@@ -7,6 +7,7 @@ use crate::{
 };
 use gpui::{MouseButton, Subscription};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use gpui_pdf::{Highlight, NormRect, PdfStyle, PdfView};
@@ -18,6 +19,8 @@ pub struct PdfPane {
     visible: bool,
     annotations: Vec<AnnotationItem>,
     active_annotation_id: Option<u64>,
+    selected_annotation_id: Option<u64>,
+    annotation_list_focus: FocusHandle,
     annotation_comment_input: Entity<InputState>,
     annotations_drawer_open: bool,
     _subscriptions: Vec<Subscription>,
@@ -49,6 +52,8 @@ impl PdfPane {
             visible: true,
             annotations,
             active_annotation_id: None,
+            selected_annotation_id: None,
+            annotation_list_focus: cx.focus_handle(),
             annotation_comment_input,
             annotations_drawer_open: false,
             _subscriptions: vec![sub],
@@ -124,6 +129,7 @@ impl PdfPane {
             .collect();
         let weak = cx.entity().downgrade();
         let weak_click = weak.clone();
+        let weak_drawer = weak.clone();
         let highlights = self.build_highlights();
         view.update(cx, |v, cx| {
             v.fit_width(cx);
@@ -156,7 +162,19 @@ impl PdfPane {
                 window.defer(cx, move |window, cx| {
                     if let Some(pane) = weak_click.upgrade() {
                         pane.update(cx, |this, cx| {
-                            this.open_annotation_card(id, window, cx);
+                            this.selected_annotation_id = Some(id);
+                            this.open_annotation_card(id, false, window, cx);
+                        });
+                    }
+                });
+            }));
+            v.set_on_toggle_annotations(Rc::new(move |window, cx| {
+                let weak_drawer = weak_drawer.clone();
+                window.defer(cx, move |_, cx| {
+                    if let Some(pane) = weak_drawer.upgrade() {
+                        pane.update(cx, |pane, cx| {
+                            pane.annotations_drawer_open = !pane.annotations_drawer_open;
+                            cx.notify();
                         });
                     }
                 });
@@ -211,22 +229,24 @@ impl PdfPane {
         let _ = storage::save_annotations(&self.path, &self.annotations);
         self.sync_highlights(cx);
         if open_comment {
-            self.open_annotation_card(id, window, cx);
+            self.open_annotation_card(id, true, window, cx);
         } else {
             cx.notify();
         }
     }
 
-    fn open_annotation_card(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_annotation_card(&mut self, id: u64, focus_comment: bool, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(item) = self.annotations.iter().find(|a| a.id == id) {
             let comment = item.comment.clone();
             self.active_annotation_id = Some(id);
             let input = self.annotation_comment_input.clone();
+            let list_focus = self.annotation_list_focus.clone();
             window.defer(cx, move |window, cx| {
                 input.update(cx, |input, cx| {
                     input.set_value(comment, window, cx);
-                    input.focus(window, cx);
+                    if focus_comment { input.focus(window, cx); }
                 });
+                if !focus_comment { list_focus.focus(window, cx); }
             });
             cx.notify();
         }
@@ -258,7 +278,8 @@ impl PdfPane {
         if self.active_annotation_id == Some(id) {
             self.active_annotation_id = None;
         }
-        let _ = storage::save_annotations(&self.path, &self.annotations);
+        if self.selected_annotation_id == Some(id) { self.selected_annotation_id = None; }
+        storage::save_annotations(&self.path, &self.annotations).expect("failed to save annotation deletion");
         self.sync_highlights(cx);
         cx.notify();
     }
@@ -351,7 +372,7 @@ impl PdfPane {
                                 .flex()
                                 .gap(px(4.))
                                 .child(
-                                    ui::button("pdf-ann-delete", "删除")
+                                    ui::button_danger_soft("pdf-ann-delete", "删除")
                                         .on_click(cx.listener(move |this, _, _window, cx| {
                                             this.delete_annotation(active_id, cx);
                                         })),
@@ -386,7 +407,8 @@ impl PdfPane {
                 .id("pdf-annotations-drawer")
                 .flex()
                 .flex_col()
-                .w(px(268.))
+                .w_full()
+                .min_w_0()
                 .h_full()
                 .flex_shrink_0()
                 .bg(rgb(0xfafaf9))
@@ -463,13 +485,16 @@ impl PdfPane {
                                 .bg(rgb(0xffffff))
                                 .border_1()
                                 .border_color(rgb(0xe8e7e3))
+                                .when(self.selected_annotation_id == Some(id), |card| card.border_color(rgb(0x94a3b8)).bg(rgb(0xf4f3ef)))
                                 .cursor_pointer()
                                 .hover(|s| s.bg(rgb(0xf4f3ef)))
+                                .active(|s| s.bg(rgb(ui::PRESSED_BG)))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     if let Some(view) = &this.view {
                                         view.update(cx, |v, cx| v.reveal_highlight(page, cx));
                                     }
-                                    this.open_annotation_card(id, window, cx);
+                                    this.selected_annotation_id = Some(id);
+                                    this.open_annotation_card(id, false, window, cx);
                                 }))
                                 .child(
                                     div()
@@ -506,6 +531,7 @@ impl PdfPane {
                                                 .text_size(px(11.))
                                                 .text_color(rgb(0x9b9a97))
                                                 .hover(|s| s.text_color(rgb(0xb42318)))
+                                                .active(|s| s.text_color(rgb(0x8a1c13)))
                                                 .child("×")
                                                 .on_click(cx.listener(
                                                     move |this, _, _window, cx| {
@@ -532,11 +558,12 @@ impl PdfPane {
 
 impl Render for PdfPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let ann_count = self.annotations.len();
-        div()
+        let viewer = div()
             .flex()
             .relative()
             .size_full()
+            .min_w_0()
+            .overflow_hidden()
             .bg(rgb(0xf1f1ef))
             .child(
                 div()
@@ -545,36 +572,27 @@ impl Render for PdfPane {
                     .min_w(px(0.))
                     .h_full()
                     .when_some(self.view.clone(), |area, view| area.child(view))
-                    .child(
-                        div()
-                            .id("pdf-annotations-drawer-btn")
-                            .absolute()
-                            .top(px(5.))
-                            .right(px(52.))
-                            .px(px(6.))
-                            .py(px(2.))
-                            .rounded(px(4.))
-                            .cursor_pointer()
-                            .bg(if self.annotations_drawer_open {
-                                rgb(0xe8e7e3)
-                            } else {
-                                rgb(0xf1f1ef)
-                            })
-                            .hover(|s| s.bg(rgb(0xe8e7e3)))
-                            .text_size(px(11.5))
-                            .text_color(rgb(0x37352f))
-                            .child(if ann_count > 0 {
-                                format!("💬 {ann_count}")
-                            } else {
-                                "💬".to_string()
-                            })
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.annotations_drawer_open = !this.annotations_drawer_open;
-                                cx.notify();
-                            })),
-                    )
                     .children(self.render_active_annotation_popover(cx)),
             )
-            .children(self.render_annotations_drawer(cx))
+            ;
+        let content = if let Some(drawer) = self.render_annotations_drawer(cx) {
+            h_resizable("pdf-annotations-layout")
+                .child(resizable_panel().size_range(px(200.)..Pixels::MAX).child(viewer))
+                .child(resizable_panel().size(px(268.)).size_range(px(160.)..px(700.)).fixed().child(drawer))
+                .into_any_element()
+        } else {
+            viewer.into_any_element()
+        };
+        div().size_full().track_focus(&self.annotation_list_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                // The comment input has its own focus, so deletion keys there still edit text.
+                if matches!(event.keystroke.key.as_str(), "delete" | "backspace") && this.annotation_list_focus.is_focused(window) {
+                    if let Some(id) = this.selected_annotation_id {
+                        this.delete_annotation(id, cx);
+                        cx.stop_propagation();
+                    }
+                }
+            }))
+            .child(content)
     }
 }

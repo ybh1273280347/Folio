@@ -652,6 +652,9 @@ pub struct PdfView {
     /// Rich annotation creation callback (quote + rects + color + open_comment).
     #[cfg(feature = "markup")]
     on_create_annotation: Option<CreateAnnotationFn>,
+    /// Host action for opening the annotations drawer from the viewer toolbar.
+    #[cfg(feature = "markup")]
+    on_toggle_annotations: Option<OpenExternalFn>,
     /// Host-supplied highlight colors `(label, fill)`; the picker shows these and the
     /// label is echoed back on create. Empty → a single default yellow.
     #[cfg(feature = "markup")]
@@ -818,6 +821,8 @@ impl PdfView {
             on_create: None,
             #[cfg(feature = "markup")]
             on_create_annotation: None,
+            #[cfg(feature = "markup")]
+            on_toggle_annotations: None,
             #[cfg(feature = "markup")]
             palette: Vec::new(),
             #[cfg(feature = "markup")]
@@ -1087,6 +1092,12 @@ impl PdfView {
     #[cfg(feature = "markup")]
     pub fn set_on_create_annotation(&mut self, handler: CreateAnnotationFn) {
         self.on_create_annotation = Some(handler);
+    }
+
+    /// Add the host's annotations drawer action to the viewer toolbar.
+    #[cfg(feature = "markup")]
+    pub fn set_on_toggle_annotations(&mut self, handler: OpenExternalFn) {
+        self.on_toggle_annotations = Some(handler);
     }
 
     /// Create a highlight/annotation from drag endpoints `(a, b)` on `pg`.
@@ -1946,6 +1957,7 @@ impl PdfView {
         div()
             .id(id)
             .flex()
+            .flex_shrink_0()
             .items_center()
             .justify_center()
             .min_w(px(20.0))
@@ -2433,7 +2445,10 @@ impl Render for PdfView {
 
         // Header: [☰] filename · N pages … (spacer) … page nav · zoom.
         let header = div()
+            .id("pdf-toolbar")
             .flex_shrink_0()
+            .min_w_0()
+            .overflow_x_scroll()
             .px(px(16.0))
             .py(px(6.0))
             .border_b_1()
@@ -2446,13 +2461,13 @@ impl Render for PdfView {
             .text_color(style.header_fg)
             .child(thumbnail_toggle)
             .children(toc_toggle)
-            .child(format!("📄 {name}"))
+            .child(div().flex_1().min_w_0().text_ellipsis().child(format!("📄 {name}")))
             .child(
                 div()
+                    .flex_shrink_0()
                     .text_color(style.header_muted)
                     .child(format!("· {total} pages")),
             )
-            .child(div().flex_1())
             .child(
                 self.control("pdf-prev", "‹")
                     .on_click(cx.listener(|this, _, _window, cx| this.prev_page(cx)))
@@ -2614,12 +2629,26 @@ impl Render for PdfView {
                 div()
                     .relative()
                     .flex()
+                    .flex_shrink_0()
                     .flex_row()
                     .gap(px(2.0))
                     .child(pen)
                     .child(area)
                     .children(dropdown),
             )
+        };
+
+        // The host action is part of the same layout as markup and search controls.
+        #[cfg(feature = "markup")]
+        let header = if let Some(handler) = self.on_toggle_annotations.clone() {
+            let count = self.highlights.len();
+            header.child(
+                self.control("pdf-annotations", if count == 0 { "💬".to_owned() } else { format!("💬 {count}") })
+                    .on_click(move |_, window, cx| handler(window, cx))
+                    .tooltip(self.tip("PDF 批注")),
+            )
+        } else {
+            header
         };
 
         // Find toggle (search): a magnifier that opens the find bar.
