@@ -1,108 +1,167 @@
-//! Native Markdown reading and editing. Source is retained verbatim between edits;
-//! visual blocks edit their own source range so unrelated formatting stays intact.
-use crate::math::{MathReady, MathRenderer};
+//! Markdown panes share one GPUI block editor for live editing and keep the
+//! source editor only for the explicit source-mode toggle.
+use crate::math::{MathReady, MathRenderer, formula_id};
 use crate::model::AppSettings;
-use crate::richtext::RichText;
 use comrak::{Arena, Options, nodes::NodeValue, parse_document};
 use gpui_kit::{
-    base::StyledExt,
+    base::{Scrollbar, ScrollbarMode, text::MarkdownExtensions},
     component::{
-        input::{Editor, EditorState, InputEvent, Position, TextDecorationCollection},
-        text::{TaskToggleEvent, TextView},
+        input::{Editor, EditorState, InputEvent, Position},
+        menu::ContextMenuExt,
     },
     prelude::FluentBuilder,
     *,
 };
-use std::{ops::Range, path::PathBuf};
+use markdown_editor::{
+    BlockEditor, BlockEditorEvent, BlockEditorState, BlockKind, BlockPosition, BlockSelection,
+    EditorCommand, MarkKind,
+};
+use std::{cell::RefCell, ops::Range, path::PathBuf, rc::Rc};
 
 pub enum MarkdownEvent {
     Change(String),
     Focus,
     Zoom(u8),
 }
+
 actions!(
     folio_markdown,
     [
         ToggleSource,
         Bold,
         Italic,
-        Heading,
+        HeadingAction,
         BulletList,
         TaskList,
-        InlineMath,
         InsertImage,
         InsertTable
     ]
 );
 
-/// Normalize math delimiters for the renderer without changing byte offsets used
-/// by task markers and block ranges. Code spans and fenced code stay literal.
-pub fn normalize_math(text: &str) -> String {
-    let mut result = String::new();
-    let mut cursor = 0;
-    let mut ticks = 0;
-    while cursor < text.len() {
-        let tail = &text[cursor..];
-        if tail.starts_with('`') {
-            let count = tail.bytes().take_while(|byte| *byte == b'`').count();
-            if ticks == 0 {
-                ticks = count;
-            } else if ticks == count {
-                ticks = 0;
-            }
-            result.push_str(&tail[..count]);
-            cursor += count;
-            continue;
-        }
-        if ticks == 0 {
-            let replacement = if tail.starts_with("\\(") {
-                Some("$ ")
-            } else if tail.starts_with("\\)") {
-                Some(" $")
-            } else if tail.starts_with("\\[") || tail.starts_with("\\]") {
-                Some("$$")
-            } else {
-                None
-            };
-            if let Some(replacement) = replacement {
-                result.push_str(replacement);
-                cursor += 2;
-                continue;
-            }
-        }
-        let character = tail.chars().next().expect("cursor is inside source");
-        result.push(character);
-        cursor += character.len_utf8();
-    }
-    result
-}
-struct Block {
+struct OutlineHeading {
     range: Range<usize>,
-    heading: Option<(u8, String)>,
-    table: Vec<Vec<Range<usize>>>,
+    level: u8,
+    title: String,
 }
+
 pub struct MarkdownPane {
+    export: Rc<RefCell<Option<crate::markdown_pdf::ExportRequest>>>,
+    export_width: Pixels,
     text: String,
     path: PathBuf,
-    blocks: Vec<Block>,
-    editor: Entity<EditorState>,
+    headings: Vec<OutlineHeading>,
+    source_editor: Entity<EditorState>,
+    visual_editor: Entity<BlockEditorState>,
     source: bool,
-    editing: Option<usize>,
-    editing_range: Option<Range<usize>>,
-    editing_cell: Option<(usize, usize)>,
-    rich: Option<RichText>,
-    decorations: Option<TextDecorationCollection>,
     outline: bool,
     reading: bool,
     focus: FocusHandle,
     scroll: ScrollHandle,
     settings: AppSettings,
     math: Entity<MathRenderer>,
-    _subscription: Subscription,
+    formula_editor: Option<(Entity<EditorState>, bool)>,
+    pending_image: Option<(PathBuf, PathBuf)>,
+    image_error: Option<String>,
+    _source_subscription: Subscription,
+    _visual_subscription: Subscription,
+    _math_subscription: Subscription,
 }
+
 impl EventEmitter<MarkdownEvent> for MarkdownPane {}
 
 impl MarkdownPane {
+    /// The workspace hosts this capture independently of the selected tab.
+    pub fn export_element(&self) -> Option<AnyElement> {
+        self.export.borrow().as_ref()?;
+        let request = self.export.clone();
+        let editor = self.visual_editor.clone();
+        let math = self.math.clone();
+        let width = self.export_width;
+        Some(
+            div()
+                .id("markdown-pdf-export")
+                .absolute()
+                .top_0()
+                .left_0()
+                .text_size(px(self.settings.markdown_font_size as f32))
+                .font_family(if self.settings.interface_font.is_empty() {
+                    SharedString::from("Segoe UI")
+                } else {
+                    self.settings.interface_font.clone().into()
+                })
+                .child(
+                    canvas(
+                        move |_, window, cx| {
+                            let content = BlockEditor::document(&editor, window, cx);
+                            let mut element =
+                                div().w(width).p_6().child(content).into_any_element();
+                            let size = element.layout_as_root(
+                                size(AvailableSpace::Definite(width), AvailableSpace::MinContent),
+                                window,
+                                cx,
+                            );
+                            let bounds = Bounds::new(Point::default(), size);
+                            window.with_document_mask(bounds, |window| {
+                                element.prepaint_at(Point::default(), window, cx);
+                            });
+                            (element, size)
+                        },
+                        move |_, (mut element, size), window, cx| {
+                            let bounds = Bounds::new(Point::default(), size);
+                            let ops = window.with_document_mask(bounds, |window| {
+                                window.capture_vectors(|window| element.paint(window, cx))
+                            });
+                            let cancelled = request
+                                .borrow()
+                                .as_ref()
+                                .expect("one export")
+                                .cancelled
+                                .load(std::sync::atomic::Ordering::Relaxed);
+                            // Wait for offscreen images and math, while allowing cancellation immediately.
+                            if !cancelled
+                                && (!math.read(cx).is_idle()
+                                    || ops.iter().any(|op| matches!(op, VectorPaint::PendingImage)))
+                            {
+                                return;
+                            }
+                            let faces = if cancelled {
+                                Ok(Default::default())
+                            } else {
+                                crate::markdown_pdf::fonts(&ops, cx)
+                            };
+                            let request = request.borrow_mut().take().expect("one export request");
+                            std::thread::spawn(move || {
+                                crate::markdown_pdf::publish(request, ops, size, faces)
+                            });
+                        },
+                    )
+                    .size(px(0.)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    pub fn export_pdf(
+        &mut self,
+        request: crate::markdown_pdf::ExportRequest,
+        cx: &mut Context<Self>,
+    ) {
+        if self.source {
+            self.visual_editor.update(cx, |editor, cx| {
+                editor
+                    .set_source(&self.text, cx)
+                    .expect("current Markdown parses")
+            });
+        }
+        *self.export.borrow_mut() = Some(request);
+        self.export_width = if self.settings.line_width_limited {
+            self.scroll.bounds().size.width.min(px(850.))
+        } else {
+            self.scroll.bounds().size.width
+        };
+        cx.notify();
+    }
+
     pub fn new(
         text: String,
         path: PathBuf,
@@ -112,205 +171,137 @@ impl MarkdownPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        cx.subscribe(&math, |_, _, _: &MathReady, cx| cx.notify())
-            .detach();
-        let editor = cx.new(|cx| {
+        let scroll = ScrollHandle::new();
+        math.update(cx, |renderer, cx| renderer.set_appearance(&settings, cx));
+        let extensions = MarkdownExtensions::default()
+            .plugin(math.read(cx).plugin(false, math.clone()))
+            .plugin(math.read(cx).plugin(true, math.clone()));
+        let visual_editor = cx.new(|cx| {
+            let mut editor = BlockEditorState::new(window, cx);
+            editor
+                .set_markdown_extensions(extensions, cx)
+                .expect("current Markdown parses with the configured GPUI extensions");
+            editor
+                .set_source(&text, cx)
+                .expect("current Markdown parses with the configured GPUI extensions");
+            editor.set_scroll_handle(scroll.clone());
+            editor
+        });
+        let source_editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .line_number(false)
                 .soft_wrap(true)
                 .searchable(true)
+                .default_value(text.clone())
         });
-        let subscription = cx.subscribe_in(
-            &editor,
+        let source_subscription = cx.subscribe_in(
+            &source_editor,
             window,
-            |pane: &mut Self, state, event: &InputEvent, window, cx| match event {
-                InputEvent::Change => {
-                    let mut value = state.read(cx).value().to_string();
-                    if pane.source {
-                        pane.text = value;
-                    } else if let Some(index) = pane.editing {
-                        let cursor = state.read(cx).selected_range().end;
-                        let rich = pane
-                            .rich
-                            .as_mut()
-                            .expect("visual block has a source projection");
-                        rich.change(value.clone());
-                        let markdown = rich.markdown();
-                        let next = RichText::new(&markdown);
-                        let position = next.visible_offset(cursor);
-                        let projected = next.text.clone();
-                        let reproject = projected != value;
-                        value = next.markdown();
-                        let decorations = next.decorations();
-                        *rich = next;
-                        if reproject {
-                            let editor = state.clone();
-                            let styles = pane.decorations.clone();
-                            window.defer(cx, move |window, cx| {
-                                editor.update(cx, |editor, cx| {
-                                    editor.replace_all(projected, window, cx);
-                                    editor.set_selected_range(position..position, cx);
-                                });
-                                if let Some(styles) = styles {
-                                    styles.set(decorations, cx);
-                                }
-                            });
-                        } else if let Some(styles) = &pane.decorations {
-                            styles.set(decorations, cx);
-                        }
-                        let range = pane.editing_range.clone().expect("active visual range");
-                        let new_end = range.start + value.len();
-                        let change = value.len() as isize - range.len() as isize;
-                        pane.text.replace_range(range.clone(), &value);
-                        pane.editing_range = Some(range.start..new_end);
-                        pane.blocks[index].range.end = pane.blocks[index]
-                            .range
-                            .end
-                            .checked_add_signed(change)
-                            .unwrap();
-                        for block in pane.blocks.iter_mut().skip(index + 1) {
-                            block.range.start = block
-                                .range
-                                .start
-                                .checked_add_signed(change)
-                                .expect("source edit preserves block offsets");
-                            block.range.end = block
-                                .range
-                                .end
-                                .checked_add_signed(change)
-                                .expect("source edit preserves block offsets");
-                        }
-                        for row in &mut pane.blocks[index].table {
-                            for cell in row {
-                                if cell.start >= range.end {
-                                    cell.start = cell.start.checked_add_signed(change).unwrap();
-                                    cell.end = cell.end.checked_add_signed(change).unwrap();
-                                } else if cell.start == range.start {
-                                    cell.end = new_end;
-                                }
-                            }
-                        }
-                    }
+            |pane: &mut Self, state, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) && pane.source {
+                    pane.text = state.read(cx).value().to_string();
+                    pane.parse_outline();
+                    cx.emit(MarkdownEvent::Change(pane.text.clone()));
+                    cx.notify();
+                } else if matches!(event, InputEvent::Focus) {
+                    cx.emit(MarkdownEvent::Focus);
+                }
+            },
+        );
+        let visual_subscription = cx.subscribe(
+            &visual_editor,
+            |pane, editor, event: &BlockEditorEvent, cx| match event {
+                BlockEditorEvent::Changed { .. } => {
+                    pane.text = editor.read(cx).source();
+                    pane.parse_outline();
                     cx.emit(MarkdownEvent::Change(pane.text.clone()));
                     cx.notify();
                 }
-                InputEvent::Focus => cx.emit(MarkdownEvent::Focus),
-                InputEvent::Blur if !pane.source => {
-                    // Changes already reach the shared document on every keystroke.
-                    // Losing focus only restores rendered layout, never confirms a draft.
-                    pane.editing = None;
-                    pane.editing_range = None;
-                    pane.editing_cell = None;
-                    pane.rich = None;
-                    pane.parse();
-                    pane.prepare_math(cx);
-                    cx.notify();
-                }
+                BlockEditorEvent::Focus => cx.emit(MarkdownEvent::Focus),
                 _ => {}
             },
         );
+        let math_subscription =
+            cx.subscribe_in(&math, window, |pane, _, event: &MathReady, window, cx| {
+                match event {
+                    MathReady::Ready => pane.visual_editor.update(cx, |_, cx| cx.notify()),
+                    MathReady::Edit { id, latex, display } => {
+                        let selected = pane.visual_editor.update(cx, |editor, cx| {
+                            editor.select_custom_node(|node| formula_id(node) == Some(*id), cx)
+                        });
+                        if selected {
+                            let editor = cx.new(|cx| {
+                                EditorState::new(window, cx)
+                                    .line_number(false)
+                                    .soft_wrap(true)
+                                    .default_value(latex.clone())
+                            });
+                            editor.update(cx, |editor, cx| editor.focus(window, cx));
+                            pane.formula_editor = Some((editor, *display));
+                        }
+                    }
+                }
+                cx.notify();
+            });
         let mut pane = Self {
+            export: Rc::new(RefCell::new(None)),
+            export_width: px(0.),
             text,
             path,
-            blocks: Vec::new(),
-            editor,
+            headings: Vec::new(),
+            source_editor,
+            visual_editor,
             source: false,
-            editing: None,
-            editing_range: None,
-            editing_cell: None,
-            rich: None,
-            decorations: None,
             outline: false,
             reading,
             focus: cx.focus_handle(),
-            scroll: ScrollHandle::new(),
+            scroll,
             settings,
             math,
-            _subscription: subscription,
+            formula_editor: None,
+            pending_image: None,
+            image_error: None,
+            _source_subscription: source_subscription,
+            _visual_subscription: visual_subscription,
+            _math_subscription: math_subscription,
         };
-        pane.parse();
-        pane.prepare_math(cx);
+        pane.parse_outline();
         pane
     }
-    fn prepare_math(&self, cx: &mut Context<Self>) {
+
+    fn parse_outline(&mut self) {
         let arena = Arena::new();
-        let mut options = Options::default();
-        options.extension.math_dollars = true;
-        let normalized = normalize_math(&self.text);
-        let root = parse_document(&arena, &normalized, &options);
-        for node in root.descendants() {
-            if let NodeValue::Math(math) = &node.data.borrow().value {
-                self.math.update(cx, |renderer, _| {
-                    renderer.prepare(&math.literal, math.display_math)
-                });
-            }
-        }
-    }
-    fn parse(&mut self) {
-        let arena = Arena::new();
-        let mut options = Options::default();
-        options.extension.table = true;
-        options.extension.tasklist = true;
-        options.extension.math_dollars = true;
-        let root = parse_document(&arena, &self.text, &options);
-        let mut lines = vec![0];
-        for (offset, byte) in self.text.bytes().enumerate() {
-            if byte == b'\n' {
-                lines.push(offset + 1);
-            }
-        }
-        self.blocks = root
-            .children()
-            .map(|node| {
+        let root = parse_document(&arena, &self.text, &Options::default());
+        let lines: Vec<_> = std::iter::once(0)
+            .chain(self.text.match_indices('\n').map(|(offset, _)| offset + 1))
+            .collect();
+        self.headings = root
+            .descendants()
+            .filter_map(|node| {
                 let data = node.data.borrow();
+                let NodeValue::Heading(heading) = &data.value else {
+                    return None;
+                };
                 let position = data.sourcepos;
                 let start = lines[position.start.line - 1] + position.start.column - 1;
                 let end = (lines[position.end.line - 1] + position.end.column).min(self.text.len());
-                let heading = match &data.value {
-                    NodeValue::Heading(heading) => Some((
-                        heading.level,
-                        node.descendants()
-                            .filter_map(|child| match &child.data.borrow().value {
-                                NodeValue::Text(text) => Some(text.to_string()),
-                                NodeValue::Code(code) => Some(code.literal.clone()),
-                                _ => None,
-                            })
-                            .collect(),
-                    )),
-                    _ => None,
-                };
-                let table = if matches!(data.value, NodeValue::Table(_)) {
-                    node.children()
-                        .map(|row| {
-                            row.children()
-                                .map(|cell| {
-                                    let p = cell.data.borrow().sourcepos;
-                                    let start = lines[p.start.line - 1] + p.start.column - 1;
-                                    let end =
-                                        (lines[p.end.line - 1] + p.end.column).min(self.text.len());
-                                    start..end
-                                })
-                                .collect()
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                Block {
+                let title = node
+                    .descendants()
+                    .filter_map(|child| match &child.data.borrow().value {
+                        NodeValue::Text(text) => Some(text.to_string()),
+                        NodeValue::Code(code) => Some(code.literal.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                Some(OutlineHeading {
                     range: start..end,
-                    heading,
-                    table,
-                }
+                    level: heading.level,
+                    title,
+                })
             })
             .collect();
-        if self.blocks.is_empty() {
-            self.blocks.push(Block {
-                range: 0..self.text.len(),
-                heading: None,
-                table: Vec::new(),
-            });
-        }
     }
+
     pub fn sync(
         &mut self,
         text: &str,
@@ -319,62 +310,34 @@ impl MarkdownPane {
         cx: &mut Context<Self>,
     ) {
         if self.settings != *settings {
+            self.settings = settings.clone();
+            self.math
+                .update(cx, |renderer, cx| renderer.set_appearance(settings, cx));
             cx.notify();
         }
-        self.settings = settings.clone();
         if self.text == text {
             return;
         }
         self.text = text.to_owned();
-        self.editing = None;
-        self.parse();
-        self.prepare_math(cx);
-        if self.source {
-            self.editor.update(cx, |editor, cx| {
-                editor.set_value(text.to_owned(), window, cx)
-            });
-        }
-        cx.notify();
-    }
-    fn edit_block(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let start = self.blocks[index].range.start;
-        self.parse();
-        let index = self
-            .blocks
-            .iter()
-            .position(|block| block.range.start == start)
-            .expect("clicked block retains its source start");
-        self.editing = Some(index);
-        self.editing_cell = None;
-        self.prepare_math(cx);
-        self.begin_edit(self.blocks[index].range.clone(), window, cx);
-    }
-    fn begin_edit(&mut self, range: Range<usize>, window: &mut Window, cx: &mut Context<Self>) {
-        self.editing_range = Some(range.clone());
-        let text = self.text[range].to_owned();
-        let rich = RichText::new(&text);
-        self.editor.update(cx, |editor, cx| {
-            editor.set_value(rich.text.clone(), window, cx);
-            editor.set_highlighter("plaintext", cx);
-            editor.focus(window, cx);
+        self.parse_outline();
+        self.visual_editor.update(cx, |editor, cx| {
+            editor
+                .set_source(text, cx)
+                .expect("external Markdown parses with the configured GPUI extensions");
         });
-        if let Some(styles) = &self.decorations {
-            styles.set(rich.decorations(), cx);
-        } else {
-            self.decorations = Some(self.editor.update(cx, |editor, cx| {
-                editor.create_decorations_collection(rich.decorations(), cx)
-            }));
-        }
-        self.rich = Some(rich);
-        cx.emit(MarkdownEvent::Focus);
+        self.source_editor.update(cx, |editor, cx| {
+            editor.set_value(text.to_owned(), window, cx)
+        });
         cx.notify();
     }
+
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.source || self.editing.is_some() {
-            self.editor
+        if self.source {
+            self.source_editor
                 .update(cx, |editor, cx| editor.focus(window, cx));
         } else {
-            self.focus.focus(window, cx);
+            self.visual_editor
+                .update(cx, |editor, cx| editor.focus(window, cx));
         }
         cx.emit(MarkdownEvent::Focus);
     }
@@ -386,185 +349,128 @@ impl MarkdownPane {
 
     pub fn toggle_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.source = !self.source;
-        self.editing = None;
-        self.parse();
-        self.prepare_math(cx);
-        self.rich = None;
-        if let Some(styles) = &self.decorations {
-            styles.set(Vec::new(), cx);
-        }
         if self.source {
-            self.editor.update(cx, |editor, cx| {
+            self.source_editor.update(cx, |editor, cx| {
                 editor.set_value(self.text.clone(), window, cx);
                 editor.set_highlighter("markdown", cx);
                 editor.focus(window, cx);
             });
         } else {
-            self.focus.focus(window, cx);
+            self.visual_editor.update(cx, |editor, cx| {
+                editor
+                    .set_source(&self.text, cx)
+                    .expect("source mode Markdown parses with the configured GPUI extensions");
+                editor.focus(window, cx);
+            });
         }
-        cx.notify();
-    }
-    fn format(&mut self, prefix: &str, suffix: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.source && self.editing.is_none() {
-            self.edit_block(0, window, cx);
-        }
-        let editor = self.editor.clone();
-        let range = editor.read(cx).selected_range();
-        let text = editor.read(cx).value();
-        if !self.source && self.editing_cell.is_none() && matches!(prefix, "## " | "- " | "- [ ] ")
-        {
-            let target = self.editing_range.clone().expect("visual block is active");
-            let block = self.text[target.clone()]
-                .trim_start_matches('#')
-                .trim_start();
-            let replacement = format!("{prefix}{block}");
-            self.text.replace_range(target, &replacement);
-            self.editing = None;
-            self.parse();
-            cx.emit(MarkdownEvent::Change(self.text.clone()));
-            cx.notify();
-            return;
-        }
-        if !self.source && !suffix.is_empty() {
-            let rich = self.rich.as_mut().expect("visual block has projection");
-            rich.format(range, prefix, suffix);
-            self.text.replace_range(
-                self.editing_range.clone().expect("active visual range"),
-                &rich.markdown(),
-            );
-            self.parse();
-            self.editing = None;
-            self.rich = None;
-            self.prepare_math(cx);
-            cx.emit(MarkdownEvent::Change(self.text.clone()));
-            cx.notify();
-            return;
-        }
-        let selected = text[range].to_owned();
-        let replacement = format!("{prefix}{selected}{suffix}");
-        editor.update(cx, |state, cx| state.replace(replacement, window, cx));
-        // Programmatic replacement is silent; route it through the same document event.
-        let mut value = editor.read(cx).value().to_string();
-        if !self.source {
-            if let Some(rich) = &mut self.rich {
-                rich.change(value);
-                value = rich.markdown();
-            }
-        }
-        if self.source {
-            self.text = value;
-        } else if self.editing.is_some() {
-            self.text.replace_range(
-                self.editing_range.clone().expect("active visual range"),
-                &value,
-            );
-            self.parse();
-            self.editing = None;
-        }
-        self.prepare_math(cx);
-        cx.emit(MarkdownEvent::Change(self.text.clone()));
+        cx.emit(MarkdownEvent::Focus);
         cx.notify();
     }
 
-    fn visual_editor(&self) -> Editor {
-        use gpui_kit::component::input::{Copy, Cut, Paste, Redo, Undo};
-        Editor::new(&self.editor)
-            .appearance(false)
-            .bordered(false)
-            .font_family(if self.settings.interface_font.is_empty() {
-                SharedString::from("Segoe UI")
-            } else {
-                self.settings.interface_font.clone().into()
-            })
-            .text_size(px(self.settings.markdown_font_size as f32))
-            .context_menu(|menu, _, _| {
-                menu.menu("撤销", Box::new(Undo))
-                    .menu("重做", Box::new(Redo))
-                    .separator()
-                    .menu("剪切", Box::new(Cut))
-                    .menu("复制", Box::new(Copy))
-                    .menu("粘贴", Box::new(Paste))
-                    .separator()
-                    .menu("加粗", Box::new(Bold))
-                    .menu("斜体", Box::new(Italic))
-                    .menu("标题", Box::new(Heading))
-                    .menu("无序列表", Box::new(BulletList))
-                    .menu("任务列表", Box::new(TaskList))
-                    .menu("公式", Box::new(InlineMath))
-                    .menu("插入图片…", Box::new(InsertImage))
-                    .menu("插入表格", Box::new(InsertTable))
-            })
+    fn run_command(&mut self, command: EditorCommand, cx: &mut Context<Self>) {
+        self.visual_editor.update(cx, |editor, cx| {
+            editor
+                .run(command, cx)
+                .expect("Markdown toolbar command applies to the current selection");
+        });
     }
-    fn task(
-        &mut self,
-        offset: usize,
-        event: &TaskToggleEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let range = event.marker_range();
-        self.text.replace_range(
-            offset + range.start..offset + range.end,
-            if event.checked() { "[x]" } else { "[ ]" },
-        );
-        self.parse();
-        self.editing = None;
-        if self.source {
-            self.editor.update(cx, |state, cx| {
-                state.set_value(self.text.clone(), window, cx)
-            });
-        }
-        cx.emit(MarkdownEvent::Change(self.text.clone()));
-        cx.notify();
-    }
+
     fn insert_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let picker = rfd::AsyncFileDialog::new()
             .set_parent(window)
             .set_title("插入本地图片")
             .add_filter("图片", &["png", "jpg", "jpeg", "webp", "gif", "svg"]);
-        let overwrite = rfd::AsyncMessageDialog::new()
-            .set_parent(window)
-            .set_title("替换同名图片？")
-            .set_buttons(rfd::MessageButtons::OkCancel);
-        let failure = rfd::AsyncMessageDialog::new()
-            .set_parent(window)
-            .set_title("图片导入失败");
         let directory = self
             .path
             .parent()
             .expect("Markdown file has parent")
             .to_path_buf();
-        cx.spawn_in(window, async move |this, cx| {
+        let pane = cx.entity();
+        cx.spawn_in(window, async move |_, cx| {
             let Some(handle) = picker.pick_file().await else {
                 return;
             };
-            let path = handle.path();
-            let filename = path
+            let source = handle.path().to_path_buf();
+            let filename = source
                 .file_name()
                 .expect("selected image has name")
                 .to_owned();
             let destination = directory.join(&filename);
-            if path != destination {
-                if destination.exists()
-                    && overwrite
-                        .set_description(destination.to_string_lossy())
-                        .show()
-                        .await
-                        != rfd::MessageDialogResult::Ok
+            let _ = pane.update_in(cx, |pane, _, cx| {
+                if source != destination && destination.exists() {
+                    pane.pending_image = Some((source, destination));
+                    cx.notify();
+                    return;
+                }
+                if source != destination
+                    && let Err(error) = std::fs::copy(source, &destination)
                 {
+                    pane.image_error = Some(error.to_string());
+                    cx.notify();
                     return;
                 }
-                if let Err(error) = std::fs::copy(path, &destination) {
-                    failure.set_description(error.to_string()).show().await;
-                    return;
-                }
-            }
-            let insertion = format!("![图片](<{}>)", filename.to_string_lossy());
-            let _ = this.update_in(cx, |pane, window, cx| {
-                pane.format(&insertion, "", window, cx)
+                pane.insert_image_reference(&filename.to_string_lossy(), cx);
             });
         })
         .detach();
+    }
+
+    fn insert_image_reference(&mut self, filename: &str, cx: &mut Context<Self>) {
+        let insertion = format!("![图片](<{filename}>)");
+        self.visual_editor.update(cx, |editor, cx| {
+            let mut range = editor
+                .capture_selection()
+                .expect("Markdown caret or selection is text");
+            editor
+                .replace_captured(&mut range, &insertion, cx)
+                .expect("captured Markdown selection remains current during insertion");
+        });
+    }
+
+    fn confirm_image_import(&mut self, cx: &mut Context<Self>) {
+        let (source, destination) = self.pending_image.take().expect("prompt has image paths");
+        if let Err(error) = std::fs::copy(source, &destination) {
+            self.image_error = Some(error.to_string());
+        } else {
+            let filename = destination
+                .file_name()
+                .expect("import destination has filename")
+                .to_string_lossy();
+            self.insert_image_reference(&filename, cx);
+        }
+        cx.notify();
+    }
+
+    fn navigate_heading(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.source {
+            let offset = self.headings[index].range.start;
+            let line = self.text[..offset]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count();
+            self.source_editor.update(cx, |editor, cx| {
+                editor.set_cursor_position(Position::new(line as u32, 0), window, cx)
+            });
+        } else {
+            let headings = self
+                .visual_editor
+                .read(cx)
+                .model()
+                .document()
+                .leaves()
+                .filter(|block| matches!(block.kind(), BlockKind::Heading { .. }))
+                .map(|block| block.id())
+                .collect::<Vec<_>>();
+            let block = headings[index];
+            self.visual_editor.update(cx, |editor, cx| {
+                editor
+                    .set_selection(BlockSelection::caret(BlockPosition::new(block, 0)), cx)
+                    .expect("outline heading remains a caret position");
+                editor.reveal_caret(cx);
+                editor.focus(window, cx);
+            });
+        }
+        cx.notify();
     }
 }
 
@@ -578,6 +484,7 @@ fn action(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<
         .hover(|style| style.bg(rgb(0xefefed)))
         .child(crate::ui::label(label.into()))
 }
+
 impl Render for MarkdownPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let toolbar = div()
@@ -626,41 +533,23 @@ impl Render for MarkdownPane {
                         })),
                     )
                     .child(
-                        action("md-outline", "☷").on_click(cx.listener(|pane, _, _, cx| {
-                            pane.outline = !pane.outline;
-                            cx.notify();
-                        })),
+                        action("md-outline", "☷")
+                            .on_click(cx.listener(|pane, _, _, cx| pane.toggle_outline(cx))),
                     )
                     .child(action("md-source", "源码").on_click(
                         cx.listener(|pane, _, window, cx| pane.toggle_source(window, cx)),
                     )),
             );
+
         let mut content = div().flex().flex_1().min_h_0();
         if self.outline {
-            let headings = self.blocks.iter().enumerate().filter_map(|(index, block)| {
-                block.heading.as_ref().map(|(level, title)| {
-                    action(("heading", index), title.clone())
-                        .pl(px(*level as f32 * 12.))
-                        .text_xs()
-                        .on_click(cx.listener(move |pane, _, window, cx| {
-                            if pane.source {
-                                let line = pane.text[..pane.blocks[index].range.start]
-                                    .bytes()
-                                    .filter(|byte| *byte == b'\n')
-                                    .count();
-                                pane.editor.update(cx, |state, cx| {
-                                    state.set_cursor_position(
-                                        Position::new(line as u32, 0),
-                                        window,
-                                        cx,
-                                    )
-                                });
-                            } else {
-                                pane.scroll.scroll_to_item(index);
-                            }
-                            cx.notify();
-                        }))
-                })
+            let headings = self.headings.iter().enumerate().map(|(index, heading)| {
+                action(("heading", index), heading.title.clone())
+                    .pl(px(heading.level as f32 * 12.))
+                    .text_xs()
+                    .on_click(cx.listener(move |pane, _, window, cx| {
+                        pane.navigate_heading(index, window, cx)
+                    }))
             });
             content = content.child(
                 div()
@@ -675,10 +564,11 @@ impl Render for MarkdownPane {
                     .children(headings),
             );
         }
+
         if self.source {
             content = content.child(
                 div().flex_1().min_w_0().p_2().child(
-                    Editor::new(&self.editor)
+                    Editor::new(&self.source_editor)
                         .appearance(false)
                         .bordered(false)
                         .size_full()
@@ -691,229 +581,105 @@ impl Render for MarkdownPane {
                 ),
             );
         } else {
-            let blocks = self.blocks.iter().enumerate().map(|(index, block)| {
-                let text = self.text[block.range.clone()].to_owned();
-                let offset = block.range.start;
-                let app = cx.entity();
-                let base = self
-                    .path
-                    .parent()
-                    .expect("Markdown has directory")
-                    .to_path_buf();
-                let body = if !block.table.is_empty() {
-                    let rows = block.table.iter().enumerate().map(|(row_index, row)| {
-                        div()
-                            .flex()
-                            .children(row.iter().enumerate().map(|(column, range)| {
-                                let target = range.clone();
-                                let mut cell = div()
-                                    .id(SharedString::from(format!(
-                                        "cell-{index}-{row_index}-{column}"
-                                    )))
-                                    .flex_1()
-                                    .min_w(px(70.))
-                                    .min_h(px(38.))
-                                    .p_2()
-                                    .border_1()
-                                    .border_color(rgb(0xe8e7e3))
-                                    .when(row_index == 0, |cell| {
-                                        cell.bg(rgb(0xf7f6f5)).font_semibold()
-                                    });
-                                if self.editing == Some(index)
-                                    && self.editing_cell == Some((row_index, column))
-                                {
-                                    cell = cell.child(self.visual_editor().h(px(38.)).w_full());
-                                } else {
-                                    cell = cell
-                                        .cursor_text()
-                                        .child(
-                                            TextView::markdown(
-                                                SharedString::from(format!(
-                                                    "cell-view-{index}-{row_index}-{column}"
-                                                )),
-                                                normalize_math(&self.text[range.clone()]),
-                                            )
-                                            .plugin(self.math.read(cx).plugin(false)),
-                                        )
-                                        .on_click(cx.listener(move |pane, _, window, cx| {
-                                            pane.editing = Some(index);
-                                            pane.editing_cell = Some((row_index, column));
-                                            pane.begin_edit(target.clone(), window, cx);
-                                        }));
-                                }
-                                cell
-                            }))
-                    });
-                    div()
-                        .flex()
-                        .flex_col()
-                        .children(rows)
-                        .child(action(("table-row", index), "+ 行").on_click(cx.listener(
-                            move |pane, _, _, cx| {
-                                let block = &pane.blocks[index];
-                                let end = block.range.end;
-                                let count = block.table[0].len();
-                                pane.text
-                                    .insert_str(end, &format!("\n|{}", "  |".repeat(count)));
-                                pane.editing = None;
-                                pane.parse();
-                                cx.emit(MarkdownEvent::Change(pane.text.clone()));
-                                cx.notify();
-                            },
-                        )))
-                        .into_any_element()
-                } else if self.editing == Some(index) {
-                    let heading_level =
-                        block.heading.as_ref().map(|(level, _)| *level).or_else(|| {
-                            let source = self.text[block.range.clone()].trim_start();
-                            let level = source.bytes().take_while(|byte| *byte == b'#').count();
-                            (1..=6)
-                                .contains(&level)
-                                .then(|| {
-                                    source
-                                        .get(level..)
-                                        .is_some_and(|tail| tail.starts_with(' '))
-                                        .then_some(level as u8)
-                                })
-                                .flatten()
-                        });
-                    let font_size = self.settings.markdown_font_size as f32
-                        * heading_level.map_or(1., |level| match level {
-                            1 => 2.,
-                            2 => 1.6,
-                            3 => 1.35,
-                            _ => 1.15,
-                        });
-                    div()
-                        .min_h(px(24.))
-                        .h(px((self.editor.read(cx).value().lines().count().max(1)
-                            as f32
-                            * font_size
-                            * 1.6
-                            + 8.)
-                            .min(640.)))
-                        .child(
-                            self.visual_editor()
-                                .size_full()
-                                .text_size(px(font_size))
-                                .when(heading_level.is_some(), |editor| {
-                                    editor.font_weight(FontWeight::BOLD)
-                                }),
-                        )
-                        .into_any_element()
-                } else {
-                    div()
-                        .id(("md-block", index))
-                        .min_h(px(24.))
-                        .cursor_text()
-                        .on_click(cx.listener(move |pane, _: &ClickEvent, window, cx| {
-                            pane.edit_block(index, window, cx);
-                            cx.emit(MarkdownEvent::Focus);
-                        }))
-                        .child(
-                            TextView::markdown(("md-view", index), normalize_math(&text))
-                                .selectable(true)
-                                .plugin(self.math.read(cx).plugin(false))
-                                .plugin(self.math.read(cx).plugin(true))
-                                .image_source(move |uri| {
-                                    if uri.as_ref().starts_with("http")
-                                        || uri.as_ref().starts_with("data:")
-                                    {
-                                        ImageSource::from(uri.clone())
-                                    } else {
-                                        ImageSource::from(base.join(uri.as_ref()))
-                                    }
-                                })
-                                .on_task_toggle(move |event, window, cx| {
-                                    app.update(cx, |pane, cx| pane.task(offset, event, window, cx))
-                                }),
-                        )
-                        .into_any_element()
-                };
-                div().mb_3().child(body)
-            });
             content = content.child(
                 div()
                     .id("markdown-content")
+                    .relative()
                     .flex_1()
                     .min_w_0()
-                    .h_full()
+                    .flex()
+                    .items_start()
+                    .justify_center()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
                     .text_size(px(self.settings.markdown_font_size as f32))
-                    .p_6()
-                    .children(blocks)
+                    .font_family(if self.settings.interface_font.is_empty() {
+                        SharedString::from("Segoe UI")
+                    } else {
+                        self.settings.interface_font.clone().into()
+                    })
                     .child(
                         div()
-                            .id("md-add-paragraph")
                             .w_full()
-                            .min_h(px(80.))
-                            .cursor_text()
-                            .on_click(cx.listener(|pane, _, window, cx| {
-                                pane.text.push_str("\n\n");
-                                let end = pane.text.len();
-                                pane.blocks.push(Block {
-                                    range: end..end,
-                                    heading: None,
-                                    table: Vec::new(),
-                                });
-                                pane.editing = Some(pane.blocks.len() - 1);
-                                pane.editing_range = Some(end..end);
-                                pane.editing_cell = None;
-                                pane.rich = Some(RichText::new(""));
-                                pane.editor.update(cx, |state, cx| {
-                                    state.set_value("", window, cx);
-                                    state.focus(window, cx);
-                                });
-                                cx.notify();
-                            })),
+                            .flex_shrink_0()
+                            .when(self.settings.line_width_limited, |content| {
+                                content.max_w(px(850.))
+                            })
+                            .p_6()
+                            .child(BlockEditor::new(&self.visual_editor)),
+                    )
+                    .child(
+                        div().absolute().inset_0().child(
+                            Scrollbar::vertical(&self.scroll)
+                                .mode(ScrollbarMode::Always)
+                                .styles(|styles| {
+                                    styles
+                                        .thumb(|style| {
+                                            style
+                                                .bg(rgb(0x999996))
+                                                .width(px(10.))
+                                                .inset(px(2.))
+                                                .radius(px(6.))
+                                        })
+                                        .thumb_hover(|style| {
+                                            style
+                                                .bg(rgb(0x777774))
+                                                .width(px(10.))
+                                                .inset(px(2.))
+                                                .radius(px(6.))
+                                        })
+                                        .thumb_active(|style| {
+                                            style
+                                                .bg(rgb(0x5d5d5a))
+                                                .width(px(10.))
+                                                .inset(px(2.))
+                                                .radius(px(6.))
+                                        })
+                                }),
+                        ),
                     ),
             );
         }
+
         div()
+            .relative()
             .size_full()
             .track_focus(&self.focus)
-            .when(!self.source, |pane| pane.key_context("FolioMarkdown"))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_, _, _, cx| cx.emit(MarkdownEvent::Focus)),
-            )
             .flex()
             .flex_col()
             .bg(rgb(0xffffff))
             .when(self.reading, |pane| pane.child(toolbar))
             .child(content)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.emit(MarkdownEvent::Focus)),
+            )
             .on_action(
                 cx.listener(|pane, _: &ToggleSource, window, cx| pane.toggle_source(window, cx)),
             )
-            .on_action(
-                cx.listener(|pane, _: &Bold, window, cx| pane.format("**", "**", window, cx)),
-            )
-            .on_action(
-                cx.listener(|pane, _: &Italic, window, cx| pane.format("*", "*", window, cx)),
-            )
-            .on_action(
-                cx.listener(|pane, _: &Heading, window, cx| pane.format("## ", "", window, cx)),
-            )
-            .on_action(
-                cx.listener(|pane, _: &BulletList, window, cx| pane.format("- ", "", window, cx)),
-            )
-            .on_action(
-                cx.listener(|pane, _: &TaskList, window, cx| pane.format("- [ ] ", "", window, cx)),
-            )
-            .on_action(
-                cx.listener(|pane, _: &InlineMath, window, cx| pane.format("$", "$", window, cx)),
-            )
+            .on_action(cx.listener(|pane, _: &Bold, _, cx| {
+                pane.run_command(EditorCommand::ToggleMark(MarkKind::Bold), cx)
+            }))
+            .on_action(cx.listener(|pane, _: &Italic, _, cx| {
+                pane.run_command(EditorCommand::ToggleMark(MarkKind::Italic), cx)
+            }))
+            .on_action(cx.listener(|pane, _: &HeadingAction, _, cx| {
+                pane.run_command(
+                    EditorCommand::SetBlockKind(BlockKind::Heading { level: 2 }),
+                    cx,
+                )
+            }))
+            .on_action(cx.listener(|pane, _: &BulletList, _, cx| {
+                pane.run_command(EditorCommand::ToggleList { ordered: false }, cx)
+            }))
+            .on_action(cx.listener(|pane, _: &TaskList, _, cx| {
+                pane.run_command(EditorCommand::ToggleTask, cx)
+            }))
             .on_action(
                 cx.listener(|pane, _: &InsertImage, window, cx| pane.insert_image(window, cx)),
             )
-            .on_action(cx.listener(|pane, _: &InsertTable, window, cx| {
-                pane.format(
-                    "\n| 标题 | 内容 |\n| --- | --- |\n|  |  |\n",
-                    "",
-                    window,
-                    cx,
-                )
+            .on_action(cx.listener(|pane, _: &InsertTable, _, cx| {
+                pane.run_command(EditorCommand::InsertTable { rows: 2, cols: 2 }, cx)
             }))
             .on_scroll(cx.listener(|pane, event: &ScrollEvent, _, cx| {
                 if event.modifiers.control {
@@ -924,10 +690,110 @@ impl Render for MarkdownPane {
                     };
                     pane.settings.markdown_font_size =
                         (pane.settings.markdown_font_size as i16 + delta).clamp(11, 26) as u8;
+                    pane.math.update(cx, |renderer, cx| {
+                        renderer.set_appearance(&pane.settings, cx)
+                    });
                     cx.stop_propagation();
                     cx.notify();
                     cx.emit(MarkdownEvent::Zoom(pane.settings.markdown_font_size));
                 }
             }))
+            .context_menu(|menu, _, _| {
+                menu.menu("加粗", Box::new(Bold))
+                    .menu("斜体", Box::new(Italic))
+                    .menu("标题", Box::new(HeadingAction))
+                    .menu("无序列表", Box::new(BulletList))
+                    .menu("任务列表", Box::new(TaskList))
+                    .separator()
+                    .menu("插入图片…", Box::new(InsertImage))
+                    .menu("插入表格", Box::new(InsertTable))
+            })
+            .when_some(self.formula_editor.clone(), |pane, (editor, display)| {
+                pane.child(crate::ui::modal_overlay(
+                    "编辑公式",
+                    "输入 LaTeX 正文，无需添加分隔符。".to_owned(),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div().h(px(180.)).w_full().child(
+                                Editor::new(&editor)
+                                    .appearance(false)
+                                    .bordered(true)
+                                    .size_full()
+                                    .font_family("Consolas")
+                                    .text_size(px(18.)),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(crate::ui::button("cancel-formula", "取消").on_click(
+                                    cx.listener(|pane, _, window, cx| {
+                                        pane.formula_editor = None;
+                                        pane.visual_editor
+                                            .update(cx, |editor, cx| editor.focus(window, cx));
+                                        cx.notify();
+                                    }),
+                                ))
+                                .child(crate::ui::button("apply-formula", "应用").on_click(
+                                    cx.listener(move |pane, _, window, cx| {
+                                        let latex = editor.read(cx).value().to_string();
+                                        let source = if display {
+                                            format!("$$\n{latex}\n$$")
+                                        } else {
+                                            format!("${latex}$")
+                                        };
+                                        pane.visual_editor.update(cx, |editor, cx| {
+                                            editor.replace_selected_markdown(&source, cx);
+                                            editor.focus(window, cx);
+                                        });
+                                        pane.formula_editor = None;
+                                        cx.notify();
+                                    }),
+                                )),
+                        ),
+                ))
+            })
+            .when_some(self.pending_image.clone(), |pane, (_, destination)| {
+                pane.child(crate::ui::modal_overlay(
+                    "替换同名图片？",
+                    destination.to_string_lossy().into_owned(),
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            crate::ui::button("cancel-image-overwrite", "取消").on_click(
+                                cx.listener(|pane, _, _, cx| {
+                                    pane.pending_image = None;
+                                    cx.notify();
+                                }),
+                            ),
+                        )
+                        .child(
+                            crate::ui::button("confirm-image-overwrite", "替换").on_click(
+                                cx.listener(|pane, _, _, cx| pane.confirm_image_import(cx)),
+                            ),
+                        ),
+                ))
+            })
+            .when_some(self.image_error.clone(), |pane, error| {
+                pane.child(crate::ui::modal_overlay(
+                    "图片导入失败",
+                    error,
+                    div().flex().justify_end().child(
+                        crate::ui::button("dismiss-image-error", "确定").on_click(cx.listener(
+                            |pane, _, _, cx| {
+                                pane.image_error = None;
+                                cx.notify();
+                            },
+                        )),
+                    ),
+                ))
+            })
     }
 }

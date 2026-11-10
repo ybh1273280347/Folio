@@ -9,11 +9,14 @@ comrak = "0.59.0"
 dirs = "6.0.0"
 dunce = "1.0.5"
 gpui-kit = { version = "0.9.1", default-features = false, features = ["component", "syntect", "assets"] }
+gpui-kit-markdown-editor = { path = "vendor/gpui-kit-markdown-editor", default-features = false }
+gpui-pdf = { path = "vendor/gpui-pdf", features = ["search"] }
 image = { version = "0.25.10", default-features = false }
 markdown = "1.0.0"
-roxmltree = "0.21.2"
+latex-rust = { path = "vendor/latex-rust", default-features = false, features = ["std"] }
+krilla = { version = "0.8.2", default-features = false, features = ["raster-images"] }
+ttf-parser = "0.25.1"
 notify = "8.2.2"
-pdfium-render = "0.9.5"
 rfd = "0.15.4"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
@@ -28,3 +31,7 @@ tempfile = "3.24.0"
 strip = true
 opt-level = 2
 codegen-units = 16
+
+[patch.crates-io]
+gpui-pre = { path = "vendor/gpui-pre" }
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }

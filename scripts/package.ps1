@@ -1,4 +1,4 @@
-param([switch]$SkipBuild, [switch]$Launch)
+param([switch]$SkipBuild, [switch]$Launch, [switch]$KeepRunning)
 $ErrorActionPreference = 'Stop'
 $projectDirectory = Split-Path -Parent $PSScriptRoot
 $compiler = (Get-Command gcc).Source
@@ -15,28 +15,24 @@ $destination = Join-Path $projectDirectory ("dist\releases\$releaseName")
 $executable = Join-Path $destination 'Folio.exe'
 $releaseRoot = (Join-Path $projectDirectory 'dist\releases').TrimEnd('\') + '\'
 $legacyExecutable = Join-Path $projectDirectory 'dist\Folio\Folio.exe'
+if (-not $KeepRunning) {
 foreach ($process in Get-Process -Name Folio -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $legacyExecutable -or $_.Path.StartsWith($releaseRoot, [StringComparison]::OrdinalIgnoreCase) }) {
     $null = $process.CloseMainWindow()
     if (-not $process.WaitForExit(5000)) {
         throw 'Save your drafts and close Folio GPUI, then run this script again.'
     }
 }
+}
 New-Item -ItemType Directory -Path $destination -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $projectDirectory 'target\release\folio-gpui-prototype.exe') -Destination $executable
 Copy-Item -LiteralPath (Join-Path $projectDirectory 'resources\icon.ico') -Destination $destination
-Copy-Item -LiteralPath (Join-Path $projectDirectory 'runtime\bin\pdfium.dll') -Destination $destination
-$katexSource = Join-Path $projectDirectory 'resources\katex'
-$katexDestination = Join-Path $destination 'katex'
-New-Item -ItemType Directory -Path (Join-Path $katexDestination 'contrib') -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $katexSource 'katex.min.css'), (Join-Path $katexSource 'katex.min.js') -Destination $katexDestination
-Copy-Item -LiteralPath (Join-Path $katexSource 'contrib\auto-render.min.js') -Destination (Join-Path $katexDestination 'contrib')
-Copy-Item -LiteralPath (Join-Path $katexSource 'fonts') -Destination $katexDestination -Recurse -Force
-Copy-Item -LiteralPath (Join-Path $katexSource 'LICENSE') -Destination (Join-Path $destination 'KaTeX-LICENSE.txt')
-Copy-Item -LiteralPath (Join-Path $projectDirectory 'runtime\LICENSE') -Destination (Join-Path $destination 'PDFium-LICENSE.txt')
-$licenses = Join-Path $destination 'pdfium-licenses'
-New-Item -ItemType Directory -Path $licenses -Force | Out-Null
-Copy-Item -Path (Join-Path $projectDirectory 'runtime\licenses\*') -Destination $licenses -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $projectDirectory 'vendor\latex-rust\LICENSE-MIT') -Destination (Join-Path $destination 'LaTeX-Rust-LICENSE-MIT.txt')
+Copy-Item -LiteralPath (Join-Path $projectDirectory 'vendor\latex-rust\NOTICE') -Destination (Join-Path $destination 'LaTeX-Rust-NOTICE.txt')
+Copy-Item -LiteralPath (Join-Path $projectDirectory 'vendor\gpui-kit-markdown-editor\LICENSE-APACHE') -Destination (Join-Path $destination 'Markdown-Editor-LICENSE-APACHE.txt')
+Copy-Item -LiteralPath (Join-Path $projectDirectory 'vendor\gpui-pdf\LICENSE') -Destination (Join-Path $destination 'GPUI-PDF-LICENSE.txt')
 Copy-Item -LiteralPath (Join-Path $projectDirectory 'README.md') -Destination $destination
+Copy-Item -LiteralPath (Join-Path $projectDirectory 'resources\fonts\OFL.txt') -Destination (Join-Path $destination 'STIX-Fonts-OFL.txt')
+Copy-Item -LiteralPath (Join-Path $projectDirectory 'resources\fonts\GUST-FONT-LICENSE.txt') -Destination $destination
 $desktop = [Environment]::GetFolderPath('Desktop')
 $shortcutPath = Join-Path $desktop 'Folio GPUI.lnk'
 $shell = New-Object -ComObject WScript.Shell
