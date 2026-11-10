@@ -72,7 +72,9 @@ pub fn control(id: impl Into<ElementId>, name: IconName) -> Stateful<Div> {
         .child(icon(name))
 }
 
-pub fn file_icon(path: &str, asset: bool) -> AnyElement {
+pub const MAIN_TEX_COLOR: u32 = 0x5c7f9f;
+
+pub fn file_icon(path: &str, asset: bool, main: bool) -> AnyElement {
     if path.to_lowercase().ends_with(".pdf") {
         return div()
             .text_size(px(9.))
@@ -96,7 +98,9 @@ pub fn file_icon(path: &str, asset: bool) -> AnyElement {
     };
     div()
         .flex_shrink_0()
-        .text_color(rgb(if path.ends_with(".tex") {
+        .text_color(rgb(if main {
+            MAIN_TEX_COLOR
+        } else if path.ends_with(".tex") {
             0x8b989f
         } else {
             0x787774
