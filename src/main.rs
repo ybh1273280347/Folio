@@ -16,7 +16,7 @@ use gpui_kit::*;
 use workspace::Workspace;
 
 fn main() {
-    gpui_kit::application().run(|cx| {
+    gpui_kit::application().with_assets(ui::Assets).run(|cx| {
         gpui_kit::init(cx);
         cx.bind_keys([
             KeyBinding::new("ctrl-s", workspace::Save, None),

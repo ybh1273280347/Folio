@@ -636,6 +636,7 @@ impl Render for PdfPane {
                     .justify_between()
                     .h(px(36.))
                     .px_3()
+                    .pr(px(38.))
                     .bg(rgb(0xffffff))
                     .border_b_1()
                     .border_color(rgb(0xe8e7e3))

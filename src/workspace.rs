@@ -13,6 +13,7 @@ use crate::{
     storage,
 };
 use gpui_kit::{
+    assets::IconName,
     base::StyledExt,
     component::{
         button::Button,
@@ -1274,35 +1275,31 @@ impl Workspace {
 
     fn render_reading_pane(&self, path: &str, cx: &mut Context<Self>) -> AnyElement {
         let close = path.to_owned();
-        let title = Path::new(path)
-            .file_name()
-            .expect("reading file has a name")
-            .to_string_lossy()
-            .into_owned();
-        let mut pane = div().size_full().flex().flex_col().bg(rgb(0xffffff)).child(
-            div()
-                .h(px(36.))
-                .px_3()
-                .flex()
-                .items_center()
-                .justify_between()
-                .border_b_1()
-                .border_color(rgb(BORDER))
-                .child(title)
-                .child(
-                    button(SharedString::from(format!("close-reading-{path}")), "×").on_click(
-                        cx.listener(move |app, _, window, cx| {
-                            app.close_reading_pane(&close, window, cx)
-                        }),
-                    ),
-                ),
-        );
+        let mut pane = div()
+            .relative()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(0xffffff));
         if let Some(pdf) = self.pdf_panes.get(&format!("reading:{path}")) {
             pane = pane.child(div().flex_1().min_h_0().child(pdf.clone()));
         } else if let Some(markdown) = self.markdown_panes.get(&format!("reading:{path}")) {
             pane = pane.child(div().flex_1().min_h_0().child(markdown.clone()));
         }
-        pane.into_any_element()
+        // The pane owns one toolbar; keep its close affordance in that same row.
+        pane.child(
+            crate::ui::control(
+                SharedString::from(format!("close-reading-{path}")),
+                IconName::Close,
+            )
+            .absolute()
+            .top(px(5.))
+            .right(px(5.))
+            .on_click(
+                cx.listener(move |app, _, window, cx| app.close_reading_pane(&close, window, cx)),
+            ),
+        )
+        .into_any_element()
     }
 
     fn remove_project(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1370,6 +1367,9 @@ impl Workspace {
         let projects = self.config.projects.iter().map(|project| {
             let id = project.id.clone();
             let rename_id = id.clone();
+            let row_rename = id.clone();
+            let row_remove = id.clone();
+            let row_name = project.name.clone();
             let name = project.name.clone();
             let root = PathBuf::from(&project.folder);
             let app = cx.entity();
@@ -1387,8 +1387,39 @@ impl Workspace {
                     row.bg(rgb(0xe8e7e4))
                 })
                 .hover(|style| style.bg(rgb(0xefefed)))
-                .child("▱")
-                .child(project.name.clone())
+                .child(crate::ui::icon(IconName::Folder))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .child(project.name.clone()),
+                )
+                .child(
+                    crate::ui::control(
+                        SharedString::from(format!("rename-project-{id}")),
+                        IconName::PencilLine,
+                    )
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        cx.stop_propagation();
+                        app.start_name(
+                            NameAction::RenameProject(row_rename.clone()),
+                            &row_name,
+                            window,
+                            cx,
+                        );
+                    })),
+                )
+                .child(
+                    crate::ui::control(
+                        SharedString::from(format!("remove-project-{id}")),
+                        IconName::Trash,
+                    )
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        cx.stop_propagation();
+                        app.remove_project(&row_remove, window, cx);
+                    })),
+                )
                 .on_click(
                     cx.listener(move |app, _, window, cx| app.switch_project(&id, window, cx)),
                 )
@@ -1457,6 +1488,7 @@ impl Workspace {
                     let full = PathBuf::from(&self.project().expect("folder has project").folder)
                         .join(path);
                     let deleted = path.clone();
+                    let row_deleted = path.clone();
                     let app = cx.entity();
                     return div()
                         .id(SharedString::from(format!("folder-{path}")))
@@ -1467,18 +1499,36 @@ impl Workspace {
                         .pl(px(12. + depth as f32 * 15.))
                         .cursor_pointer()
                         .hover(|style| style.bg(rgb(0xefefed)))
-                        .child(if self.collapsed_folders.contains(path) {
-                            "›"
+                        .child(crate::ui::icon(if self.collapsed_folders.contains(path) {
+                            IconName::ChevronRight
                         } else {
-                            "⌄"
-                        })
-                        .child("▱")
+                            IconName::ChevronDown
+                        }))
+                        .child(crate::ui::icon(if self.collapsed_folders.contains(path) {
+                            IconName::Folder
+                        } else {
+                            IconName::FolderOpen
+                        }))
                         .child(
-                            Path::new(path)
-                                .file_name()
-                                .expect("folder has name")
-                                .to_string_lossy()
-                                .into_owned(),
+                            div().flex_1().min_w_0().text_ellipsis().child(
+                                Path::new(path)
+                                    .file_name()
+                                    .expect("folder has name")
+                                    .to_string_lossy()
+                                    .into_owned(),
+                            ),
+                        )
+                        .child(
+                            crate::ui::control(
+                                SharedString::from(format!("delete-folder-{path}")),
+                                IconName::Trash,
+                            )
+                            .on_click(cx.listener(
+                                move |app, _, window, cx| {
+                                    cx.stop_propagation();
+                                    app.delete_folder(&row_deleted, window, cx);
+                                },
+                            )),
                         )
                         .on_click(cx.listener(move |app, _, _, cx| {
                             if !app.collapsed_folders.remove(&toggled) {
@@ -1519,6 +1569,14 @@ impl Workspace {
                     .join(&file.path);
                 let app = cx.entity();
                 let split = file.clone();
+                let row_split = file.clone();
+                let row_rename = file.path.clone();
+                let row_delete = file.path.clone();
+                let row_name = Path::new(path)
+                    .file_name()
+                    .expect("file has name")
+                    .to_string_lossy()
+                    .into_owned();
                 let pdf_file = file.path.to_lowercase().ends_with(".pdf");
                 let name = Path::new(&file.path)
                     .file_name()
@@ -1536,29 +1594,61 @@ impl Workspace {
                     .cursor_pointer()
                     .when(self.active == file.path, |row| row.bg(rgb(0xe8e7e4)))
                     .hover(|style| style.bg(rgb(0xefefed)))
-                    .child(
-                        div()
-                            .text_size(px(9.))
-                            .text_color(rgb(if pdf_file { 0xb45b57 } else { 0x8b989f }))
-                            .when(pdf_file, |icon| {
-                                icon.border_1()
-                                    .border_color(rgb(0xd5a7a3))
-                                    .rounded(px(3.))
-                                    .px_1()
-                            })
-                            .child(if pdf_file {
-                                "PDF"
-                            } else if file.path.ends_with(".tex") {
-                                "TeX"
-                            } else {
-                                "◇"
-                            }),
-                    )
-                    .child(div().flex_1().overflow_hidden().child(name.clone()))
+                    .child(crate::ui::file_icon(
+                        &file.path,
+                        file.kind == FileKind::Asset,
+                    ))
+                    .child(div().flex_1().min_w_0().text_ellipsis().child(name.clone()))
                     .when(
                         self.project()
                             .is_some_and(|project| project.main_file == file.path),
                         |row| row.child(div().text_xs().text_color(rgb(MUTED)).child("主")),
+                    )
+                    .when(
+                        pdf_file || file.path.to_lowercase().ends_with(".md"),
+                        |row| {
+                            row.child(
+                                crate::ui::control(
+                                    SharedString::from(format!("split-{path}")),
+                                    IconName::Columns2,
+                                )
+                                .on_click(cx.listener(
+                                    move |app, _, window, cx| {
+                                        cx.stop_propagation();
+                                        app.open_reading_pane(&row_split, window, cx);
+                                    },
+                                )),
+                            )
+                        },
+                    )
+                    .child(
+                        crate::ui::control(
+                            SharedString::from(format!("rename-{path}")),
+                            IconName::PencilLine,
+                        )
+                        .on_click(cx.listener(
+                            move |app, _, window, cx| {
+                                cx.stop_propagation();
+                                app.start_name(
+                                    NameAction::RenameFile(row_rename.clone()),
+                                    &row_name,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        )),
+                    )
+                    .child(
+                        crate::ui::control(
+                            SharedString::from(format!("delete-{path}")),
+                            IconName::Trash,
+                        )
+                        .on_click(cx.listener(
+                            move |app, _, window, cx| {
+                                cx.stop_propagation();
+                                app.delete_file(&row_delete, window, cx);
+                            },
+                        )),
                     )
                     .on_click(cx.listener(move |app, _, window, cx| {
                         if let Err(error) = app.open_file(&open, window, cx) {
@@ -1710,7 +1800,23 @@ impl Workspace {
                     ),
             )
             .when(self.searching, |sidebar| {
-                sidebar.child(div().px_3().pb_2().child(Input::new(&self.search_input)))
+                sidebar.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_3()
+                        .pb_2()
+                        .child(Input::new(&self.search_input).flex_1().min_w_0())
+                        .child(
+                            crate::ui::control("close-file-search", IconName::Close).on_click(
+                                cx.listener(|app, _, _, cx| {
+                                    app.searching = false;
+                                    cx.notify();
+                                }),
+                            ),
+                        ),
+                )
             })
             .child(
                 div()
@@ -1751,7 +1857,9 @@ impl Workspace {
                 .id(SharedString::from(format!("tab-{path}")))
                 .flex()
                 .items_center()
-                .gap_3()
+                .gap_2()
+                .flex_shrink_0()
+                .max_w(px(240.))
                 .px_3()
                 .h(px(36.))
                 .border_r_1()
@@ -1762,19 +1870,18 @@ impl Workspace {
                         .border_b_2()
                         .border_color(rgb(0x8aa2b9))
                 })
-                .child(format!("{title}{}", if dirty { " ·" } else { "" }))
-                .when(path.to_lowercase().ends_with(".pdf"), |tab| {
-                    tab.child(
-                        div()
-                            .text_size(px(9.))
-                            .px_1()
-                            .rounded(px(3.))
-                            .border_1()
-                            .border_color(rgb(0xd5a7a3))
-                            .text_color(rgb(0xb45b57))
-                            .child("PDF"),
-                    )
-                })
+                .child(crate::ui::file_icon(
+                    path,
+                    self.files
+                        .iter()
+                        .any(|file| file.path == *path && file.kind == FileKind::Asset),
+                ))
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .child(format!("{title}{}", if dirty { " ·" } else { "" })),
+                )
                 .on_click(cx.listener(move |app, _, window, cx| {
                     let file = app.files.iter().find(|file| file.path == open).cloned();
                     if let Some(file) = file {
@@ -1784,12 +1891,14 @@ impl Workspace {
                     }
                 }))
                 .child(
-                    button(SharedString::from(format!("close-{path}")), "×").on_click(cx.listener(
-                        move |app, _, window, cx| {
-                            cx.stop_propagation();
-                            app.close_tab(&close, window, cx);
-                        },
-                    )),
+                    crate::ui::control(
+                        SharedString::from(format!("close-{path}")),
+                        IconName::Close,
+                    )
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        cx.stop_propagation();
+                        app.close_tab(&close, window, cx);
+                    })),
                 )
         });
         let mut area = div().flex().flex_col().size_full().bg(rgb(0xffffff)).child(
@@ -1930,7 +2039,8 @@ impl Workspace {
             .bg(rgb(0xf1f1ef))
             .child(
                 div()
-                    .h(px(36.))
+                    .h(px(38.))
+                    .flex_shrink_0()
                     .px_4()
                     .flex()
                     .items_center()
@@ -1938,7 +2048,14 @@ impl Workspace {
                     .bg(rgb(0xffffff))
                     .border_b_1()
                     .border_color(rgb(BORDER))
-                    .child("预览")
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(crate::ui::icon(IconName::FileText))
+                            .child("预览"),
+                    )
                     .when_some(self.preview.clone(), |toolbar, path| {
                         toolbar.child(
                             button("reveal-output", "在资源管理器中显示")
@@ -1980,6 +2097,11 @@ impl Workspace {
 fn button(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Stateful<Div> {
     div()
         .id(id)
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .min_h(px(27.))
         .px_2()
         .py_1()
         .rounded(px(4.))
@@ -2001,10 +2123,7 @@ impl Render for Workspace {
             .project()
             .map(|project| format!("工作空间  ›  {}", project.name))
             .unwrap_or_else(|| "工作空间".to_owned());
-        let engine = self
-            .project()
-            .map(|project| format!("{:?}", project.engine))
-            .unwrap_or_default();
+        let engine = self.project().map(|project| project.engine);
         let engine_app = cx.entity();
         let main_app = cx.entity();
         let main_label = self
@@ -2049,28 +2168,19 @@ impl Render for Workspace {
                     .size(px(area_width * (1. - self.settings.editor_ratio)))
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
+                            .relative()
                             .size_full()
+                            .child(self.render_preview())
                             .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .h(px(28.))
-                                    .px_3()
-                                    .bg(rgb(0xffffff))
-                                    .text_xs()
-                                    .text_color(rgb(MUTED))
-                                    .child("编译预览")
-                                    .child(button("close-build-preview", "×").on_click(
-                                        cx.listener(|app, _, _, cx| {
-                                            app.show_build_preview = false;
-                                            cx.notify();
-                                        }),
-                                    )),
-                            )
-                            .child(div().flex_1().min_h_0().child(self.render_preview())),
+                                crate::ui::control("close-build-preview", IconName::Close)
+                                    .absolute()
+                                    .top(px(5.))
+                                    .right(px(5.))
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.show_build_preview = false;
+                                        cx.notify();
+                                    })),
+                            ),
                     ),
             );
         }
@@ -2141,12 +2251,42 @@ impl Render for Workspace {
                     .h(px(38.))
                     .flex_shrink_0()
                     .items_center()
-                    .px_3()
-                    .gap_3()
+                    .pl_4()
+                    .gap_2()
                     .border_b_1()
                     .border_color(rgb(BORDER))
                     .child(
-                        button("toggle-sidebar", "☰").on_click(cx.listener(|app, _, _, cx| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .flex_shrink_0()
+                            .w(px(170.))
+                            .child(
+                                div()
+                                    .font_family("Georgia")
+                                    .italic()
+                                    .text_size(px(24.))
+                                    .child("ƒ"),
+                            )
+                            .child(div().font_semibold().child("Folio"))
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED))
+                                    .child("LaTeX 工作台"),
+                            ),
+                    )
+                    .child(
+                        crate::ui::control(
+                            "toggle-sidebar",
+                            if self.settings.sidebar_open {
+                                IconName::PanelLeftClose
+                            } else {
+                                IconName::PanelLeftOpen
+                            },
+                        )
+                        .on_click(cx.listener(|app, _, _, cx| {
                             app.settings.sidebar_open = !app.settings.sidebar_open;
                             if let Err(error) = storage::save_settings(&app.settings) {
                                 app.report(error, cx);
@@ -2158,67 +2298,86 @@ impl Render for Workspace {
                         div()
                             .id("window-drag")
                             .flex_1()
+                            .min_w_0()
                             .h_full()
                             .flex()
                             .items_center()
+                            .gap_2()
                             .text_color(rgb(MUTED))
-                            .child(title)
+                            .text_xs()
+                            .child(div().min_w_0().text_ellipsis().child(title))
+                            .child(
+                                div()
+                                    .max_w(px(140.))
+                                    .min_w_0()
+                                    .text_ellipsis()
+                                    .rounded(px(10.))
+                                    .px_2()
+                                    .bg(rgb(0xebeae6))
+                                    .child(main_label.clone()),
+                            )
                             .window_control_area(WindowControlArea::Drag),
                     )
                     .child(button("compile", label).text_color(rgb(0x4b7b59)).on_click(
                         cx.listener(|app, _, window, cx| app.compile(&Compile, window, cx)),
                     ))
                     .child(
-                        Button::new("engine")
-                            .label(engine)
+                        Button::new("compile-settings")
+                            .icon(crate::ui::icon(IconName::SlidersHorizontal))
+                            .tooltip("编译设置")
                             .dropdown_menu(move |menu, _, _| {
-                                [Engine::Xelatex, Engine::Pdflatex, Engine::Lualatex]
+                                let menu = [Engine::Xelatex, Engine::Pdflatex, Engine::Lualatex]
                                     .into_iter()
-                                    .fold(menu, |menu, engine| {
-                                        let app = engine_app.clone();
+                                    .fold(
+                                        menu.item(PopupMenuItem::label("编译引擎")),
+                                        |menu, choice| {
+                                            let app = engine_app.clone();
+                                            menu.item(
+                                                PopupMenuItem::new(format!("{choice:?}"))
+                                                    .checked(engine == Some(choice))
+                                                    .on_click(move |_, _, cx| {
+                                                        app.update(cx, |app, cx| {
+                                                            app.set_engine(choice, cx)
+                                                        })
+                                                    }),
+                                            )
+                                        },
+                                    );
+                                main_files.iter().fold(
+                                    menu.separator().item(PopupMenuItem::label("编译主文件")),
+                                    |menu, file| {
+                                        let app = main_app.clone();
+                                        let file = file.clone();
                                         menu.item(
-                                            PopupMenuItem::new(format!("{engine:?}")).on_click(
-                                                move |_, _, cx| {
+                                            PopupMenuItem::new(file.clone())
+                                                .checked(file == main_label)
+                                                .on_click(move |_, _, cx| {
                                                     app.update(cx, |app, cx| {
-                                                        app.set_engine(engine, cx)
+                                                        if app.cancellation.is_some() {
+                                                            return;
+                                                        }
+                                                        app.config
+                                                            .projects
+                                                            .iter_mut()
+                                                            .find(|project| {
+                                                                Some(&project.id)
+                                                                    == app.config.active_id.as_ref()
+                                                            })
+                                                            .expect("main file belongs to project")
+                                                            .main_file = file.clone();
+                                                        if let Err(error) =
+                                                            storage::save_projects(&app.config)
+                                                        {
+                                                            app.report(error, cx);
+                                                        }
+                                                        cx.notify();
                                                     })
-                                                },
-                                            ),
+                                                }),
                                         )
-                                    })
+                                    },
+                                )
                             }),
                     )
-                    .child(Button::new("main-file").label(main_label).dropdown_menu(
-                        move |menu, _, _| {
-                            main_files.iter().fold(menu, |menu, file| {
-                                let app = main_app.clone();
-                                let file = file.clone();
-                                menu.item(PopupMenuItem::new(file.clone()).on_click(
-                                    move |_, _, cx| {
-                                        app.update(cx, |app, cx| {
-                                            if app.cancellation.is_some() {
-                                                return;
-                                            }
-                                            app.config
-                                                .projects
-                                                .iter_mut()
-                                                .find(|project| {
-                                                    Some(&project.id)
-                                                        == app.config.active_id.as_ref()
-                                                })
-                                                .expect("main file belongs to project")
-                                                .main_file = file.clone();
-                                            if let Err(error) = storage::save_projects(&app.config)
-                                            {
-                                                app.report(error, cx);
-                                            }
-                                            cx.notify();
-                                        })
-                                    },
-                                ))
-                            })
-                        },
-                    ))
                     .child(div().text_xs().text_color(rgb(MUTED)).child(status))
                     .child(
                         button("logs", "终端").on_click(cx.listener(|app, _, _, cx| {
@@ -2234,10 +2393,33 @@ impl Render for Workspace {
                             },
                         )))
                     })
-                    .child(button("minimize", "−").window_control_area(WindowControlArea::Min))
-                    .child(button("maximize", "□").window_control_area(WindowControlArea::Max))
                     .child(
-                        button("close-window", "×").window_control_area(WindowControlArea::Close),
+                        div()
+                            .flex()
+                            .h_full()
+                            .flex_shrink_0()
+                            .child(
+                                crate::ui::control("minimize", IconName::Minus)
+                                    .w(px(42.))
+                                    .h_full()
+                                    .rounded_none()
+                                    .window_control_area(WindowControlArea::Min),
+                            )
+                            .child(
+                                crate::ui::control("maximize", IconName::Maximize2)
+                                    .w(px(42.))
+                                    .h_full()
+                                    .rounded_none()
+                                    .window_control_area(WindowControlArea::Max),
+                            )
+                            .child(
+                                crate::ui::control("close-window", IconName::Close)
+                                    .w(px(42.))
+                                    .h_full()
+                                    .rounded_none()
+                                    .hover(|s| s.bg(rgb(0xdf5151)).text_color(rgb(0xffffff)))
+                                    .window_control_area(WindowControlArea::Close),
+                            ),
                     ),
             )
             .child(
@@ -2269,6 +2451,24 @@ impl Render for Workspace {
                                         .rounded(px(6.))
                                         .font_family("Consolas")
                                         .text_xs()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .mb_2()
+                                                .child("编译日志")
+                                                .child(
+                                                    crate::ui::control(
+                                                        "close-logs",
+                                                        IconName::Close,
+                                                    )
+                                                    .on_click(cx.listener(|app, _, _, cx| {
+                                                        app.show_logs = false;
+                                                        cx.notify();
+                                                    })),
+                                                ),
+                                        )
                                         .child(self.logs.clone()),
                                 )
                             }),
@@ -2333,7 +2533,20 @@ impl Render for Workspace {
                             .flex()
                             .flex_col()
                             .gap_4()
-                            .child(div().font_semibold().child(title))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(div().font_semibold().child(title))
+                                    .child(
+                                        crate::ui::control("close-name-dialog", IconName::Close)
+                                            .on_click(cx.listener(|app, _, _, cx| {
+                                                app.name_action = None;
+                                                cx.notify();
+                                            })),
+                                    ),
+                            )
                             .child(Input::new(&self.name_input))
                             .child(
                                 div()

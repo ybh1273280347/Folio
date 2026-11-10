@@ -4,7 +4,9 @@ Folio 的 Windows 原生版本。LaTeX、Markdown 编辑器和 PDF 预览都在 
 
 ## 启动
 
-构建后的程序位于 `dist\Folio\Folio.exe`，也可以双击 `启动 Folio.cmd`。第一次使用点“添加本地项目”，选择已有项目文件夹。
+双击 `编译并更新桌面.cmd`，自动编译发布版、打包运行库、更新桌面的 **Folio GPUI** 快捷方式并启动。以后更新继续双击同一个脚本即可；若旧版有未保存草稿，请先保存并关闭。
+
+日常直接双击桌面的 **Folio GPUI**。程序位于 `dist\Folio\Folio.exe`，也可以双击 `启动 Folio.cmd`。桌面的原版 Folio 快捷方式保持独立。第一次使用点“添加本地项目”，选择已有项目文件夹。
 
 项目、偏好和编译缓存独立保存在 `%APPDATA%\folio-gpui`。源码文件仍保存在用户选择的项目内，编译生成的 PDF 保存到源文件旁。排版使用本机已安装的 TeX Live，PDFium 和程序运行库随启动目录一起提供。
 
