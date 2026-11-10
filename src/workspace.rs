@@ -19,6 +19,7 @@ use gpui_kit::{
         button::Button,
         input::{Editor, EditorState, Input, InputEvent, InputState},
         menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
+        progress::Progress,
         resizable::{h_resizable, resizable_panel},
     },
     prelude::FluentBuilder,
@@ -106,6 +107,8 @@ pub struct Workspace {
     build_events: Option<mpsc::Receiver<BuildEvent>>,
     cancellation: Option<Arc<AtomicBool>>,
     build_status: BuildStatus,
+    build_target: String,
+    build_started: Option<Instant>,
     build_duration: Duration,
     logs: String,
     show_logs: bool,
@@ -195,6 +198,8 @@ impl Workspace {
             build_events: None,
             cancellation: None,
             build_status: BuildStatus::Idle,
+            build_target: String::new(),
+            build_started: None,
             build_duration: Duration::ZERO,
             logs: String::new(),
             show_logs: false,
@@ -423,7 +428,9 @@ impl Workspace {
             self.add_markdown_pane(&file.path, false, window, cx);
         }
         self.active = file.path.clone();
-        if let Some(document) = self.documents.get(&file.path) {
+        if let Some(pane) = self.markdown_panes.get(&file.path) {
+            pane.update(cx, |pane, cx| pane.focus(window, cx));
+        } else if let Some(document) = self.documents.get(&file.path) {
             document
                 .editor
                 .update(cx, |editor, cx| editor.focus(window, cx));
@@ -443,7 +450,7 @@ impl Workspace {
         let full = PathBuf::from(&self.project().expect("Markdown has project").folder).join(path);
         let settings = self.settings.clone();
         let math = self.math.clone();
-        let pane = cx.new(|cx| MarkdownPane::new(text, full, settings, math, window, cx));
+        let pane = cx.new(|cx| MarkdownPane::new(text, full, settings, math, reading, window, cx));
         let file = path.to_owned();
         cx.subscribe(&pane, move |app, _, event: &MarkdownEvent, cx| {
             match event {
@@ -452,12 +459,15 @@ impl Workspace {
                         .documents
                         .get_mut(&file)
                         .expect("Markdown pane owns open document");
+                    if document.buffer.text == *text {
+                        return;
+                    }
                     document.buffer.set_text(text.clone());
                     document.last_edit = Instant::now();
                     app.markdown_changed.insert(file.clone());
                     app.source_version += 1;
                 }
-                MarkdownEvent::Focus => app.focused_markdown = Some(file.clone()),
+                MarkdownEvent::Focus => app.focused_markdown = reading.then(|| file.clone()),
                 MarkdownEvent::Zoom(size) => {
                     app.settings.markdown_font_size = *size;
                     if let Err(error) = storage::save_settings(&app.settings) {
@@ -539,7 +549,9 @@ impl Workspace {
         let paths: Vec<_> = self
             .documents
             .iter()
-            .filter(|(_, document)| document.buffer.is_dirty())
+            .filter(|(_, document)| {
+                document.buffer.is_dirty() || document.buffer.conflict.is_some()
+            })
             .map(|(path, _)| path.clone())
             .collect();
         for path in paths {
@@ -863,6 +875,12 @@ impl Workspace {
                 }
             }
         }
+        // Reuse the workspace tick for elapsed time, including quiet compiler phases.
+        // Idle workspaces do not redraw for the build indicator.
+        if let Some(started) = self.build_started {
+            self.build_duration = started.elapsed();
+            cx.notify();
+        }
         let events: Vec<_> = self
             .build_events
             .iter()
@@ -875,6 +893,11 @@ impl Workspace {
                     cx.notify();
                 }
                 BuildEvent::Finished(result) => {
+                    self.build_duration = self
+                        .build_started
+                        .take()
+                        .expect("finished build has a start time")
+                        .elapsed();
                     self.cancellation = None;
                     self.build_events = None;
                     if self.close_requested {
@@ -885,10 +908,15 @@ impl Workspace {
                     match result {
                         Ok(result) => {
                             self.build_status = result.status;
-                            self.build_duration = result.elapsed;
+                            self.build_duration = self.build_duration.max(result.elapsed);
                             self.logs = result.log;
                             if let Some(path) = result.preview {
-                                self.build_pdf = Some(cx.new(|cx| PdfPane::new(path.clone(), cx)));
+                                let title = format!("{} · 编译预览", self.build_target);
+                                self.build_pdf = Some(cx.new(|cx| {
+                                    let mut pane = PdfPane::new(path.clone(), cx);
+                                    pane.set_title(title);
+                                    pane
+                                }));
                                 self.preview = Some(path);
                             }
                             self.show_logs = result.status == BuildStatus::Failed;
@@ -909,12 +937,29 @@ impl Workspace {
             cancelled.store(true, Ordering::Relaxed);
         }
     }
+    fn compile_target(&self) -> Option<&str> {
+        let focused = self.focused_markdown.as_deref().unwrap_or(&self.active);
+        if focused.to_lowercase().ends_with(".md") {
+            Some(focused)
+        } else {
+            self.project()
+                .map(|project| project.main_file.as_str())
+                .filter(|file| !file.is_empty())
+        }
+    }
+
     fn compile(&mut self, _: &Compile, _: &mut Window, cx: &mut Context<Self>) {
         if self.cancellation.is_some() {
             self.cancel_build();
             return;
         }
         let Some(project) = self.project().cloned() else {
+            return;
+        };
+        // Match the original app: a focused Markdown split overrides the active
+        // tab; other files use the project's configured TeX entry point.
+        let Some(target) = self.compile_target().map(str::to_owned) else {
+            self.report("请选择一个 .tex 文件作为编译主文件。", cx);
             return;
         };
         if !self.save_all(cx) {
@@ -927,15 +972,18 @@ impl Workspace {
                 return;
             }
         };
-        let markdown_file = self.focused_markdown.as_deref().unwrap_or(&self.active);
-        let markdown = markdown_file
+        let markdown = target
             .to_lowercase()
             .ends_with(".md")
-            .then(|| markdown_file.to_owned());
+            .then(|| target.clone());
         let cancelled = Arc::new(AtomicBool::new(false));
         self.build_version = self.source_version;
+        self.build_target = target;
+        self.build_status = BuildStatus::Idle;
         self.show_build_preview = true;
         self.cancellation = Some(cancelled.clone());
+        self.build_started = Some(Instant::now());
+        self.build_duration = Duration::ZERO;
         self.logs.clear();
         self.notice = None;
         let (sender, receiver) = mpsc::channel();
@@ -1230,6 +1278,8 @@ impl Workspace {
         self.active = active;
         if file.path.to_lowercase().ends_with(".md") {
             self.add_markdown_pane(&file.path, true, window, cx);
+            self.markdown_panes[&format!("reading:{}", file.path)]
+                .update(cx, |pane, cx| pane.focus(window, cx));
         }
         if file.path.to_lowercase().ends_with(".pdf") {
             let full = PathBuf::from(&self.project().expect("reading file has project").folder)
@@ -1597,12 +1647,23 @@ impl Workspace {
                     .child(crate::ui::file_icon(
                         &file.path,
                         file.kind == FileKind::Asset,
-                    ))
-                    .child(div().flex_1().min_w_0().text_ellipsis().child(name.clone()))
-                    .when(
                         self.project()
                             .is_some_and(|project| project.main_file == file.path),
-                        |row| row.child(div().text_xs().text_color(rgb(MUTED)).child("主")),
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_ellipsis()
+                            .when(
+                                self.project()
+                                    .is_some_and(|project| project.main_file == file.path),
+                                |name| {
+                                    name.text_color(rgb(crate::ui::MAIN_TEX_COLOR))
+                                        .font_semibold()
+                                },
+                            )
+                            .child(name.clone()),
                     )
                     .when(
                         pdf_file || file.path.to_lowercase().ends_with(".md"),
@@ -1875,11 +1936,22 @@ impl Workspace {
                     self.files
                         .iter()
                         .any(|file| file.path == *path && file.kind == FileKind::Asset),
+                    self.project()
+                        .is_some_and(|project| project.main_file == *path),
                 ))
                 .child(
                     div()
                         .min_w_0()
                         .text_ellipsis()
+                        .when(
+                            self.project()
+                                .is_some_and(|project| project.main_file == *path),
+                            |title| {
+                                title
+                                    .text_color(rgb(crate::ui::MAIN_TEX_COLOR))
+                                    .font_semibold()
+                            },
+                        )
                         .child(format!("{title}{}", if dirty { " ·" } else { "" })),
                 )
                 .on_click(cx.listener(move |app, _, window, cx| {
@@ -1901,18 +1973,52 @@ impl Workspace {
                     })),
                 )
         });
-        let mut area = div().flex().flex_col().size_full().bg(rgb(0xffffff)).child(
-            div()
-                .id("tabs")
-                .flex()
-                .flex_shrink_0()
-                .h(px(36.))
-                .overflow_x_scroll()
-                .bg(rgb(0xfafaf9))
-                .border_b_1()
-                .border_color(rgb(BORDER))
-                .children(tabs),
-        );
+        let markdown = self.markdown_panes.get(&self.active).cloned();
+        let outline_pane = markdown.clone();
+        let mut area = div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(rgb(0xffffff))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|app, _, _, _| app.focused_markdown = None),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_shrink_0()
+                    .h(px(36.))
+                    .bg(rgb(0xfafaf9))
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .id("tabs")
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .overflow_x_scroll()
+                            .children(tabs),
+                    )
+                    .when_some(outline_pane, |bar, pane| {
+                        bar.child(
+                            crate::ui::control("markdown-outline", IconName::ListTree).on_click(
+                                move |_, _, cx| pane.update(cx, |pane, cx| pane.toggle_outline(cx)),
+                            ),
+                        )
+                    })
+                    .when_some(markdown, |bar, pane| {
+                        bar.child(
+                            crate::ui::control("markdown-source", IconName::CodeXml).on_click(
+                                move |_, window, cx| {
+                                    pane.update(cx, |pane, cx| pane.toggle_source(window, cx))
+                                },
+                            ),
+                        )
+                    }),
+            );
         if let Some(document) = self.documents.get(&self.active) {
             if document.buffer.deleted {
                 area = area.child(
@@ -2137,6 +2243,20 @@ impl Render for Workspace {
             .filter(|file| file.path.to_lowercase().ends_with(".tex"))
             .map(|file| file.path.clone())
             .collect();
+        let save_status = self
+            .documents
+            .get(self.focused_markdown.as_deref().unwrap_or(&self.active))
+            .map(|document| {
+                if document.buffer.deleted {
+                    "自动保存已暂停：文件已删除"
+                } else if document.buffer.conflict.is_some() {
+                    "自动保存已暂停：文件冲突"
+                } else if document.buffer.is_dirty() {
+                    "等待自动保存…"
+                } else {
+                    "已保存 · 自动保存"
+                }
+            });
         let resize_app = cx.entity();
         let area_width = f32::from(window.viewport_size().width)
             - if self.settings.sidebar_open {
@@ -2193,19 +2313,38 @@ impl Render for Workspace {
         } else {
             "▶  编译"
         };
-        let status = match self.build_status {
-            BuildStatus::Idle => String::new(),
-            BuildStatus::Success => format!(
-                "✓ {:.1}s{}",
-                self.build_duration.as_secs_f32(),
-                if self.source_version != self.build_version {
-                    " · 需重新编译"
+        let status = if self.build_started.is_some() {
+            format!(
+                "{} · {:.1}s",
+                if self
+                    .cancellation
+                    .as_ref()
+                    .expect("running build owns cancellation")
+                    .load(Ordering::Relaxed)
+                {
+                    "正在停止"
                 } else {
-                    ""
+                    "正在编译"
+                },
+                self.build_duration.as_secs_f32()
+            )
+        } else {
+            match self.build_status {
+                BuildStatus::Idle => String::new(),
+                BuildStatus::Success => format!(
+                    "✓ {:.1}s{}",
+                    self.build_duration.as_secs_f32(),
+                    if self.source_version != self.build_version {
+                        " · 需重新编译"
+                    } else {
+                        ""
+                    }
+                ),
+                BuildStatus::Failed => format!("失败 · {:.1}s", self.build_duration.as_secs_f32()),
+                BuildStatus::Cancelled => {
+                    format!("已取消 · {:.1}s", self.build_duration.as_secs_f32())
                 }
-            ),
-            BuildStatus::Failed => "失败".into(),
-            BuildStatus::Cancelled => "已取消".into(),
+            }
         };
         let mut app = div()
             .relative()
@@ -2313,14 +2452,28 @@ impl Render for Workspace {
                                     .text_ellipsis()
                                     .rounded(px(10.))
                                     .px_2()
-                                    .bg(rgb(0xebeae6))
+                                    .bg(rgb(0xe8eff5))
+                                    .text_color(rgb(crate::ui::MAIN_TEX_COLOR))
                                     .child(main_label.clone()),
                             )
                             .window_control_area(WindowControlArea::Drag),
                     )
-                    .child(button("compile", label).text_color(rgb(0x4b7b59)).on_click(
-                        cx.listener(|app, _, window, cx| app.compile(&Compile, window, cx)),
-                    ))
+                    .child(
+                        button("compile", label)
+                            .text_color(rgb(0x4b7b59))
+                            .tooltip({
+                                let target = self.compile_target().unwrap_or("主文件").to_owned();
+                                move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(format!(
+                                        "编译 {target} · Ctrl+Enter"
+                                    ))
+                                    .build(window, cx)
+                                }
+                            })
+                            .on_click(
+                                cx.listener(|app, _, window, cx| app.compile(&Compile, window, cx)),
+                            ),
+                    )
                     .child(
                         Button::new("compile-settings")
                             .icon(crate::ui::icon(IconName::SlidersHorizontal))
@@ -2378,7 +2531,31 @@ impl Render for Workspace {
                                 )
                             }),
                     )
-                    .child(div().text_xs().text_color(rgb(MUTED)).child(status))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_shrink_0()
+                            .gap_1()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .when(self.build_started.is_some(), |status| {
+                                status
+                                    .w(px(140.))
+                                    .text_color(rgb(crate::ui::MAIN_TEX_COLOR))
+                            })
+                            .child(status)
+                            .when(self.build_started.is_some(), |status| {
+                                // latexmk has no reliable percentage; show activity without inventing one.
+                                status.child(
+                                    Progress::new("build-progress")
+                                        .loading(true)
+                                        .accessibility_label("正在编译")
+                                        .color(rgb(crate::ui::MAIN_TEX_COLOR))
+                                        .h(px(3.)),
+                                )
+                            }),
+                    )
                     .child(
                         button("logs", "终端").on_click(cx.listener(|app, _, _, cx| {
                             app.show_logs = !app.show_logs;
@@ -2508,6 +2685,7 @@ impl Render for Workspace {
                             .map(|project| project.folder.clone())
                             .unwrap_or_else(|| "Folio · 原生工作台".into()),
                     )
+                    .children(save_status)
                     .child("Ctrl+S 保存  ·  Ctrl+F 查找  ·  Ctrl+Enter 编译"),
             );
         if let Some(action) = &self.name_action {

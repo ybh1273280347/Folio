@@ -48,6 +48,7 @@ struct RenderPage {
 
 pub struct PdfPane {
     path: PathBuf,
+    title: SharedString,
     pages: Vec<PageInfo>,
     images: BTreeMap<usize, PageImage>,
     text_pages: BTreeMap<usize, Vec<String>>,
@@ -74,6 +75,10 @@ pub struct PdfPane {
 }
 
 impl PdfPane {
+    pub fn set_title(&mut self, title: impl Into<SharedString>) {
+        self.title = title.into();
+    }
+
     pub fn new(path: PathBuf, cx: &mut Context<Self>) -> Self {
         let (requests, receiver) = mpsc::channel::<RenderPage>();
         let (sender, events) = mpsc::channel();
@@ -258,6 +263,12 @@ impl PdfPane {
             }
         });
         Self {
+            title: path
+                .file_name()
+                .expect("PDF has a filename")
+                .to_string_lossy()
+                .into_owned()
+                .into(),
             path,
             pages: Vec::new(),
             images: BTreeMap::new(),
@@ -645,7 +656,13 @@ impl Render for PdfPane {
                             .flex()
                             .items_center()
                             .gap_1()
-                            .child("预览")
+                            .child(
+                                div()
+                                    .max_w(px(160.))
+                                    .min_w_0()
+                                    .text_ellipsis()
+                                    .child(self.title.clone()),
+                            )
                             .child(
                                 Input::new(
                                     self.page_input.as_ref().expect("page input initialized"),

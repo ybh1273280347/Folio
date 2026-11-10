@@ -28,6 +28,8 @@ fn main() {
             KeyBinding::new("ctrl-shift-s", workspace::SaveAll, None),
             KeyBinding::new("ctrl-c", gpui_kit::component::input::Copy, Some("FolioPdf")),
             KeyBinding::new("ctrl-e", markdown::ToggleSource, None),
+            KeyBinding::new("ctrl-b", markdown::Bold, Some("FolioMarkdown")),
+            KeyBinding::new("ctrl-i", markdown::Italic, Some("FolioMarkdown")),
             KeyBinding::new("escape", workspace::Dismiss, None),
         ]);
         gpui_kit::open_window(

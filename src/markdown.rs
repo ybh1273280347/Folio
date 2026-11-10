@@ -20,7 +20,20 @@ pub enum MarkdownEvent {
     Focus,
     Zoom(u8),
 }
-actions!(folio_markdown, [ToggleSource]);
+actions!(
+    folio_markdown,
+    [
+        ToggleSource,
+        Bold,
+        Italic,
+        Heading,
+        BulletList,
+        TaskList,
+        InlineMath,
+        InsertImage,
+        InsertTable
+    ]
+);
 
 /// Normalize math delimiters for the renderer without changing byte offsets used
 /// by task markers and block ranges. Code spans and fenced code stay literal.
@@ -80,6 +93,8 @@ pub struct MarkdownPane {
     rich: Option<RichText>,
     decorations: Option<TextDecorationCollection>,
     outline: bool,
+    reading: bool,
+    focus: FocusHandle,
     scroll: ScrollHandle,
     settings: AppSettings,
     math: Entity<MathRenderer>,
@@ -93,6 +108,7 @@ impl MarkdownPane {
         path: PathBuf,
         settings: AppSettings,
         math: Entity<MathRenderer>,
+        reading: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -156,6 +172,17 @@ impl MarkdownPane {
                     cx.notify();
                 }
                 InputEvent::Focus => cx.emit(MarkdownEvent::Focus),
+                InputEvent::Blur if !pane.source => {
+                    // Changes already reach the shared document on every keystroke.
+                    // Losing focus only restores rendered layout, never confirms a draft.
+                    pane.editing = None;
+                    pane.editing_range = None;
+                    pane.editing_cell = None;
+                    pane.rich = None;
+                    pane.parse();
+                    pane.prepare_math(cx);
+                    cx.notify();
+                }
                 _ => {}
             },
         );
@@ -171,6 +198,8 @@ impl MarkdownPane {
             rich: None,
             decorations: None,
             outline: false,
+            reading,
+            focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
             settings,
             math,
@@ -317,7 +346,22 @@ impl MarkdownPane {
         cx.emit(MarkdownEvent::Focus);
         cx.notify();
     }
-    fn toggle_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.source || self.editing.is_some() {
+            self.editor
+                .update(cx, |editor, cx| editor.focus(window, cx));
+        } else {
+            self.focus.focus(window, cx);
+        }
+        cx.emit(MarkdownEvent::Focus);
+    }
+
+    pub fn toggle_outline(&mut self, cx: &mut Context<Self>) {
+        self.outline = !self.outline;
+        cx.notify();
+    }
+
+    pub fn toggle_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.source = !self.source;
         self.editing = None;
         self.parse();
@@ -332,6 +376,8 @@ impl MarkdownPane {
                 editor.set_highlighter("markdown", cx);
                 editor.focus(window, cx);
             });
+        } else {
+            self.focus.focus(window, cx);
         }
         cx.notify();
     }
@@ -395,6 +441,36 @@ impl MarkdownPane {
         self.prepare_math(cx);
         cx.emit(MarkdownEvent::Change(self.text.clone()));
         cx.notify();
+    }
+
+    fn visual_editor(&self) -> Editor {
+        use gpui_kit::component::input::{Copy, Cut, Paste, Redo, Undo};
+        Editor::new(&self.editor)
+            .appearance(false)
+            .bordered(false)
+            .font_family(if self.settings.interface_font.is_empty() {
+                SharedString::from("Segoe UI")
+            } else {
+                self.settings.interface_font.clone().into()
+            })
+            .text_size(px(self.settings.markdown_font_size as f32))
+            .context_menu(|menu, _, _| {
+                menu.menu("撤销", Box::new(Undo))
+                    .menu("重做", Box::new(Redo))
+                    .separator()
+                    .menu("剪切", Box::new(Cut))
+                    .menu("复制", Box::new(Copy))
+                    .menu("粘贴", Box::new(Paste))
+                    .separator()
+                    .menu("加粗", Box::new(Bold))
+                    .menu("斜体", Box::new(Italic))
+                    .menu("标题", Box::new(Heading))
+                    .menu("无序列表", Box::new(BulletList))
+                    .menu("任务列表", Box::new(TaskList))
+                    .menu("公式", Box::new(InlineMath))
+                    .menu("插入图片…", Box::new(InsertImage))
+                    .menu("插入表格", Box::new(InsertTable))
+            })
     }
     fn task(
         &mut self,
@@ -481,7 +557,7 @@ fn action(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<
 }
 impl Render for MarkdownPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut toolbar = div()
+        let toolbar = div()
             .flex()
             .items_center()
             .justify_between()
@@ -494,67 +570,48 @@ impl Render for MarkdownPane {
             .child(
                 div()
                     .flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_1()
+                    .min_w_0()
+                    .child(crate::ui::icon(gpui_kit::assets::IconName::FileText))
+                    .child(
+                        div().min_w_0().text_ellipsis().child(
+                            self.path
+                                .file_name()
+                                .expect("Markdown has filename")
+                                .to_string_lossy()
+                                .into_owned(),
+                        ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
                     .gap_1()
+                    .child(
+                        action(
+                            "md-font-size",
+                            format!("{}px", self.settings.markdown_font_size),
+                        )
+                        .on_click(cx.listener(|pane, _, _, cx| {
+                            pane.settings.markdown_font_size = 14;
+                            cx.emit(MarkdownEvent::Zoom(14));
+                            cx.notify();
+                        })),
+                    )
                     .child(
                         action("md-outline", "☷").on_click(cx.listener(|pane, _, _, cx| {
                             pane.outline = !pane.outline;
                             cx.notify();
                         })),
                     )
-                    .child(action("md-bold", "B").font_bold().on_click(
-                        cx.listener(|pane, _, window, cx| pane.format("**", "**", window, cx)),
-                    ))
-                    .child(action("md-italic", "I").on_click(
-                        cx.listener(|pane, _, window, cx| pane.format("*", "*", window, cx)),
-                    ))
-                    .child(action("md-heading", "H").on_click(
-                        cx.listener(|pane, _, window, cx| pane.format("## ", "", window, cx)),
-                    ))
-                    .child(action("md-list", "•").on_click(
-                        cx.listener(|pane, _, window, cx| pane.format("- ", "", window, cx)),
-                    ))
-                    .child(action("md-task", "☑").on_click(
-                        cx.listener(|pane, _, window, cx| pane.format("- [ ] ", "", window, cx)),
-                    ))
-                    .child(action("md-math", "∑").on_click(
-                        cx.listener(|pane, _, window, cx| pane.format("$", "$", window, cx)),
-                    ))
-                    .child(
-                        action("md-image", "▧").on_click(
-                            cx.listener(|pane, _, window, cx| pane.insert_image(window, cx)),
-                        ),
-                    )
-                    .child(
-                        action("md-table", "▦").on_click(cx.listener(|pane, _, window, cx| {
-                            pane.format(
-                                "\n| 标题 | 内容 |\n| --- | --- |\n|  |  |\n",
-                                "",
-                                window,
-                                cx,
-                            )
-                        })),
-                    ),
-            )
-            .child(
-                action(
-                    "md-source",
-                    if self.source {
-                        "所见即所得"
-                    } else {
-                        "源码"
-                    },
-                )
-                .on_click(cx.listener(|pane, _, window, cx| pane.toggle_source(window, cx))),
+                    .child(action("md-source", "源码").on_click(
+                        cx.listener(|pane, _, window, cx| pane.toggle_source(window, cx)),
+                    )),
             );
-        if self.editing.is_some() && !self.source {
-            toolbar = toolbar.child(action("md-finish-edit", "✓").on_click(cx.listener(
-                |pane, _, _, cx| {
-                    pane.editing = None;
-                    pane.parse();
-                    cx.notify();
-                },
-            )));
-        }
         let mut content = div().flex().flex_1().min_h_0();
         if self.outline {
             let headings = self.blocks.iter().enumerate().filter_map(|(index, block)| {
@@ -642,15 +699,7 @@ impl Render for MarkdownPane {
                                 if self.editing == Some(index)
                                     && self.editing_cell == Some((row_index, column))
                                 {
-                                    cell = cell.child(
-                                        Editor::new(&self.editor)
-                                            .appearance(false)
-                                            .bordered(false)
-                                            .h(px(60.))
-                                            .w_full()
-                                            .font_family("Segoe UI")
-                                            .text_size(px(self.settings.markdown_font_size as f32)),
-                                    );
+                                    cell = cell.child(self.visual_editor().h(px(38.)).w_full());
                                 } else {
                                     cell = cell
                                         .cursor_text()
@@ -691,20 +740,28 @@ impl Render for MarkdownPane {
                         )))
                         .into_any_element()
                 } else if self.editing == Some(index) {
+                    let font_size = self.settings.markdown_font_size as f32
+                        * block.heading.as_ref().map_or(1., |(level, _)| match level {
+                            1 => 2.,
+                            2 => 1.6,
+                            3 => 1.35,
+                            _ => 1.15,
+                        });
                     div()
-                        .min_h(px(80.))
-                        .h(px((text.lines().count().max(3) as f32 * 24.).min(640.)))
+                        .min_h(px(24.))
+                        .h(px((self.editor.read(cx).value().lines().count().max(1)
+                            as f32
+                            * font_size
+                            * 1.6
+                            + 8.)
+                            .min(640.)))
                         .child(
-                            Editor::new(&self.editor)
-                                .appearance(false)
-                                .bordered(false)
+                            self.visual_editor()
                                 .size_full()
-                                .font_family(if self.settings.interface_font.is_empty() {
-                                    SharedString::from("Segoe UI")
-                                } else {
-                                    self.settings.interface_font.clone().into()
-                                })
-                                .text_size(px(self.settings.markdown_font_size as f32)),
+                                .text_size(px(font_size))
+                                .when(block.heading.is_some(), |editor| {
+                                    editor.font_weight(FontWeight::BOLD)
+                                }),
                         )
                         .into_any_element()
                 } else {
@@ -749,38 +806,78 @@ impl Render for MarkdownPane {
                     .text_size(px(self.settings.markdown_font_size as f32))
                     .p_6()
                     .children(blocks)
-                    .child(action("md-add-paragraph", "+").on_click(cx.listener(
-                        |pane, _, window, cx| {
-                            pane.text.push_str("\n\n");
-                            let end = pane.text.len();
-                            pane.blocks.push(Block {
-                                range: end..end,
-                                heading: None,
-                                table: Vec::new(),
-                            });
-                            pane.editing = Some(pane.blocks.len() - 1);
-                            pane.editing_range = Some(end..end);
-                            pane.editing_cell = None;
-                            pane.rich = Some(RichText::new(""));
-                            pane.editor.update(cx, |state, cx| {
-                                state.set_value("", window, cx);
-                                state.focus(window, cx);
-                            });
-                            cx.notify();
-                        },
-                    ))),
+                    .child(
+                        div()
+                            .id("md-add-paragraph")
+                            .w_full()
+                            .min_h(px(80.))
+                            .cursor_text()
+                            .on_click(cx.listener(|pane, _, window, cx| {
+                                pane.text.push_str("\n\n");
+                                let end = pane.text.len();
+                                pane.blocks.push(Block {
+                                    range: end..end,
+                                    heading: None,
+                                    table: Vec::new(),
+                                });
+                                pane.editing = Some(pane.blocks.len() - 1);
+                                pane.editing_range = Some(end..end);
+                                pane.editing_cell = None;
+                                pane.rich = Some(RichText::new(""));
+                                pane.editor.update(cx, |state, cx| {
+                                    state.set_value("", window, cx);
+                                    state.focus(window, cx);
+                                });
+                                cx.notify();
+                            })),
+                    ),
             );
         }
         div()
             .size_full()
+            .track_focus(&self.focus)
+            .when(!self.source, |pane| pane.key_context("FolioMarkdown"))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.emit(MarkdownEvent::Focus)),
+            )
             .flex()
             .flex_col()
             .bg(rgb(0xffffff))
-            .child(toolbar)
+            .when(self.reading, |pane| pane.child(toolbar))
             .child(content)
             .on_action(
                 cx.listener(|pane, _: &ToggleSource, window, cx| pane.toggle_source(window, cx)),
             )
+            .on_action(
+                cx.listener(|pane, _: &Bold, window, cx| pane.format("**", "**", window, cx)),
+            )
+            .on_action(
+                cx.listener(|pane, _: &Italic, window, cx| pane.format("*", "*", window, cx)),
+            )
+            .on_action(
+                cx.listener(|pane, _: &Heading, window, cx| pane.format("## ", "", window, cx)),
+            )
+            .on_action(
+                cx.listener(|pane, _: &BulletList, window, cx| pane.format("- ", "", window, cx)),
+            )
+            .on_action(
+                cx.listener(|pane, _: &TaskList, window, cx| pane.format("- [ ] ", "", window, cx)),
+            )
+            .on_action(
+                cx.listener(|pane, _: &InlineMath, window, cx| pane.format("$", "$", window, cx)),
+            )
+            .on_action(
+                cx.listener(|pane, _: &InsertImage, window, cx| pane.insert_image(window, cx)),
+            )
+            .on_action(cx.listener(|pane, _: &InsertTable, window, cx| {
+                pane.format(
+                    "\n| 标题 | 内容 |\n| --- | --- |\n|  |  |\n",
+                    "",
+                    window,
+                    cx,
+                )
+            }))
             .on_scroll(cx.listener(|pane, event: &ScrollEvent, _, cx| {
                 if event.modifiers.control {
                     let delta = if event.delta.pixel_delta(px(20.)).y > px(0.) {

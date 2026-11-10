@@ -65,7 +65,14 @@ impl RichText {
                     r = r.start + delimiter..r.end.saturating_sub(delimiter);
                     visible[r].fill(true);
                 }
-                NodeValue::CodeBlock(_) | NodeValue::HtmlBlock(_) => visible[r].fill(true),
+                NodeValue::CodeBlock(code) => {
+                    // Editing keeps the code content visible, not the fenced Markdown wrapper.
+                    let literal = code.literal.trim_end_matches('\n');
+                    if let Some(offset) = source[r.clone()].find(literal) {
+                        visible[r.start + offset..r.start + offset + literal.len()].fill(true);
+                    }
+                }
+                NodeValue::HtmlBlock(_) => visible[r].fill(true),
                 NodeValue::Strong => styles.push((
                     r,
                     HighlightStyle {
