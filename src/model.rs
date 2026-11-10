@@ -117,6 +117,32 @@ pub enum BuildStatus {
     Cancelled,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum MathFont {
+    #[default]
+    StixTwo,
+    LatinModern,
+    TexGyrePagella,
+}
+impl MathFont {
+    pub const ALL: [Self; 3] = [Self::StixTwo, Self::LatinModern, Self::TexGyrePagella];
+    pub fn family(self) -> &'static str {
+        match self {
+            Self::StixTwo => "STIX Two Math",
+            Self::LatinModern => "Latin Modern Math",
+            Self::TexGyrePagella => "TeX Gyre Pagella Math",
+        }
+    }
+    pub fn filename(self) -> &'static str {
+        match self {
+            Self::StixTwo => "STIXTwoMath-Regular.otf",
+            Self::LatinModern => "latinmodern-math.otf",
+            Self::TexGyrePagella => "texgyrepagella-math.otf",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
@@ -125,9 +151,14 @@ pub struct AppSettings {
     pub interface_font_size: u8,
     pub editor_font_size: u8,
     pub markdown_font_size: u8,
+    pub math_scale: f32,
+    pub inline_math_scale: f32,
+    pub math_font: MathFont,
     pub line_width_limited: bool,
     pub editor_ratio: f32,
     pub sidebar_open: bool,
+    pub sidebar_width: f32,
+    pub log_height: f32,
 }
 
 impl Default for AppSettings {
@@ -138,9 +169,14 @@ impl Default for AppSettings {
             interface_font_size: 14,
             editor_font_size: 14,
             markdown_font_size: 14,
+            math_scale: 1.7,
+            inline_math_scale: 1.,
+            math_font: MathFont::StixTwo,
             line_width_limited: true,
             editor_ratio: 0.5,
             sidebar_open: true,
+            sidebar_width: 232.,
+            log_height: 220.,
         }
     }
 }

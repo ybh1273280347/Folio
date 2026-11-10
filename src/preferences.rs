@@ -1,5 +1,8 @@
 //! Appearance preferences are persisted independently of project files and PDF typesetting.
-use crate::{model::AppSettings, storage};
+use crate::{
+    model::{AppSettings, MathFont},
+    storage,
+};
 use gpui_kit::{
     base::StyledExt,
     component::{
@@ -14,7 +17,10 @@ pub struct Preferences {
     settings: AppSettings,
     interface_font: Entity<SelectState<SearchableVec<String>>>,
     editor_font: Entity<SelectState<SearchableVec<String>>>,
+    math_font: Entity<SelectState<SearchableVec<String>>>,
     sizes: [Entity<SliderState>; 3],
+    math_scale: Entity<SliderState>,
+    inline_math_scale: Entity<SliderState>,
     error: Option<String>,
 }
 impl EventEmitter<SettingsChanged> for Preferences {}
@@ -35,7 +41,10 @@ impl Preferences {
             cx.new(|_| {
                 SliderState::new()
                     .min(11.)
-                    .max(if index == 0 { 20. } else { 26. })
+                    .max(match index {
+                        0 => 20.,
+                        _ => 26.,
+                    })
                     .step(1.)
                     .default_value(
                         [
@@ -61,6 +70,63 @@ impl Preferences {
             })
             .detach();
         }
+        let math_scale = cx.new(|_| {
+            SliderState::new()
+                .min(0.5)
+                .max(3.)
+                .step(0.1)
+                .default_value(settings.math_scale)
+        });
+        cx.subscribe(&math_scale, |panel, _, event: &SliderEvent, cx| {
+            if let SliderEvent::Change(value) = event {
+                panel.settings.math_scale = (value.end() * 10.).round() / 10.;
+                panel.changed(cx);
+            }
+        })
+        .detach();
+        let math_font = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(
+                    MathFont::ALL
+                        .iter()
+                        .map(|font| font.family().to_owned())
+                        .collect::<Vec<_>>(),
+                ),
+                None,
+                window,
+                cx,
+            )
+        });
+        math_font.update(cx, |state, cx| {
+            state.set_selected_value(&settings.math_font.family().to_owned(), window, cx)
+        });
+        cx.subscribe(
+            &math_font,
+            |panel, _, event: &SelectEvent<SearchableVec<String>>, cx| {
+                if let SelectEvent::Confirm(Some(family)) = event {
+                    panel.settings.math_font = MathFont::ALL
+                        .into_iter()
+                        .find(|font| font.family() == family)
+                        .expect("listed math font");
+                    panel.changed(cx);
+                }
+            },
+        )
+        .detach();
+        let inline_math_scale = cx.new(|_| {
+            SliderState::new()
+                .min(0.5)
+                .max(3.)
+                .step(0.1)
+                .default_value(settings.inline_math_scale)
+        });
+        cx.subscribe(&inline_math_scale, |panel, _, event: &SliderEvent, cx| {
+            if let SliderEvent::Change(value) = event {
+                panel.settings.inline_math_scale = (value.end() * 10.).round() / 10.;
+                panel.changed(cx);
+            }
+        })
+        .detach();
         for (state, selected) in [
             (&interface_font, &settings.interface_font),
             (&editor_font, &settings.editor_font),
@@ -111,6 +177,9 @@ impl Preferences {
             settings,
             interface_font,
             editor_font,
+            math_font,
+            math_scale,
+            inline_math_scale,
             sizes,
             error: None,
         }
@@ -124,6 +193,15 @@ impl Preferences {
         ]) {
             slider.update(cx, |state, cx| state.set_value(size as f32, window, cx));
         }
+        self.math_scale.update(cx, |state, cx| {
+            state.set_value(settings.math_scale, window, cx)
+        });
+        self.inline_math_scale.update(cx, |state, cx| {
+            state.set_value(settings.inline_math_scale, window, cx)
+        });
+        self.math_font.update(cx, |state, cx| {
+            state.set_selected_value(&settings.math_font.family().to_owned(), window, cx)
+        });
     }
     fn changed(&mut self, cx: &mut Context<Self>) {
         self.error = storage::save_settings(&self.settings)
@@ -182,6 +260,13 @@ impl Render for Preferences {
             .child(self.size_row("ui-size", "界面字号", self.settings.interface_font_size, cx))
             .child(self.size_row("editor-size", "编辑器字号", self.settings.editor_font_size, cx))
             .child(self.size_row("markdown-size", "Markdown 字号", self.settings.markdown_font_size, cx))
+            .child(div().flex().flex_col().gap_2().child("数学字体").child(Select::new(&self.math_font)))
+            .child(div().flex().flex_col().gap_2()
+                .child(div().flex().justify_between().child("块级公式 / 正文字号").child(format!("{:.1}×", self.settings.math_scale)))
+                .child(Slider::new(&self.math_scale)))
+            .child(div().flex().flex_col().gap_2()
+                .child(div().flex().justify_between().child("行内公式 / 正文字号").child(format!("{:.1}×", self.settings.inline_math_scale)))
+                .child(Slider::new(&self.inline_math_scale)))
             .child(div().flex().items_center().justify_between().child("编辑器限制行宽")
                 .child(control("limit-width", if self.settings.line_width_limited { "已开启" } else { "已关闭" }).on_click(cx.listener(|panel, _, _, cx| {
                     panel.settings.line_width_limited = !panel.settings.line_width_limited; panel.changed(cx);
@@ -194,7 +279,8 @@ impl Render for Preferences {
             .child(div().text_xs().text_color(rgb(0x787774)).child("Ctrl+O 打开项目    Ctrl+S 保存    Ctrl+Enter 编译\nCtrl+P 查找文件    Ctrl+滚轮 缩放"))
             .child(control("reset-settings", "恢复默认").on_click(cx.listener(|panel, _, window, cx| {
                 panel.settings = AppSettings::default();
-                for slider in &panel.sizes { slider.update(cx, |state, cx| state.set_value(14., window, cx)); }
+                let settings = panel.settings.clone();
+                panel.sync(&settings, window, cx);
                 panel.interface_font.update(cx, |state, cx| state.set_selected_value(&"系统默认".into(), window, cx));
                 panel.editor_font.update(cx, |state, cx| state.set_selected_value(&"系统默认".into(), window, cx));
                 panel.changed(cx);

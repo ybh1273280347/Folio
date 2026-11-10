@@ -1,6 +1,7 @@
 //! Shared Lucide controls use the same restrained icon treatment as Folio's web UI.
 use gpui_kit::{
     assets::{IconName, icon_assets},
+    base::StyledExt,
     component::Icon,
     *,
 };
@@ -29,7 +30,8 @@ icon_assets!(
         List,
         ListTodo,
         Sigma,
-        Table2
+        Table2,
+        Ellipsis
     ]
 );
 
@@ -70,6 +72,51 @@ pub fn control(id: impl Into<ElementId>, name: IconName) -> Stateful<Div> {
         .text_color(rgb(0x7d838b))
         .hover(|s| s.bg(rgb(0xe9ebed)).text_color(rgb(0x343a40)))
         .child(icon(name))
+}
+
+pub fn modal_overlay(
+    title: impl IntoElement,
+    description: impl IntoElement,
+    actions: impl IntoElement,
+) -> Div {
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgba(0x00000030))
+        .child(
+            div()
+                .w(px(420.))
+                .p_6()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(rgb(0xe8e7e3))
+                .bg(rgb(0xffffff))
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(div().font_semibold().child(title))
+                .child(div().text_color(rgb(0x787774)).child(description))
+                .child(actions),
+        )
+}
+
+pub fn button(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .min_h(px(27.))
+        .px_2()
+        .py_1()
+        .rounded(px(4.))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(0xefefed)))
+        .child(label(text.into()))
 }
 
 pub const MAIN_TEX_COLOR: u32 = 0x5c7f9f;

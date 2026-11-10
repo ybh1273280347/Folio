@@ -16,11 +16,12 @@ use gpui_kit::{
     assets::IconName,
     base::StyledExt,
     component::{
-        button::Button,
+        button::{Button, ButtonVariants},
         input::{Editor, EditorState, Input, InputEvent, InputState},
         menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
         progress::Progress,
-        resizable::{h_resizable, resizable_panel},
+        resizable::{h_resizable, resizable_panel, v_resizable},
+        text::TextView,
     },
     prelude::FluentBuilder,
     *,
@@ -80,6 +81,18 @@ enum Dialog {
     DeleteFolder,
     RemoveProject,
 }
+#[derive(Clone)]
+enum DialogButtons {
+    SaveDiscardCancel,
+    Confirm(String),
+}
+#[derive(Clone)]
+struct DialogPrompt {
+    kind: Dialog,
+    title: String,
+    description: String,
+    buttons: DialogButtons,
+}
 
 pub struct Workspace {
     config: ProjectConfig,
@@ -91,6 +104,8 @@ pub struct Workspace {
     search_input: Entity<InputState>,
     reading_panes: Vec<String>,
     markdown_panes: BTreeMap<String, Entity<MarkdownPane>>,
+    // Retain the capture pane until publication, even when its tab closes.
+    markdown_export: Option<Entity<MarkdownPane>>,
     focused_markdown: Option<String>,
     markdown_changed: BTreeSet<String>,
     collapsed_folders: BTreeSet<String>,
@@ -123,18 +138,42 @@ pub struct Workspace {
     build_version: u64,
     close_requested: bool,
     dialog_response: Option<(Dialog, rfd::MessageDialogResult)>,
+    dialog_prompt: Option<DialogPrompt>,
+    dialog_retry: Option<Box<dyn FnOnce(&mut Self, &mut Window, &mut Context<Self>)>>,
     dialog_open: bool,
     _tick: Task<()>,
 }
 
 impl Workspace {
+    fn release_pdf_pane(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pane) = self.pdf_panes.remove(key) {
+            pane.update(cx, |pane, cx| pane.release(window, cx));
+        }
+    }
+
+    fn release_all_pdf_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for (_, pane) in std::mem::take(&mut self.pdf_panes) {
+            pane.update(cx, |pane, cx| pane.release(window, cx));
+        }
+    }
+
+    fn release_build_pdf(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pane) = self.build_pdf.take() {
+            pane.update(cx, |pane, cx| pane.release(window, cx));
+        }
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let config = storage::load_projects().expect("无法读取项目列表");
         let settings = storage::load_settings().expect("无法读取界面设置");
         let math = cx.new(MathRenderer::new);
+        math.update(cx, |renderer, cx| renderer.set_appearance(&settings, cx));
         let preferences = cx.new(|cx| Preferences::new(settings.clone(), window, cx));
         cx.subscribe(&preferences, |app, _, event: &SettingsChanged, cx| {
             app.settings = event.0.clone();
+            app.math.update(cx, |renderer, cx| {
+                renderer.set_appearance(&app.settings, cx)
+            });
             app.markdown_changed.extend(app.documents.keys().cloned());
             cx.notify();
         })
@@ -182,6 +221,7 @@ impl Workspace {
             search_input,
             reading_panes: Vec::new(),
             markdown_panes: BTreeMap::new(),
+            markdown_export: None,
             focused_markdown: None,
             markdown_changed: BTreeSet::new(),
             collapsed_folders: BTreeSet::new(),
@@ -214,6 +254,8 @@ impl Workspace {
             build_version: 0,
             close_requested: false,
             dialog_response: None,
+            dialog_prompt: None,
+            dialog_retry: None,
             dialog_open: false,
             _tick: tick,
         };
@@ -238,6 +280,35 @@ impl Workspace {
     fn report(&mut self, error: impl std::fmt::Display, cx: &mut Context<Self>) {
         self.notice = Some(error.to_string());
         cx.notify();
+    }
+    fn export_pdf(&mut self, source: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let dialog = rfd::AsyncFileDialog::new()
+            .set_parent(window)
+            .set_title("导出 PDF")
+            .set_file_name(
+                source
+                    .file_name()
+                    .expect("PDF has filename")
+                    .to_string_lossy(),
+            )
+            .add_filter("PDF", &["pdf"]);
+        self.dialog_open = true;
+        let app_entity = cx.entity();
+        window
+            .spawn(cx, async move |cx| {
+                let result = if let Some(destination) = dialog.save_file().await {
+                    std::fs::copy(&source, destination.path()).map(|_| ())
+                } else {
+                    Ok(())
+                };
+                let _ = app_entity.update(cx, |app, cx| {
+                    app.dialog_open = false;
+                    if let Err(error) = result {
+                        app.report(error, cx);
+                    }
+                });
+            })
+            .detach();
     }
     fn select_project(
         &mut self,
@@ -270,8 +341,8 @@ impl Workspace {
         self.build_status = BuildStatus::Idle;
         self.notice = None;
         self.preview = None;
-        self.build_pdf = None;
-        self.pdf_panes.clear();
+        self.release_build_pdf(window, cx);
+        self.release_all_pdf_panes(window, cx);
         self.reading_panes.clear();
         self.markdown_panes.clear();
         self.focused_markdown = None;
@@ -282,7 +353,7 @@ impl Workspace {
             .join(&project.id)
             .join("preview.pdf");
         if previous_pdf.exists() {
-            self.build_pdf = Some(cx.new(|cx| PdfPane::new(previous_pdf.clone(), cx)));
+            self.build_pdf = Some(cx.new(|cx| PdfPane::new(previous_pdf.clone(), window, cx)));
             self.preview = Some(previous_pdf);
         }
         let first = self
@@ -294,6 +365,14 @@ impl Workspace {
         if let Some(first) = first {
             self.open_file(&first, window, cx)?;
         }
+        self.queue_math_preload(
+            self.files
+                .iter()
+                .filter(|file| file.path.to_lowercase().ends_with(".md"))
+                .map(|file| Path::new(&project.folder).join(&file.path))
+                .collect(),
+            cx,
+        );
         storage::save_projects(&self.config)?;
         cx.notify();
         Ok(())
@@ -379,8 +458,10 @@ impl Workspace {
                 Path::new(&self.project().expect("file has project").folder),
                 &file.path,
             )?;
-            self.pdf_panes
-                .insert(file.path.clone(), cx.new(|cx| PdfPane::new(path, cx)));
+            self.pdf_panes.insert(
+                file.path.clone(),
+                cx.new(|cx| PdfPane::new(path, window, cx)),
+            );
         }
         if file.kind == FileKind::Text && !self.documents.contains_key(&file.path) {
             let disk = files::read_document(
@@ -566,13 +647,15 @@ impl Workspace {
         }
         true
     }
-    /// Native dialogs run outside GPUI's App borrow. Retry the same action once
-    /// with its response, so existing save/conflict paths retain their semantics.
+    /// Store the retry action while the in-window prompt is open; selecting a
+    /// button re-enters the same operation with its original response.
     fn ask(
         &mut self,
         kind: Dialog,
-        dialog: rfd::AsyncMessageDialog,
-        window: &mut Window,
+        title: String,
+        description: String,
+        buttons: DialogButtons,
+        _window: &mut Window,
         cx: &mut Context<Self>,
         retry: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> Option<rfd::MessageDialogResult> {
@@ -589,16 +672,32 @@ impl Workspace {
             );
         }
         self.dialog_open = true;
-        cx.spawn_in(window, async move |this, cx| {
-            let response = dialog.show().await;
-            let _ = this.update_in(cx, |app, window, cx| {
-                app.dialog_open = false;
-                app.dialog_response = Some((kind, response));
-                retry(app, window, cx);
-            });
-        })
-        .detach();
+        self.dialog_prompt = Some(DialogPrompt {
+            kind,
+            title,
+            description,
+            buttons,
+        });
+        self.dialog_retry = Some(Box::new(retry));
+        cx.notify();
         None
+    }
+
+    fn answer_dialog(
+        &mut self,
+        result: rfd::MessageDialogResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prompt = self.dialog_prompt.take().expect("visible prompt exists");
+        self.dialog_open = false;
+        self.dialog_response = Some((prompt.kind, result));
+        let retry = self
+            .dialog_retry
+            .take()
+            .expect("visible prompt has retry action");
+        retry(self, window, cx);
+        cx.notify();
     }
     fn confirm_drafts(
         &mut self,
@@ -617,12 +716,15 @@ impl Workspace {
         {
             return true;
         }
-        let dialog = rfd::AsyncMessageDialog::new()
-            .set_parent(window)
-            .set_title("处理未保存的修改")
-            .set_description("选择“是”保存全部修改；选择“否”放弃修改；选择“取消”继续编辑。")
-            .set_buttons(rfd::MessageButtons::YesNoCancel);
-        match self.ask(Dialog::Drafts, dialog, window, cx, retry) {
+        match self.ask(
+            Dialog::Drafts,
+            "处理未保存的修改".into(),
+            "保存全部修改、放弃修改，或返回继续编辑。".into(),
+            DialogButtons::SaveDiscardCancel,
+            window,
+            cx,
+            retry,
+        ) {
             Some(rfd::MessageDialogResult::Yes) => self.save_all(cx),
             Some(rfd::MessageDialogResult::No) => true,
             _ => false,
@@ -658,14 +760,11 @@ impl Workspace {
                     .is_some_and(|(kind, _)| *kind == Dialog::CloseTab))
         {
             let retry_path = path.to_owned();
-            let dialog = rfd::AsyncMessageDialog::new()
-                .set_parent(window)
-                .set_title(format!("关闭 {path} 前保存？"))
-                .set_description("“是”保存；“否”放弃；“取消”继续编辑。")
-                .set_buttons(rfd::MessageButtons::YesNoCancel);
             match self.ask(
                 Dialog::CloseTab,
-                dialog,
+                format!("关闭 {path} 前保存修改？"),
+                "保存文件、放弃修改，或返回继续编辑。".into(),
+                DialogButtons::SaveDiscardCancel,
                 window,
                 cx,
                 move |app, window, cx| {
@@ -689,7 +788,7 @@ impl Workspace {
             }
         }
         self.tabs.retain(|tab| tab != path);
-        self.pdf_panes.remove(path);
+        self.release_pdf_pane(path, window, cx);
         self.markdown_panes.remove(path);
         if !self.reading_panes.iter().any(|pane| pane == path) {
             self.documents.remove(path);
@@ -727,12 +826,41 @@ impl Workspace {
             Err(error) => self.report(error, cx),
         }
     }
+    fn queue_math_preload(&self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if paths.is_empty() {
+            return;
+        }
+        let task = self
+            .math
+            .read(cx)
+            .prewarm_paths(paths, self.math.clone(), cx);
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = task.await {
+                this.update(cx, |app, cx| app.report(error, cx))
+                    .expect("workspace is alive while preloading");
+            }
+        })
+        .detach();
+    }
     fn refresh_files(&mut self, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
         let root = PathBuf::from(&self.project().expect("watcher has project").folder);
+        let previous: BTreeSet<_> = self.files.iter().map(|file| file.path.clone()).collect();
         if self.watch_paths.is_empty() || self.watch_tree {
             self.files = files::list_files(&root)?;
         }
         let changed = std::mem::take(&mut self.watch_paths);
+        self.queue_math_preload(
+            self.files
+                .iter()
+                .filter(|file| {
+                    file.path.to_lowercase().ends_with(".md")
+                        && (!previous.contains(&file.path)
+                            || changed.contains(&root.join(&file.path)))
+                })
+                .map(|file| root.join(&file.path))
+                .collect(),
+            cx,
+        );
         self.watch_tree = false;
         for (path, document) in &mut self.documents {
             // notify gives absolute paths; read only drafts touched by this event.
@@ -777,7 +905,7 @@ impl Workspace {
         for key in pdf_keys {
             let full = root.join(key.strip_prefix("reading:").unwrap_or(&key));
             self.pdf_panes
-                .insert(key, cx.new(|cx| PdfPane::new(full, cx)));
+                .insert(key, cx.new(|cx| PdfPane::new(full, window, cx)));
         }
         cx.notify();
         Ok(())
@@ -893,6 +1021,7 @@ impl Workspace {
                     cx.notify();
                 }
                 BuildEvent::Finished(result) => {
+                    self.markdown_export = None;
                     self.build_duration = self
                         .build_started
                         .take()
@@ -911,12 +1040,9 @@ impl Workspace {
                             self.build_duration = self.build_duration.max(result.elapsed);
                             self.logs = result.log;
                             if let Some(path) = result.preview {
-                                let title = format!("{} · 编译预览", self.build_target);
-                                self.build_pdf = Some(cx.new(|cx| {
-                                    let mut pane = PdfPane::new(path.clone(), cx);
-                                    pane.set_title(title);
-                                    pane
-                                }));
+                                self.release_build_pdf(window, cx);
+                                self.build_pdf =
+                                    Some(cx.new(|cx| PdfPane::new(path.clone(), window, cx)));
                                 self.preview = Some(path);
                             }
                             self.show_logs = result.status == BuildStatus::Failed;
@@ -988,18 +1114,34 @@ impl Workspace {
         self.notice = None;
         let (sender, receiver) = mpsc::channel();
         self.build_events = Some(receiver);
-        thread::spawn(move || {
-            let log_sender = sender.clone();
-            let on_log = move |line: &str| {
-                let _ = log_sender.send(BuildEvent::Log(line.to_owned()));
-            };
-            let result = if let Some(file) = markdown {
-                compiler::compile_markdown(&project, &file, &build_root, cancelled, on_log)
+        if let Some(file) = markdown {
+            let key = if self.markdown_panes.contains_key(&format!("reading:{file}")) {
+                format!("reading:{file}")
             } else {
-                compiler::compile_tex(&project, &build_root, cancelled, on_log)
+                file.clone()
             };
-            let _ = sender.send(BuildEvent::Finished(result));
-        });
+            let pane = self.markdown_panes[&key].clone();
+            self.markdown_export = Some(pane.clone());
+            let request = crate::markdown_pdf::ExportRequest {
+                destination: Path::new(&project.folder).join(&file).with_extension("pdf"),
+                preview: build_root.join(&project.id).join("preview.pdf"),
+                cancelled,
+                complete: Box::new(move |result| {
+                    let _ = sender.send(BuildEvent::Finished(result));
+                }),
+                started: Instant::now(),
+            };
+            pane.update(cx, |pane, cx| pane.export_pdf(request, cx));
+        } else {
+            thread::spawn(move || {
+                let log_sender = sender.clone();
+                let on_log = move |line: &str| {
+                    let _ = log_sender.send(BuildEvent::Log(line.to_owned()));
+                };
+                let result = compiler::compile_tex(&project, &build_root, cancelled, on_log);
+                let _ = sender.send(BuildEvent::Finished(result));
+            });
+        }
         cx.notify();
     }
     fn start_name(
@@ -1049,8 +1191,8 @@ impl Workspace {
                 }
                 self.markdown_panes.remove(&path);
                 self.markdown_panes.remove(&format!("reading:{path}"));
-                self.pdf_panes.remove(&path);
-                self.pdf_panes.remove(&format!("reading:{path}"));
+                self.release_pdf_pane(&path, window, cx);
+                self.release_pdf_pane(&format!("reading:{path}"), window, cx);
                 if self.focused_markdown.as_deref() == Some(&path) {
                     self.focused_markdown = Some(renamed.clone());
                 }
@@ -1071,13 +1213,13 @@ impl Workspace {
                     if self.tabs.contains(&renamed) {
                         self.pdf_panes.insert(
                             renamed.clone(),
-                            cx.new(|cx| PdfPane::new(root.join(&renamed), cx)),
+                            cx.new(|cx| PdfPane::new(root.join(&renamed), window, cx)),
                         );
                     }
                     if self.reading_panes.contains(&renamed) {
                         self.pdf_panes.insert(
                             format!("reading:{renamed}"),
-                            cx.new(|cx| PdfPane::new(root.join(&renamed), cx)),
+                            cx.new(|cx| PdfPane::new(root.join(&renamed), window, cx)),
                         );
                     }
                 }
@@ -1119,14 +1261,11 @@ impl Workspace {
             return;
         }
         let retry_path = path.to_owned();
-        let dialog = rfd::AsyncMessageDialog::new()
-            .set_parent(window)
-            .set_title(format!("删除 {path}？"))
-            .set_description("文件及其未保存草稿将删除。")
-            .set_buttons(rfd::MessageButtons::OkCancel);
         if self.ask(
             Dialog::DeleteFile,
-            dialog,
+            format!("删除 {path}？"),
+            "文件及其未保存草稿将删除。".into(),
+            DialogButtons::Confirm("删除".into()),
             window,
             cx,
             move |app, window, cx| app.delete_file(&retry_path, window, cx),
@@ -1140,8 +1279,8 @@ impl Workspace {
             return;
         }
         self.documents.remove(path);
-        self.pdf_panes.remove(path);
-        self.pdf_panes.remove(&format!("reading:{path}"));
+        self.release_pdf_pane(path, window, cx);
+        self.release_pdf_pane(&format!("reading:{path}"), window, cx);
         if self.focused_markdown.as_deref() == Some(path) {
             self.focused_markdown = None;
         }
@@ -1174,14 +1313,11 @@ impl Workspace {
             return;
         }
         let retry_folder = folder.to_owned();
-        let dialog = rfd::AsyncMessageDialog::new()
-            .set_parent(window)
-            .set_title(format!("删除文件夹 {folder} 内的项目文件？"))
-            .set_description("仅删除支持的项目文件，其他文件保留。")
-            .set_buttons(rfd::MessageButtons::OkCancel);
         if self.ask(
             Dialog::DeleteFolder,
-            dialog,
+            format!("删除文件夹 {folder} 内的项目文件？"),
+            "仅删除支持的项目文件，其他文件保留。".into(),
+            DialogButtons::Confirm("删除".into()),
             window,
             cx,
             move |app, window, cx| app.delete_folder(&retry_folder, window, cx),
@@ -1197,12 +1333,19 @@ impl Workspace {
         let prefix = format!("{folder}/");
         self.documents.retain(|path, _| !path.starts_with(&prefix));
         self.tabs.retain(|path| !path.starts_with(&prefix));
-        self.pdf_panes.retain(|path, _| {
-            !path
-                .strip_prefix("reading:")
-                .unwrap_or(path)
-                .starts_with(&prefix)
-        });
+        let removed_pdf_panes: Vec<_> = self
+            .pdf_panes
+            .keys()
+            .filter(|path| {
+                path.strip_prefix("reading:")
+                    .unwrap_or(path)
+                    .starts_with(&prefix)
+            })
+            .cloned()
+            .collect();
+        for path in removed_pdf_panes {
+            self.release_pdf_pane(&path, window, cx);
+        }
         self.reading_panes.retain(|path| !path.starts_with(&prefix));
         if self
             .focused_markdown
@@ -1273,7 +1416,7 @@ impl Workspace {
         if !already_tab {
             self.tabs.retain(|tab| tab != &file.path);
             self.markdown_panes.remove(&file.path);
-            self.pdf_panes.remove(&file.path);
+            self.release_pdf_pane(&file.path, window, cx);
         }
         self.active = active;
         if file.path.to_lowercase().ends_with(".md") {
@@ -1286,7 +1429,7 @@ impl Workspace {
                 .join(&file.path);
             self.pdf_panes.insert(
                 format!("reading:{}", file.path),
-                cx.new(|cx| PdfPane::new(full, cx)),
+                cx.new(|cx| PdfPane::new(full, window, cx)),
             );
         }
         if !self.reading_panes.contains(&file.path) {
@@ -1306,7 +1449,7 @@ impl Workspace {
             }
         }
         self.markdown_panes.remove(&format!("reading:{path}"));
-        self.pdf_panes.remove(&format!("reading:{path}"));
+        self.release_pdf_pane(&format!("reading:{path}"), window, cx);
         if self.focused_markdown.as_deref() == Some(path) {
             self.focused_markdown = None;
         }
@@ -1325,31 +1468,55 @@ impl Workspace {
 
     fn render_reading_pane(&self, path: &str, cx: &mut Context<Self>) -> AnyElement {
         let close = path.to_owned();
+        let is_pdf = path.to_ascii_lowercase().ends_with(".pdf");
+        let root = PathBuf::from(&self.project().expect("reading pane has project").folder);
+        let filename = Path::new(path)
+            .file_name()
+            .expect("reading pane has filename")
+            .to_string_lossy()
+            .into_owned();
         let mut pane = div()
             .relative()
             .size_full()
             .flex()
             .flex_col()
             .bg(rgb(0xffffff));
+        let mut titlebar = div()
+            .h(px(36.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_2()
+            .pl_3()
+            .pr_1()
+            .bg(rgb(0xfafaf9))
+            .border_b_1()
+            .border_color(rgb(BORDER))
+            .child(crate::ui::file_icon(path, false, false))
+            .child(div().min_w_0().text_ellipsis().child(filename))
+            .child(div().flex_1());
+        if is_pdf {
+            let source = root.join(path);
+            titlebar = titlebar.child(button("export-reading-pdf", "导出").on_click(
+                cx.listener(move |app, _, window, cx| app.export_pdf(source.clone(), window, cx)),
+            ));
+        }
+        titlebar = titlebar.child(
+            crate::ui::control(
+                SharedString::from(format!("close-reading-{path}")),
+                IconName::Close,
+            )
+            .on_click(
+                cx.listener(move |app, _, window, cx| app.close_reading_pane(&close, window, cx)),
+            ),
+        );
+        pane = pane.child(titlebar);
         if let Some(pdf) = self.pdf_panes.get(&format!("reading:{path}")) {
             pane = pane.child(div().flex_1().min_h_0().child(pdf.clone()));
         } else if let Some(markdown) = self.markdown_panes.get(&format!("reading:{path}")) {
             pane = pane.child(div().flex_1().min_h_0().child(markdown.clone()));
         }
-        // The pane owns one toolbar; keep its close affordance in that same row.
-        pane.child(
-            crate::ui::control(
-                SharedString::from(format!("close-reading-{path}")),
-                IconName::Close,
-            )
-            .absolute()
-            .top(px(5.))
-            .right(px(5.))
-            .on_click(
-                cx.listener(move |app, _, window, cx| app.close_reading_pane(&close, window, cx)),
-            ),
-        )
-        .into_any_element()
+        pane.into_any_element()
     }
 
     fn remove_project(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1367,14 +1534,11 @@ impl Workspace {
             return;
         }
         let retry_id = id.to_owned();
-        let dialog = rfd::AsyncMessageDialog::new()
-            .set_parent(window)
-            .set_title("从工作台移除项目？")
-            .set_description("文件夹和文件保留在磁盘上。")
-            .set_buttons(rfd::MessageButtons::OkCancel);
         if self.ask(
             Dialog::RemoveProject,
-            dialog,
+            "从工作台移除项目？".into(),
+            "文件夹和文件保留在磁盘上。".into(),
+            DialogButtons::Confirm("移除项目".into()),
             window,
             cx,
             move |app, window, cx| app.remove_project(&retry_id, window, cx),
@@ -1391,9 +1555,9 @@ impl Workspace {
             self.files.clear();
             self.watcher = None;
             self.watch_events = None;
-            self.build_pdf = None;
+            self.release_build_pdf(window, cx);
             self.preview = None;
-            self.pdf_panes.clear();
+            self.release_all_pdf_panes(window, cx);
             self.reading_panes.clear();
             self.markdown_panes.clear();
             self.markdown_changed.clear();
@@ -1420,6 +1584,7 @@ impl Workspace {
             let row_rename = id.clone();
             let row_remove = id.clone();
             let row_name = project.name.clone();
+            let menu_app = cx.entity();
             let name = project.name.clone();
             let root = PathBuf::from(&project.folder);
             let app = cx.entity();
@@ -1446,29 +1611,39 @@ impl Workspace {
                         .child(project.name.clone()),
                 )
                 .child(
-                    crate::ui::control(
-                        SharedString::from(format!("rename-project-{id}")),
-                        IconName::PencilLine,
-                    )
-                    .on_click(cx.listener(move |app, _, window, cx| {
-                        cx.stop_propagation();
-                        app.start_name(
-                            NameAction::RenameProject(row_rename.clone()),
-                            &row_name,
-                            window,
-                            cx,
-                        );
-                    })),
-                )
-                .child(
-                    crate::ui::control(
-                        SharedString::from(format!("remove-project-{id}")),
-                        IconName::Trash,
-                    )
-                    .on_click(cx.listener(move |app, _, window, cx| {
-                        cx.stop_propagation();
-                        app.remove_project(&row_remove, window, cx);
-                    })),
+                    Button::new(SharedString::from(format!("project-menu-{id}")))
+                        .ghost()
+                        .compact()
+                        .w(px(27.))
+                        .h(px(27.))
+                        .icon(crate::ui::icon(IconName::Ellipsis))
+                        .tooltip("更多操作")
+                        .dropdown_menu(move |menu, _, _| {
+                            let rename_app = menu_app.clone();
+                            let remove_app = menu_app.clone();
+                            let rename = row_rename.clone();
+                            let name = row_name.clone();
+                            let remove = row_remove.clone();
+                            menu.item(PopupMenuItem::new("重命名项目…").on_click(
+                                move |_, window, cx| {
+                                    rename_app.update(cx, |app, cx| {
+                                        app.start_name(
+                                            NameAction::RenameProject(rename.clone()),
+                                            &name,
+                                            window,
+                                            cx,
+                                        )
+                                    });
+                                },
+                            ))
+                            .item(
+                                PopupMenuItem::new("移除项目…").on_click(move |_, window, cx| {
+                                    remove_app.update(cx, |app, cx| {
+                                        app.remove_project(&remove, window, cx)
+                                    });
+                                }),
+                            )
+                        }),
                 )
                 .on_click(
                     cx.listener(move |app, _, window, cx| app.switch_project(&id, window, cx)),
@@ -1622,6 +1797,7 @@ impl Workspace {
                 let row_split = file.clone();
                 let row_rename = file.path.clone();
                 let row_delete = file.path.clone();
+                let menu_app = cx.entity();
                 let row_name = Path::new(path)
                     .file_name()
                     .expect("file has name")
@@ -1683,33 +1859,39 @@ impl Workspace {
                         },
                     )
                     .child(
-                        crate::ui::control(
-                            SharedString::from(format!("rename-{path}")),
-                            IconName::PencilLine,
-                        )
-                        .on_click(cx.listener(
-                            move |app, _, window, cx| {
-                                cx.stop_propagation();
-                                app.start_name(
-                                    NameAction::RenameFile(row_rename.clone()),
-                                    &row_name,
-                                    window,
-                                    cx,
-                                );
-                            },
-                        )),
-                    )
-                    .child(
-                        crate::ui::control(
-                            SharedString::from(format!("delete-{path}")),
-                            IconName::Trash,
-                        )
-                        .on_click(cx.listener(
-                            move |app, _, window, cx| {
-                                cx.stop_propagation();
-                                app.delete_file(&row_delete, window, cx);
-                            },
-                        )),
+                        Button::new(SharedString::from(format!("file-menu-{path}")))
+                            .ghost()
+                            .compact()
+                            .w(px(27.))
+                            .h(px(27.))
+                            .icon(crate::ui::icon(IconName::Ellipsis))
+                            .tooltip("更多操作")
+                            .dropdown_menu(move |menu, _, _| {
+                                let rename_app = menu_app.clone();
+                                let delete_app = menu_app.clone();
+                                let rename = row_rename.clone();
+                                let name = row_name.clone();
+                                let delete = row_delete.clone();
+                                menu.item(PopupMenuItem::new("重命名…").on_click(
+                                    move |_, window, cx| {
+                                        rename_app.update(cx, |app, cx| {
+                                            app.start_name(
+                                                NameAction::RenameFile(rename.clone()),
+                                                &name,
+                                                window,
+                                                cx,
+                                            )
+                                        });
+                                    },
+                                ))
+                                .item(
+                                    PopupMenuItem::new("删除…").on_click(move |_, window, cx| {
+                                        delete_app.update(cx, |app, cx| {
+                                            app.delete_file(&delete, window, cx)
+                                        });
+                                    }),
+                                )
+                            }),
                     )
                     .on_click(cx.listener(move |app, _, window, cx| {
                         if let Err(error) = app.open_file(&open, window, cx) {
@@ -1793,11 +1975,14 @@ impl Workspace {
                     .into_any_element()
             });
         div()
-            .w(px(232.))
+            .w_full()
+            .min_w_0()
             .h_full()
             .flex_shrink_0()
             .flex()
             .flex_col()
+            .min_h_0()
+            .overflow_hidden()
             .bg(rgb(0xfbfbfa))
             .border_r_1()
             .border_color(rgb(BORDER))
@@ -1975,6 +2160,9 @@ impl Workspace {
         });
         let markdown = self.markdown_panes.get(&self.active).cloned();
         let outline_pane = markdown.clone();
+        let active_pdf = self.active.to_ascii_lowercase().ends_with(".pdf").then(|| {
+            PathBuf::from(&self.project().expect("PDF tab has project").folder).join(&self.active)
+        });
         let mut area = div()
             .flex()
             .flex_col()
@@ -2017,6 +2205,11 @@ impl Workspace {
                                 },
                             ),
                         )
+                    })
+                    .when_some(active_pdf, |bar, path| {
+                        bar.child(button("export-tab-pdf", "导出").on_click(cx.listener(
+                            move |app, _, window, cx| app.export_pdf(path.clone(), window, cx),
+                        )))
                     }),
             );
         if let Some(document) = self.documents.get(&self.active) {
@@ -2134,9 +2327,42 @@ impl Workspace {
         area.into_any_element()
     }
 
-    fn render_preview(&self) -> AnyElement {
+    fn render_preview(&self, cx: &mut Context<Self>) -> AnyElement {
         if let Some(pane) = &self.build_pdf {
-            return pane.clone().into_any_element();
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .h(px(36.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .bg(rgb(0xfafaf9))
+                        .border_b_1()
+                        .border_color(rgb(BORDER))
+                        .child(crate::ui::icon(IconName::FileText))
+                        .child("编译预览")
+                        .child(div().flex_1())
+                        .when_some(self.preview.clone(), |bar, path| {
+                            bar.child(button("export-build-pdf", "导出").on_click(cx.listener(
+                                move |app, _, window, cx| app.export_pdf(path.clone(), window, cx),
+                            )))
+                        })
+                        .child(
+                            crate::ui::control("close-build-preview", IconName::Close).on_click(
+                                cx.listener(|app, _, _, cx| {
+                                    app.show_build_preview = false;
+                                    cx.notify();
+                                }),
+                            ),
+                        ),
+                )
+                .child(div().flex_1().min_h_0().child(pane.clone()))
+                .into_any_element();
         }
         div()
             .flex()
@@ -2167,7 +2393,15 @@ impl Workspace {
                             button("reveal-output", "在资源管理器中显示")
                                 .on_click(move |_, _, cx| cx.reveal_path(&path)),
                         )
-                    }),
+                    })
+                    .child(
+                        crate::ui::control("close-build-preview", IconName::Close).on_click(
+                            cx.listener(|app, _, _, cx| {
+                                app.show_build_preview = false;
+                                cx.notify();
+                            }),
+                        ),
+                    ),
             )
             .child(
                 div()
@@ -2218,12 +2452,19 @@ fn button(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Stateful<D
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let exports: Vec<_> = self
+            .markdown_export
+            .iter()
+            .filter_map(|pane| pane.read(cx).export_element())
+            .collect();
         for (key, pane) in &self.pdf_panes {
             let visible = key.starts_with("reading:") || *key == self.active;
-            pane.update(cx, |pane, _| pane.set_visible(visible));
+            pane.update(cx, |pane, cx| pane.set_visible(visible, window, cx));
         }
         if let Some(pane) = &self.build_pdf {
-            pane.update(cx, |pane, _| pane.set_visible(self.show_build_preview));
+            pane.update(cx, |pane, cx| {
+                pane.set_visible(self.show_build_preview, window, cx)
+            });
         }
         let title = self
             .project()
@@ -2260,7 +2501,7 @@ impl Render for Workspace {
         let resize_app = cx.entity();
         let area_width = f32::from(window.viewport_size().width)
             - if self.settings.sidebar_open {
-                248.
+                self.settings.sidebar_width + 16.
             } else {
                 16.
             };
@@ -2286,22 +2527,7 @@ impl Render for Workspace {
             work_area = work_area.child(
                 resizable_panel()
                     .size(px(area_width * (1. - self.settings.editor_ratio)))
-                    .child(
-                        div()
-                            .relative()
-                            .size_full()
-                            .child(self.render_preview())
-                            .child(
-                                crate::ui::control("close-build-preview", IconName::Close)
-                                    .absolute()
-                                    .top(px(5.))
-                                    .right(px(5.))
-                                    .on_click(cx.listener(|app, _, _, cx| {
-                                        app.show_build_preview = false;
-                                        cx.notify();
-                                    })),
-                            ),
-                    ),
+                    .child(div().relative().size_full().child(self.render_preview(cx))),
             );
         }
         for path in &self.reading_panes {
@@ -2346,7 +2572,87 @@ impl Render for Workspace {
                 }
             }
         };
+        let mut vertical_work_area = v_resizable(if self.show_logs {
+            "work-with-logs"
+        } else {
+            "work-no-logs"
+        })
+        .on_resize({
+            let app = cx.entity();
+            move |state, _, cx| {
+                let log_height = f32::from(
+                    *state
+                        .read(cx)
+                        .sizes()
+                        .last()
+                        .expect("work area has a panel"),
+                );
+                app.update(cx, |app, cx| {
+                    if app.show_logs {
+                        app.settings.log_height = log_height;
+                        if let Err(error) = storage::save_settings(&app.settings) {
+                            app.report(error, cx);
+                        }
+                    }
+                });
+            }
+        })
+        .child(resizable_panel().child(work_area));
+        if self.show_logs {
+            vertical_work_area = vertical_work_area.child(
+                resizable_panel()
+                    .size(px(self.settings.log_height))
+                    .size_range(px(100.)..px(700.))
+                    .fixed()
+                    .child(
+                        div()
+                            .id("build-log")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .p_3()
+                            .bg(rgb(0xffffff))
+                            .rounded(px(6.))
+                            .font_family("Consolas")
+                            .text_xs()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .mb_2()
+                                    .child("编译日志")
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .gap_2()
+                                            .child(button("copy-build-log", "复制全部").on_click(
+                                                cx.listener(|app, _, _, cx| {
+                                                    cx.write_to_clipboard(
+                                                        ClipboardItem::new_string(app.logs.clone()),
+                                                    );
+                                                }),
+                                            ))
+                                            .child(
+                                                crate::ui::control("close-logs", IconName::Close)
+                                                    .on_click(cx.listener(|app, _, _, cx| {
+                                                        app.show_logs = false;
+                                                        cx.notify();
+                                                    })),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                TextView::markdown(
+                                    "build-log-text",
+                                    format!("````text\n{}\n````", self.logs),
+                                )
+                                .selectable(true),
+                            ),
+                    ),
+            );
+        }
         let mut app = div()
+            .children(exports)
             .relative()
             .size_full()
             .flex()
@@ -2600,56 +2906,52 @@ impl Render for Workspace {
                     ),
             )
             .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
+                // The resize group asks for 100% height. Constrain it to the
+                // space between the title/status bars so the settings footer stays visible.
+                div().flex_1().min_h_0().overflow_hidden().child(
+                    h_resizable(if self.settings.sidebar_open {
+                        "workspace-with-sidebar"
+                    } else {
+                        "workspace-no-sidebar"
+                    })
+                    .on_resize({
+                        let app = cx.entity();
+                        move |state, _, cx| {
+                            let sidebar_width = f32::from(state.read(cx).sizes()[0]);
+                            app.update(cx, |app, cx| {
+                                if app.settings.sidebar_open {
+                                    app.settings.sidebar_width = sidebar_width;
+                                    if let Err(error) = storage::save_settings(&app.settings) {
+                                        app.report(error, cx);
+                                    }
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    })
                     .when(self.settings.sidebar_open, |body| {
-                        body.child(self.render_sidebar(cx))
+                        body.child(
+                            resizable_panel()
+                                .size(px(self.settings.sidebar_width))
+                                .size_range(px(170.)..px(520.))
+                                .fixed()
+                                .child(self.render_sidebar(cx)),
+                        )
                     })
                     .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .p_2()
-                            .gap_2()
-                            .child(work_area)
-                            .when(self.show_logs, |body| {
-                                body.child(
-                                    div()
-                                        .id("build-log")
-                                        .h(px(220.))
-                                        .overflow_y_scroll()
-                                        .p_3()
-                                        .bg(rgb(0xffffff))
-                                        .rounded(px(6.))
-                                        .font_family("Consolas")
-                                        .text_xs()
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .mb_2()
-                                                .child("编译日志")
-                                                .child(
-                                                    crate::ui::control(
-                                                        "close-logs",
-                                                        IconName::Close,
-                                                    )
-                                                    .on_click(cx.listener(|app, _, _, cx| {
-                                                        app.show_logs = false;
-                                                        cx.notify();
-                                                    })),
-                                                ),
-                                        )
-                                        .child(self.logs.clone()),
-                                )
-                            }),
+                        resizable_panel().child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .min_h_0()
+                                .p_2()
+                                .gap_2()
+                                .child(vertical_work_area),
+                        ),
                     ),
+                ),
             )
             .when_some(self.notice.clone(), |app, notice| {
                 app.child(
@@ -2775,9 +3077,54 @@ impl Render for Workspace {
                                         cx.notify();
                                     })),
                             )
-                            .child(self.preferences.clone()),
+                            .child(
+                                div()
+                                    .id("preferences-content")
+                                    .max_h(
+                                        px(f32::from(window.viewport_size().height) * 0.92 - 56.),
+                                    )
+                                    .overflow_y_scroll()
+                                    .child(self.preferences.clone()),
+                            ),
                     ),
             );
+        }
+        if let Some(prompt) = self.dialog_prompt.clone() {
+            let choices = match prompt.buttons {
+                DialogButtons::SaveDiscardCancel => vec![
+                    (
+                        "继续编辑".to_string(),
+                        rfd::MessageDialogResult::Cancel,
+                        false,
+                    ),
+                    ("放弃修改".to_string(), rfd::MessageDialogResult::No, false),
+                    ("保存".to_string(), rfd::MessageDialogResult::Yes, true),
+                ],
+                DialogButtons::Confirm(confirm) => vec![
+                    ("取消".to_string(), rfd::MessageDialogResult::Cancel, false),
+                    (confirm, rfd::MessageDialogResult::Ok, true),
+                ],
+            };
+            let choices =
+                choices
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (label, result, primary))| {
+                        let button = button(("prompt-choice", index), label)
+                            .px_3()
+                            .when(primary, |button| {
+                                button.bg(rgb(0x5c7f9f)).text_color(rgb(0xffffff))
+                            })
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.answer_dialog(result.clone(), window, cx)
+                            }));
+                        button.into_any_element()
+                    });
+            app = app.child(crate::ui::modal_overlay(
+                prompt.title,
+                prompt.description,
+                div().flex().justify_end().gap_2().children(choices),
+            ));
         }
         app
     }

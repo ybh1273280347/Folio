@@ -3,11 +3,12 @@
 mod compiler;
 mod files;
 mod markdown;
+mod markdown_pdf;
 mod math;
+mod math_layout;
 mod model;
 mod pdf;
 mod preferences;
-mod richtext;
 mod storage;
 mod ui;
 mod workspace;
@@ -18,6 +19,8 @@ use workspace::Workspace;
 fn main() {
     gpui_kit::application().with_assets(ui::Assets).run(|cx| {
         gpui_kit::init(cx);
+        math_layout::register_fonts(cx);
+        markdown_editor::init(cx);
         cx.bind_keys([
             KeyBinding::new("ctrl-s", workspace::Save, None),
             KeyBinding::new("ctrl-o", workspace::OpenProject, None),
@@ -28,8 +31,6 @@ fn main() {
             KeyBinding::new("ctrl-shift-s", workspace::SaveAll, None),
             KeyBinding::new("ctrl-c", gpui_kit::component::input::Copy, Some("FolioPdf")),
             KeyBinding::new("ctrl-e", markdown::ToggleSource, None),
-            KeyBinding::new("ctrl-b", markdown::Bold, Some("FolioMarkdown")),
-            KeyBinding::new("ctrl-i", markdown::Italic, Some("FolioMarkdown")),
             KeyBinding::new("escape", workspace::Dismiss, None),
         ]);
         gpui_kit::open_window(
