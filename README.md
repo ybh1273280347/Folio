@@ -1,22 +1,43 @@
-# Folio GPUI prototype
+# Folio GPUI
 
-This isolated native app evaluates GPUI Kit's editor component with three independent LaTeX documents mounted at once. The original Electron project remains untouched.
+Folio 的 Windows 原生版本。LaTeX、Markdown 编辑器和 PDF 预览都在 GPUI 内运行，没有 Electron、Chromium 或每个预览独立的浏览器进程。原项目保留在上一级目录。
 
-## Run
+## 启动
 
-Requires Rust and a native Windows build toolchain supported by GPUI.
+构建后的程序位于 `dist\Folio\Folio.exe`，也可以双击 `启动 Folio.cmd`。第一次使用点“添加本地项目”，选择已有项目文件夹。
+
+项目、偏好和编译缓存独立保存在 `%APPDATA%\folio-gpui`。源码文件仍保存在用户选择的项目内，编译生成的 PDF 保存到源文件旁。排版使用本机已安装的 TeX Live，PDFium 和程序运行库随启动目录一起提供。
+
+## 使用
+
+- LaTeX：标签页、语法高亮、行号、查找替换、自动保存、磁盘修改冲突提示；支持 XeLaTeX、pdfLaTeX、LuaLaTeX，主文件和引擎可在顶栏选择，支持停止编译、日志和失败后保留上次 PDF。
+- Markdown：点选内容直接编辑，支持标题、粗体、斜体、列表、任务、表格单元格、本地图片和公式；源码与可视模式可切换，支持目录定位、独立编辑分屏和导出 PDF。数学语法支持 `$...$`、`$$...$$`、`\(...\)` 和 `\[...\]`。
+- PDF：按需渲染页面、连续滚动、输入页码跳转、翻页、缩放、目录、缩略图、选择复制文字、另存 PDF；多个分屏各自保留导航状态。
+- 文件：树形目录、查找、新建、重命名、删除、主文件设置。右键文件选择“在资源管理器中显示”，即可从资源管理器拖到微信或浏览器；也可复制完整路径。
+- 设置：界面字体、编辑器字体、三类字号、行宽限制和恢复默认；侧栏和编辑器分屏比例自动保存。
+
+| 快捷键 | 功能 |
+| --- | --- |
+| Ctrl+O | 添加项目 |
+| Ctrl+S | 保存当前编辑文件 |
+| Ctrl+Shift+S | 保存全部 |
+| Ctrl+Enter | 编译 / 停止 |
+| Ctrl+F | 编辑器查找 |
+| Ctrl+P | 查找文件 |
+| Ctrl+B | 显示 / 隐藏侧栏 |
+| Ctrl+W | 关闭当前标签 |
+| Ctrl+E | Markdown 源码 / 可视编辑 |
+| Ctrl+滚轮 | 编辑器字号 / PDF 缩放 |
+| Esc | 关闭设置、命名弹窗或文件查找 |
+
+## 资源管理
+
+PDF 只为视口附近页面保留位图，缩略图另设小尺寸缓存；隐藏标签清除位图，关闭面板释放实体与渲染线程。改变缩放和尺寸后，旧的排队渲染任务直接作废。文件监听只读取发生变化的打开文件，目录变动才重新扫描文件树。草稿的脏状态在输入时更新，不在定时轮询中反复比较全文。公式由一个共享工作线程生成 SVG 并复用缓存。
+
+## 开发构建
 
 ```powershell
-cargo run --manifest-path gpui-prototype/Cargo.toml
+.\scripts\package.ps1
 ```
 
-The prototype is intentionally limited to editor rendering and input. It does not read or write project files, compile TeX, or render PDFs, so it does not yet answer whether a full rewrite would improve the current multi-preview workload.
-
-## Evaluation boundary
-
-- The editor state is owned by GPUI and its text component; there is no Chromium renderer or DOM per editor.
-- Each pane stays mounted with its own buffer to exercise concurrent editor memory and redraw behavior.
-- LaTeX highlighting uses GPUI Kit's Syntect integration; this does not yet reproduce CodeMirror's editing behavior or settings.
-- PDF rendering remains a separate decision. A replacement must preserve the current PDF text layer, selection, outline, navigation, zoom, and failure behavior before memory comparisons are meaningful.
-
-The next useful gate is an isolated PDF renderer experiment and a repeatable comparison against the existing app using the same documents, page count, zoom, and number of visible panes. Until that exists, this project is evidence about the native editor layer only.
+需要 Rust GNU Windows 工具链、MinGW、TeX Live。脚本使用 PATH 中的 `gcc`，生成优化后的发布程序和启动目录，不运行测试。首次安装 PDFium 可运行 `scripts\install-pdfium.ps1`。
