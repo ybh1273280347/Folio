@@ -1,1 +1,5 @@
 /target/
+/runtime/
+/dist/
+/fixtures/smoke/*.pdf
+/fixtures/smoke/*.synctex.gz
