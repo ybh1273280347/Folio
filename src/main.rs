@@ -21,18 +21,8 @@ fn main() {
         gpui_kit::init(cx);
         math_layout::register_fonts(cx);
         markdown_editor::init(cx);
-        cx.bind_keys([
-            KeyBinding::new("ctrl-s", workspace::Save, None),
-            KeyBinding::new("ctrl-o", workspace::OpenProject, None),
-            KeyBinding::new("ctrl-enter", workspace::Compile, None),
-            KeyBinding::new("ctrl-b", workspace::ToggleSidebar, None),
-            KeyBinding::new("ctrl-p", workspace::FindFile, None),
-            KeyBinding::new("ctrl-w", workspace::CloseTab, None),
-            KeyBinding::new("ctrl-shift-s", workspace::SaveAll, None),
-            KeyBinding::new("ctrl-c", gpui_kit::component::input::Copy, Some("FolioPdf")),
-            KeyBinding::new("ctrl-e", markdown::ToggleSource, None),
-            KeyBinding::new("escape", workspace::Dismiss, None),
-        ]);
+        let initial_settings = storage::load_settings().unwrap_or_default();
+        workspace::bind_shortcuts(&initial_settings, cx);
         gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(

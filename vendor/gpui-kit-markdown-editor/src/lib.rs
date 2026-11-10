@@ -89,8 +89,11 @@ pub use input_rule::InputRule;
 pub use math::normalize_math;
 /// Shows or hides the optional toolbar. Unbound by default; bind it in the
 /// `"BlockEditor"` key context, e.g. `KeyBinding::new("cmd-shift-t", ToggleToolbar, Some("BlockEditor"))`.
-pub use state::ToggleToolbar;
-pub use state::{BlockEditorEvent, BlockEditorState, ClipboardPolicy, PasteRequest, SubmitPolicy};
+pub use state::{
+    BlockEditorEvent, BlockEditorState, ClipboardPolicy, EditLink, PasteRequest, SubmitPolicy,
+    ToggleBold, ToggleCode, ToggleHighlight, ToggleItalic, ToggleStrikethrough, ToggleToolbar,
+    ToggleUnderline,
+};
 pub use style::BlockEditorStyle;
 pub use table::{TableEdit, TableLine};
 pub use toolbar::EditorToolbar;

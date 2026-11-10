@@ -430,6 +430,9 @@ pub struct Highlight {
     /// directly — no text layer involved, so it works on scans and figures.
     /// When set, `quote`/`occurrence` are not used for locating.
     pub region: Option<NormRect>,
+    /// Pre-computed normalized line/content rects (e.g. from box-selection of
+    /// effective content). When non-empty, drawn directly instead of re-locating `quote`.
+    pub rects: Vec<NormRect>,
 }
 
 /// Invoked with a [`Highlight`]'s `id` when the user clicks it. (`markup` feature.)
@@ -443,6 +446,24 @@ pub type HighlightClickFn = Rc<dyn Fn(u64, &mut Window, &mut gpui::App)>;
 #[cfg(feature = "markup")]
 pub type CreateHighlightFn =
     Rc<dyn Fn(usize, String, usize, SharedString, &mut Window, &mut gpui::App)>;
+
+/// Invoked when a highlight or annotation is created (from text selection, box-content
+/// selection, or the Chrome-style floating selection pill): `(page, quote, occurrence,
+/// rects, is_box, color_name, open_comment, window, cx)`.
+#[cfg(feature = "markup")]
+pub type CreateAnnotationFn = Rc<
+    dyn Fn(
+        usize,
+        String,
+        usize,
+        Vec<NormRect>,
+        bool,
+        SharedString,
+        bool,
+        &mut Window,
+        &mut gpui::App,
+    ),
+>;
 
 /// Invoked when the user finishes a box-drag in "area mode": the page (0-based), the
 /// dragged rect in normalized page coordinates, and the label of the picked color.
@@ -616,13 +637,21 @@ pub struct PdfView {
     /// In-progress drag selection: (page, start, current) in normalized coords.
     #[cfg(feature = "markup")]
     sel_drag: Option<(usize, NormPoint, NormPoint)>,
-    /// A finished drag outside highlight mode: text selected for ⌘C. Cleared by
-    /// the next mouse-down.
+    /// Whether the current drag (`sel_drag`) is a rectangular box selection (`⬚` or `Alt`+drag).
+    #[cfg(feature = "markup")]
+    box_drag: bool,
+    /// A finished drag outside highlight mode: text selected for ⌘C or Chrome-style floating popup.
     #[cfg(feature = "markup")]
     text_sel: Option<(usize, NormPoint, NormPoint)>,
+    /// Whether `text_sel` was created via rectangular box selection (`⬚` or `Alt`+drag).
+    #[cfg(feature = "markup")]
+    text_sel_is_box: bool,
     /// Called when a drag-selection finishes, so the host stores the note (markup).
     #[cfg(feature = "markup")]
     on_create: Option<CreateHighlightFn>,
+    /// Rich annotation creation callback (quote + rects + color + open_comment).
+    #[cfg(feature = "markup")]
+    on_create_annotation: Option<CreateAnnotationFn>,
     /// Host-supplied highlight colors `(label, fill)`; the picker shows these and the
     /// label is echoed back on create. Empty → a single default yellow.
     #[cfg(feature = "markup")]
@@ -776,13 +805,19 @@ impl PdfView {
             #[cfg(feature = "markup")]
             text_sel: None,
             #[cfg(feature = "markup")]
+            text_sel_is_box: false,
+            #[cfg(feature = "markup")]
             area_mode: false,
             #[cfg(feature = "markup")]
             on_create_area: None,
             #[cfg(feature = "markup")]
             sel_drag: None,
             #[cfg(feature = "markup")]
+            box_drag: false,
+            #[cfg(feature = "markup")]
             on_create: None,
+            #[cfg(feature = "markup")]
+            on_create_annotation: None,
             #[cfg(feature = "markup")]
             palette: Vec::new(),
             #[cfg(feature = "markup")]
@@ -1046,6 +1081,108 @@ impl PdfView {
     #[cfg(feature = "markup")]
     pub fn set_on_create_highlight(&mut self, handler: CreateHighlightFn) {
         self.on_create = Some(handler);
+    }
+
+    /// Set the rich annotation handler invoked for both text and box-content annotations.
+    #[cfg(feature = "markup")]
+    pub fn set_on_create_annotation(&mut self, handler: CreateAnnotationFn) {
+        self.on_create_annotation = Some(handler);
+    }
+
+    /// Create a highlight/annotation from drag endpoints `(a, b)` on `pg`.
+    /// When `is_box` is true, extracts effective content inside the dragged rectangle
+    /// via `PageText::select_in_rect` (and falls back to the rectangular box region if
+    /// no text glyphs exist inside the rectangle).
+    #[cfg(feature = "markup")]
+    fn create_from_drag(
+        &mut self,
+        pg: usize,
+        a: NormPoint,
+        b: NormPoint,
+        is_box: bool,
+        color_name: SharedString,
+        open_comment: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let color_hsla = self
+            .palette
+            .iter()
+            .find(|(n, _)| *n == color_name)
+            .map(|(_, c)| *c)
+            .unwrap_or_else(|| self.active_color_hsla());
+
+        if is_box {
+            let region = norm_rect_between(a, b);
+            let sel = match self.page_text.get(&pg) {
+                Some(TextSlot::Ready(pt)) => pt.select_in_rect(region),
+                _ => None,
+            };
+            let (quote, occurrence, rects) = match sel {
+                Some(s) => (s.quote, s.occurrence, s.rects),
+                None => (String::new(), 0, vec![region]),
+            };
+            if let Some(cb) = self.on_create_annotation.clone() {
+                cb(
+                    pg,
+                    quote,
+                    occurrence,
+                    rects,
+                    true,
+                    color_name,
+                    open_comment,
+                    window,
+                    cx,
+                );
+            } else if let Some(cb) = self.on_create_area.clone() {
+                cb(pg, region, color_name, window, cx);
+            } else {
+                self.highlights.push(Highlight {
+                    id: self.highlights.len() as u64 + 1,
+                    page: pg,
+                    quote,
+                    occurrence,
+                    color: color_hsla,
+                    region: Some(region),
+                    rects,
+                });
+            }
+            cx.notify();
+            return;
+        }
+
+        let sel = match self.page_text.get(&pg) {
+            Some(TextSlot::Ready(pt)) => pt.select(a, b),
+            _ => None,
+        };
+        if let Some(sel) = sel {
+            if let Some(cb) = self.on_create_annotation.clone() {
+                cb(
+                    pg,
+                    sel.quote,
+                    sel.occurrence,
+                    sel.rects,
+                    false,
+                    color_name,
+                    open_comment,
+                    window,
+                    cx,
+                );
+            } else if let Some(cb) = self.on_create.clone() {
+                cb(pg, sel.quote, sel.occurrence, color_name, window, cx);
+            } else {
+                self.highlights.push(Highlight {
+                    id: self.highlights.len() as u64 + 1,
+                    page: pg,
+                    quote: sel.quote,
+                    occurrence: sel.occurrence,
+                    color: color_hsla,
+                    region: None,
+                    rects: sel.rects,
+                });
+            }
+        }
+        cx.notify();
     }
 
     /// Toggle "highlight mode": when on, dragging over text selects it and fires the
@@ -1721,19 +1858,7 @@ impl PdfView {
         // already-rendered page still gets its text extracted.
         #[cfg(feature = "markup")]
         {
-            let mut pages: Vec<usize> = self
-                .highlights
-                .iter()
-                .filter(|h| h.region.is_none())
-                .map(|h| h.page)
-                .filter(|p| (start..=end).contains(p))
-                .collect();
-            if self.selecting && !self.area_mode {
-                pages.extend(start..=end);
-            }
-            pages.sort_unstable();
-            pages.dedup();
-            for p in pages {
+            for p in start..=end {
                 self.ensure_page_text(p, cx);
             }
         }
@@ -1946,14 +2071,17 @@ impl Render for PdfView {
                         a: if flashing { 0.6 } else { 0.35 },
                         ..h.color
                     };
-                    // An area highlight is its stored rect; a quote highlight is
-                    // one rect per located line (needs the page's text layer).
-                    let rects: Vec<NormRect> = match h.region {
-                        Some(r) => vec![r],
-                        None => match self.page_text.get(&i) {
+                    // Pre-computed line rects (e.g. from box-content extraction) take
+                    // precedence; otherwise fall back to `region` or locating `quote`.
+                    let rects: Vec<NormRect> = if !h.rects.is_empty() {
+                        h.rects.clone()
+                    } else if let Some(r) = h.region {
+                        vec![r]
+                    } else {
+                        match self.page_text.get(&i) {
                             Some(TextSlot::Ready(pt)) => pt.locate(&h.quote, h.occurrence),
                             _ => Vec::new(),
-                        },
+                        }
                     };
                     for (ri, r) in rects.into_iter().enumerate() {
                         let id = h.id;
@@ -1981,13 +2109,26 @@ impl Render for PdfView {
                         slot = slot.child(hl);
                     }
                 }
-                // Live drag feedback: the raw box in area mode, the text
-                // selection's line rects otherwise (also a finished copy selection).
-                if let Some((pg, a, b)) = self.sel_drag.or(self.text_sel)
+                // Live drag feedback + finished selection + Chrome-style floating action bar.
+                let active_sel = self
+                    .sel_drag
+                    .map(|(pg, a, b)| (pg, a, b, self.box_drag, true))
+                    .or_else(|| {
+                        self.text_sel
+                            .map(|(pg, a, b)| (pg, a, b, self.text_sel_is_box, false))
+                    });
+                if let Some((pg, a, b, is_box, is_dragging)) = active_sel
                     && pg == i
                 {
-                    let rects: Vec<NormRect> = if self.selecting && self.area_mode {
-                        vec![norm_rect_between(a, b)]
+                    let box_rect = norm_rect_between(a, b);
+                    let rects: Vec<NormRect> = if is_box {
+                        if let Some(TextSlot::Ready(pt)) = self.page_text.get(&i)
+                            && let Some(sel) = pt.select_in_rect(box_rect)
+                        {
+                            sel.rects
+                        } else {
+                            vec![box_rect]
+                        }
                     } else if let Some(TextSlot::Ready(pt)) = self.page_text.get(&i)
                         && let Some(sel) = pt.select(a, b)
                     {
@@ -1995,7 +2136,21 @@ impl Render for PdfView {
                     } else {
                         Vec::new()
                     };
-                    for r in rects {
+                    if is_box {
+                        slot = slot.child(
+                            div()
+                                .absolute()
+                                .left(px(box_rect.x * page_width))
+                                .top(px(box_rect.y * disp_h))
+                                .w(px(box_rect.w * page_width))
+                                .h(px(box_rect.h * disp_h))
+                                .rounded(px(2.0))
+                                .border_1()
+                                .border_color(hsla(0.58, 0.9, 0.45, 0.85))
+                                .bg(hsla(0.58, 0.9, 0.55, 0.08)),
+                        );
+                    }
+                    for r in &rects {
                         slot = slot.child(
                             div()
                                 .absolute()
@@ -2004,8 +2159,125 @@ impl Render for PdfView {
                                 .w(px(r.w * page_width))
                                 .h(px(r.h * disp_h))
                                 .rounded(px(1.0))
-                                .bg(hsla(0.58, 0.9, 0.55, 0.3)),
+                                .bg(hsla(0.58, 0.9, 0.55, 0.32)),
                         );
+                    }
+                    // Chrome-style floating selection pill when drag finishes outside sticky mode
+                    if !is_dragging && !rects.is_empty() {
+                        let min_x = rects.iter().map(|r| r.x).fold(1.0_f32, f32::min);
+                        let min_y = rects.iter().map(|r| r.y).fold(1.0_f32, f32::min);
+                        let pill_left = (min_x * page_width).clamp(8.0, (page_width - 250.0).max(8.0));
+                        let pill_top = if min_y * disp_h > 42.0 {
+                            min_y * disp_h - 38.0
+                        } else {
+                            (min_y * disp_h + 24.0).min((disp_h - 38.0).max(8.0))
+                        };
+                        let mut pill = div()
+                            .id(SharedString::from(format!("pdf-sel-pill-{i}")))
+                            .absolute()
+                            .left(px(pill_left))
+                            .top(px(pill_top))
+                            .h(px(32.0))
+                            .px(px(8.0))
+                            .rounded(px(16.0))
+                            .bg(hsla(0.0, 0.0, 1.0, 0.98))
+                            .border_1()
+                            .border_color(style.border)
+                            .shadow_md()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(5.0))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            });
+
+                        for (ci, (cname, cfill)) in self.palette.iter().enumerate() {
+                            let cname = cname.clone();
+                            let cfill = *cfill;
+                            pill = pill.child(
+                                div()
+                                    .id(SharedString::from(format!("pdf-sel-color-{i}-{ci}")))
+                                    .size(px(16.0))
+                                    .rounded(px(8.0))
+                                    .bg(cfill)
+                                    .border_1()
+                                    .border_color(hsla(0.0, 0.0, 0.0, 0.15))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.active_color = ci;
+                                        this.text_sel = None;
+                                        this.create_from_drag(
+                                            pg,
+                                            a,
+                                            b,
+                                            is_box,
+                                            cname.clone(),
+                                            false,
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            );
+                        }
+
+                        pill = pill
+                            .child(div().w(px(1.0)).h(px(14.0)).mx(px(2.0)).bg(style.border))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("pdf-sel-comment-{i}")))
+                                    .px(px(6.0))
+                                    .py(px(2.0))
+                                    .rounded(px(4.0))
+                                    .text_size(px(11.0))
+                                    .text_color(style.header_fg)
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(style.placeholder_bg))
+                                    .child("💬 批注")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        let cname = this.active_color_name();
+                                        this.text_sel = None;
+                                        this.create_from_drag(
+                                            pg,
+                                            a,
+                                            b,
+                                            is_box,
+                                            cname,
+                                            true,
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("pdf-sel-copy-{i}")))
+                                    .px(px(6.0))
+                                    .py(px(2.0))
+                                    .rounded(px(4.0))
+                                    .text_size(px(11.0))
+                                    .text_color(style.header_fg)
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(style.placeholder_bg))
+                                    .child("复制")
+                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                        if let Some(TextSlot::Ready(pt)) = this.page_text.get(&pg) {
+                                            let copied = if is_box {
+                                                pt.selected_text_in_rect(norm_rect_between(a, b))
+                                            } else {
+                                                pt.selected_text(a, b)
+                                            };
+                                            if let Some(text) = copied {
+                                                cx.write_to_clipboard(
+                                                    gpui::ClipboardItem::new_string(text),
+                                                );
+                                            }
+                                        }
+                                        this.text_sel = None;
+                                        cx.notify();
+                                    })),
+                            );
+                        slot = slot.child(pill);
                     }
                 }
                 // Find-in-PDF: box every match on this page; emphasize the focused one.
@@ -2265,9 +2537,9 @@ impl Render for PdfView {
                 .child("✎")
                 .child(div().w(px(12.0)).h(px(2.0)).rounded(px(1.0)).bg(active))
                 .on_click(cx.listener(|this, _, _window, cx| this.toggle_select_mode(cx)))
-                .tooltip(self.tip("Highlight — pick a color (⌘⇧H)"));
+                .tooltip(self.tip("荧光画笔高亮 (⌘⇧H)"));
             // The area (box) tool: same pen state + palette, but a drag marks a
-            // page region instead of selecting text — for figures and scans.
+            // page region and extracts the effective content inside the box.
             let area_bg = if self.selecting && self.area_mode {
                 style.placeholder_bg
             } else {
@@ -2291,7 +2563,7 @@ impl Render for PdfView {
                 .child("⬚")
                 .child(div().w(px(12.0)).h(px(2.0)).rounded(px(1.0)).bg(active))
                 .on_click(cx.listener(|this, _, _window, cx| this.toggle_area_mode(cx)))
-                .tooltip(self.tip("Area highlight — drag a box over a region"));
+                .tooltip(self.tip("框选有效内容批注 (也可按住 Alt 拖拽框选)"));
 
             // Color-picker dropdown, deferred so it paints over the page area below.
             let dropdown = if self.palette_open && !self.palette.is_empty() {
@@ -2381,6 +2653,7 @@ impl Render for PdfView {
                     #[cfg(feature = "markup")]
                     {
                         this.text_sel = None;
+                        this.box_drag = (this.selecting && this.area_mode) || _ev.modifiers.alt;
                         if let Some((pg, n)) = this.point_to_page(_ev.position) {
                             window.focus(&this.focus, cx);
                             this.ensure_page_text(pg, cx);
@@ -2473,16 +2746,22 @@ impl Render for PdfView {
                     this.toggle_select_mode(cx);
                     return;
                 }
-                // ⌘C: copy the selected text.
+                // ⌘C: copy the selected text (or box-extracted text).
                 #[cfg(feature = "markup")]
                 if secondary
                     && key == "c"
                     && let Some((pg, a, b)) = this.text_sel
                     && let Some(TextSlot::Ready(pt)) = this.page_text.get(&pg)
-                    && let Some(text) = pt.selected_text(a, b)
                 {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                    return;
+                    let copied = if this.text_sel_is_box {
+                        pt.selected_text_in_rect(norm_rect_between(a, b))
+                    } else {
+                        pt.selected_text(a, b)
+                    };
+                    if let Some(text) = copied {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                        return;
+                    }
                 }
                 match key {
                     "pagedown" => this.next_page(cx),
@@ -2527,50 +2806,16 @@ impl Render for PdfView {
                         cx.notify();
                         return;
                     }
-                    // Outside highlight mode the drag just selects text to copy.
+                    // Outside sticky highlight mode, the drag keeps `text_sel` and shows
+                    // the Chrome-style floating selection pill right above the selection.
                     if !this.selecting {
                         this.text_sel = Some((pg, a, b));
+                        this.text_sel_is_box = this.box_drag;
                         cx.notify();
                         return;
                     }
-                    if this.area_mode {
-                        let region = norm_rect_between(a, b);
-                        if let Some(cb) = this.on_create_area.clone() {
-                            let color = this.active_color_name();
-                            cb(pg, region, color, window, cx);
-                        } else {
-                            this.highlights.push(Highlight {
-                                id: this.highlights.len() as u64 + 1,
-                                page: pg,
-                                quote: String::new(),
-                                occurrence: 0,
-                                color: this.active_color_hsla(),
-                                region: Some(region),
-                            });
-                        }
-                        cx.notify();
-                        return;
-                    }
-                    let sel = match this.page_text.get(&pg) {
-                        Some(TextSlot::Ready(pt)) => pt.select(a, b),
-                        _ => None,
-                    };
-                    if let Some(sel) = sel {
-                        if let Some(cb) = this.on_create.clone() {
-                            let color = this.active_color_name();
-                            cb(pg, sel.quote, sel.occurrence, color, window, cx);
-                        } else {
-                            this.highlights.push(Highlight {
-                                id: this.highlights.len() as u64 + 1,
-                                page: pg,
-                                quote: sel.quote,
-                                occurrence: sel.occurrence,
-                                color: this.active_color_hsla(),
-                                region: None,
-                            });
-                        }
-                    }
-                    cx.notify();
+                    let color = this.active_color_name();
+                    this.create_from_drag(pg, a, b, this.box_drag, color, false, window, cx);
                 }),
             );
 

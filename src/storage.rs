@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     files,
-    model::{AppSettings, Engine, Project, ProjectConfig},
+    model::{AnnotationItem, AppSettings, Engine, Project, ProjectConfig},
 };
 
 pub fn data_directory() -> io::Result<PathBuf> {
@@ -48,6 +48,40 @@ pub fn load_settings() -> io::Result<AppSettings> {
 
 pub fn save_settings(settings: &AppSettings) -> io::Result<()> {
     write_json(&data_directory()?.join("preferences.json"), settings)
+}
+
+fn annotations_store_path(target_file: &Path) -> PathBuf {
+    target_file
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".folio")
+        .join("annotations.json")
+}
+
+pub fn load_annotations(target_file: &Path) -> Vec<AnnotationItem> {
+    let store = annotations_store_path(target_file);
+    let fname = target_file
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let all: Vec<AnnotationItem> = read_json(&store).unwrap_or_default();
+    all.into_iter().filter(|item| item.file == fname).collect()
+}
+
+pub fn save_annotations(target_file: &Path, items: &[AnnotationItem]) -> io::Result<()> {
+    let store = annotations_store_path(target_file);
+    let fname = target_file
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mut all: Vec<AnnotationItem> = read_json(&store).unwrap_or_default();
+    all.retain(|item| item.file != fname);
+    for item in items {
+        let mut entry = item.clone();
+        entry.file = fname.clone();
+        all.push(entry);
+    }
+    write_json(&store, &all)
 }
 
 pub fn add_project(config: &mut ProjectConfig, folder: &Path) -> io::Result<Project> {

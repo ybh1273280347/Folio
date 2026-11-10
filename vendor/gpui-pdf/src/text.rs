@@ -473,6 +473,89 @@ impl PageText {
             rects,
         })
     }
+
+    /// Collect indices of runs whose effective glyph box lies inside or substantially
+    /// overlaps `rect`.
+    fn runs_in_rect(&self, rect: NormRect) -> Vec<usize> {
+        let rx0 = rect.x;
+        let ry0 = rect.y;
+        let rx1 = rect.right();
+        let ry1 = rect.bottom();
+        self.runs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, run)| {
+                let r = run.rect;
+                let cx = r.x + r.w * 0.5;
+                let cy = r.y + r.h * 0.5;
+                let center_in = cx >= rx0 && cx <= rx1 && cy >= ry0 && cy <= ry1;
+                if center_in {
+                    return Some(i);
+                }
+                let ox = (rx1.min(r.right()) - rx0.max(r.x)).max(0.0);
+                let oy = (ry1.min(r.bottom()) - ry0.max(r.y)).max(0.0);
+                let w_ok = r.w <= 0.0001 || ox >= r.w * 0.35;
+                let h_ok = r.h <= 0.0001 || oy >= r.h * 0.35;
+                (ox > 0.0 && oy > 0.0 && w_ok && h_ok).then_some(i)
+            })
+            .collect()
+    }
+
+    /// Extract the effective text and tight line rectangles inside a rectangular box
+    /// `rect`. Used by box-selection (`⬚` / `Alt`+drag) so users can drag a rectangle
+    /// around hard-to-select PDF text, formulas, or multi-column blocks and capture
+    /// the effective content inside.
+    pub fn select_in_rect(&self, rect: NormRect) -> Option<Selection> {
+        let ids = self.runs_in_rect(rect);
+        if ids.is_empty() {
+            return None;
+        }
+        let picked: Vec<Run> = ids
+            .iter()
+            .map(|&i| Run {
+                text: self.runs[i].text.clone(),
+                rect: self.runs[i].rect,
+            })
+            .collect();
+        let raw = Self::join_runs(&picked, false);
+        let quote = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        if quote.trim().is_empty() {
+            return None;
+        }
+        let lo = ids[0];
+        let occurrence = self.occurrence_at(lo, &quote);
+        let rects = self.group_lines(&ids);
+        if rects.is_empty() {
+            return None;
+        }
+        Some(Selection {
+            quote,
+            occurrence,
+            rects,
+        })
+    }
+
+    /// Readable multi-line text inside `rect`, for copying a box selection.
+    pub fn selected_text_in_rect(&self, rect: NormRect) -> Option<String> {
+        let ids = self.runs_in_rect(rect);
+        if ids.is_empty() {
+            return None;
+        }
+        let picked: Vec<Run> = ids
+            .iter()
+            .map(|&i| Run {
+                text: self.runs[i].text.clone(),
+                rect: self.runs[i].rect,
+            })
+            .collect();
+        let raw = Self::join_runs(&picked, true);
+        let text = raw
+            .lines()
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        (!text.trim().is_empty()).then_some(text)
+    }
 }
 
 #[cfg(test)]
