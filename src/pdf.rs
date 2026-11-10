@@ -2,7 +2,10 @@
 //! PDF bytes are owned by the worker, so rebuilding the source PDF never holds a disk lock.
 use gpui_kit::Pixels;
 use gpui_kit::{
-    component::input::{Input, InputEvent, InputState},
+    component::{
+        input::{Input, InputEvent, InputState},
+        progress::Progress,
+    },
     prelude::FluentBuilder,
     *,
 };
@@ -35,8 +38,8 @@ struct Bookmark {
 }
 enum PdfEvent {
     Opened(Vec<PageInfo>, Vec<Bookmark>),
-    Rendered(usize, i32, PageImage),
-    Thumbnail(usize, Arc<RenderImage>),
+    Rendered(usize, i32, u64, PageImage),
+    Thumbnail(usize, u64, Arc<RenderImage>),
     Error(String),
 }
 struct RenderPage {
@@ -52,7 +55,8 @@ pub struct PdfPane {
     pages: Vec<PageInfo>,
     images: BTreeMap<usize, PageImage>,
     text_pages: BTreeMap<usize, Vec<String>>,
-    pending: BTreeSet<usize>,
+    rendered_width: BTreeMap<usize, i32>,
+    pending: BTreeSet<(usize, u64)>,
     requests: mpsc::Sender<RenderPage>,
     events: mpsc::Receiver<PdfEvent>,
     list: ListState,
@@ -66,7 +70,7 @@ pub struct PdfPane {
     page_bounds: BTreeMap<usize, Bounds<Pixels>>,
     focus: FocusHandle,
     thumbnails: BTreeMap<usize, Arc<RenderImage>>,
-    thumbnail_pending: BTreeSet<usize>,
+    thumbnail_pending: BTreeSet<(usize, u64)>,
     thumbnail_list: ListState,
     page_input: Option<Entity<InputState>>,
     generation: Arc<AtomicU64>,
@@ -146,7 +150,11 @@ impl PdfPane {
                     let image = Arc::new(RenderImage::new(vec![image::Frame::new(rgba)]));
                     if request.thumbnail {
                         if sender
-                            .send(PdfEvent::Thumbnail(request.index, image))
+                            .send(PdfEvent::Thumbnail(
+                                request.index,
+                                request.generation,
+                                image,
+                            ))
                             .is_err()
                         {
                             break;
@@ -172,6 +180,7 @@ impl PdfPane {
                         .send(PdfEvent::Rendered(
                             request.index,
                             request.width,
+                            request.generation,
                             PageImage {
                                 image,
                                 text,
@@ -208,9 +217,13 @@ impl PdfPane {
                                     pane.list.reset(pane.pages.len());
                                     pane.thumbnail_list.reset(pane.pages.len());
                                 }
-                                PdfEvent::Rendered(index, width, image) => {
-                                    pane.pending.remove(&index);
-                                    if pane.visible && width == pane.pixel_width() {
+                                PdfEvent::Rendered(index, width, generation, image) => {
+                                    pane.pending.remove(&(index, generation));
+                                    if pane.visible
+                                        && generation == pane.generation.load(Ordering::Relaxed)
+                                        && width == pane.pixel_width()
+                                    {
+                                        pane.rendered_width.insert(index, width);
                                         pane.text_pages.insert(
                                             index,
                                             image
@@ -236,6 +249,8 @@ impl PdfPane {
                                     pane.images.retain(|index, _| {
                                         *index >= top.saturating_sub(1) && *index <= top + count
                                     });
+                                    pane.rendered_width
+                                        .retain(|index, _| pane.images.contains_key(index));
                                     pane.text_pages.retain(|index, _| {
                                         pane.images.contains_key(index)
                                             || pane.selection.is_some_and(|(a, b)| {
@@ -243,9 +258,11 @@ impl PdfPane {
                                             })
                                     });
                                 }
-                                PdfEvent::Thumbnail(index, image) => {
-                                    pane.thumbnail_pending.remove(&index);
-                                    if pane.visible {
+                                PdfEvent::Thumbnail(index, generation, image) => {
+                                    pane.thumbnail_pending.remove(&(index, generation));
+                                    if pane.visible
+                                        && generation == pane.generation.load(Ordering::Relaxed)
+                                    {
                                         pane.thumbnails.insert(index, image);
                                     }
                                     let top = pane.thumbnail_list.logical_scroll_top().item_ix;
@@ -273,6 +290,7 @@ impl PdfPane {
             pages: Vec::new(),
             images: BTreeMap::new(),
             text_pages: BTreeMap::new(),
+            rendered_width: BTreeMap::new(),
             pending: BTreeSet::new(),
             requests,
             events,
@@ -306,6 +324,7 @@ impl PdfPane {
         if !visible {
             self.generation.fetch_add(1, Ordering::Relaxed);
             self.images.clear();
+            self.rendered_width.clear();
             self.pending.clear();
             self.thumbnails.clear();
             self.thumbnail_pending.clear();
@@ -319,32 +338,36 @@ impl PdfPane {
         if (self.width - width).abs() < 2. {
             return;
         }
+        let current_page = self.list.logical_scroll_top().item_ix;
         self.width = width.max(80.);
         self.generation.fetch_add(1, Ordering::Relaxed);
-        self.images.clear();
         self.pending.clear();
-        self.thumbnail_pending.clear();
         self.list.reset(self.pages.len());
+        self.list.scroll_to_reveal_item(current_page);
         cx.notify();
     }
     fn zoom(&mut self, amount: f32, cx: &mut Context<Self>) {
+        let current_page = self.list.logical_scroll_top().item_ix;
         self.zoom = (self.zoom + amount).clamp(0.25, 3.);
         self.generation.fetch_add(1, Ordering::Relaxed);
-        self.images.clear();
         self.pending.clear();
-        self.thumbnail_pending.clear();
         self.list.reset(self.pages.len());
+        self.list.scroll_to_reveal_item(current_page);
         cx.notify();
     }
     fn page(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let width = self.width * self.zoom;
         let height = width * self.pages[index].ratio;
-        if !self.images.contains_key(&index) && self.pending.insert(index) {
+        let generation = self.generation.load(Ordering::Relaxed);
+        let width_px = self.pixel_width();
+        if self.rendered_width.get(&index) != Some(&width_px)
+            && self.pending.insert((index, generation))
+        {
             if let Err(error) = self.requests.send(RenderPage {
                 index,
-                width: self.pixel_width(),
+                width: width_px,
                 thumbnail: false,
-                generation: self.generation.load(Ordering::Relaxed),
+                generation,
             }) {
                 self.error = Some(error.to_string());
             }
@@ -483,12 +506,15 @@ impl PdfPane {
     }
 
     fn thumbnail(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
-        if !self.thumbnails.contains_key(&index) && self.thumbnail_pending.insert(index) {
+        let generation = self.generation.load(Ordering::Relaxed);
+        if !self.thumbnails.contains_key(&index)
+            && self.thumbnail_pending.insert((index, generation))
+        {
             if let Err(error) = self.requests.send(RenderPage {
                 index,
                 width: 160,
                 thumbnail: true,
-                generation: self.generation.load(Ordering::Relaxed),
+                generation,
             }) {
                 self.error = Some(error.to_string());
             }
@@ -601,6 +627,8 @@ impl Render for PdfPane {
         let entity = cx.entity();
         let measured = entity.clone();
         let top = self.list.logical_scroll_top().item_ix;
+        let rendering =
+            self.error.is_none() && (self.pages.is_empty() || !self.images.contains_key(&top));
         let page_input = self
             .page_input
             .as_ref()
@@ -671,6 +699,30 @@ impl Render for PdfPane {
                             )
                             .child(format!("/ {}", self.pages.len())),
                     )
+                    .when(rendering, |toolbar| {
+                        toolbar.child(
+                            div()
+                                .w(px(110.))
+                                .flex()
+                                .flex_col()
+                                .justify_center()
+                                .gap_1()
+                                .text_xs()
+                                .text_color(rgb(0x5c7f9f))
+                                .child(if self.pages.is_empty() {
+                                    "正在打开 PDF…"
+                                } else {
+                                    "正在渲染 PDF…"
+                                })
+                                .child(
+                                    Progress::new("pdf-render-progress")
+                                        .loading(true)
+                                        .accessibility_label("正在渲染 PDF")
+                                        .color(rgb(0x5c7f9f))
+                                        .h(px(3.)),
+                                ),
+                        )
+                    })
                     .child(
                         div()
                             .flex()

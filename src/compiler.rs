@@ -14,7 +14,7 @@ use std::{
 
 use crate::{
     files,
-    model::{BuildStatus, Engine, Project},
+    model::{BuildStatus, Project},
 };
 
 #[cfg(windows)]
@@ -73,81 +73,130 @@ pub fn compile_markdown(
     }
     let output = build_root.join(&project.id).join("work");
     fs::create_dir_all(&output)?;
-    // Builds are serialized per workspace, so one stable job name reuses aux files.
-    let tex_path = output.join("folio-markdown.tex");
-    let content_path = tex_path.with_extension("content.tex");
-    // markdown.sty delegates conversion to Lua through shell escape. Invoke that
-    // converter explicitly, then typeset its renderer macros with shell escape disabled.
     let started = Instant::now();
-    let mut locate = Command::new("kpsewhich");
-    #[cfg(windows)]
-    locate.creation_flags(0x08000000);
-    let located = locate.arg("markdown-cli.lua").output()?;
-    if !located.status.success() {
-        return Err(io::Error::other("TeX Live 中找不到 markdown-cli.lua。"));
-    }
-    let script = String::from_utf8_lossy(&located.stdout).trim().to_owned();
-    let mut convert = Command::new("texlua");
-    #[cfg(windows)]
-    convert.creation_flags(0x08000000);
-    let conversion = convert
-        .arg(script)
-        .args([
-            "pipeTables=true",
-            "taskLists=true",
-            "strikeThrough=true",
-            "texMathDollars=true",
-            "texMathSingleBackslash=true",
-            "singletonCache=false",
-        ])
-        .arg(format!(
-            "cacheDir={}",
-            output.to_string_lossy().replace('\\', "/")
-        ))
-        .arg("--")
-        .arg(&source)
-        .arg(&content_path)
-        .current_dir(source.parent().expect("Markdown source has parent"))
-        .output()?;
-    let conversion_log = format!(
-        "{}{}",
-        String::from_utf8_lossy(&conversion.stdout),
-        String::from_utf8_lossy(&conversion.stderr)
-    );
-    on_log(&conversion_log);
-    if !conversion.status.success() {
+    if cancelled.load(Ordering::Relaxed) {
         return Ok(BuildResult {
-            status: BuildStatus::Failed,
+            status: BuildStatus::Cancelled,
             elapsed: started.elapsed(),
-            log: conversion_log,
+            log: String::new(),
             preview: None,
         });
     }
-    let content = content_path.to_string_lossy().replace('\\', "/");
-    let tex = format!(
-        "\\documentclass{{ctexart}}\n\\usepackage[a4paper,margin=25mm]{{geometry}}\n\\usepackage{{amsmath,graphicx,booktabs}}\n\\usepackage{{markdown}}\n\\begin{{document}}\n\\input{{\\detokenize{{{content}}}}}\n\\end{{document}}\n"
-    );
-    fs::write(&tex_path, tex)?;
-    // The generated TeX lives in the build directory; the user's PDF belongs
-    // next to the Markdown source, never next to this temporary wrapper.
-    let mut markdown_project = project.clone();
-    markdown_project.engine = Engine::Xelatex;
-    markdown_project.folder = source
+    let content = fs::read_to_string(&source)?;
+    let mut options = comrak::Options::default();
+    options.extension.table = true;
+    options.extension.tasklist = true;
+    options.extension.strikethrough = true;
+    options.extension.math_dollars = true;
+    options.extension.math_code = true;
+    let body = comrak::markdown_to_html(&crate::markdown::normalize_math(&content), &options);
+    let browser = [
+        std::env::var_os("ProgramFiles(x86)")
+            .map(|dir| PathBuf::from(dir).join("Microsoft/Edge/Application/msedge.exe")),
+        std::env::var_os("ProgramFiles")
+            .map(|dir| PathBuf::from(dir).join("Microsoft/Edge/Application/msedge.exe")),
+        std::env::var_os("ProgramFiles")
+            .map(|dir| PathBuf::from(dir).join("Google/Chrome/Application/chrome.exe")),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|path| path.is_file())
+    .ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "Markdown PDF export needs Microsoft Edge or Google Chrome.",
+        )
+    })?;
+    let katex = std::env::current_exe()?
         .parent()
-        .expect("Markdown source has parent")
-        .to_string_lossy()
-        .into_owned();
-    let result = run_latexmk(
-        &markdown_project,
-        &tex_path,
-        &source.with_extension("pdf"),
-        build_root,
-        cancelled,
-        on_log,
+        .expect("application has a directory")
+        .join("katex");
+    let katex = if katex.join("katex.min.css").is_file() {
+        katex
+    } else {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("project has a parent")
+            .join("node_modules/katex/dist")
+    };
+    let html_path = output.join("folio-markdown-print.html");
+    let browser_profile = output.join("folio-markdown-print-profile");
+    let staged_pdf = output.join("folio-markdown-print.pdf");
+    let base_url =
+        url::Url::from_directory_path(source.parent().expect("Markdown file has a parent"))
+            .expect("Markdown project directory is absolute");
+    let katex_url = url::Url::from_directory_path(&katex).expect("KaTeX directory is absolute");
+    fs::create_dir_all(&browser_profile)?;
+    let html = format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><base href="{base_url}"><link rel="stylesheet" href="{katex_url}katex.min.css"><style>
+@page{{size:A4;margin:20mm}}body{{font:11pt/1.8 "Microsoft YaHei",sans-serif;color:#373b40}}h1,h2,h3{{line-height:1.35;margin-top:1.35em}}p{{margin-bottom:.55em}}blockquote{{margin-left:0;padding-left:1em;border-left:3px solid #d8e1eb;color:#747d87}}pre{{padding:14px 16px;white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f6f7;border-radius:5px;break-inside:avoid}}code{{font-family:Consolas,monospace;font-size:.92em}}:not(pre)>code{{background:#f2f3f4;padding:.1em .3em;border-radius:3px}}a{{color:#527aa3}}table{{width:100%;border-collapse:collapse;margin:1em 0;break-inside:avoid}}td,th{{border:1px solid #dfe3e6;padding:6px 10px;vertical-align:top}}th{{background:#f6f7f8;text-align:left}}img{{max-width:100%;height:auto}}.katex-display{{overflow-x:auto}}input[type=checkbox]{{appearance:none;width:11px;height:11px;border:1px solid #7a7a7a;border-radius:2px;vertical-align:middle}}input[type=checkbox]:checked{{background:#5c7f9f}}
+</style><script defer src="{katex_url}katex.min.js"></script><script defer src="{katex_url}contrib/auto-render.min.js"></script><script>document.addEventListener('DOMContentLoaded',()=>{{for(const node of document.querySelectorAll('[data-math-style]')){{const block=node.dataset.mathStyle==='display';const latex=node.textContent;if(block&&node.closest('pre')){{const display=document.createElement('div');display.textContent='$$'+latex+'$$';node.closest('pre').replaceWith(display)}}else node.textContent=(block?'$$':'$')+latex+(block?'$$':'$')}}renderMathInElement(document.body,{{delimiters:[{{left:'$$',right:'$$',display:true}},{{left:'\\[',right:'\\]',display:true}},{{left:'$',right:'$',display:false}},{{left:'\\(',right:'\\)',display:false}}],throwOnError:false}})}})</script></head><body>{body}</body></html>"#
     );
-    fs::remove_file(&tex_path)?;
-    fs::remove_file(&content_path)?;
-    result
+    fs::write(&html_path, html)?;
+    let mut command = Command::new(browser);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
+    let mut child = command
+        .args([
+            "--headless=new",
+            "--disable-gpu",
+            "--disable-extensions",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--hide-scrollbars",
+            "--no-pdf-header-footer",
+            "--virtual-time-budget=1200",
+        ])
+        .arg(format!("--user-data-dir={}", browser_profile.display()))
+        .arg(format!("--print-to-pdf={}", staged_pdf.display()))
+        .arg(&html_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let pid = child.id();
+    let status = loop {
+        if cancelled.load(Ordering::Relaxed) {
+            terminate_process_tree(&mut child, pid);
+            return Ok(BuildResult {
+                status: BuildStatus::Cancelled,
+                elapsed: started.elapsed(),
+                log: String::new(),
+                preview: None,
+            });
+        }
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    if !status.success() || !staged_pdf.is_file() {
+        let message = "Markdown PDF printing failed in Edge/Chrome.".to_owned();
+        on_log(&message);
+        return Ok(BuildResult {
+            status: BuildStatus::Failed,
+            elapsed: started.elapsed(),
+            log: message,
+            preview: None,
+        });
+    }
+    let destination = source.with_extension("pdf");
+    fs::copy(&staged_pdf, &destination)?;
+    let preview = build_root.join(&project.id).join("preview.pdf");
+    fs::copy(&staged_pdf, &preview)?;
+    let log = format!(
+        "Exported {} to the matching PDF beside the Markdown file.",
+        source
+            .file_name()
+            .expect("Markdown has a filename")
+            .to_string_lossy()
+    );
+    on_log(&log);
+    Ok(BuildResult {
+        status: BuildStatus::Success,
+        elapsed: started.elapsed(),
+        log,
+        preview: Some(preview),
+    })
 }
 
 fn run_latexmk(

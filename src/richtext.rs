@@ -16,6 +16,21 @@ pub struct RichText {
 }
 
 impl RichText {
+    pub fn visible_offset(&self, source_offset: usize) -> usize {
+        let mut hidden = 0;
+        for marker in &self.markers {
+            let start = marker.at + hidden;
+            let end = start + marker.text.len();
+            if source_offset < start {
+                break;
+            }
+            if source_offset < end {
+                return marker.at;
+            }
+            hidden += marker.text.len();
+        }
+        source_offset - hidden
+    }
     pub fn new(source: &str) -> Self {
         let arena = Arena::new();
         let mut options = Options::default();
