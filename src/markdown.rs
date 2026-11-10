@@ -486,7 +486,9 @@ impl Render for MarkdownPane {
             .items_center()
             .justify_between()
             .h(px(36.))
+            .flex_shrink_0()
             .px_3()
+            .pr(px(38.))
             .border_b_1()
             .border_color(rgb(0xe8e7e3))
             .child(
