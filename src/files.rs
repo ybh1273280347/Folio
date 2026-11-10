@@ -222,6 +222,75 @@ pub fn delete_file(root: &Path, relative: &str) -> io::Result<()> {
     fs::remove_file(project_path(root, relative)?)
 }
 
+pub fn list_folders(root: &Path) -> io::Result<Vec<String>> {
+    fn visit(root: &Path, current: &Path, folders: &mut Vec<String>) -> io::Result<()> {
+        for entry in fs::read_dir(current)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir()
+                && !EXCLUDED_DIRECTORIES.contains(&entry.file_name().to_string_lossy().as_ref())
+            {
+                let path = entry
+                    .path()
+                    .strip_prefix(root)
+                    .expect("walked from project root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                folders.push(path);
+                visit(root, &entry.path(), folders)?;
+            }
+        }
+        Ok(())
+    }
+
+    let root = dunce::canonicalize(root)?;
+    let mut folders = Vec::new();
+    visit(&root, &root, &mut folders)?;
+    folders.sort_by(|left, right| {
+        left.to_lowercase()
+            .cmp(&right.to_lowercase())
+            .then_with(|| left.cmp(right))
+    });
+    Ok(folders)
+}
+
+pub fn create_folder(root: &Path, relative: &str) -> io::Result<()> {
+    let relative = relative.trim().trim_matches(['/', '\\']);
+    let path = Path::new(relative);
+    if relative.is_empty()
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+        || relative.chars().any(|char| "<>:\"|?*".contains(char))
+        || path.components().any(|part| {
+            EXCLUDED_DIRECTORIES
+                .iter()
+                .any(|name| part.as_os_str() == *name)
+        })
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "请输入有效的文件夹名称。",
+        ));
+    }
+    let canonical_root = dunce::canonicalize(root)?;
+    let target = canonical_root.join(path);
+    if target.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "同名文件夹或文件已存在。",
+        ));
+    }
+    fs::create_dir_all(target)
+}
+
 pub fn delete_folder_files(root: &Path, relative: &str) -> io::Result<()> {
     let folder = project_path(root, relative)?;
     if !folder.is_dir() {
@@ -233,6 +302,7 @@ pub fn delete_folder_files(root: &Path, relative: &str) -> io::Result<()> {
     for file in list_files(&folder)? {
         fs::remove_file(project_path(&folder, &file.path)?)?;
     }
+    let _ = fs::remove_dir(&folder);
     Ok(())
 }
 

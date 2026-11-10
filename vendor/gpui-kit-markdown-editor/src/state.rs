@@ -65,6 +65,9 @@ actions!(
         Redo,
         ToggleBold,
         ToggleItalic,
+        ToggleUnderline,
+        ToggleStrikethrough,
+        ToggleHighlight,
         EditLink,
         SoftBreak,
         ExitBlock,
@@ -403,6 +406,8 @@ pub struct BlockEditorState {
     pub(crate) table_hover: Vec<(BlockId, crate::TableLine)>,
     /// The pointer is on a table grip (grab cursor).
     pub(crate) grip_hover: bool,
+    pub(crate) slash_key_handler:
+        Option<Rc<dyn Fn(&mut Self, &str, &mut Window, &mut Context<Self>) -> bool>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -470,8 +475,16 @@ impl BlockEditorState {
             table_menu: None,
             table_hover: Vec::new(),
             grip_hover: false,
+            slash_key_handler: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    pub fn set_slash_key_handler(
+        &mut self,
+        handler: impl Fn(&mut Self, &str, &mut Window, &mut Context<Self>) -> bool + 'static,
+    ) {
+        self.slash_key_handler = Some(Rc::new(handler));
     }
 
     pub fn with_submit_policy(mut self, policy: SubmitPolicy) -> Self {
@@ -747,6 +760,192 @@ impl BlockEditorState {
     /// The headless model (document, selection, history).
     pub fn model(&self) -> &BlockEditorModel {
         &self.model
+    }
+
+    /// Window-space bounds of the current caret, if the selection is a caret.
+    pub fn caret_window_bounds(&self) -> Option<Bounds<Pixels>> {
+        let pos = self.model.caret()?;
+        self.frame.borrow().caret_bounds(pos, self.style.caret_width())
+    }
+
+    /// Window-space bounding box of a non-collapsed text selection.
+    pub fn selection_window_bounds(&self) -> Option<Bounds<Pixels>> {
+        let BlockSelection::Text { anchor, head } = self.model.selection else {
+            return None;
+        };
+        if anchor == head {
+            return None;
+        }
+        let frame = self.frame.borrow();
+        let w = self.style.caret_width();
+        let a = frame.caret_bounds(anchor, w)?;
+        let b = frame.caret_bounds(head, w)?;
+        Some(a.union(&b))
+    }
+
+    /// Plain text of the current non-collapsed selection.
+    pub fn selected_plain_text(&self) -> Option<String> {
+        let BlockSelection::Text { anchor, head } = self.model.selection else {
+            return None;
+        };
+        if anchor == head {
+            return None;
+        }
+        if anchor.block == head.block
+            && let Some(text) = self.model.doc.leaf_text(anchor.block)
+        {
+            let (lo, hi) = (anchor.offset.min(head.offset), anchor.offset.max(head.offset));
+            let s = text.get(lo..hi)?.trim().to_string();
+            return (!s.is_empty()).then_some(s);
+        }
+        let (text, _) = self.selected_text();
+        let s = text.trim().to_string();
+        (!s.is_empty()).then_some(s)
+    }
+
+    /// Returns `(quote, occurrence)` for the current text selection within the document.
+    pub fn selected_quote_and_occurrence(&self) -> Option<(String, usize)> {
+        let BlockSelection::Text { anchor, head } = self.model.selection else {
+            return None;
+        };
+        if anchor == head {
+            return None;
+        }
+        let target_block = anchor.block;
+        let lo = if anchor.block == head.block {
+            anchor.offset.min(head.offset)
+        } else {
+            anchor.offset
+        };
+        let quote = self.selected_plain_text()?;
+        let mut count = 0usize;
+        for leaf in self.model.document().leaves() {
+            let Some(text) = self.model.doc.leaf_text(leaf.id()) else {
+                continue;
+            };
+            if leaf.id() == target_block {
+                if let Some(prefix) = text.get(..lo.min(text.len())) {
+                    count += prefix.matches(&quote).count();
+                }
+                break;
+            } else {
+                count += text.matches(&quote).count();
+            }
+        }
+        Some((quote, count))
+    }
+
+    /// Selects and reveals the `occurrence`-th match of `quote` across the document's leaves.
+    pub fn select_quote_occurrence(
+        &mut self,
+        quote: &str,
+        occurrence: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if quote.is_empty() {
+            return false;
+        }
+        let step = quote.chars().next().map_or(1, char::len_utf8);
+        let mut seen = 0usize;
+        let mut found = None;
+        for leaf in self.model.document().leaves() {
+            let Some(text) = self.model.doc.leaf_text(leaf.id()) else {
+                continue;
+            };
+            let mut from = 0;
+            while let Some(slice) = text.get(from..) {
+                let Some(rel) = slice.find(quote) else {
+                    break;
+                };
+                let start = from + rel;
+                let end = start + quote.len();
+                if seen == occurrence {
+                    found = Some((leaf.id(), start, end));
+                    break;
+                }
+                seen += 1;
+                from = start + step;
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        if let Some((block, start, end)) = found {
+            let _ = self.model.set_selection(BlockSelection::Text {
+                anchor: BlockPosition::new(block, start),
+                head: BlockPosition::new(block, end),
+            });
+            self.selection_changed(cx);
+            self.reveal_caret(cx);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns `(top_block_id, representative_kind, window_bounds)` for the hovered or active top-level block.
+    pub fn top_block_at_or_active(
+        &self,
+        mouse: Option<Point<Pixels>>,
+    ) -> Option<(BlockId, BlockKind, Bounds<Pixels>)> {
+        use gpui::px;
+        let blocks = self.top_level_bounds();
+        let chosen = if let Some(at) = mouse
+            && let Some((_, id, b)) = blocks.iter().find(|(_, _, b)| {
+                at.y >= b.top() - px(4.)
+                    && at.y <= b.bottom() + px(4.)
+                    && at.x >= b.left() - px(64.)
+                    && at.x <= b.right() + px(16.)
+            })
+        {
+            Some((*id, *b))
+        } else if let Some(caret) = self.model.caret() {
+            let top = self.model.doc.path(caret.block).get(1).copied()?;
+            blocks
+                .iter()
+                .find(|(_, id, _)| *id == top)
+                .map(|(_, id, b)| (*id, *b))
+        } else {
+            None
+        }?;
+        let kind = self
+            .model
+            .doc
+            .kind(chosen.0)
+            .map(super::kind::BlockKindData::public)
+            .unwrap_or(BlockKind::Paragraph);
+        Some((chosen.0, kind, chosen.1))
+    }
+
+    /// Places the caret in the first leaf of `top_block` and executes `command`.
+    pub fn run_on_top_block(
+        &mut self,
+        top_block: BlockId,
+        command: EditorCommand,
+        cx: &mut Context<Self>,
+    ) {
+        let leaf_id = self
+            .model
+            .document()
+            .leaves()
+            .find(|l| self.model.doc.path(l.id()).contains(&top_block))
+            .map(|l| l.id());
+        if let Some(leaf_id) = leaf_id {
+            let _ = self
+                .model
+                .set_selection(BlockSelection::caret(BlockPosition::new(leaf_id, 0)));
+            self.selection_changed(cx);
+        }
+        let _ = self.run(command, cx);
+    }
+
+    /// Deletes the given top-level block.
+    pub fn delete_top_block(&mut self, top_block: BlockId, cx: &mut Context<Self>) {
+        let _ = self.model.set_selection(BlockSelection::Blocks {
+            anchor: top_block,
+            head: top_block,
+        });
+        let _ = self.run(EditorCommand::DeleteSelection, cx);
     }
 
     /// Document revision; bumped by every committed transaction.
@@ -1587,6 +1786,32 @@ impl BlockEditorState {
         self.link_range_at_caret().map(|(_, _, url)| url)
     }
 
+    /// If the caret is inside a `<mark>` highlight span, returns `(block_id, byte_range, text)`.
+    pub fn highlight_at_caret(&self) -> Option<(BlockId, Range<usize>, String)> {
+        let head = match &self.model.selection {
+            BlockSelection::Text { anchor, head } if anchor == head => *head,
+            _ => return None,
+        };
+        let inline = self.model.doc.inline(head.block)?;
+        let pieces: Vec<_> = inline
+            .pieces()
+            .map(|(range, marks, _)| (range, marks.highlight.is_some()))
+            .collect();
+        let ix = pieces
+            .iter()
+            .position(|(r, hl)| *hl && r.start <= head.offset && head.offset <= r.end)?;
+        let (mut lo, mut hi) = (ix, ix);
+        while lo > 0 && pieces[lo - 1].1 {
+            lo -= 1;
+        }
+        while hi + 1 < pieces.len() && pieces[hi + 1].1 {
+            hi += 1;
+        }
+        let range = pieces[lo].0.start..pieces[hi].0.end;
+        let quote = inline.text().get(range.clone())?.trim().to_string();
+        (!quote.is_empty()).then_some((head.block, range, quote))
+    }
+
     fn link_range_at_caret(&self) -> Option<(BlockId, Range<usize>, SharedString)> {
         let head = match &self.model.selection {
             BlockSelection::Text { anchor, head } => {
@@ -1938,8 +2163,6 @@ impl BlockEditorState {
         let in_edge = |b: &Bounds<Pixels>| {
             at.y >= b.top() && at.y < b.bottom() && at.x < b.left() && at.x >= b.left() - px(24.)
         };
-        // Tables: only the corner handle, so the left edge stays free for
-        // the row grips (no two "select" targets side by side).
         if let Some(table) = self.table_handle_at(at) {
             return Some(table);
         }
@@ -2025,8 +2248,13 @@ impl BlockEditorState {
         self.end_composition();
         self.edit(EditOrigin::DeleteForward, |m| m.delete(true), cx);
     }
-    pub(crate) fn on_enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_enter(&mut self, _: &Enter, window: &mut Window, cx: &mut Context<Self>) {
         if self.readonly || self.is_composing() {
+            return;
+        }
+        if let Some(h) = self.slash_key_handler.clone()
+            && h(self, "enter", window, cx)
+        {
             return;
         }
         if self.submit_policy == SubmitPolicy::Enter {
@@ -2170,10 +2398,20 @@ impl BlockEditorState {
     pub(crate) fn on_move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
         self.horizontal(true, false, cx);
     }
-    pub(crate) fn on_move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_move_up(&mut self, _: &MoveUp, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(h) = self.slash_key_handler.clone()
+            && h(self, "up", window, cx)
+        {
+            return;
+        }
         self.vertical(false, false, cx);
     }
-    pub(crate) fn on_move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_move_down(&mut self, _: &MoveDown, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(h) = self.slash_key_handler.clone()
+            && h(self, "down", window, cx)
+        {
+            return;
+        }
         self.vertical(true, false, cx);
     }
     pub(crate) fn on_move_home(&mut self, _: &MoveHome, _: &mut Window, cx: &mut Context<Self>) {
@@ -2372,6 +2610,30 @@ impl BlockEditorState {
     ) {
         self.toggle_mark(MarkKind::Italic, cx);
     }
+    pub(crate) fn on_toggle_underline(
+        &mut self,
+        _: &ToggleUnderline,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_mark(MarkKind::Underline, cx);
+    }
+    pub(crate) fn on_toggle_strikethrough(
+        &mut self,
+        _: &ToggleStrikethrough,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_mark(MarkKind::Strikethrough, cx);
+    }
+    pub(crate) fn on_toggle_highlight(
+        &mut self,
+        _: &ToggleHighlight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_mark(MarkKind::Highlight, cx);
+    }
     pub(crate) fn on_toggle_code(
         &mut self,
         _: &ToggleCode,
@@ -2380,7 +2642,12 @@ impl BlockEditorState {
     ) {
         self.toggle_mark(MarkKind::Code, cx);
     }
-    pub(crate) fn on_indent(&mut self, _: &Indent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_indent(&mut self, _: &Indent, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(h) = self.slash_key_handler.clone()
+            && h(self, "tab", window, cx)
+        {
+            return;
+        }
         let _ = self.run(EditorCommand::Indent, cx);
     }
     pub(crate) fn on_outdent(&mut self, _: &Outdent, _: &mut Window, cx: &mut Context<Self>) {

@@ -1,20 +1,31 @@
-//! Appearance preferences are persisted independently of project files and PDF typesetting.
+//! Appearance and shortcut preferences are persisted independently of project files and PDF typesetting.
 use crate::{
-    model::{AppSettings, MathFont},
+    model::{AppSettings, MathFont, SHORTCUT_DEFS},
     storage,
 };
 use gpui_kit::{
+    assets::IconName,
     base::StyledExt,
     component::{
         select::{SearchableVec, Select, SelectEvent, SelectState},
         slider::{Slider, SliderEvent, SliderState},
     },
+    prelude::FluentBuilder,
     *,
 };
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PreferencesTab {
+    Appearance,
+    Shortcuts,
+}
 
 pub struct SettingsChanged(pub AppSettings);
 pub struct Preferences {
     settings: AppSettings,
+    tab: PreferencesTab,
+    recording: Option<&'static str>,
+    focus: FocusHandle,
     interface_font: Entity<SelectState<SearchableVec<String>>>,
     editor_font: Entity<SelectState<SearchableVec<String>>>,
     math_font: Entity<SelectState<SearchableVec<String>>>,
@@ -175,6 +186,9 @@ impl Preferences {
         .detach();
         Self {
             settings,
+            tab: PreferencesTab::Appearance,
+            recording: None,
+            focus: cx.focus_handle(),
             interface_font,
             editor_font,
             math_font,
@@ -186,6 +200,7 @@ impl Preferences {
     }
     pub fn sync(&mut self, settings: &AppSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.settings = settings.clone();
+        self.recording = None;
         for (slider, size) in self.sizes.iter().zip([
             settings.interface_font_size,
             settings.editor_font_size,
@@ -238,6 +253,310 @@ impl Preferences {
             .child(Slider::new(&self.sizes[index]))
             .into_any_element()
     }
+
+    fn render_appearance(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_5()
+            .child(
+                div()
+                    .text_lg()
+                    .font_semibold()
+                    .child("外观设置"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child("界面字体")
+                    .child(Select::new(&self.interface_font)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child("编辑器字体")
+                    .child(Select::new(&self.editor_font)),
+            )
+            .child(self.size_row("ui-size", "界面字号", self.settings.interface_font_size, cx))
+            .child(self.size_row("editor-size", "编辑器字号", self.settings.editor_font_size, cx))
+            .child(self.size_row("markdown-size", "Markdown 字号", self.settings.markdown_font_size, cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child("数学字体")
+                    .child(Select::new(&self.math_font)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .child("块级公式 / 正文字号")
+                            .child(format!("{:.1}×", self.settings.math_scale)),
+                    )
+                    .child(Slider::new(&self.math_scale)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .child("行内公式 / 正文字号")
+                            .child(format!("{:.1}×", self.settings.inline_math_scale)),
+                    )
+                    .child(Slider::new(&self.inline_math_scale)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child("编辑器限制行宽")
+                    .child(
+                        control(
+                            "limit-width",
+                            if self.settings.line_width_limited {
+                                "已开启"
+                            } else {
+                                "已关闭"
+                            },
+                        )
+                        .on_click(cx.listener(|panel, _, _, cx| {
+                            panel.settings.line_width_limited = !panel.settings.line_width_limited;
+                            panel.changed(cx);
+                        })),
+                    ),
+            )
+            .child(
+                div()
+                    .p_4()
+                    .rounded(px(5.))
+                    .bg(rgb(0xf7f6f5))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .font_family(if self.settings.interface_font.is_empty() {
+                        SharedString::from("Segoe UI")
+                    } else {
+                        self.settings.interface_font.clone().into()
+                    })
+                    .child("Aa 中文字体")
+                    .child(
+                        div()
+                            .font_family(if self.settings.editor_font.is_empty() {
+                                SharedString::from("Consolas")
+                            } else {
+                                self.settings.editor_font.clone().into()
+                            })
+                            .text_size(px(self.settings.editor_font_size as f32))
+                            .child("\\section{Introduction}"),
+                    ),
+            )
+            .child(
+                div().flex().justify_start().child(
+                    control("reset-appearance", "恢复默认外观").on_click(cx.listener(
+                        |panel, _, window, cx| {
+                            let keybindings = panel.settings.keybindings.clone();
+                            panel.settings = AppSettings {
+                                keybindings,
+                                ..AppSettings::default()
+                            };
+                            let settings = panel.settings.clone();
+                            panel.sync(&settings, window, cx);
+                            panel.interface_font.update(cx, |state, cx| {
+                                state.set_selected_value(&"系统默认".into(), window, cx)
+                            });
+                            panel.editor_font.update(cx, |state, cx| {
+                                state.set_selected_value(&"系统默认".into(), window, cx)
+                            });
+                            panel.changed(cx);
+                        },
+                    )),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn render_shortcuts(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut categories: Vec<&'static str> = Vec::new();
+        for def in SHORTCUT_DEFS {
+            if !categories.contains(&def.category) {
+                categories.push(def.category);
+            }
+        }
+        let sections = categories.into_iter().map(|cat| {
+            let rows = SHORTCUT_DEFS
+                .iter()
+                .filter(|def| def.category == cat)
+                .map(|def| {
+                    let id = def.id;
+                    let current = self.settings.key_for(id);
+                    let is_recording = self.recording == Some(id);
+                    let is_modified = self.settings.keybindings.contains_key(id)
+                        && current != def.default_key;
+                    let conflict = SHORTCUT_DEFS
+                        .iter()
+                        .find(|other| {
+                            other.id != id
+                                && self
+                                    .settings
+                                    .key_for(other.id)
+                                    .eq_ignore_ascii_case(&current)
+                        })
+                        .map(|other| other.label);
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .py_2()
+                        .px_3()
+                        .rounded(px(6.))
+                        .hover(|s| s.bg(rgb(0xf7f6f5)))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(div().text_sm().child(def.label))
+                                .when_some(conflict, |row, other| {
+                                    row.child(
+                                        div()
+                                            .text_xs()
+                                            .px_1p5()
+                                            .py_0p5()
+                                            .rounded(px(4.))
+                                            .bg(rgb(0xfef3c7))
+                                            .text_color(rgb(0xb45309))
+                                            .child(format!("与「{other}」冲突")),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .when(is_modified, |row| {
+                                    row.child(
+                                        crate::ui::control(
+                                            SharedString::from(format!("reset-key-{id}")),
+                                            IconName::RotateCcw,
+                                        )
+                                        .on_click(cx.listener(move |panel, _, _, cx| {
+                                            panel.settings.keybindings.remove(id);
+                                            panel.recording = None;
+                                            panel.changed(cx);
+                                        })),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("record-key-{id}")))
+                                        .px_3()
+                                        .py_1()
+                                        .min_w(px(110.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(5.))
+                                        .border_1()
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .font_family("Consolas")
+                                        .when(is_recording, |badge| {
+                                            badge
+                                                .bg(rgb(0xeef4fb))
+                                                .border_color(rgb(0x4b7bb5))
+                                                .text_color(rgb(0x2b5b94))
+                                                .child("请按下快捷键… (Esc取消)")
+                                        })
+                                        .when(!is_recording, |badge| {
+                                            badge
+                                                .bg(rgb(0xfafaf9))
+                                                .border_color(rgb(0xe2e1dd))
+                                                .text_color(rgb(0x37352f))
+                                                .hover(|s| s.bg(rgb(0xefefed)))
+                                                .child(AppSettings::format_key_badge(&current))
+                                        })
+                                        .on_click(cx.listener(move |panel, _, window, cx| {
+                                            panel.recording = if panel.recording == Some(id) {
+                                                None
+                                            } else {
+                                                Some(id)
+                                            };
+                                            window.focus(&panel.focus, cx);
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                });
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_semibold()
+                        .text_color(rgb(0x787774))
+                        .px_3()
+                        .pb_1()
+                        .child(cat),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .border_1()
+                        .border_color(rgb(0xe8e7e3))
+                        .rounded(px(6.))
+                        .p_1()
+                        .children(rows),
+                )
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_lg().font_semibold().child("快捷键设置"))
+                    .child(
+                        control("reset-all-shortcuts", "全部恢复默认").on_click(cx.listener(
+                            |panel, _, _, cx| {
+                                panel.settings.keybindings.clear();
+                                panel.recording = None;
+                                panel.changed(cx);
+                            },
+                        )),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x787774))
+                    .child("点击右侧按键框后直接按下新的组合键即可修改；在 Markdown 所见即所得模式下还可随时输入 / 呼出快捷块菜单。"),
+            )
+            .children(sections)
+            .into_any_element()
+    }
 }
 fn control(id: impl Into<ElementId>, label: &'static str) -> Stateful<Div> {
     div()
@@ -253,38 +572,134 @@ fn control(id: impl Into<ElementId>, label: &'static str) -> Stateful<Div> {
 }
 impl Render for Preferences {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div().flex().flex_col().gap_5().text_color(rgb(0x37352f))
-            .child(div().text_xl().font_semibold().child("设置"))
-            .child(div().flex().flex_col().gap_2().child("界面字体").child(Select::new(&self.interface_font)))
-            .child(div().flex().flex_col().gap_2().child("编辑器字体").child(Select::new(&self.editor_font)))
-            .child(self.size_row("ui-size", "界面字号", self.settings.interface_font_size, cx))
-            .child(self.size_row("editor-size", "编辑器字号", self.settings.editor_font_size, cx))
-            .child(self.size_row("markdown-size", "Markdown 字号", self.settings.markdown_font_size, cx))
-            .child(div().flex().flex_col().gap_2().child("数学字体").child(Select::new(&self.math_font)))
-            .child(div().flex().flex_col().gap_2()
-                .child(div().flex().justify_between().child("块级公式 / 正文字号").child(format!("{:.1}×", self.settings.math_scale)))
-                .child(Slider::new(&self.math_scale)))
-            .child(div().flex().flex_col().gap_2()
-                .child(div().flex().justify_between().child("行内公式 / 正文字号").child(format!("{:.1}×", self.settings.inline_math_scale)))
-                .child(Slider::new(&self.inline_math_scale)))
-            .child(div().flex().items_center().justify_between().child("编辑器限制行宽")
-                .child(control("limit-width", if self.settings.line_width_limited { "已开启" } else { "已关闭" }).on_click(cx.listener(|panel, _, _, cx| {
-                    panel.settings.line_width_limited = !panel.settings.line_width_limited; panel.changed(cx);
-                }))))
-            .child(div().p_4().rounded(px(5.)).bg(rgb(0xf7f6f5)).flex().flex_col().gap_3()
-                .font_family(if self.settings.interface_font.is_empty() { SharedString::from("Segoe UI") } else { self.settings.interface_font.clone().into() })
-                .child("Aa 中文字体")
-                .child(div().font_family(if self.settings.editor_font.is_empty() { SharedString::from("Consolas") } else { self.settings.editor_font.clone().into() })
-                    .text_size(px(self.settings.editor_font_size as f32)).child("\\section{Introduction}")))
-            .child(div().text_xs().text_color(rgb(0x787774)).child("Ctrl+O 打开项目    Ctrl+S 保存    Ctrl+Enter 编译\nCtrl+P 查找文件    Ctrl+滚轮 缩放"))
-            .child(control("reset-settings", "恢复默认").on_click(cx.listener(|panel, _, window, cx| {
-                panel.settings = AppSettings::default();
-                let settings = panel.settings.clone();
-                panel.sync(&settings, window, cx);
-                panel.interface_font.update(cx, |state, cx| state.set_selected_value(&"系统默认".into(), window, cx));
-                panel.editor_font.update(cx, |state, cx| state.set_selected_value(&"系统默认".into(), window, cx));
+        let nav_item = |id: &'static str,
+                        tab: PreferencesTab,
+                        icon_name: IconName,
+                        title: &'static str,
+                        active: bool,
+                        cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_sm()
+                .when(active, |s| {
+                    s.bg(rgb(0xe8e7e4))
+                        .font_semibold()
+                        .text_color(rgb(0x1f2328))
+                })
+                .when(!active, |s| {
+                    s.text_color(rgb(0x57606a)).hover(|h| h.bg(rgb(0xefefed)))
+                })
+                .child(crate::ui::icon(icon_name))
+                .child(title)
+                .on_click(cx.listener(move |panel, _, _, cx| {
+                    panel.tab = tab;
+                    panel.recording = None;
+                    cx.notify();
+                }))
+        };
+        let body = match self.tab {
+            PreferencesTab::Appearance => self.render_appearance(cx),
+            PreferencesTab::Shortcuts => self.render_shortcuts(cx),
+        };
+        div()
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|panel, event: &KeyDownEvent, _, cx| {
+                let Some(id) = panel.recording else {
+                    return;
+                };
+                cx.stop_propagation();
+                let key = event.keystroke.key.to_ascii_lowercase();
+                if matches!(
+                    key.as_str(),
+                    "control" | "ctrl" | "shift" | "alt" | "meta" | "super" | "win"
+                ) {
+                    return;
+                }
+                if key == "escape"
+                    && !event.keystroke.modifiers.control
+                    && !event.keystroke.modifiers.alt
+                    && !event.keystroke.modifiers.shift
+                {
+                    panel.recording = None;
+                    cx.notify();
+                    return;
+                }
+                let mut parts = Vec::new();
+                if event.keystroke.modifiers.control || event.keystroke.modifiers.platform {
+                    parts.push("ctrl".to_owned());
+                }
+                if event.keystroke.modifiers.alt {
+                    parts.push("alt".to_owned());
+                }
+                if event.keystroke.modifiers.shift {
+                    parts.push("shift".to_owned());
+                }
+                parts.push(key);
+                let combo = parts.join("-");
+                panel.settings.keybindings.insert(id.to_owned(), combo);
+                panel.recording = None;
                 panel.changed(cx);
-            })))
-            .children(self.error.iter().map(|error| div().text_color(rgb(0xa16b60)).child(error.clone())))
+            }))
+            .flex()
+            .w_full()
+            .min_h(px(460.))
+            .gap_6()
+            .text_color(rgb(0x37352f))
+            .child(
+                div()
+                    .w(px(148.))
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .pr_4()
+                    .border_r_1()
+                    .border_color(rgb(0xe8e7e3))
+                    .child(
+                        div()
+                            .px_3()
+                            .pb_2()
+                            .text_base()
+                            .font_semibold()
+                            .child("设置"),
+                    )
+                    .child(nav_item(
+                        "pref-tab-appearance",
+                        PreferencesTab::Appearance,
+                        IconName::Palette,
+                        "外观",
+                        self.tab == PreferencesTab::Appearance,
+                        cx,
+                    ))
+                    .child(nav_item(
+                        "pref-tab-shortcuts",
+                        PreferencesTab::Shortcuts,
+                        IconName::Keyboard,
+                        "快捷键",
+                        self.tab == PreferencesTab::Shortcuts,
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(body)
+                    .children(
+                        self.error
+                            .iter()
+                            .map(|error| div().text_color(rgb(0xa16b60)).child(error.clone())),
+                    ),
+            )
     }
 }

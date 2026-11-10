@@ -1,2 +1,2 @@
 @echo off
-start "" "%~dp0dist\releases\Folio-20261110-191908-067\Folio.exe" %*
+start "" "%~dp0dist\releases\Folio-20261110-203010-974\Folio.exe" %*

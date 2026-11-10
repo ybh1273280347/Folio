@@ -70,8 +70,94 @@ enum BuildEvent {
 #[derive(Clone)]
 enum NameAction {
     Create,
+    CreateFolder,
     RenameFile(String),
     RenameProject(String),
+}
+
+pub fn bind_shortcuts(settings: &AppSettings, cx: &mut App) {
+    let mut bindings = vec![
+        KeyBinding::new("ctrl-c", gpui_kit::component::input::Copy, Some("FolioPdf")),
+        KeyBinding::new("escape", Dismiss, None),
+    ];
+    fn push_key<A: Action>(
+        bindings: &mut Vec<KeyBinding>,
+        key: String,
+        action: A,
+        ctx: Option<&'static str>,
+    ) {
+        let trimmed = key.trim().to_owned();
+        if !trimmed.is_empty() {
+            let static_key: &'static str = Box::leak(trimmed.into_boxed_str());
+            bindings.push(KeyBinding::new(static_key, action, ctx));
+        }
+    }
+    push_key(&mut bindings, settings.key_for("save"), Save, None);
+    push_key(&mut bindings, settings.key_for("save_all"), SaveAll, None);
+    push_key(
+        &mut bindings,
+        settings.key_for("open_project"),
+        OpenProject,
+        None,
+    );
+    push_key(&mut bindings, settings.key_for("compile"), Compile, None);
+    push_key(
+        &mut bindings,
+        settings.key_for("toggle_sidebar"),
+        ToggleSidebar,
+        None,
+    );
+    push_key(&mut bindings, settings.key_for("find_file"), FindFile, None);
+    push_key(&mut bindings, settings.key_for("close_tab"), CloseTab, None);
+    push_key(
+        &mut bindings,
+        settings.key_for("toggle_source"),
+        crate::markdown::ToggleSource,
+        None,
+    );
+    push_key(
+        &mut bindings,
+        settings.key_for("md_bold"),
+        markdown_editor::ToggleBold,
+        Some("BlockEditor"),
+    );
+    push_key(
+        &mut bindings,
+        settings.key_for("md_italic"),
+        markdown_editor::ToggleItalic,
+        Some("BlockEditor"),
+    );
+    push_key(
+        &mut bindings,
+        settings.key_for("md_underline"),
+        markdown_editor::ToggleUnderline,
+        Some("BlockEditor"),
+    );
+    push_key(
+        &mut bindings,
+        settings.key_for("md_strikethrough"),
+        markdown_editor::ToggleStrikethrough,
+        Some("BlockEditor"),
+    );
+    push_key(
+        &mut bindings,
+        settings.key_for("md_code"),
+        markdown_editor::ToggleCode,
+        Some("BlockEditor"),
+    );
+    push_key(
+        &mut bindings,
+        settings.key_for("md_highlight"),
+        markdown_editor::ToggleHighlight,
+        Some("BlockEditor"),
+    );
+    push_key(
+        &mut bindings,
+        settings.key_for("md_link"),
+        markdown_editor::EditLink,
+        Some("BlockEditor"),
+    );
+    cx.bind_keys(bindings);
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Dialog {
@@ -111,6 +197,7 @@ pub struct Workspace {
     collapsed_folders: BTreeSet<String>,
     show_build_preview: bool,
     files: Vec<ProjectFile>,
+    folders: Vec<String>,
     documents: BTreeMap<String, OpenDocument>,
     tabs: Vec<String>,
     active: String,
@@ -171,6 +258,7 @@ impl Workspace {
         let preferences = cx.new(|cx| Preferences::new(settings.clone(), window, cx));
         cx.subscribe(&preferences, |app, _, event: &SettingsChanged, cx| {
             app.settings = event.0.clone();
+            bind_shortcuts(&app.settings, cx);
             app.math.update(cx, |renderer, cx| {
                 renderer.set_appearance(&app.settings, cx)
             });
@@ -227,6 +315,7 @@ impl Workspace {
             collapsed_folders: BTreeSet::new(),
             show_build_preview: true,
             files: Vec::new(),
+            folders: Vec::new(),
             documents: BTreeMap::new(),
             tabs: Vec::new(),
             active: String::new(),
@@ -334,6 +423,7 @@ impl Workspace {
         self.watch_paths.clear();
         self.watch_tree = false;
         self.files = files::list_files(Path::new(&project.folder))?;
+        self.folders = files::list_folders(Path::new(&project.folder)).unwrap_or_default();
         self.documents.clear();
         self.tabs.clear();
         self.active.clear();
@@ -847,6 +937,7 @@ impl Workspace {
         let previous: BTreeSet<_> = self.files.iter().map(|file| file.path.clone()).collect();
         if self.watch_paths.is_empty() || self.watch_tree {
             self.files = files::list_files(&root)?;
+            self.folders = files::list_folders(&root).unwrap_or_default();
         }
         let changed = std::mem::take(&mut self.watch_paths);
         self.queue_math_preload(
@@ -1165,6 +1256,7 @@ impl Workspace {
             NameAction::Create => {
                 files::create_file(&root, &name)?;
                 self.files = files::list_files(&root)?;
+                self.folders = files::list_folders(&root).unwrap_or_default();
                 let file = self
                     .files
                     .iter()
@@ -1172,6 +1264,11 @@ impl Workspace {
                     .expect("new supported file appears in scan")
                     .clone();
                 self.open_file(&file, window, cx)?;
+            }
+            NameAction::CreateFolder => {
+                files::create_folder(&root, &name)?;
+                self.files = files::list_files(&root)?;
+                self.folders = files::list_folders(&root).unwrap_or_default();
             }
             NameAction::RenameFile(path) => {
                 let renamed = files::rename_file(&root, &path, &name)?;
@@ -1237,6 +1334,7 @@ impl Workspace {
                     };
                 }
                 self.files = files::list_files(&root)?;
+                self.folders = files::list_folders(&root).unwrap_or_default();
                 storage::save_projects(&self.config)?;
             }
             NameAction::RenameProject(id) => {
@@ -1553,6 +1651,7 @@ impl Workspace {
             self.tabs.clear();
             self.active.clear();
             self.files.clear();
+            self.folders.clear();
             self.watcher = None;
             self.watch_events = None;
             self.release_build_pdf(window, cx);
@@ -1686,6 +1785,16 @@ impl Workspace {
             String::new()
         };
         let mut entries = BTreeMap::new();
+        for folder in self
+            .folders
+            .iter()
+            .filter(|folder| folder.to_lowercase().contains(&query))
+        {
+            let parts: Vec<_> = folder.split('/').collect();
+            for depth in 1..=parts.len() {
+                entries.insert(parts[..depth].join("/"), true);
+            }
+        }
         for file in self
             .files
             .iter()
@@ -1764,14 +1873,47 @@ impl Workspace {
                         .context_menu(move |menu, _, _| {
                             let full = full.clone();
                             let deleted = deleted.clone();
+                            let folder_prefix = format!("{deleted}/");
+                            let folder_prefix_dir = folder_prefix.clone();
                             let app = app.clone();
+                            let create_file_app = app.clone();
+                            let create_folder_app = app.clone();
                             menu.item(
+                                PopupMenuItem::new("新建文件…").on_click(
+                                    move |_, window, cx| {
+                                        create_file_app.update(cx, |app, cx| {
+                                            app.start_name(
+                                                NameAction::Create,
+                                                &folder_prefix,
+                                                window,
+                                                cx,
+                                            )
+                                        })
+                                    },
+                                ),
+                            )
+                            .item(
+                                PopupMenuItem::new("新建文件夹…").on_click(
+                                    move |_, window, cx| {
+                                        create_folder_app.update(cx, |app, cx| {
+                                            app.start_name(
+                                                NameAction::CreateFolder,
+                                                &folder_prefix_dir,
+                                                window,
+                                                cx,
+                                            )
+                                        })
+                                    },
+                                ),
+                            )
+                            .separator()
+                            .item(
                                 PopupMenuItem::new("在资源管理器中显示")
                                     .on_click(move |_, _, cx| cx.reveal_path(&full)),
                             )
                             .separator()
                             .item(
-                                PopupMenuItem::new("删除文件夹内项目文件…").on_click(
+                                PopupMenuItem::new("删除文件夹…").on_click(
                                     move |_, window, cx| {
                                         app.update(cx, |app, cx| {
                                             app.delete_folder(&deleted, window, cx)
@@ -2033,15 +2175,15 @@ impl Workspace {
                                     }
                                 },
                             )))
-                            .child(button("find-file", "⌕").on_click(cx.listener(
-                                |app, _, window, cx| app.find_file(&FindFile, window, cx),
-                            )))
-                            .child(button("reveal-project", "▱").on_click(cx.listener(
-                                |app, _, _, cx| {
-                                    if let Some(project) = app.project() {
-                                        cx.reveal_path(Path::new(&project.folder));
+                            .child(button("new-folder", "📁+").on_click(cx.listener(
+                                |app, _, window, cx| {
+                                    if app.project().is_some() {
+                                        app.start_name(NameAction::CreateFolder, "", window, cx);
                                     }
                                 },
+                            )))
+                            .child(button("find-file", "⌕").on_click(cx.listener(
+                                |app, _, window, cx| app.find_file(&FindFile, window, cx),
                             ))),
                     ),
             )
@@ -2087,82 +2229,6 @@ impl Workspace {
     }
 
     fn render_editor(&self, cx: &mut Context<Self>) -> AnyElement {
-        let tabs = self.tabs.iter().map(|path| {
-            let open = path.clone();
-            let close = path.clone();
-            let dirty = self
-                .documents
-                .get(path)
-                .is_some_and(|document| document.buffer.is_dirty());
-            let title = Path::new(path)
-                .file_name()
-                .expect("tab has name")
-                .to_string_lossy()
-                .to_string();
-            div()
-                .id(SharedString::from(format!("tab-{path}")))
-                .flex()
-                .items_center()
-                .gap_2()
-                .flex_shrink_0()
-                .max_w(px(240.))
-                .px_3()
-                .h(px(36.))
-                .border_r_1()
-                .border_color(rgb(BORDER))
-                .cursor_pointer()
-                .when(self.active == *path, |tab| {
-                    tab.bg(rgb(0xffffff))
-                        .border_b_2()
-                        .border_color(rgb(0x8aa2b9))
-                })
-                .child(crate::ui::file_icon(
-                    path,
-                    self.files
-                        .iter()
-                        .any(|file| file.path == *path && file.kind == FileKind::Asset),
-                    self.project()
-                        .is_some_and(|project| project.main_file == *path),
-                ))
-                .child(
-                    div()
-                        .min_w_0()
-                        .text_ellipsis()
-                        .when(
-                            self.project()
-                                .is_some_and(|project| project.main_file == *path),
-                            |title| {
-                                title
-                                    .text_color(rgb(crate::ui::MAIN_TEX_COLOR))
-                                    .font_semibold()
-                            },
-                        )
-                        .child(format!("{title}{}", if dirty { " ·" } else { "" })),
-                )
-                .on_click(cx.listener(move |app, _, window, cx| {
-                    let file = app.files.iter().find(|file| file.path == open).cloned();
-                    if let Some(file) = file {
-                        if let Err(error) = app.open_file(&file, window, cx) {
-                            app.report(error, cx);
-                        }
-                    }
-                }))
-                .child(
-                    crate::ui::control(
-                        SharedString::from(format!("close-{path}")),
-                        IconName::Close,
-                    )
-                    .on_click(cx.listener(move |app, _, window, cx| {
-                        cx.stop_propagation();
-                        app.close_tab(&close, window, cx);
-                    })),
-                )
-        });
-        let markdown = self.markdown_panes.get(&self.active).cloned();
-        let outline_pane = markdown.clone();
-        let active_pdf = self.active.to_ascii_lowercase().ends_with(".pdf").then(|| {
-            PathBuf::from(&self.project().expect("PDF tab has project").folder).join(&self.active)
-        });
         let mut area = div()
             .flex()
             .flex_col()
@@ -2171,46 +2237,6 @@ impl Workspace {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|app, _, _, _| app.focused_markdown = None),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_shrink_0()
-                    .h(px(36.))
-                    .bg(rgb(0xfafaf9))
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(
-                        div()
-                            .id("tabs")
-                            .flex()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .overflow_x_scroll()
-                            .children(tabs),
-                    )
-                    .when_some(outline_pane, |bar, pane| {
-                        bar.child(
-                            crate::ui::control("markdown-outline", IconName::ListTree).on_click(
-                                move |_, _, cx| pane.update(cx, |pane, cx| pane.toggle_outline(cx)),
-                            ),
-                        )
-                    })
-                    .when_some(markdown, |bar, pane| {
-                        bar.child(
-                            crate::ui::control("markdown-source", IconName::CodeXml).on_click(
-                                move |_, window, cx| {
-                                    pane.update(cx, |pane, cx| pane.toggle_source(window, cx))
-                                },
-                            ),
-                        )
-                    })
-                    .when_some(active_pdf, |bar, path| {
-                        bar.child(button("export-tab-pdf", "导出").on_click(cx.listener(
-                            move |app, _, window, cx| app.export_pdf(path.clone(), window, cx),
-                        )))
-                    }),
             );
         if let Some(document) = self.documents.get(&self.active) {
             if document.buffer.deleted {
@@ -2993,6 +3019,7 @@ impl Render for Workspace {
         if let Some(action) = &self.name_action {
             let title = match action {
                 NameAction::Create => "新建文件",
+                NameAction::CreateFolder => "新建文件夹",
                 NameAction::RenameFile(_) => "重命名文件",
                 NameAction::RenameProject(_) => "重命名项目",
             };
@@ -3062,7 +3089,7 @@ impl Render for Workspace {
                     .child(
                         div()
                             .relative()
-                            .w(px(520.))
+                            .w(px(680.))
                             .max_h(relative(0.92))
                             .p_7()
                             .rounded(px(8.))
