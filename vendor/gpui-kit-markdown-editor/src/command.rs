@@ -767,6 +767,16 @@ impl BlockEditorModel {
     /// Enter: split the text block (in a list, a new item; in an empty item, exit or outdent).
     pub fn split_block(&mut self) -> Result<(), CommandError> {
         let range = self.resolved()?;
+        if range.is_collapsed() && self.doc.kind(range.start.block) == Some(&BlockKindData::Custom) {
+            return self.transact(EditOrigin::Command("split_block"), |tx| {
+                let (parent, index) = tx.doc.index_in_parent(range.start.block)
+                    .ok_or(PositionError::UnknownBlock(range.start.block))?;
+                let paragraph = DetachedBlock::paragraph(InlineText::new());
+                let id = paragraph.id;
+                tx.insert(parent, index + usize::from(range.start.offset > 0), vec![paragraph])?;
+                Ok(caret(BlockPosition::new(id, 0)))
+            }).map(|_| ());
+        }
         // Enter in an empty heading: a paragraph, not another heading.
         if range.is_collapsed()
             && matches!(
@@ -1207,14 +1217,29 @@ impl BlockEditorModel {
         {
             return Ok(false);
         }
+        let ends_with_custom_block = matches!(
+            blocks.last().map(|block| &block.content),
+            Some(DetachedContent::Leaf(BlockContent::Atom(super::document::AtomData::Custom(_))))
+        );
         if let Some((parent, range)) = self.selected_blocks() {
-            // Replacing a formula must not move insertion into its neighbouring
-            // atom: consecutive formula blocks are not editable paragraphs.
             self.transact(EditOrigin::Paste, |tx| {
                 let start = range.start;
                 let last = blocks.last().expect("parsed paste has blocks").id;
                 tx.remove(parent, range)?;
                 tx.insert(parent, start, blocks)?;
+                if ends_with_custom_block {
+                    let (_, index) = tx.doc.index_in_parent(last).expect("inserted block has parent");
+                    let next = tx.doc.children(parent).get(index + 1).copied();
+                    if let Some(next) = next.filter(|id| tx.doc.inline(*id).is_some()) {
+                        return Ok(caret(BlockPosition::new(next, 0)));
+                    }
+                    // A formula is atomic; give the caret an editable place even
+                    // when the following block is another formula or the document ends.
+                    let paragraph = DetachedBlock::paragraph(InlineText::new());
+                    let id = paragraph.id;
+                    tx.insert(parent, index + 1, vec![paragraph])?;
+                    return Ok(caret(BlockPosition::new(id, 0)));
+                }
                 Ok(caret(tx.doc.last_leaf_in(last)))
             })?;
             return Ok(true);
@@ -1281,7 +1306,9 @@ impl BlockEditorModel {
             if !merged_head && tx.doc.leaf_len(left) == Some(0) {
                 tx.remove_block(left)?;
             }
+            // An atomic custom block needs the empty right paragraph for further typing.
             if tail.is_none()
+                && !ends_with_custom_block
                 && tx.doc.leaf_len(right) == Some(0)
                 && let Some(last) = last
             {

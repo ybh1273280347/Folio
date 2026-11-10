@@ -50,6 +50,7 @@ actions!(
         ToggleSidebar,
         FindFile,
         CloseTab,
+        UndoFileDelete,
         Dismiss
     ]
 );
@@ -78,6 +79,7 @@ enum NameAction {
 pub fn bind_shortcuts(settings: &AppSettings, cx: &mut App) {
     let mut bindings = vec![
         KeyBinding::new("ctrl-c", gpui_kit::component::input::Copy, Some("FolioPdf")),
+        KeyBinding::new("ctrl-z", UndoFileDelete, Some("FolioFileTree")),
         KeyBinding::new("escape", Dismiss, None),
     ];
     fn push_key<A: Action>(
@@ -165,6 +167,7 @@ enum Dialog {
     CloseTab,
     DeleteFile,
     DeleteFolder,
+    DeleteSelected,
     RemoveProject,
 }
 #[derive(Clone)]
@@ -195,6 +198,9 @@ pub struct Workspace {
     focused_markdown: Option<String>,
     markdown_changed: BTreeSet<String>,
     collapsed_folders: BTreeSet<String>,
+    selected_files: BTreeSet<String>,
+    deleted_files: Vec<(String, Vec<(String, Vec<u8>)>, String)>,
+    file_tree_focus: FocusHandle,
     show_build_preview: bool,
     files: Vec<ProjectFile>,
     folders: Vec<String>,
@@ -210,6 +216,12 @@ pub struct Workspace {
     cancellation: Option<Arc<AtomicBool>>,
     build_status: BuildStatus,
     build_target: String,
+    batch_queue: std::collections::VecDeque<String>,
+    batch_next: Option<Instant>,
+    batch_target: Option<String>,
+    batch_logs: String,
+    batch_failed: bool,
+    batch_running: bool,
     build_started: Option<Instant>,
     build_duration: Duration,
     logs: String,
@@ -218,6 +230,7 @@ pub struct Workspace {
     build_pdf: Option<Entity<PdfPane>>,
     pdf_panes: BTreeMap<String, Entity<PdfPane>>,
     notice: Option<String>,
+    notice_until: Option<Instant>,
     name_action: Option<NameAction>,
     name_input: Entity<InputState>,
     focus: FocusHandle,
@@ -313,7 +326,10 @@ impl Workspace {
             focused_markdown: None,
             markdown_changed: BTreeSet::new(),
             collapsed_folders: BTreeSet::new(),
-            show_build_preview: true,
+            selected_files: BTreeSet::new(),
+            deleted_files: Vec::new(),
+            file_tree_focus: cx.focus_handle(),
+            show_build_preview: false,
             files: Vec::new(),
             folders: Vec::new(),
             documents: BTreeMap::new(),
@@ -328,6 +344,12 @@ impl Workspace {
             cancellation: None,
             build_status: BuildStatus::Idle,
             build_target: String::new(),
+            batch_queue: Default::default(),
+            batch_next: None,
+            batch_target: None,
+            batch_logs: String::new(),
+            batch_failed: false,
+            batch_running: false,
             build_started: None,
             build_duration: Duration::ZERO,
             logs: String::new(),
@@ -336,6 +358,7 @@ impl Workspace {
             build_pdf: None,
             pdf_panes: BTreeMap::new(),
             notice: None,
+            notice_until: None,
             name_action: None,
             name_input,
             focus: cx.focus_handle(),
@@ -368,6 +391,7 @@ impl Workspace {
     }
     fn report(&mut self, error: impl std::fmt::Display, cx: &mut Context<Self>) {
         self.notice = Some(error.to_string());
+        self.notice_until = Some(Instant::now() + Duration::from_millis(2000));
         cx.notify();
     }
     fn export_pdf(&mut self, source: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -438,6 +462,7 @@ impl Workspace {
         self.focused_markdown = None;
         self.markdown_changed.clear();
         self.collapsed_folders.clear();
+        self.selected_files.clear();
         let previous_pdf = storage::data_directory()?
             .join("builds")
             .join(&project.id)
@@ -469,7 +494,7 @@ impl Workspace {
     }
     fn switch_project(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let retry_id = id.to_owned();
-        if self.cancellation.is_some()
+        if self.cancellation.is_some() || self.batch_running
             || !self.confirm_drafts(window, cx, move |app, window, cx| {
                 app.switch_project(&retry_id, window, cx)
             })
@@ -491,7 +516,7 @@ impl Workspace {
         }
     }
     fn add_project(&mut self, _: &OpenProject, window: &mut Window, cx: &mut Context<Self>) {
-        if self.cancellation.is_some()
+        if self.cancellation.is_some() || self.batch_running
             || !self.confirm_drafts(window, cx, |app, window, cx| {
                 app.add_project(&OpenProject, window, cx)
             })
@@ -1002,6 +1027,11 @@ impl Workspace {
         Ok(())
     }
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.notice_until.is_some_and(|deadline| Instant::now() >= deadline) {
+            self.notice = None;
+            self.notice_until = None;
+            cx.notify();
+        }
         for path in std::mem::take(&mut self.markdown_changed) {
             if let Some(document) = self.documents.get(&path) {
                 for key in [&path, &format!("reading:{path}")] {
@@ -1140,16 +1170,71 @@ impl Workspace {
                         }
                         Err(error) => {
                             self.build_status = BuildStatus::Failed;
+                            self.logs.push_str(&format!("\n{error}\n"));
                             self.report(error, cx);
                             self.show_logs = true;
+                        }
+                    }
+                    if self.batch_running {
+                        self.batch_logs.push_str(&format!("\n===== {} =====\n{}\n", self.build_target, self.logs));
+                        self.batch_failed |= self.build_status == BuildStatus::Failed;
+                        if self.build_status != BuildStatus::Cancelled && !self.batch_queue.is_empty() {
+                            self.prepare_batch_next(window, cx);
+                        } else {
+                            self.batch_running = false;
+                            self.logs = std::mem::take(&mut self.batch_logs);
+                            if self.batch_failed { self.build_status = BuildStatus::Failed; self.show_logs = true; }
                         }
                     }
                     cx.notify();
                 }
             }
         }
+        if self.batch_next.is_some_and(|time| time.elapsed() >= Duration::from_millis(250)) {
+            self.batch_next = None;
+            self.compile(&Compile, window, cx);
+        }
     }
+    fn compile_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cancellation.is_some() || self.batch_running { return; }
+        let targets: Vec<_> = self.selected_files.iter().filter(|path| {
+            let lower = path.to_lowercase();
+            lower.ends_with(".tex") || lower.ends_with(".md")
+        }).cloned().collect();
+        if targets.is_empty() { self.report("请选择要编译的 .tex 或 .md 文件。", cx); return; }
+        let mut outputs = BTreeSet::new();
+        if targets.iter().any(|target| !outputs.insert(Path::new(target).with_extension("pdf").to_string_lossy().to_lowercase())) {
+            self.report("所选文件会生成同名 PDF，请分开编译。", cx);
+            return;
+        }
+        if !self.save_all(cx) { return; }
+        self.batch_queue = targets.into();
+        self.batch_logs.clear();
+        self.batch_failed = false;
+        self.batch_running = true;
+        self.prepare_batch_next(window, cx);
+    }
+
+    fn prepare_batch_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.batch_queue.pop_front().unwrap();
+        let file = self.files.iter().find(|file| file.path == target).cloned();
+        let result = file.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "待编译文件不存在"))
+            .and_then(|file| self.open_file(&file, window, cx));
+        if let Err(error) = result {
+            self.batch_running = false;
+            self.batch_queue.clear();
+            self.report(error, cx);
+            return;
+        }
+        // Markdown export captures the rendered pane, so let GPUI paint it first.
+        self.batch_target = Some(target);
+        self.batch_next = Some(Instant::now());
+        cx.notify();
+    }
+
     fn cancel_build(&mut self) {
+        self.batch_queue.clear();
+        self.batch_next = None;
         if let Some(cancelled) = &self.cancellation {
             cancelled.store(true, Ordering::Relaxed);
         }
@@ -1166,33 +1251,54 @@ impl Workspace {
     }
 
     fn compile(&mut self, _: &Compile, _: &mut Window, cx: &mut Context<Self>) {
+        if self.batch_running && self.batch_next.is_some() {
+            self.batch_next = None;
+            self.batch_target = None;
+            self.batch_queue.clear();
+            self.batch_running = false;
+            self.build_status = BuildStatus::Cancelled;
+            cx.notify();
+            return;
+        }
         if self.cancellation.is_some() {
             self.cancel_build();
             return;
         }
-        let Some(project) = self.project().cloned() else {
+        let Some(mut project) = self.project().cloned() else {
             return;
         };
         // Match the original app: a focused Markdown split overrides the active
         // tab; other files use the project's configured TeX entry point.
-        let Some(target) = self.compile_target().map(str::to_owned) else {
+        let Some(target) = self.batch_target.take().or_else(|| self.compile_target().map(str::to_owned)) else {
             self.report("请选择一个 .tex 文件作为编译主文件。", cx);
             return;
         };
         if !self.save_all(cx) {
+            self.batch_running = false;
+            self.batch_queue.clear();
             return;
         }
-        let build_root = match storage::data_directory() {
+        let mut build_root = match storage::data_directory() {
             Ok(path) => path.join("builds"),
             Err(error) => {
+                self.batch_running = false;
+                self.batch_queue.clear();
                 self.report(error, cx);
                 return;
             }
         };
+        if self.batch_running {
+            use sha2::{Digest, Sha256};
+            // Different directories can contain TeX sources with the same stem;
+            // their latexmk work files must not share an output directory.
+            let hash: String = Sha256::digest(target.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
+            build_root = build_root.join(format!("batch-{hash}"));
+        }
         let markdown = target
             .to_lowercase()
             .ends_with(".md")
             .then(|| target.clone());
+        if markdown.is_none() { project.main_file = target.clone(); }
         let cancelled = Arc::new(AtomicBool::new(false));
         self.build_version = self.source_version;
         self.build_target = target;
@@ -1362,7 +1468,7 @@ impl Workspace {
         if self.ask(
             Dialog::DeleteFile,
             format!("删除 {path}？"),
-            "文件及其未保存草稿将删除。".into(),
+            "删除后可在文件树中按 Ctrl+Z 撤销。".into(),
             DialogButtons::Confirm("删除".into()),
             window,
             cx,
@@ -1371,39 +1477,7 @@ impl Workspace {
         {
             return;
         }
-        let root = PathBuf::from(&self.project().expect("file has project").folder);
-        if let Err(error) = files::delete_file(&root, path) {
-            self.report(error, cx);
-            return;
-        }
-        self.documents.remove(path);
-        self.release_pdf_pane(path, window, cx);
-        self.release_pdf_pane(&format!("reading:{path}"), window, cx);
-        if self.focused_markdown.as_deref() == Some(path) {
-            self.focused_markdown = None;
-        }
-        self.markdown_panes.remove(path);
-        self.markdown_panes.remove(&format!("reading:{path}"));
-        self.reading_panes.retain(|pane| pane != path);
-        self.tabs.retain(|file| file != path);
-        if self.active == path {
-            self.active = self.tabs.last().cloned().unwrap_or_default();
-        }
-        let project = self
-            .config
-            .projects
-            .iter_mut()
-            .find(|project| Some(&project.id) == self.config.active_id.as_ref())
-            .expect("active project exists");
-        if project.main_file == path {
-            project.main_file.clear();
-        }
-        if let Err(error) = storage::save_projects(&self.config) {
-            self.report(error, cx);
-        }
-        if let Err(error) = self.refresh_files(window, cx) {
-            self.report(error, cx);
-        }
+        self.delete_paths(vec![path.to_owned()], window, cx);
     }
 
     fn delete_folder(&mut self, folder: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1423,59 +1497,99 @@ impl Workspace {
         {
             return;
         }
-        let root = PathBuf::from(&self.project().expect("folder has project").folder);
-        if let Err(error) = files::delete_folder_files(&root, folder) {
-            self.report(error, cx);
+        let prefix = format!("{folder}/");
+        let paths = self.files.iter().filter(|file| file.path.starts_with(&prefix))
+            .map(|file| file.path.clone()).collect();
+        self.delete_paths(paths, window, cx);
+    }
+
+    fn delete_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_files.is_empty() || self.cancellation.is_some() { return; }
+        if self.ask(Dialog::DeleteSelected, format!("删除选中的 {} 个文件？", self.selected_files.len()),
+            "删除后可在文件树中按 Ctrl+Z 撤销。".into(), DialogButtons::Confirm("删除".into()),
+            window, cx, |app, window, cx| app.delete_selected(window, cx)) != Some(rfd::MessageDialogResult::Ok) { return; }
+        self.delete_paths(self.selected_files.iter().cloned().collect(), window, cx);
+    }
+
+    fn delete_paths(&mut self, paths: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if paths.is_empty() { return; }
+        for path in &paths {
+            if self.documents.get(path).is_some_and(|document| document.buffer.is_dirty() || document.buffer.conflict.is_some()) {
+                match self.save_file(path, false, cx) {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(error) => { self.report(error, cx); return; }
+                }
+            }
+        }
+        let project = self.project().expect("files have a project").clone();
+        let root = Path::new(&project.folder);
+        let mut deleted = Vec::new();
+        let mut failed = false;
+        for path in paths {
+            let result = files::project_path(root, &path).and_then(|full| {
+                let bytes = std::fs::read(&full)?;
+                std::fs::remove_file(full)?;
+                Ok(bytes)
+            });
+            let bytes = match result { Ok(bytes) => bytes, Err(error) => { failed = true; self.report(error, cx); break; } };
+            deleted.push((path.clone(), bytes));
+            self.documents.remove(&path);
+            self.release_pdf_pane(&path, window, cx);
+            self.release_pdf_pane(&format!("reading:{path}"), window, cx);
+            self.markdown_panes.remove(&path);
+            self.markdown_panes.remove(&format!("reading:{path}"));
+            self.reading_panes.retain(|pane| pane != &path);
+            self.tabs.retain(|tab| tab != &path);
+            self.selected_files.remove(&path);
+            if self.focused_markdown.as_deref() == Some(&path) { self.focused_markdown = None; }
+        }
+        if deleted.is_empty() { return; }
+        if !self.tabs.contains(&self.active) { self.active = self.tabs.last().cloned().unwrap_or_default(); }
+        let main = project.main_file.clone();
+        if deleted.iter().any(|(path, _)| path == &main) {
+            self.config.projects.iter_mut().find(|p| p.id == project.id).unwrap().main_file.clear();
+            if let Err(error) = storage::save_projects(&self.config) { self.report(error, cx); }
+        }
+        self.deleted_files.push((project.id, deleted, main));
+        if let Err(error) = self.refresh_files(window, cx) { self.report(error, cx); }
+        self.file_tree_focus.focus(window, cx);
+        if !failed { self.report("已删除，按 Ctrl+Z 撤销。", cx); }
+        cx.notify();
+    }
+
+    fn undo_file_delete(&mut self, _: &UndoFileDelete, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((project_id, mut files, main)) = self.deleted_files.pop() else { return; };
+        if self.project().is_none_or(|project| project.id != project_id) {
+            self.deleted_files.push((project_id, files, main));
+            self.report("请切回删除文件时所在的项目。", cx);
             return;
         }
-        let prefix = format!("{folder}/");
-        self.documents.retain(|path, _| !path.starts_with(&prefix));
-        self.tabs.retain(|path| !path.starts_with(&prefix));
-        let removed_pdf_panes: Vec<_> = self
-            .pdf_panes
-            .keys()
-            .filter(|path| {
-                path.strip_prefix("reading:")
-                    .unwrap_or(path)
-                    .starts_with(&prefix)
-            })
-            .cloned()
-            .collect();
-        for path in removed_pdf_panes {
-            self.release_pdf_pane(&path, window, cx);
+        let root = PathBuf::from(&self.project().unwrap().folder);
+        // create_new prevents undo from overwriting a file created after deletion.
+        while let Some((path, bytes)) = files.pop() {
+            let result = (|| -> io::Result<()> {
+                use std::io::Write;
+                let relative = Path::new(&path);
+                let parent = relative.parent().unwrap();
+                let parent = if parent.as_os_str().is_empty() { dunce::canonicalize(&root)? }
+                    else { files::project_path(&root, &parent.to_string_lossy())? };
+                let target = parent.join(relative.file_name().unwrap());
+                std::fs::OpenOptions::new().write(true).create_new(true).open(target)?.write_all(&bytes)
+            })();
+            if let Err(error) = result {
+                files.push((path, bytes));
+                self.deleted_files.push((project_id, files, main));
+                self.report(error, cx);
+                if let Err(error) = self.refresh_files(window, cx) { self.report(error, cx); }
+                return;
+            }
         }
-        self.reading_panes.retain(|path| !path.starts_with(&prefix));
-        if self
-            .focused_markdown
-            .as_ref()
-            .is_some_and(|path| path.starts_with(&prefix))
-        {
-            self.focused_markdown = None;
-        }
-        self.markdown_panes.retain(|path, _| {
-            !path
-                .strip_prefix("reading:")
-                .unwrap_or(path)
-                .starts_with(&prefix)
-        });
-        if self.active.starts_with(&prefix) {
-            self.active = self.tabs.last().cloned().unwrap_or_default();
-        }
-        let project = self
-            .config
-            .projects
-            .iter_mut()
-            .find(|project| Some(&project.id) == self.config.active_id.as_ref())
-            .expect("active project exists");
-        if project.main_file.starts_with(&prefix) {
-            project.main_file.clear();
-        }
-        if let Err(error) = storage::save_projects(&self.config) {
-            self.report(error, cx);
-        }
-        if let Err(error) = self.refresh_files(window, cx) {
-            self.report(error, cx);
-        }
+        let project = self.config.projects.iter_mut().find(|p| p.id == project_id).unwrap();
+        if project.main_file.is_empty() && root.join(&main).is_file() { project.main_file = main; }
+        if let Err(error) = storage::save_projects(&self.config) { self.report(error, cx); }
+        if let Err(error) = self.refresh_files(window, cx) { self.report(error, cx); }
+        cx.notify();
     }
 
     fn set_engine(&mut self, engine: Engine, cx: &mut Context<Self>) {
@@ -1701,6 +1815,7 @@ impl Workspace {
                     row.bg(rgb(0xe8e7e4))
                 })
                 .hover(|style| style.bg(rgb(0xefefed)))
+                .active(|style| style.bg(rgb(crate::ui::PRESSED_BG)))
                 .child(crate::ui::icon(IconName::Folder))
                 .child(
                     div()
@@ -1833,6 +1948,7 @@ impl Workspace {
                         .pl(px(12. + depth as f32 * 15.))
                         .cursor_pointer()
                         .hover(|style| style.bg(rgb(0xefefed)))
+                        .active(|style| style.bg(rgb(crate::ui::PRESSED_BG)))
                         .child(crate::ui::icon(if self.collapsed_folders.contains(path) {
                             IconName::ChevronRight
                         } else {
@@ -1939,6 +2055,7 @@ impl Workspace {
                 let row_split = file.clone();
                 let row_rename = file.path.clone();
                 let row_delete = file.path.clone();
+                let selected_path = file.path.clone();
                 let menu_app = cx.entity();
                 let row_name = Path::new(path)
                     .file_name()
@@ -1951,17 +2068,54 @@ impl Workspace {
                     .expect("file has name")
                     .to_string_lossy()
                     .to_string();
+                let is_selected = self.selected_files.contains(path);
                 div()
                     .id(SharedString::from(format!("file-{}", file.path)))
                     .flex()
                     .items_center()
                     .h(px(29.))
-                    .pl(px(16. + depth as f32 * 15.))
+                    .pl(px(14. + depth as f32 * 15.))
                     .pr_2()
                     .gap_2()
                     .cursor_pointer()
                     .when(self.active == file.path, |row| row.bg(rgb(0xe8e7e4)))
                     .hover(|style| style.bg(rgb(0xefefed)))
+                    .active(|style| style.bg(rgb(crate::ui::PRESSED_BG)))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("select-{path}")))
+                            .w(px(15.))
+                            .h(px(15.))
+                            .rounded(px(3.5))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .when(is_selected, |s| {
+                                s.bg(rgb(0x165dff))
+                                    .border_1()
+                                    .border_color(rgb(0x165dff))
+                                    .text_color(rgb(0xffffff))
+                                    .active(|a| a.bg(rgb(0x0e42d2)).border_color(rgb(0x0e42d2)))
+                                    .child(crate::ui::icon(IconName::Check).w(px(10.)).h(px(10.)))
+                            })
+                            .when(!is_selected, |s| {
+                                s.bg(rgb(0xffffff))
+                                    .border_1()
+                                    .border_color(rgb(0xc4c7cc))
+                                    .hover(|h| h.border_color(rgb(0x165dff)).bg(rgb(0xf2f7ff)))
+                                    .active(|a| a.border_color(rgb(0x0e42d2)).bg(rgb(0xdde9f6)))
+                            })
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                cx.stop_propagation();
+                                if !app.selected_files.remove(&selected_path) {
+                                    app.selected_files.insert(selected_path.clone());
+                                }
+                                app.file_tree_focus.focus(window, cx);
+                                cx.notify();
+                            })),
+                    )
                     .child(crate::ui::file_icon(
                         &file.path,
                         file.kind == FileKind::Asset,
@@ -2206,9 +2360,76 @@ impl Workspace {
                         ),
                 )
             })
+            .when(!self.selected_files.is_empty(), |sidebar| {
+                let sel_count = self.selected_files.len();
+                sidebar.child(
+                    div()
+                        .mx_2()
+                        .mb_2()
+                        .px_2()
+                        .py_1p5()
+                        .rounded(px(6.))
+                        .bg(rgb(0xf7f6f3))
+                        .border_1()
+                        .border_color(rgb(0xe8e7e3))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_1p5()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x787774))
+                                        .child(format!("已选 {sel_count} 项")),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    crate::ui::button_secondary("batch-compile", "编译")
+                                        .min_h(px(22.))
+                                        .py_0p5()
+                                        .text_xs()
+                                        .on_click(cx.listener(|app, _, window, cx| {
+                                            app.compile_selected(window, cx)
+                                        })),
+                                )
+                                .child(
+                                    crate::ui::button_danger_soft("batch-delete", "")
+                                        .min_h(px(22.))
+                                        .py_0p5()
+                                        .gap_1()
+                                        .text_xs()
+                                        .child(crate::ui::icon(IconName::Trash).w(px(11.)).h(px(11.)))
+                                        .child("删除")
+                                        .on_click(cx.listener(|app, _, window, cx| {
+                                            app.delete_selected(window, cx)
+                                        })),
+                                )
+                                .child(
+                                    crate::ui::control("clear-selection", IconName::Close)
+                                        .on_click(cx.listener(|app, _, _, cx| {
+                                            app.selected_files.clear();
+                                            cx.notify();
+                                        })),
+                                ),
+                        ),
+                )
+            })
             .child(
                 div()
                     .id("file-tree-scroll")
+                    .key_context("FolioFileTree")
+                    .track_focus(&self.file_tree_focus)
+                    .on_action(cx.listener(Self::undo_file_delete))
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -2446,7 +2667,7 @@ impl Workspace {
                         "编译后在此查看文档"
                     })
                     .when_some(self.preview.clone(), |area, path| {
-                        area.child(button("open-output", "打开生成的 PDF").on_click(
+                        area.child(crate::ui::button_secondary("open-output", "打开生成的 PDF").on_click(
                             move |_, _, cx| {
                                 cx.open_url(&format!(
                                     "file:///{}",
@@ -2461,19 +2682,7 @@ impl Workspace {
 }
 
 fn button(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .min_h(px(27.))
-        .px_2()
-        .py_1()
-        .rounded(px(4.))
-        .cursor_pointer()
-        .hover(|style| style.bg(rgb(0xefefed)))
-        .child(crate::ui::label(text.into()))
+    crate::ui::button(id, text)
 }
 
 impl Render for Workspace {
@@ -2927,6 +3136,7 @@ impl Render for Workspace {
                                     .h_full()
                                     .rounded_none()
                                     .hover(|s| s.bg(rgb(0xdf5151)).text_color(rgb(0xffffff)))
+                                    .active(|s| s.bg(rgb(0xb92d2d)).text_color(rgb(0xffffff)))
                                     .window_control_area(WindowControlArea::Close),
                             ),
                     ),
@@ -2979,24 +3189,6 @@ impl Render for Workspace {
                     ),
                 ),
             )
-            .when_some(self.notice.clone(), |app, notice| {
-                app.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .px_4()
-                        .py_2()
-                        .bg(rgb(0xfff4e5))
-                        .child(div().flex_1().child(notice))
-                        .child(button("dismiss-notice", "×").on_click(cx.listener(
-                            |app, _, _, cx| {
-                                app.notice = None;
-                                cx.notify();
-                            },
-                        ))),
-                )
-            })
             .child(
                 div()
                     .flex()
@@ -3015,7 +3207,46 @@ impl Render for Workspace {
                     )
                     .children(save_status)
                     .child("Ctrl+S 保存  ·  Ctrl+F 查找  ·  Ctrl+Enter 编译"),
-            );
+            )
+            .when_some(self.notice.clone(), |app, notice| {
+                app.child(
+                    div()
+                        .id("notice-toast")
+                        .absolute()
+                        .bottom(px(32.))
+                        .right_3()
+                        .max_w(px(360.))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .pl_3()
+                        .pr_1p5()
+                        .py_1p5()
+                        .rounded(px(8.))
+                        .bg(rgb(0xfffaf0))
+                        .border_1()
+                        .border_color(rgb(0xf0dec0))
+                        .shadow_md()
+                        .text_xs()
+                        .text_color(rgb(0x5c4628))
+                        .child(div().flex_1().min_w_0().child(notice))
+                        .child(
+                            crate::ui::control("dismiss-notice", IconName::Close)
+                                .size(px(20.))
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.notice = None;
+                                    app.notice_until = None;
+                                    cx.notify();
+                                })),
+                        )
+                        .with_animation(
+                            "notice-toast-in",
+                            Animation::new(Duration::from_millis(140))
+                                .with_easing(ease_out_quint()),
+                            |toast, t| toast.opacity(t),
+                        ),
+                )
+            });
         if let Some(action) = &self.name_action {
             let title = match action {
                 NameAction::Create => "新建文件",
@@ -3036,6 +3267,9 @@ impl Render for Workspace {
                             .w(px(420.))
                             .p_6()
                             .rounded(px(8.))
+                            .border_1()
+                            .border_color(rgb(0xe6e5e1))
+                            .shadow_lg()
                             .bg(rgb(0xffffff))
                             .flex()
                             .flex_col()
@@ -3060,13 +3294,13 @@ impl Render for Workspace {
                                     .flex()
                                     .justify_end()
                                     .gap_3()
-                                    .child(button("cancel-name", "取消").on_click(cx.listener(
+                                    .child(crate::ui::button_secondary("cancel-name", "取消").on_click(cx.listener(
                                         |app, _, _, cx| {
                                             app.name_action = None;
                                             cx.notify();
                                         },
                                     )))
-                                    .child(button("apply-name", "确定").on_click(cx.listener(
+                                    .child(crate::ui::button_primary("apply-name", "确定").on_click(cx.listener(
                                         |app, _, window, cx| {
                                             if let Err(error) = app.apply_name(window, cx) {
                                                 app.report(error, cx);
@@ -3093,9 +3327,12 @@ impl Render for Workspace {
                             .max_h(relative(0.92))
                             .p_7()
                             .rounded(px(8.))
+                            .border_1()
+                            .border_color(rgb(0xe6e5e1))
+                            .shadow_lg()
                             .bg(rgb(0xffffff))
                             .child(
-                                button("close-preferences", "×")
+                                crate::ui::control("close-preferences", IconName::Close)
                                     .absolute()
                                     .top_3()
                                     .right_3()
@@ -3117,6 +3354,8 @@ impl Render for Workspace {
             );
         }
         if let Some(prompt) = self.dialog_prompt.clone() {
+            // Confirm dialogs are only used for destructive actions.
+            let destructive = matches!(prompt.buttons, DialogButtons::Confirm(_));
             let choices = match prompt.buttons {
                 DialogButtons::SaveDiscardCancel => vec![
                     (
@@ -3137,12 +3376,14 @@ impl Render for Workspace {
                     .into_iter()
                     .enumerate()
                     .map(|(index, (label, result, primary))| {
-                        let button = button(("prompt-choice", index), label)
-                            .px_3()
-                            .when(primary, |button| {
-                                button.bg(rgb(0x5c7f9f)).text_color(rgb(0xffffff))
-                            })
-                            .on_click(cx.listener(move |app, _, window, cx| {
+                        let id = ("prompt-choice", index);
+                        let button = match (primary, destructive) {
+                            (true, true) => crate::ui::button_danger(id, label),
+                            (true, false) => crate::ui::button_primary(id, label),
+                            (false, _) => crate::ui::button_secondary(id, label).px_3(),
+                        }
+                        .min_w(px(64.))
+                        .on_click(cx.listener(move |app, _, window, cx| {
                                 app.answer_dialog(result.clone(), window, cx)
                             }));
                         button.into_any_element()

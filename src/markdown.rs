@@ -10,6 +10,7 @@ use gpui_kit::{
     component::{
         input::{Editor, EditorState, Input, InputEvent, InputState, Position},
         menu::ContextMenuExt,
+        resizable::{h_resizable, resizable_panel},
     },
     prelude::FluentBuilder,
     *,
@@ -219,6 +220,7 @@ pub struct MarkdownPane {
     image_error: Option<String>,
     // Slash menu state
     slash_index: usize,
+    slash_scroll: ScrollHandle,
     dismissed_slash_prefix: Option<String>,
     // Floating selection toolbar sub-popovers
     show_turn_into: bool,
@@ -237,6 +239,8 @@ pub struct MarkdownPane {
     // Annotations (Chrome-style highlights & comments)
     annotations: Vec<AnnotationItem>,
     active_annotation_id: Option<u64>,
+    selected_annotation_id: Option<u64>,
+    annotation_list_focus: FocusHandle,
     show_annotations_drawer: bool,
     note_input: Entity<InputState>,
     _source_subscription: Subscription,
@@ -394,6 +398,7 @@ impl MarkdownPane {
                     "up" => {
                         pane.update(cx, |pane, cx| {
                             pane.slash_index = (pane.slash_index + count - 1) % count;
+                            pane.scroll_slash_item_into_view(pane.slash_index);
                             cx.notify();
                         });
                         true
@@ -401,6 +406,7 @@ impl MarkdownPane {
                     "down" => {
                         pane.update(cx, |pane, cx| {
                             pane.slash_index = (pane.slash_index + 1) % count;
+                            pane.scroll_slash_item_into_view(pane.slash_index);
                             cx.notify();
                         });
                         true
@@ -623,6 +629,7 @@ impl MarkdownPane {
             pending_image: None,
             image_error: None,
             slash_index: 0,
+            slash_scroll: ScrollHandle::new(),
             dismissed_slash_prefix: None,
             show_turn_into: false,
             show_color_picker: false,
@@ -637,6 +644,8 @@ impl MarkdownPane {
             block_menu_for: None,
             annotations,
             active_annotation_id: None,
+            selected_annotation_id: None,
+            annotation_list_focus: cx.focus_handle(),
             show_annotations_drawer: false,
             note_input,
             _source_subscription: source_subscription,
@@ -753,28 +762,19 @@ impl MarkdownPane {
         Some((token_len, query, items))
     }
 
-    fn handle_slash_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some((token_len, _, items)) = self.active_slash_state(cx) else {
-            return false;
-        };
-        let count = items.len();
-        match key {
-            "up" => {
-                self.slash_index = (self.slash_index + count - 1) % count;
-                cx.notify();
-                true
-            }
-            "down" => {
-                self.slash_index = (self.slash_index + 1) % count;
-                cx.notify();
-                true
-            }
-            "enter" | "tab" => {
-                let cmd = items[self.slash_index.min(count - 1)];
-                self.execute_slash_command(cmd.id, token_len, window, cx);
-                true
-            }
-            _ => false,
+    fn scroll_slash_item_into_view(&self, index: usize) {
+        let item_h = 41.0;
+        let viewport_h = 320.0;
+        let top_y = index as f32 * item_h;
+        let bottom_y = top_y + item_h;
+        let current_scroll = f32::from(-self.slash_scroll.offset().y).max(0.0);
+
+        if top_y < current_scroll {
+            let target = top_y.max(0.0);
+            self.slash_scroll.set_offset(point(px(0.), px(-target)));
+        } else if bottom_y > current_scroll + viewport_h {
+            let target = bottom_y - viewport_h + 4.0;
+            self.slash_scroll.set_offset(point(px(0.), px(-target)));
         }
     }
 
@@ -927,6 +927,14 @@ impl MarkdownPane {
 
     fn clear_highlight(&mut self, cx: &mut Context<Self>) {
         self.visual_editor.update(cx, |editor, cx| {
+            // A caret inside a highlight targets the whole marked span; an
+            // explicit selection continues to target only the selected text.
+            if let Some((block, range, _)) = editor.highlight_at_caret() {
+                editor.set_selection(BlockSelection::Text {
+                    anchor: BlockPosition::new(block, range.start),
+                    head: BlockPosition::new(block, range.end),
+                }, cx).expect("highlight range belongs to the current document");
+            }
             let _ = editor.run(
                 EditorCommand::ApplyMark(MarkChange::new().clear(MarkKind::Highlight)),
                 cx,
@@ -1111,10 +1119,15 @@ impl MarkdownPane {
                 .justify_center()
                 .cursor_pointer()
                 .when(active, |s| {
-                    s.bg(rgb(0xe0ecff)).text_color(rgb(0x1d4ed8))
+                    s.bg(rgb(0xe0ecff))
+                        .text_color(rgb(0x1d4ed8))
+                        .hover(|h| h.bg(rgb(0xd0e6ff)))
+                        .active(|a| a.bg(rgb(0xb9d8fb)))
                 })
                 .when(!active, |s| {
-                    s.text_color(rgb(0x1f2328)).hover(|h| h.bg(rgb(0xf2f3f5)))
+                    s.text_color(rgb(0x1f2328))
+                        .hover(|h| h.bg(rgb(0xf2f3f5)))
+                        .active(|a| a.bg(rgb(crate::ui::PRESSED_BG)))
                 })
                 .child(content)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1137,6 +1150,7 @@ impl MarkdownPane {
             .bg(rgb(0xffffff))
             .border_1()
             .border_color(rgb(0xe2e4e8))
+            .shadow_md()
             .flex()
             .items_center()
             .gap_0p5()
@@ -1150,6 +1164,7 @@ impl MarkdownPane {
                     .rounded(px(14.))
                     .bg(rgb(0xf2f3f5))
                     .hover(|s| s.bg(rgb(0xe5e6eb)))
+                    .active(|s| s.bg(rgb(crate::ui::PRESSED_BG)))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1268,6 +1283,7 @@ impl MarkdownPane {
                     .rounded(px(5.))
                     .bg(rgb(0xe8f3ff))
                     .hover(|s| s.bg(rgb(0xd0e6ff)))
+                    .active(|s| s.bg(rgb(0xb9d8fb)))
                     .flex()
                     .flex_col()
                     .items_center()
@@ -1402,13 +1418,27 @@ impl MarkdownPane {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .px_2p5()
-                    .py_1()
+                    .px_2()
+                    .h(px(32.))
                     .rounded(px(5.))
                     .cursor_pointer()
                     .text_xs()
-                    .hover(|s| s.bg(rgb(0xf2f3f5)))
-                    .child(crate::ui::icon(*ic))
+                    .text_color(rgb(0x37352f))
+                    .hover(|s| s.bg(rgb(0xefefed)))
+                    .active(|s| s.bg(rgb(crate::ui::PRESSED_BG)))
+                    .child(
+                        div()
+                            .w(px(22.))
+                            .h(px(22.))
+                            .rounded(px(4.))
+                            .bg(rgb(0xffffff))
+                            .border_1()
+                            .border_color(rgb(0xe8e7e3))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(crate::ui::icon(*ic).w(px(13.)).h(px(13.))),
+                    )
                     .child(*label)
                     .on_click(cx.listener(move |pane, _, window, cx| {
                         pane.show_turn_into = false;
@@ -1417,12 +1447,13 @@ impl MarkdownPane {
             });
             stack = stack.child(
                 div()
-                    .w(px(160.))
+                    .w(px(186.))
                     .p_1p5()
                     .rounded(px(8.))
                     .bg(rgb(0xffffff))
                     .border_1()
-                    .border_color(rgb(0xe2e4e8))
+                    .border_color(rgb(0xe8e7e3))
+                    .shadow_md()
                     .flex()
                     .flex_col()
                     .gap_0p5()
@@ -1461,6 +1492,7 @@ impl MarkdownPane {
                     .bg(rgb(0xffffff))
                     .border_1()
                     .border_color(rgb(0xe2e4e8))
+                    .shadow_md()
                     .flex()
                     .items_center()
                     .gap_2()
@@ -1476,6 +1508,7 @@ impl MarkdownPane {
                             .text_xs()
                             .text_color(rgb(0x57606a))
                             .hover(|s| s.bg(rgb(0xf2f3f5)))
+                            .active(|s| s.bg(rgb(crate::ui::PRESSED_BG)))
                             .cursor_pointer()
                             .child("清除")
                             .on_click(cx.listener(|pane, _, window, cx| {
@@ -1495,13 +1528,14 @@ impl MarkdownPane {
                     .bg(rgb(0xffffff))
                     .border_1()
                     .border_color(rgb(0xe2e4e8))
+                    .shadow_md()
                     .flex()
                     .items_center()
                     .gap_2()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(Input::new(&self.link_input).flex_1().min_w_0())
                     .child(
-                        crate::ui::button("apply-md-link", "确定").on_click(cx.listener(
+                        crate::ui::button_primary("apply-md-link", "确定").on_click(cx.listener(
                             |pane, _, window, cx| {
                                 let url = pane.link_input.read(cx).value().trim().to_string();
                                 pane.visual_editor.update(cx, |editor, cx| {
@@ -1529,11 +1563,12 @@ impl MarkdownPane {
         let caret = self.visual_editor.read(cx).caret_window_bounds()?;
         let active_ix = self.slash_index.min(items.len().saturating_sub(1));
 
+        let menu_w = px(300.);
         let rel_x = (caret.origin.x - pane_origin.x)
             .max(px(16.))
-            .min((pane_size.width - px(250.)).max(px(16.)));
+            .min((pane_size.width - menu_w - px(16.)).max(px(16.)));
         let below_y = caret.bottom() - pane_origin.y + px(6.);
-        let menu_h = px((items.len().min(9) as f32) * 32. + 36.);
+        let menu_h = px((items.len().min(8) as f32) * 40. + 48.);
         let rel_y = if below_y + menu_h > pane_size.height && caret.origin.y - pane_origin.y > menu_h
         {
             caret.origin.y - pane_origin.y - menu_h - px(6.)
@@ -1549,29 +1584,67 @@ impl MarkdownPane {
                 .flex()
                 .items_center()
                 .justify_between()
-                .px_2p5()
-                .h(px(30.))
+                .px_2()
+                .h(px(40.))
                 .rounded(px(6.))
                 .cursor_pointer()
                 .when(selected, |s| {
-                    s.bg(rgb(0xe8f3ff)).text_color(rgb(0x165dff))
+                    s.bg(rgb(0xefefed))
+                        .active(|a| a.bg(rgb(crate::ui::PRESSED_BG)))
                 })
                 .when(!selected, |s| {
-                    s.text_color(rgb(0x1f2328)).hover(|h| h.bg(rgb(0xf2f3f5)))
+                    s.hover(|h| h.bg(rgb(0xf7f6f4)))
+                        .active(|a| a.bg(rgb(crate::ui::PRESSED_BG)))
                 })
                 .child(
                     div()
                         .flex()
                         .items_center()
-                        .gap_2()
-                        .child(crate::ui::icon(cmd.icon))
-                        .child(div().text_xs().font_medium().child(cmd.title)),
+                        .gap_2p5()
+                        .child(
+                            div()
+                                .w(px(28.))
+                                .h(px(28.))
+                                .rounded(px(5.))
+                                .bg(rgb(0xffffff))
+                                .border_1()
+                                .border_color(if selected {
+                                    rgb(0xd3d1cb)
+                                } else {
+                                    rgb(0xe8e7e3)
+                                })
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(rgb(0x37352f))
+                                .child(crate::ui::icon(cmd.icon).w(px(15.)).h(px(15.))),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.5))
+                                .text_color(rgb(0x37352f))
+                                .child(cmd.title),
+                        ),
                 )
                 .child(
                     div()
-                        .text_xs()
+                        .text_size(px(11.))
                         .font_family("Consolas")
-                        .text_color(rgb(0x86909c))
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded(px(4.))
+                        .bg(rgb(0xf7f6f3))
+                        .border_1()
+                        .border_color(if selected {
+                            rgb(0xd3d1cb)
+                        } else {
+                            rgb(0xe8e7e3)
+                        })
+                        .text_color(if selected {
+                            rgb(0x37352f)
+                        } else {
+                            rgb(0x787774)
+                        })
                         .child(cmd.hint),
                 )
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1593,27 +1666,42 @@ impl MarkdownPane {
                     .absolute()
                     .left(rel_x)
                     .top(rel_y)
-                    .w(px(236.))
-                    .max_h(px(320.))
-                    .overflow_y_scroll()
+                    .w(menu_w)
                     .p_1p5()
                     .rounded(px(10.))
                     .bg(rgb(0xffffff))
                     .border_1()
-                    .border_color(rgb(0xe2e4e8))
+                    .border_color(rgb(0xe8e7e3))
+                    .shadow_lg()
                     .flex()
                     .flex_col()
-                    .gap_0p5()
+                    .gap_1()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
                         div()
-                            .px_2()
-                            .py_1()
+                            .px_2p5()
+                            .pt_1()
+                            .pb_1p5()
+                            .border_b_1()
+                            .border_color(rgb(0xf1f0eb))
                             .text_size(px(11.))
-                            .text_color(rgb(0x86909c))
+                            .text_color(rgb(0x787774))
                             .child(header_label),
                     )
-                    .children(rows),
+                    .child(
+                        div()
+                            .id("slash-menu-items")
+                            .max_h(px(320.))
+                            .overflow_y_scroll()
+                            .track_scroll(&self.slash_scroll)
+                            .on_scroll(cx.listener(|_, _: &ScrollEvent, _, cx| {
+                                cx.stop_propagation();
+                            }))
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .children(rows),
+                    ),
             )
             .into_any_element(),
         )
@@ -1661,6 +1749,7 @@ impl MarkdownPane {
             .cursor_pointer()
             .text_color(rgb(0x2b6cb0))
             .hover(|s| s.bg(rgb(0xeef4fb)))
+            .active(|s| s.bg(rgb(0xdde9f6)))
             .child(
                 div()
                     .font_family("Georgia")
@@ -1731,13 +1820,27 @@ impl MarkdownPane {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .px_2p5()
-                    .py_1()
+                    .px_2()
+                    .h(px(32.))
                     .rounded(px(5.))
                     .cursor_pointer()
                     .text_xs()
-                    .hover(|s| s.bg(rgb(0xf2f3f5)))
-                    .child(crate::ui::icon(*ic))
+                    .text_color(rgb(0x37352f))
+                    .hover(|s| s.bg(rgb(0xefefed)))
+                    .active(|s| s.bg(rgb(crate::ui::PRESSED_BG)))
+                    .child(
+                        div()
+                            .w(px(22.))
+                            .h(px(22.))
+                            .rounded(px(4.))
+                            .bg(rgb(0xffffff))
+                            .border_1()
+                            .border_color(rgb(0xe8e7e3))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(crate::ui::icon(*ic).w(px(13.)).h(px(13.))),
+                    )
                     .child(*label)
                     .on_click(cx.listener(move |pane, _, window, cx| {
                         pane.block_menu_for = None;
@@ -1753,32 +1856,46 @@ impl MarkdownPane {
                 .absolute()
                 .left(rel_x)
                 .top(rel_y + px(26.))
-                .w(px(168.))
+                .w(px(186.))
                 .p_1p5()
                 .rounded(px(8.))
                 .bg(rgb(0xffffff))
                 .border_1()
-                .border_color(rgb(0xe2e4e8))
+                .border_color(rgb(0xe8e7e3))
+                .shadow_md()
                 .flex()
                 .flex_col()
                 .gap_0p5()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .children(rows)
-                .child(div().h(px(1.)).my_1().bg(rgb(0xebedf0)))
+                .child(div().h(px(1.)).my_1().bg(rgb(0xf1f0eb)))
                 .child(
                     div()
                         .id("block-menu-delete")
                         .flex()
                         .items_center()
                         .gap_2()
-                        .px_2p5()
-                        .py_1()
+                        .px_2()
+                        .h(px(32.))
                         .rounded(px(5.))
                         .cursor_pointer()
                         .text_xs()
                         .text_color(rgb(0xd93025))
                         .hover(|s| s.bg(rgb(0xfff1f0)))
-                        .child(crate::ui::icon(IconName::Trash))
+                        .active(|s| s.bg(rgb(0xffdcd8)))
+                        .child(
+                            div()
+                                .w(px(22.))
+                                .h(px(22.))
+                                .rounded(px(4.))
+                                .bg(rgb(0xfff1f0))
+                                .border_1()
+                                .border_color(rgb(0xffccc7))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(crate::ui::icon(IconName::Trash).w(px(13.)).h(px(13.))),
+                        )
                         .child("删除该块")
                         .on_click(cx.listener(move |pane, _, window, cx| {
                             pane.block_menu_for = None;
@@ -1814,9 +1931,13 @@ impl MarkdownPane {
             .selection_window_bounds()
             .or_else(|| self.visual_editor.read(cx).caret_window_bounds())?;
 
+        let scale = (self.settings.markdown_font_size as f32) / 14.0;
+        let quote_font_size = (12.0 * scale).clamp(11.0, 20.0);
+        let popover_w = (308.0 * scale).clamp(280.0, 480.0);
+
         let rel_x = (anchor.origin.x - pane_origin.x)
             .max(px(16.))
-            .min((pane_size.width - px(310.)).max(px(16.)));
+            .min((pane_size.width - px(popover_w + 16.)).max(px(16.)));
         let rel_y = (anchor.bottom() - pane_origin.y + px(8.)).min(pane_size.height - px(140.));
 
         let swatches = HIGHLIGHT_COLORS.iter().map(|(name, _, hex)| {
@@ -1851,12 +1972,13 @@ impl MarkdownPane {
                     .absolute()
                     .left(rel_x)
                     .top(rel_y)
-                    .w(px(296.))
+                    .w(px(popover_w))
                     .p_3()
                     .rounded(px(10.))
                     .bg(rgb(0xffffff))
                     .border_1()
                     .border_color(rgb(0xe2e4e8))
+                    .shadow_md()
                     .flex()
                     .flex_col()
                     .gap_2()
@@ -1882,6 +2004,7 @@ impl MarkdownPane {
                                         crate::ui::control("delete-md-annotation", IconName::Trash)
                                             .on_click(cx.listener(move |pane, _, _, cx| {
                                                 pane.annotations.retain(|a| a.id != id);
+                                                if pane.selected_annotation_id == Some(id) { pane.selected_annotation_id = None; }
                                                 let _ = storage::save_annotations(
                                                     &pane.path,
                                                     &pane.annotations,
@@ -1901,7 +2024,7 @@ impl MarkdownPane {
                     )
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(quote_font_size))
                             .text_color(rgb(0x787774))
                             .text_ellipsis()
                             .child(format!("“{}”", item.quote)),
@@ -1912,7 +2035,7 @@ impl MarkdownPane {
                             .flex()
                             .justify_end()
                             .child(
-                                crate::ui::button("save-md-annotation", "保存批注").on_click(
+                                crate::ui::button_primary("save-md-annotation", "保存批注").on_click(
                                     cx.listener(move |pane, _, _, cx| {
                                         let comment =
                                             pane.note_input.read(cx).value().trim().to_string();
@@ -1938,14 +2061,7 @@ impl MarkdownPane {
 }
 
 fn action(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
-    div()
-        .id(id)
-        .px_2()
-        .py_1()
-        .rounded(px(4.))
-        .cursor_pointer()
-        .hover(|style| style.bg(rgb(0xefefed)))
-        .child(crate::ui::label(label.into()))
+    crate::ui::button(id, label)
 }
 
 impl Render for MarkdownPane {
@@ -1953,6 +2069,8 @@ impl Render for MarkdownPane {
         let pane_bounds = self.scroll.bounds();
         let pane_origin = pane_bounds.origin;
         let pane_size = pane_bounds.size;
+        // Keep room below the last line without letting the canvas scroll indefinitely.
+        let trailing_space = (pane_size.height * 0.4).clamp(px(160.), px(480.));
 
         let toolbar = div()
             .flex()
@@ -2008,7 +2126,7 @@ impl Render for MarkdownPane {
                     )),
             );
 
-        let mut content = div().relative().flex().flex_1().min_h_0();
+        let mut content = div().relative().flex().flex_1().min_w_0().min_h_0().overflow_hidden();
         if self.outline {
             let headings = self.headings.iter().enumerate().map(|(index, heading)| {
                 div()
@@ -2019,6 +2137,7 @@ impl Render for MarkdownPane {
                     .rounded(px(4.))
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(0xefefed)))
+                    .active(|style| style.bg(rgb(crate::ui::PRESSED_BG)))
                     .child(div().text_ellipsis().child(heading.title.clone()))
                     .on_click(
                         cx.listener(move |pane, _, window, cx| {
@@ -2097,11 +2216,12 @@ impl Render for MarkdownPane {
                 self.render_active_annotation_popover(pane_origin, pane_size, cx);
 
             content = content.child(
-                div()
+                // Floating controls must be outside the scroll owner: their
+                // screen-relative positions otherwise enlarge its scroll bounds.
+                div().relative().flex_1().min_w_0().min_h_0()
+                .child(div()
                     .id("markdown-content")
-                    .relative()
-                    .flex_1()
-                    .min_w_0()
+                    .size_full()
                     .flex()
                     .items_start()
                     .justify_center()
@@ -2134,9 +2254,10 @@ impl Render for MarkdownPane {
                             })
                             .pl(px(54.))
                             .pr_6()
-                            .py_6()
+                            .pt_6()
+                            .pb(trailing_space)
                             .child(BlockEditor::new(&self.visual_editor)),
-                    )
+                    ))
                     .children(block_handle)
                     .children(floating_toolbar)
                     .children(slash_menu)
@@ -2166,6 +2287,8 @@ impl Render for MarkdownPane {
                                             .items_center()
                                             .gap_1()
                                             .cursor_pointer()
+                                            .hover(|s| s.bg(rgb(0xfef08a)))
+                                            .active(|s| s.bg(rgb(0xfde047)))
                                             .text_xs()
                                             .text_color(rgb(0x854d0e))
                                             .child(crate::ui::icon(IconName::MessageSquareText))
@@ -2182,7 +2305,7 @@ impl Render for MarkdownPane {
                                         .on_click(cx.listener(|pane, _, _, cx| {
                                             pane.toggle_outline(cx)
                                         })),
-                                )
+                                 )
                                 .child(
                                     crate::ui::control("md-float-source", IconName::CodeXml)
                                         .on_click(cx.listener(|pane, _, window, cx| {
@@ -2209,6 +2332,8 @@ impl Render for MarkdownPane {
                                 .items_center()
                                 .gap_1()
                                 .cursor_pointer()
+                                .hover(|s| s.bg(rgb(0xfef08a)))
+                                .active(|s| s.bg(rgb(0xfde047)))
                                 .text_xs()
                                 .text_color(rgb(0x854d0e))
                                 .child(crate::ui::icon(IconName::MessageSquareText))
@@ -2233,6 +2358,7 @@ impl Render for MarkdownPane {
                                 .bg(rgb(0xffffff))
                                 .border_1()
                                 .border_color(rgb(0xe2e4e8))
+                                .shadow_md()
                                 .flex()
                                 .items_center()
                                 .gap_1p5()
@@ -2279,6 +2405,12 @@ impl Render for MarkdownPane {
             );
 
             if self.show_annotations_drawer && !self.annotations.is_empty() {
+                let editor_font_size = self.settings.markdown_font_size as f32;
+                let quote_font_size = (editor_font_size - 1.0).clamp(12.0, 26.0);
+                let comment_font_size = editor_font_size.clamp(13.0, 26.0);
+                let title_font_size = (editor_font_size * 0.9).clamp(12.0, 20.0);
+                let drawer_width = (editor_font_size * 18.0).clamp(280.0, 600.0);
+
                 let cards = self.annotations.iter().map(|item| {
                     let id = item.id;
                     let quote = item.quote.clone();
@@ -2291,27 +2423,38 @@ impl Render for MarkdownPane {
                         .unwrap_or(0xfacc15);
                     div()
                         .id(SharedString::from(format!("md-ann-card-{id}")))
+                        .w_full()
                         .p_2p5()
                         .rounded(px(8.))
                         .bg(rgb(0xffffff))
                         .border_1()
                         .border_color(rgb(0xe8e7e3))
+                        .when(self.selected_annotation_id == Some(id), |card| {
+                            card.border_color(rgb(0x94a3b8)).bg(rgb(0xf4f3ef))
+                        })
                         .flex()
                         .flex_col()
-                        .gap_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .gap_1p5()
                         .cursor_pointer()
                         .hover(|s| s.border_color(rgb(0x94a3b8)))
+                        .active(|s| s.border_color(rgb(0x64748b)))
                         .child(
                             div()
+                                .w_full()
                                 .flex()
                                 .items_center()
                                 .justify_between()
+                                .gap_2()
                                 .child(
                                     div()
                                         .flex()
                                         .items_center()
                                         .gap_1p5()
+                                        .flex_1()
                                         .min_w_0()
+                                        .overflow_hidden()
                                         .child(
                                             div()
                                                 .w(px(8.))
@@ -2322,8 +2465,11 @@ impl Render for MarkdownPane {
                                         )
                                         .child(
                                             div()
-                                                .text_xs()
-                                                .font_medium()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .text_size(px(quote_font_size))
+                                                .text_color(rgb(0x64748b))
                                                 .text_ellipsis()
                                                 .child(quote.clone()),
                                         ),
@@ -2333,9 +2479,16 @@ impl Render for MarkdownPane {
                                         SharedString::from(format!("del-ann-{id}")),
                                         IconName::Trash,
                                     )
+                                    .flex_shrink_0()
                                     .on_click(cx.listener(move |pane, _, _, cx| {
                                         cx.stop_propagation();
                                         pane.annotations.retain(|a| a.id != id);
+                                        if pane.selected_annotation_id == Some(id) {
+                                            pane.selected_annotation_id = None;
+                                        }
+                                        if pane.active_annotation_id == Some(id) {
+                                            pane.active_annotation_id = None;
+                                        }
                                         let _ = storage::save_annotations(
                                             &pane.path,
                                             &pane.annotations,
@@ -2347,8 +2500,10 @@ impl Render for MarkdownPane {
                         .when(!comment.is_empty(), |card| {
                             card.child(
                                 div()
-                                    .text_xs()
-                                    .text_color(rgb(0x57606a))
+                                    .w_full()
+                                    .min_w_0()
+                                    .text_size(px(comment_font_size))
+                                    .text_color(rgb(0x1e293b))
                                     .child(comment.clone()),
                             )
                         })
@@ -2358,47 +2513,85 @@ impl Render for MarkdownPane {
                             let quote_cl = quote.clone();
                             let comment_cl = comment.clone();
                             pane.active_annotation_id = Some(id);
+                            pane.selected_annotation_id = Some(id);
+                            let list_focus = pane.annotation_list_focus.clone();
                             window.defer(cx, move |window, cx| {
                                 visual_editor.update(cx, |editor, cx| {
                                     editor.select_quote_occurrence(&quote_cl, occ, cx);
                                 });
                                 note_input.update(cx, |input, cx| {
                                     input.set_value(comment_cl, window, cx);
-                                    input.focus(window, cx);
                                 });
+                                list_focus.focus(window, cx);
                             });
                             cx.notify();
                         }))
                 });
-                content = content.child(
-                    div()
-                        .id("md-annotations-drawer")
-                        .w(px(240.))
-                        .flex_shrink_0()
-                        .h_full()
-                        .overflow_y_scroll()
-                        .bg(rgb(0xfafaf9))
-                        .border_l_1()
-                        .border_color(rgb(0xe8e7e3))
-                        .p_3()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
+                content = div().flex_1().min_w_0().min_h_0().child(
+                    h_resizable("markdown-annotations-layout")
+                        .child(resizable_panel().size_range(px(200.)..Pixels::MAX).child(content))
+                        // The drawer scales with zoom and remains user-resizable.
                         .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(div().text_xs().font_semibold().child("文档批注"))
+                            resizable_panel()
+                                .size(px(drawer_width))
+                                .size_range(px(200.)..px(800.))
+                                .fixed()
                                 .child(
-                                    crate::ui::control("close-ann-drawer", IconName::Close)
-                                        .on_click(cx.listener(|pane, _, _, cx| {
-                                            pane.show_annotations_drawer = false;
-                                            cx.notify();
-                                        })),
+                                    div()
+                                        .id("md-annotations-drawer")
+                                        .track_focus(&self.annotation_list_focus)
+                                        .on_key_down(cx.listener(|pane, event: &KeyDownEvent, window, cx| {
+                                            // Deletion keys in the comment editor edit text, not the card.
+                                            if matches!(event.keystroke.key.as_str(), "delete" | "backspace")
+                                                && pane.annotation_list_focus.is_focused(window)
+                                            {
+                                                if let Some(id) = pane.selected_annotation_id.take() {
+                                                    pane.annotations.retain(|item| item.id != id);
+                                                    if pane.active_annotation_id == Some(id) {
+                                                        pane.active_annotation_id = None;
+                                                    }
+                                                    storage::save_annotations(&pane.path, &pane.annotations)
+                                                        .expect("failed to save annotation deletion");
+                                                    cx.stop_propagation();
+                                                    cx.notify();
+                                                }
+                                            }
+                                        }))
+                                        .w_full()
+                                        .min_w_0()
+                                        .flex_shrink_0()
+                                        .h_full()
+                                        .overflow_y_scroll()
+                                        .bg(rgb(0xfafaf9))
+                                        .border_l_1()
+                                        .border_color(rgb(0xe8e7e3))
+                                        .p_3()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .child(
+                                                    div()
+                                                        .text_size(px(title_font_size))
+                                                        .font_semibold()
+                                                        .text_color(rgb(0x37352f))
+                                                        .child("文档批注"),
+                                                )
+                                                .child(
+                                                    crate::ui::control("close-ann-drawer", IconName::Close)
+                                                        .on_click(cx.listener(|pane, _, _, cx| {
+                                                            pane.show_annotations_drawer = false;
+                                                            cx.notify();
+                                                        })),
+                                                ),
+                                        )
+                                        .children(cards),
                                 ),
-                        )
-                        .children(cards),
+                        ),
                 );
             }
         }
@@ -2525,6 +2718,7 @@ impl Render for MarkdownPane {
                     .menu("插入表格", Box::new(InsertTable))
             })
             .when_some(self.formula_editor.clone(), |pane, (editor, display)| {
+                // Block the underlying editor's mouse handler while the formula input is open.
                 pane.child(crate::ui::modal_overlay(
                     "编辑公式",
                     "输入 LaTeX 正文，无需添加分隔符。".to_owned(),
@@ -2547,18 +2741,18 @@ impl Render for MarkdownPane {
                                 .flex()
                                 .justify_end()
                                 .gap_2()
-                                .child(crate::ui::button("cancel-formula", "取消").on_click(
+                                .child(crate::ui::button_secondary("cancel-formula", "取消").on_click(
                                     cx.listener(|pane, _, window, cx| {
                                         pane.formula_editor = None;
                                         pane.defer_focus_visual(window, cx);
                                         cx.notify();
                                     }),
                                 ))
-                                .child(crate::ui::button("apply-formula", "应用").on_click(
+                                .child(crate::ui::button_primary("apply-formula", "应用").on_click(
                                     cx.listener(move |pane, _, window, cx| {
                                         let latex = editor.read(cx).value().to_string();
                                         let source = if display {
-                                            format!("$$\n{latex}\n$$")
+                                             format!("$$\n{latex}\n$$")
                                         } else {
                                             format!("${latex}$")
                                         };
@@ -2582,7 +2776,7 @@ impl Render for MarkdownPane {
                         .justify_end()
                         .gap_2()
                         .child(
-                            crate::ui::button("cancel-image-overwrite", "取消").on_click(
+                            crate::ui::button_secondary("cancel-image-overwrite", "取消").on_click(
                                 cx.listener(|pane, _, _, cx| {
                                     pane.pending_image = None;
                                     cx.notify();
@@ -2590,7 +2784,7 @@ impl Render for MarkdownPane {
                             ),
                         )
                         .child(
-                            crate::ui::button("confirm-image-overwrite", "替换").on_click(
+                            crate::ui::button_danger("confirm-image-overwrite", "替换").on_click(
                                 cx.listener(|pane, _, _, cx| pane.confirm_image_import(cx)),
                             ),
                         ),
@@ -2601,7 +2795,7 @@ impl Render for MarkdownPane {
                     "图片导入失败",
                     error,
                     div().flex().justify_end().child(
-                        crate::ui::button("dismiss-image-error", "确定").on_click(cx.listener(
+                        crate::ui::button_primary("dismiss-image-error", "确定").on_click(cx.listener(
                             |pane, _, _, cx| {
                                 pane.image_error = None;
                                 cx.notify();

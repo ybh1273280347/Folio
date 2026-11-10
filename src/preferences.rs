@@ -490,6 +490,7 @@ impl Preferences {
                                                 .border_color(rgb(0xe2e1dd))
                                                 .text_color(rgb(0x37352f))
                                                 .hover(|s| s.bg(rgb(0xefefed)))
+                                                .active(|s| s.bg(rgb(crate::ui::PRESSED_BG)))
                                                 .child(AppSettings::format_key_badge(&current))
                                         })
                                         .on_click(cx.listener(move |panel, _, window, cx| {
@@ -559,16 +560,7 @@ impl Preferences {
     }
 }
 fn control(id: impl Into<ElementId>, label: &'static str) -> Stateful<Div> {
-    div()
-        .id(id)
-        .px_3()
-        .py_1()
-        .border_1()
-        .border_color(rgb(0xe8e7e3))
-        .rounded(px(4.))
-        .cursor_pointer()
-        .hover(|style| style.bg(rgb(0xefefed)))
-        .child(label)
+    crate::ui::button_secondary(id, label).px_3()
 }
 impl Render for Preferences {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -592,9 +584,12 @@ impl Render for Preferences {
                     s.bg(rgb(0xe8e7e4))
                         .font_semibold()
                         .text_color(rgb(0x1f2328))
+                        .active(|a| a.bg(rgb(0xdddcda)))
                 })
                 .when(!active, |s| {
-                    s.text_color(rgb(0x57606a)).hover(|h| h.bg(rgb(0xefefed)))
+                    s.text_color(rgb(0x57606a))
+                        .hover(|h| h.bg(rgb(0xefefed)))
+                        .active(|a| a.bg(rgb(crate::ui::PRESSED_BG)))
                 })
                 .child(crate::ui::icon(icon_name))
                 .child(title)
