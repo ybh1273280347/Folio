@@ -120,20 +120,43 @@ impl MarkdownPane {
                 .soft_wrap(true)
                 .searchable(true)
         });
-        let subscription = cx.subscribe(
+        let subscription = cx.subscribe_in(
             &editor,
-            |pane: &mut Self, state, event: &InputEvent, cx| match event {
+            window,
+            |pane: &mut Self, state, event: &InputEvent, window, cx| match event {
                 InputEvent::Change => {
                     let mut value = state.read(cx).value().to_string();
                     if pane.source {
                         pane.text = value;
                     } else if let Some(index) = pane.editing {
-                        if let Some(rich) = &mut pane.rich {
-                            rich.change(value);
-                            value = rich.markdown();
-                            if let Some(styles) = &pane.decorations {
-                                styles.set(rich.decorations(), cx);
-                            }
+                        let cursor = state.read(cx).selected_range().end;
+                        let rich = pane
+                            .rich
+                            .as_mut()
+                            .expect("visual block has a source projection");
+                        rich.change(value.clone());
+                        let markdown = rich.markdown();
+                        let next = RichText::new(&markdown);
+                        let position = next.visible_offset(cursor);
+                        let projected = next.text.clone();
+                        let reproject = projected != value;
+                        value = next.markdown();
+                        let decorations = next.decorations();
+                        *rich = next;
+                        if reproject {
+                            let editor = state.clone();
+                            let styles = pane.decorations.clone();
+                            window.defer(cx, move |window, cx| {
+                                editor.update(cx, |editor, cx| {
+                                    editor.replace_all(projected, window, cx);
+                                    editor.set_selected_range(position..position, cx);
+                                });
+                                if let Some(styles) = styles {
+                                    styles.set(decorations, cx);
+                                }
+                            });
+                        } else if let Some(styles) = &pane.decorations {
+                            styles.set(decorations, cx);
                         }
                         let range = pane.editing_range.clone().expect("active visual range");
                         let new_end = range.start + value.len();
@@ -740,8 +763,22 @@ impl Render for MarkdownPane {
                         )))
                         .into_any_element()
                 } else if self.editing == Some(index) {
+                    let heading_level =
+                        block.heading.as_ref().map(|(level, _)| *level).or_else(|| {
+                            let source = self.text[block.range.clone()].trim_start();
+                            let level = source.bytes().take_while(|byte| *byte == b'#').count();
+                            (1..=6)
+                                .contains(&level)
+                                .then(|| {
+                                    source
+                                        .get(level..)
+                                        .is_some_and(|tail| tail.starts_with(' '))
+                                        .then_some(level as u8)
+                                })
+                                .flatten()
+                        });
                     let font_size = self.settings.markdown_font_size as f32
-                        * block.heading.as_ref().map_or(1., |(level, _)| match level {
+                        * heading_level.map_or(1., |level| match level {
                             1 => 2.,
                             2 => 1.6,
                             3 => 1.35,
@@ -759,7 +796,7 @@ impl Render for MarkdownPane {
                             self.visual_editor()
                                 .size_full()
                                 .text_size(px(font_size))
-                                .when(block.heading.is_some(), |editor| {
+                                .when(heading_level.is_some(), |editor| {
                                     editor.font_weight(FontWeight::BOLD)
                                 }),
                         )
