@@ -619,6 +619,18 @@ impl BlockEditorState {
         self.model.source()
     }
 
+    /// Install a model parsed off the UI thread without emitting `Changed`.
+    /// Advance the local revision so geometry from the previous model expires.
+    pub fn set_model(&mut self, mut model: BlockEditorModel, cx: &mut Context<Self>) {
+        model.doc.revision = self.model.revision() + 1;
+        self.model = model;
+        self.marked = None;
+        self.composition_open = false;
+        self.pending_paste = None;
+        self.projection.invalidate();
+        cx.notify();
+    }
+
     /// Select the exact custom object chosen by the host's rendered editor.
     pub fn select_custom_node(
         &mut self,

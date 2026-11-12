@@ -1784,7 +1784,11 @@ impl Workspace {
         self.name_action = Some(action);
         self.name_input.update(cx, |input, cx| {
             input.set_value(value.to_owned(), window, cx);
-            input.focus(window, cx);
+        });
+        // Let the menu and its pointer event finish before the dialog takes focus.
+        let input = self.name_input.clone();
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx));
         });
         cx.notify();
     }
@@ -2445,8 +2449,23 @@ impl Workspace {
                 entries.insert(file.path.clone(), false);
             }
         }
+        let mut entries: Vec<_> = entries.iter().collect();
+        // Sort each path component so folders precede files at every depth,
+        // while keeping each folder immediately followed by its own children.
+        entries.sort_by_cached_key(|(path, folder)| {
+            let mut parts = path.split('/').peekable();
+            let mut key = Vec::new();
+            while let Some(part) = parts.next() {
+                key.push((
+                    parts.peek().is_none() && !**folder,
+                    part.to_lowercase(),
+                    part.to_owned(),
+                ));
+            }
+            key
+        });
         let rows = entries
-            .iter()
+            .into_iter()
             .filter(|(path, _)| {
                 !query.is_empty()
                     || !self
@@ -3869,6 +3888,7 @@ impl Render for Workspace {
                     .items_center()
                     .justify_center()
                     .bg(rgba(0x00000030))
+                    .occlude()
                     .child(
                         div()
                             .w(px(420.))
