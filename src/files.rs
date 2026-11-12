@@ -205,6 +205,19 @@ pub fn create_file(root: &Path, relative: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Create a persistent quick note without replacing an existing numbered note.
+pub fn create_markdown(root: &Path) -> io::Result<ProjectFile> {
+    let mut number = 1;
+    loop {
+        let name = if number == 1 { "未命名.md".to_owned() } else { format!("未命名{number}.md") };
+        match create_file(root, &name) {
+            Ok(()) => return Ok(ProjectFile { path: name, kind: FileKind::Text }),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => number += 1,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 pub fn rename_file(root: &Path, relative: &str, name: &str) -> io::Result<String> {
     if name.is_empty()
         || name == "."
@@ -327,6 +340,33 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn quick_notes_number_without_overwriting_existing_content() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("未命名.md"), "existing").unwrap();
+        fs::write(temp.path().join("未命名3.md"), "third").unwrap();
+        assert_eq!(create_markdown(temp.path()).unwrap().path, "未命名2.md");
+        assert_eq!(create_markdown(temp.path()).unwrap().path, "未命名4.md");
+        assert_eq!(fs::read_to_string(temp.path().join("未命名.md")).unwrap(), "existing");
+    }
+
+    #[test]
+    fn renamed_markdown_keeps_body_and_accepts_unsaved_draft() {
+        let temp = tempdir().unwrap();
+        let note = create_markdown(temp.path()).unwrap();
+        fs::write(temp.path().join(&note.path), "# Independent heading\n\nbody").unwrap();
+        let disk = read_document(temp.path(), &note.path).unwrap();
+        let renamed = rename_file(temp.path(), &note.path, "读书笔记.md").unwrap();
+        assert_eq!(read_document(temp.path(), &renamed).unwrap().text, disk.text);
+        save_document(temp.path(), &renamed, "unsaved draft", &disk.revision).unwrap().unwrap();
+        assert_eq!(fs::read_to_string(temp.path().join(&renamed)).unwrap(), "unsaved draft");
+        assert!(!temp.path().join(&note.path).exists());
+        fs::write(temp.path().join("occupied.md"), "keep").unwrap();
+        assert!(rename_file(temp.path(), &renamed, "occupied.md").is_err());
+        assert_eq!(fs::read_to_string(temp.path().join("occupied.md")).unwrap(), "keep");
+        assert!(temp.path().join(renamed).exists());
+    }
 
     #[test]
     fn listing_filters_build_directories_and_sorts_nested_supported_files() {

@@ -181,6 +181,15 @@ pub struct Project {
 pub struct ProjectConfig {
     pub projects: Vec<Project>,
     pub active_id: Option<String>,
+    #[serde(default)]
+    pub active_workspace: Option<WorkspaceLocation>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum WorkspaceLocation {
+    Default,
+    Project(String),
+    LooseFiles,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -196,6 +205,7 @@ impl Default for ProjectConfig {
         Self {
             projects: Vec::new(),
             active_id: None,
+            active_workspace: None,
         }
     }
 }

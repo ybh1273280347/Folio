@@ -22,6 +22,7 @@ use markdown_editor::{
 use std::{cell::RefCell, ops::Range, path::PathBuf, rc::Rc};
 
 pub enum MarkdownEvent {
+    RenameTitle(String),
     Change(String),
     Focus,
     Zoom(u8),
@@ -205,6 +206,7 @@ pub struct MarkdownPane {
     export_width: Pixels,
     text: String,
     path: PathBuf,
+    title_input: Entity<InputState>,
     headings: Vec<OutlineHeading>,
     source_editor: Entity<EditorState>,
     visual_editor: Entity<BlockEditorState>,
@@ -254,6 +256,18 @@ pub struct MarkdownPane {
 impl EventEmitter<MarkdownEvent> for MarkdownPane {}
 
 impl MarkdownPane {
+    pub fn path(&self) -> &std::path::Path { &self.path }
+
+    /// Rename the document identity without replacing its editor or undo history.
+    pub fn set_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.path = path;
+        let title = self.path.file_stem().unwrap().to_string_lossy().into_owned();
+        self.title_input.update(cx, |input, cx| input.set_value(title, window, cx));
+        for annotation in &mut self.annotations {
+            annotation.file = self.path.file_name().unwrap().to_string_lossy().into_owned();
+        }
+        cx.notify();
+    }
     /// The workspace hosts this capture independently of the selected tab.
     pub fn export_element(&self) -> Option<AnyElement> {
         self.export.borrow().as_ref()?;
@@ -353,6 +367,14 @@ impl MarkdownPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let title_input = cx.new(|cx| InputState::new(window, cx).default_value(
+            path.file_stem().expect("Markdown filename").to_string_lossy().into_owned()
+        ));
+        cx.subscribe_in(&title_input, window, |_pane: &mut Self, input, event: &InputEvent, _, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                cx.emit(MarkdownEvent::RenameTitle(input.read(cx).value().trim().to_owned()));
+            }
+        }).detach();
         let scroll = ScrollHandle::new();
         math.update(cx, |renderer, cx| renderer.set_appearance(&settings, cx));
         let extensions = MarkdownExtensions::default()
@@ -615,6 +637,7 @@ impl MarkdownPane {
             export_width: px(0.),
             text,
             path,
+            title_input,
             headings: Vec::new(),
             source_editor,
             visual_editor,
@@ -2653,6 +2676,23 @@ impl Render for MarkdownPane {
             .flex_col()
             .bg(rgb(0xffffff))
             .when(self.reading, |pane| pane.child(toolbar))
+            .child(div().id("markdown-title").flex().justify_center().flex_shrink_0().pt_6().pb_3()
+                    .on_key_down(cx.listener(|pane, event: &KeyDownEvent, window, cx| {
+                        if event.keystroke.key == "escape" {
+                            let path = pane.path.clone();
+                            pane.set_path(path, window, cx);
+                            pane.focus(window, cx);
+                            cx.stop_propagation();
+                        }
+                    })).child(
+                        div().w_full().pl(px(54.)).pr_6()
+                            .when(self.settings.line_width_limited, |title| title.max_w(px(850.)))
+                            .child(Input::new(&self.title_input)
+                                .appearance(false).bordered(false)
+                                .w_full().h(px(56.)).px_0().py_0()
+                                .text_size(px(32.)).line_height(relative(1.25))
+                                .font_semibold().text_color(rgb(0x37352f)))
+                    ))
             .child(content)
             .on_key_down(cx.listener(|pane, ev: &KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "escape" {

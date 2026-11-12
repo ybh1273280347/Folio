@@ -8,7 +8,7 @@ use crate::{
     compiler, files,
     model::{
         AppSettings, BuildStatus, DocumentBuffer, Engine, FileKind, Project, ProjectConfig,
-        ProjectFile, WorkspaceSession,
+        ProjectFile, WorkspaceSession, WorkspaceLocation,
     },
     storage,
 };
@@ -188,6 +188,7 @@ struct DialogPrompt {
 }
 
 pub struct Workspace {
+    default_workspace: Project,
     config: ProjectConfig,
     workspace_sessions: BTreeMap<String, WorkspaceSession>,
     active_session: Option<String>,
@@ -284,7 +285,25 @@ impl Workspace {
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let config = storage::load_projects().expect("无法读取项目列表");
-        let workspace_sessions = storage::load_workspace_sessions().expect("无法读取工作区标签页");
+        let mut workspace_sessions = storage::load_workspace_sessions().expect("无法读取工作区标签页");
+        // The old default session contained external paths, never default-space files.
+        if let Some(session) = workspace_sessions.remove("default") {
+            workspace_sessions.insert("loose".into(), session);
+        }
+        let initial_location = config.active_workspace.clone().unwrap_or_else(|| {
+            config.active_id.clone().map(WorkspaceLocation::Project).unwrap_or(
+                if workspace_sessions.contains_key("loose") {
+                    WorkspaceLocation::LooseFiles
+                } else { WorkspaceLocation::Default }
+            )
+        });
+        let default_workspace = Project {
+            id: "__folio_default".into(),
+            name: "默认空间".into(),
+            folder: dirs::home_dir().expect("用户主目录存在").join(".Folio").to_string_lossy().into_owned(),
+            main_file: String::new(),
+            engine: Engine::Xelatex,
+        };
         let settings = storage::load_settings().expect("无法读取界面设置");
         let math = cx.new(MathRenderer::new);
         math.update(cx, |renderer, cx| renderer.set_appearance(&settings, cx));
@@ -333,6 +352,7 @@ impl Workspace {
             }
         });
         let mut app = Self {
+            default_workspace,
             config,
             workspace_sessions,
             active_session: None,
@@ -394,11 +414,12 @@ impl Workspace {
             dialog_open: false,
             _tick: tick,
         };
-        if let Some(id) = app.config.active_id.clone() {
-            if let Err(error) = app.select_project(&id, window, cx) {
-                app.report(error, cx);
-            }
-        } else if let Err(error) = app.select_default_space(window, cx) {
+        let result = match initial_location {
+            WorkspaceLocation::Default => app.select_project("__folio_default", window, cx),
+            WorkspaceLocation::Project(id) => app.select_project(&id, window, cx),
+            WorkspaceLocation::LooseFiles => app.select_loose_files(window, cx),
+        };
+        if let Err(error) = result {
             app.report(error, cx);
         }
         let arguments: Vec<_> = std::env::args_os().skip(1).map(PathBuf::from).collect();
@@ -409,7 +430,10 @@ impl Workspace {
         app
     }
 
-    fn project(&self) -> Option<&Project> {
+    fn directory_workspace(&self) -> Option<&Project> {
+        if self.config.active_workspace == Some(WorkspaceLocation::Default) {
+            return Some(&self.default_workspace);
+        }
         self.config
             .projects
             .iter()
@@ -434,7 +458,7 @@ impl Workspace {
 
     fn document_path(&self, key: &str) -> PathBuf {
         let key = key.strip_prefix("reading:").unwrap_or(key);
-        self.project()
+        self.directory_workspace()
             .map(|project| PathBuf::from(&project.folder).join(key))
             .unwrap_or_else(|| PathBuf::from(key))
     }
@@ -454,7 +478,7 @@ impl Workspace {
         self.preview = None;
     }
 
-    fn select_default_space(
+    fn select_loose_files(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -467,7 +491,8 @@ impl Workspace {
         self.watch_changed = None;
         self.watch_tree = false;
         self.config.active_id = None;
-        self.active_session = Some("default".into());
+        self.config.active_workspace = Some(WorkspaceLocation::LooseFiles);
+        self.active_session = Some("loose".into());
         self.ensure_default_watcher()?;
         self.files.clear();
         self.folders.clear();
@@ -479,7 +504,7 @@ impl Workspace {
 
         let session = self
             .workspace_sessions
-            .get("default")
+            .get("loose")
             .cloned()
             .unwrap_or_default();
         for path in &session.tabs {
@@ -545,8 +570,15 @@ impl Workspace {
         self.watcher = None;
         self.watch_events = None;
         self.active_session = Some(id.to_owned());
-        self.config.active_id = Some(id.to_owned());
-        let project = self.project().expect("selected project exists").clone();
+        if id == "__folio_default" {
+            std::fs::create_dir_all(&self.default_workspace.folder)?;
+            self.config.active_id = None;
+            self.config.active_workspace = Some(WorkspaceLocation::Default);
+        } else {
+            self.config.active_id = Some(id.to_owned());
+            self.config.active_workspace = Some(WorkspaceLocation::Project(id.to_owned()));
+        }
+        let project = self.directory_workspace().expect("selected project exists").clone();
         let (sender, receiver) = mpsc::channel();
         let mut watcher = notify::recommended_watcher(move |event| {
             let _ = sender.send(event);
@@ -631,7 +663,7 @@ impl Workspace {
         }
     }
     fn switch_to_default(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.config.active_id.is_none() {
+        if self.config.active_workspace == Some(WorkspaceLocation::Default) {
             return;
         }
         if self.cancellation.is_some()
@@ -642,7 +674,7 @@ impl Workspace {
         {
             return;
         }
-        if let Err(error) = self.select_default_space(window, cx) {
+        if let Err(error) = self.select_project("__folio_default", window, cx) {
             self.report(error, cx);
         }
     }
@@ -739,9 +771,10 @@ impl Workspace {
             return;
         }
         let mut project_files = Vec::new();
+        let mut default_space_files = Vec::new();
         let mut default_files = Vec::new();
         let project_root = self
-            .project()
+            .directory_workspace()
             .map(|project| dunce::canonicalize(&project.folder));
         for path in paths {
             if !files::is_relevant(&path) {
@@ -759,6 +792,8 @@ impl Workspace {
                     kind: Self::file_kind(&path),
                     path: relative,
                 });
+            } else if path.starts_with(&self.default_workspace.folder) {
+                default_space_files.push(path);
             } else {
                 default_files.push(path);
             }
@@ -769,17 +804,32 @@ impl Workspace {
                 return;
             }
         }
+        if !default_space_files.is_empty() {
+            let retry_paths = default_space_files.clone();
+            if !self.confirm_drafts(window, cx, move |app, window, cx| app.open_paths(retry_paths.clone(), window, cx)) {
+                return;
+            }
+            if let Err(error) = self.select_project("__folio_default", window, cx) {
+                self.report(error, cx);
+                return;
+            }
+            for path in default_space_files {
+                let relative = path.strip_prefix(&self.default_workspace.folder).unwrap().to_string_lossy().replace('\\', "/");
+                let file = ProjectFile { kind: Self::file_kind(&path), path: relative };
+                if let Err(error) = self.open_file(&file, window, cx) { self.report(error, cx); return; }
+            }
+        }
         if default_files.is_empty() {
             return;
         }
-        if self.project().is_some() {
+        if self.directory_workspace().is_some() {
             let retry_paths = default_files.clone();
             if !self.confirm_drafts(window, cx, move |app, window, cx| {
                 app.open_paths(retry_paths.clone(), window, cx);
             }) {
                 return;
             }
-            if let Err(error) = self.select_default_space(window, cx) {
+            if let Err(error) = self.select_loose_files(window, cx) {
                 self.report(error, cx);
                 return;
             }
@@ -901,9 +951,9 @@ impl Workspace {
             );
         }
         if file.kind == FileKind::Text && !self.documents.contains_key(&file.path) {
-            let disk = if self.project().is_some() {
+            let disk = if self.directory_workspace().is_some() {
                 files::read_document(
-                    Path::new(&self.project().expect("project was checked").folder),
+                    Path::new(&self.directory_workspace().expect("project was checked").folder),
                     &file.path,
                 )?
             } else {
@@ -978,9 +1028,22 @@ impl Workspace {
         let settings = self.settings.clone();
         let math = self.math.clone();
         let pane = cx.new(|cx| MarkdownPane::new(text, full, settings, math, reading, window, cx));
-        let file = path.to_owned();
-        cx.subscribe(&pane, move |app, _, event: &MarkdownEvent, cx| {
+        cx.subscribe_in(&pane, window, move |app, pane, event: &MarkdownEvent, window, cx| {
+            // Resolve identity from the live pane; a rename keeps this subscription alive.
+            let full = pane.read(cx).path();
+            let file = app.documents.iter().find(|(_, doc)| doc.path == full)
+                .expect("Markdown pane owns open document").0.clone();
             match event {
+                MarkdownEvent::RenameTitle(title) => {
+                    let name = format!("{title}.md");
+                    if title.is_empty() {
+                        app.report("标题不能为空。", cx);
+                    } else if let Err(error) = app.rename_markdown(&file, &name, window, cx) {
+                        app.report(error, cx);
+                    } else {
+                        pane.update(cx, |pane, cx| pane.focus(window, cx));
+                    }
+                }
                 MarkdownEvent::Change(text) => {
                     let document = app
                         .documents
@@ -1021,7 +1084,7 @@ impl Workspace {
         overwrite: bool,
         cx: &mut Context<Self>,
     ) -> io::Result<bool> {
-        let root = self.project().map(|project| PathBuf::from(&project.folder));
+        let root = self.directory_workspace().map(|project| PathBuf::from(&project.folder));
         let document = self
             .documents
             .get_mut(path)
@@ -1261,7 +1324,7 @@ impl Workspace {
         cx.notify();
     }
     fn reload_disk(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let disk = if let Some(project) = self.project() {
+        let disk = if let Some(project) = self.directory_workspace() {
             files::read_document(Path::new(&project.folder), path)
         } else {
             files::read_document_at(&self.documents[path].path)
@@ -1299,7 +1362,7 @@ impl Workspace {
         .detach();
     }
     fn refresh_files(&mut self, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
-        let root = self.project().map(|project| PathBuf::from(&project.folder));
+        let root = self.directory_workspace().map(|project| PathBuf::from(&project.folder));
         let previous: BTreeSet<_> = self.files.iter().map(|file| file.path.clone()).collect();
         if let Some(root) = &root {
             if self.watch_paths.is_empty() || self.watch_tree {
@@ -1422,7 +1485,7 @@ impl Workspace {
                             | notify::EventKind::Remove(_)
                             | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
                     );
-                    let root = self.project().map(|project| PathBuf::from(&project.folder));
+                    let root = self.directory_workspace().map(|project| PathBuf::from(&project.folder));
                     let paths: Vec<_> = event
                         .paths
                         .into_iter()
@@ -1640,10 +1703,10 @@ impl Workspace {
     fn compile_target(&self) -> Option<&str> {
         let focused = self.focused_markdown.as_deref().unwrap_or(&self.active);
         let lower = focused.to_lowercase();
-        if lower.ends_with(".md") || (self.project().is_none() && lower.ends_with(".tex")) {
+        if lower.ends_with(".md") || (self.config.active_id.is_none() && lower.ends_with(".tex")) {
             Some(focused)
         } else {
-            self.project()
+            self.directory_workspace()
                 .map(|project| project.main_file.as_str())
                 .filter(|file| !file.is_empty())
         }
@@ -1673,7 +1736,7 @@ impl Workspace {
             self.report("请选择一个 .tex 文件作为编译主文件。", cx);
             return;
         };
-        let mut project = self.project().cloned().unwrap_or_else(|| {
+        let mut project = self.directory_workspace().cloned().unwrap_or_else(|| {
             let source = PathBuf::from(&target);
             let root = source.parent().expect("standalone document has a parent");
             // The synthetic compile context only supplies latexmk's working directory;
@@ -1727,7 +1790,7 @@ impl Workspace {
             .to_lowercase()
             .ends_with(".md")
             .then(|| target.clone());
-        if markdown.is_none() && self.project().is_some() {
+        if markdown.is_none() && self.directory_workspace().is_some() {
             project.main_file = target.clone();
         }
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -1792,11 +1855,76 @@ impl Workspace {
         });
         cx.notify();
     }
+    fn rename_markdown(&mut self, key: &str, name: &str, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
+        let old = self.document_path(key);
+        if old.file_name().unwrap() == name { return Ok(()); }
+        let parent = old.parent().unwrap();
+        files::rename_file(parent, &old.file_name().unwrap().to_string_lossy(), name)?;
+        let full = parent.join(name);
+        let renamed = if let Some(workspace) = self.directory_workspace() {
+            full.strip_prefix(&workspace.folder).expect("same workspace").to_string_lossy().replace('\\', "/")
+        } else { full.to_string_lossy().into_owned() };
+        if let Some(mut document) = self.documents.remove(key) {
+            document.path = full.clone();
+            document._subscription = self.subscribe_editor(renamed.clone(), &document.editor, cx);
+            self.documents.insert(renamed.clone(), document);
+        }
+        for reading in [false, true] {
+            let old_key = if reading { format!("reading:{key}") } else { key.to_owned() };
+            let new_key = if reading { format!("reading:{renamed}") } else { renamed.clone() };
+            if let Some(pane) = self.markdown_panes.remove(&old_key) {
+                pane.update(cx, |pane, cx| pane.set_path(full.clone(), window, cx));
+                self.markdown_panes.insert(new_key, pane);
+            }
+        }
+        for path in self.tabs.iter_mut().chain(self.reading_panes.iter_mut()) {
+            if path == key { *path = renamed.clone(); }
+        }
+        if self.active == key { self.active = renamed.clone(); }
+        if self.focused_markdown.as_deref() == Some(key) { self.focused_markdown = Some(renamed.clone()); }
+        for paths in [&mut self.selected_files, &mut self.markdown_changed] {
+            if paths.remove(key) { paths.insert(renamed.clone()); }
+        }
+        if let Some(workspace) = self.directory_workspace() {
+            self.files = files::list_files(Path::new(&workspace.folder))?;
+        }
+        self.remember_session()?;
+        cx.notify();
+        // Annotation storage is keyed by filename, independently of editor state.
+        let mut annotations = storage::load_annotations(&old);
+        for item in &mut annotations { item.file = name.to_owned(); }
+        if !annotations.is_empty() {
+            storage::save_annotations(&old, &[])?;
+            storage::save_annotations(&full, &annotations)?;
+        }
+        Ok(())
+    }
+
+    fn new_markdown(&mut self, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
+        if self.directory_workspace().is_none() {
+            if self.cancellation.is_some() || self.batch_running { return Ok(()); }
+            if !self.confirm_drafts(window, cx, |app, window, cx| {
+                if let Err(error) = app.new_markdown(window, cx) { app.report(error, cx); }
+            }) { return Ok(()); }
+            self.select_project("__folio_default", window, cx)?;
+        }
+        let root = PathBuf::from(&self.directory_workspace().unwrap().folder);
+        let file = files::create_markdown(&root)?;
+        self.files = files::list_files(&root)?;
+        self.open_file(&file, window, cx)
+    }
+
     fn apply_name(&mut self, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
         let name = self.name_input.read(cx).value().trim().to_owned();
-        let root = PathBuf::from(&self.project().expect("modal has project").folder);
+        if let Some(NameAction::RenameFile(path)) = self.name_action.clone()
+            && path.to_lowercase().ends_with(".md") && name.to_lowercase().ends_with(".md") {
+            self.rename_markdown(&path, &name, window, cx)?;
+            self.name_action = None;
+            return Ok(());
+        }
         match self.name_action.clone().expect("modal has action") {
             NameAction::Create => {
+                let root = PathBuf::from(&self.directory_workspace().expect("file creation has a directory").folder);
                 files::create_file(&root, &name)?;
                 self.files = files::list_files(&root)?;
                 self.folders = files::list_folders(&root).unwrap_or_default();
@@ -1809,13 +1937,16 @@ impl Workspace {
                 self.open_file(&file, window, cx)?;
             }
             NameAction::CreateFolder => {
+                let root = PathBuf::from(&self.directory_workspace().expect("folder creation has a directory").folder);
                 files::create_folder(&root, &name)?;
                 self.files = files::list_files(&root)?;
                 self.folders = files::list_folders(&root).unwrap_or_default();
             }
             NameAction::RenameFile(path) => {
+                let root = PathBuf::from(&self.directory_workspace().expect("file tree has a directory").folder);
                 let renamed = files::rename_file(&root, &path, &name)?;
                 if let Some(mut document) = self.documents.remove(&path) {
+                    document.path = root.join(&renamed);
                     // Reconnect the subscription because it identifies the owning document by path.
                     document._subscription =
                         self.subscribe_editor(renamed.clone(), &document.editor, cx);
@@ -1868,8 +1999,8 @@ impl Workspace {
                     .projects
                     .iter_mut()
                     .find(|project| Some(&project.id) == self.config.active_id.as_ref())
-                    .expect("active project exists");
-                if project.main_file == path {
+                    ;
+                if let Some(project) = project && project.main_file == path {
                     project.main_file = if renamed.to_lowercase().ends_with(".tex") {
                         renamed
                     } else {
@@ -1982,7 +2113,7 @@ impl Workspace {
                 }
             }
         }
-        let project = self.project().expect("files have a project").clone();
+        let project = self.directory_workspace().expect("files have a project").clone();
         let root = Path::new(&project.folder);
         let mut deleted = Vec::new();
         let mut failed = false;
@@ -2056,14 +2187,14 @@ impl Workspace {
             return;
         };
         if self
-            .project()
+            .directory_workspace()
             .is_none_or(|project| project.id != project_id)
         {
             self.deleted_files.push((project_id, files, main));
             self.report("请切回删除文件时所在的项目。", cx);
             return;
         }
-        let root = PathBuf::from(&self.project().unwrap().folder);
+        let root = PathBuf::from(&self.directory_workspace().unwrap().folder);
         // create_new prevents undo from overwriting a file created after deletion.
         while let Some((path, bytes)) = files.pop() {
             let result = (|| -> io::Result<()> {
@@ -2097,8 +2228,8 @@ impl Workspace {
             .projects
             .iter_mut()
             .find(|p| p.id == project_id)
-            .unwrap();
-        if project.main_file.is_empty() && root.join(&main).is_file() {
+            ;
+        if let Some(project) = project && !main.is_empty() && project.main_file.is_empty() && root.join(&main).is_file() {
             project.main_file = main;
         }
         if let Err(error) = storage::save_projects(&self.config) {
@@ -2192,7 +2323,7 @@ impl Workspace {
     }
 
     fn find_file(&mut self, _: &FindFile, window: &mut Window, cx: &mut Context<Self>) {
-        if self.project().is_none() {
+        if self.directory_workspace().is_none() {
             return;
         }
         self.settings.sidebar_open = true;
@@ -2298,7 +2429,7 @@ impl Workspace {
                 if let Err(error) = self.select_project(&id, window, cx) {
                     self.report(error, cx);
                 }
-            } else if let Err(error) = self.select_default_space(window, cx) {
+            } else if let Err(error) = self.select_loose_files(window, cx) {
                 self.report(error, cx);
             }
         }
@@ -2309,6 +2440,7 @@ impl Workspace {
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let user_project = self.config.active_id.is_some();
         let projects = self.config.projects.iter().map(|project| {
             let id = project.id.clone();
             let rename_id = id.clone();
@@ -2418,7 +2550,7 @@ impl Workspace {
             String::new()
         };
         let mut entries = BTreeMap::new();
-        if self.project().is_none() {
+        if self.directory_workspace().is_none() {
             for path in self
                 .tabs
                 .iter()
@@ -2474,15 +2606,18 @@ impl Workspace {
                         .any(|folder| path.starts_with(&format!("{folder}/")))
             })
             .map(|(path, folder)| {
-                let depth = if self.project().is_some() {
+                let depth = if self.directory_workspace().is_some() {
                     path.matches('/').count()
                 } else {
                     0
                 };
-                if self.project().is_none() {
+                if self.directory_workspace().is_none() {
                     let key = path.clone();
                     let active = self.active == key;
                     let close = key.clone();
+                    let rename_key = key.clone();
+                    let rename_name = Path::new(path).file_name().unwrap().to_string_lossy().into_owned();
+                    let rename_app = cx.entity();
                     let close_id = SharedString::from(format!("close-default-file-{key}"));
                     let name = Path::new(path)
                         .file_name()
@@ -2523,11 +2658,21 @@ impl Workspace {
                             }
                             cx.notify();
                         }))
+                        .context_menu(move |menu, _, _| {
+                            let app = rename_app.clone();
+                            let path = rename_key.clone();
+                            let name = rename_name.clone();
+                            menu.when(path.to_lowercase().ends_with(".md"), |menu| {
+                                menu.item(PopupMenuItem::new("重命名…").on_click(move |_, window, cx| {
+                                    app.update(cx, |app, cx| app.start_name(NameAction::RenameFile(path.clone()), &name, window, cx));
+                                }))
+                            })
+                        })
                         .into_any_element();
                 }
                 if *folder {
                     let toggled = path.clone();
-                    let full = PathBuf::from(&self.project().expect("folder has project").folder)
+                    let full = PathBuf::from(&self.directory_workspace().expect("folder has project").folder)
                         .join(path);
                     let deleted = path.clone();
                     let row_deleted = path.clone();
@@ -2635,7 +2780,7 @@ impl Workspace {
                 let open = file.clone();
                 let rename = file.path.clone();
                 let delete = file.path.clone();
-                let full = PathBuf::from(&self.project().expect("file has project").folder)
+                let full = PathBuf::from(&self.directory_workspace().expect("file has project").folder)
                     .join(&file.path);
                 let app = cx.entity();
                 let split = file.clone();
@@ -2706,7 +2851,7 @@ impl Workspace {
                     .child(crate::ui::file_icon(
                         &file.path,
                         file.kind == FileKind::Asset,
-                        self.project()
+                        self.directory_workspace()
                             .is_some_and(|project| project.main_file == file.path),
                     ))
                     .child(
@@ -2715,7 +2860,7 @@ impl Workspace {
                             .min_w_0()
                             .text_ellipsis()
                             .when(
-                                self.project()
+                                self.directory_workspace()
                                     .is_some_and(|project| project.main_file == file.path),
                                 |name| {
                                     name.text_color(rgb(crate::ui::MAIN_TEX_COLOR))
@@ -2815,7 +2960,7 @@ impl Workspace {
                                 ))
                             },
                         )
-                        .when(main.to_lowercase().ends_with(".tex"), |menu| {
+                        .when(user_project && main.to_lowercase().ends_with(".tex"), |menu| {
                             menu.item(PopupMenuItem::new("设为编译主文件").on_click(
                                 move |_, _, cx| {
                                     main_app.update(cx, |app, cx| {
@@ -2867,7 +3012,7 @@ impl Workspace {
             .h(px(32.))
             .rounded(px(4.))
             .cursor_pointer()
-            .when(self.project().is_none(), |row| row.bg(rgb(0xe8e7e4)))
+            .when(self.config.active_workspace == Some(WorkspaceLocation::Default), |row| row.bg(rgb(0xe8e7e4)))
             .hover(|style| style.bg(rgb(0xefefed)))
             .child(crate::ui::icon(IconName::FileText))
             .child(div().flex_1().child("默认空间"))
@@ -2900,6 +3045,20 @@ impl Workspace {
                     )),
             )
             .child(default_space)
+            .child(div().id("loose-files").flex().items_center().gap_2()
+                .mx_2().px_2().h(px(32.)).rounded(px(4.)).cursor_pointer()
+                .text_sm()
+                .when(self.directory_workspace().is_none(), |row| row.bg(rgb(0xe8e7e4)))
+                .hover(|style| style.bg(rgb(0xefefed)))
+                .child(crate::ui::icon(IconName::Files))
+                .child("独立文件")
+                .on_click(cx.listener(|app, _, window, cx| {
+                if app.directory_workspace().is_none() { return; }
+                if app.cancellation.is_some() || app.batch_running || !app.confirm_drafts(window, cx, |app, window, cx| {
+                    if let Err(error) = app.select_loose_files(window, cx) { app.report(error, cx); }
+                }) { return; }
+                if let Err(error) = app.select_loose_files(window, cx) { app.report(error, cx); }
+            })))
             .children(projects)
             .child(
                 button("add-project", "+  添加本地项目")
@@ -2921,10 +3080,13 @@ impl Workspace {
                     .text_xs()
                     .text_color(rgb(MUTED))
                     .child("文件")
-                    .child(button("open-file", "打开文件").on_click(
+                    .child(button("new-markdown", "+ Markdown").on_click(cx.listener(|app, _, window, cx| {
+                        if let Err(error) = app.new_markdown(window, cx) { app.report(error, cx); }
+                    })))
+                    .when(self.directory_workspace().is_none(), |header| header.child(button("open-file", "打开文件").on_click(
                         cx.listener(|app, _, window, cx| app.open_file_dialog(window, cx)),
-                    ))
-                    .when(self.project().is_some(), |header| {
+                    )))
+                    .when(self.directory_workspace().is_some(), |header| {
                         header.child(
                             div()
                                 .flex()
@@ -3168,15 +3330,19 @@ impl Workspace {
                     .gap_3()
                     .text_color(rgb(MUTED))
                     .child(div().text_xl().child("Folio"))
-                    .child(if self.project().is_none() {
-                        "默认空间已就绪，打开文件即可开始"
+                    .child(if self.directory_workspace().is_none() {
+                        "打开文件，或点击 + Markdown 开始写作"
                     } else {
-                        "打开本地项目，开始编辑和排版"
+                        "选择文件，或点击 + Markdown 开始写作"
                     })
-                    .child(button("welcome-open-file", "打开文件").on_click(
+                    .when(self.directory_workspace().is_none(), |area| area.child(button("welcome-open-file", "打开文件").on_click(
                         cx.listener(|app, _, window, cx| app.open_file_dialog(window, cx)),
-                    ))
-                    .child("Ctrl+Shift+O 打开文件  ·  Ctrl+O 打开项目  ·  Ctrl+S 保存"),
+                    )))
+                    .child(if self.directory_workspace().is_none() {
+                        "Ctrl+Shift+O 打开文件  ·  Ctrl+O 打开项目  ·  Ctrl+S 保存"
+                    } else {
+                        "Ctrl+O 打开项目  ·  Ctrl+S 保存"
+                    }),
             );
         }
         area.into_any_element()
@@ -3312,14 +3478,14 @@ impl Render for Workspace {
             });
         }
         let title = self
-            .project()
+            .directory_workspace()
             .map(|project| format!("工作空间  ›  {}", project.name))
-            .unwrap_or_else(|| "默认空间".to_owned());
-        let engine = self.project().map(|project| project.engine);
+            .unwrap_or_else(|| "独立文件".to_owned());
+        let engine = self.directory_workspace().map(|project| project.engine);
         let engine_app = cx.entity();
         let main_app = cx.entity();
         let main_label = self
-            .project()
+            .directory_workspace()
             .map(|project| project.main_file.clone())
             .filter(|path| !path.is_empty())
             .unwrap_or_else(|| "选择主文件".into());
@@ -3599,7 +3765,7 @@ impl Render for Workspace {
                             .text_color(rgb(MUTED))
                             .text_xs()
                             .child(div().min_w_0().text_ellipsis().child(title))
-                            .when(self.project().is_some(), |title| {
+                            .when(self.config.active_id.is_some(), |title| {
                                 title.child(
                                     div()
                                         .max_w(px(140.))
@@ -3633,7 +3799,7 @@ impl Render for Workspace {
                                 })),
                         )
                     })
-                    .when(self.project().is_some(), |header| {
+                    .when(self.config.active_id.is_some(), |header| {
                         header.child(
                             Button::new("compile-settings")
                                 .icon(crate::ui::icon(IconName::SlidersHorizontal))
@@ -3827,9 +3993,9 @@ impl Render for Workspace {
                     .border_t_1()
                     .border_color(rgb(BORDER))
                     .child(
-                        self.project()
+                        self.directory_workspace()
                             .map(|project| project.folder.clone())
-                            .unwrap_or_else(|| format!("默认空间 · {} 个文件", self.tabs.len())),
+                            .unwrap_or_else(|| format!("独立文件 · {} 个文件", self.tabs.len())),
                     )
                     .children(save_status)
                     .child("Ctrl+S 保存  ·  Ctrl+Shift+O 打开文件  ·  Ctrl+Enter 编译"),
