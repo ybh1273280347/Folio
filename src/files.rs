@@ -135,7 +135,12 @@ fn revision(bytes: &[u8]) -> String {
 }
 
 pub fn read_document(root: &Path, relative: &str) -> io::Result<DiskDocument> {
-    let bytes = fs::read(project_path(root, relative)?)?;
+    read_document_at(&project_path(root, relative)?)
+}
+
+/// Reads a document directly by its canonical path for files in the default space.
+pub fn read_document_at(path: &Path) -> io::Result<DiskDocument> {
+    let bytes = fs::read(path)?;
     Ok(DiskDocument {
         text: String::from_utf8_lossy(&bytes).into_owned(),
         revision: revision(&bytes),
@@ -148,11 +153,20 @@ pub fn save_document(
     text: &str,
     expected_revision: &str,
 ) -> io::Result<Result<DiskDocument, DiskDocument>> {
-    let current = read_document(root, relative)?;
+    save_document_at(&project_path(root, relative)?, text, expected_revision)
+}
+
+/// Saves a default-space document only when its on-disk revision still matches.
+pub fn save_document_at(
+    path: &Path,
+    text: &str,
+    expected_revision: &str,
+) -> io::Result<Result<DiskDocument, DiskDocument>> {
+    let current = read_document_at(path)?;
     if current.revision != expected_revision {
         return Ok(Err(current));
     }
-    fs::write(project_path(root, relative)?, text.as_bytes())?;
+    fs::write(path, text.as_bytes())?;
     Ok(Ok(DiskDocument {
         text: text.to_owned(),
         revision: revision(text.as_bytes()),

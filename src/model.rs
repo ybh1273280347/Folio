@@ -29,6 +29,12 @@ pub const SHORTCUT_DEFS: &[ShortcutDef] = &[
         default_key: "ctrl-o",
     },
     ShortcutDef {
+        id: "open_file",
+        category: "工作区与全局",
+        label: "打开本地文件",
+        default_key: "ctrl-shift-o",
+    },
+    ShortcutDef {
         id: "compile",
         category: "工作区与全局",
         label: "编译文档",
@@ -175,6 +181,14 @@ pub struct Project {
 pub struct ProjectConfig {
     pub projects: Vec<Project>,
     pub active_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSession {
+    pub tabs: Vec<String>,
+    pub active: String,
+    pub reading_panes: Vec<String>,
 }
 
 impl Default for ProjectConfig {

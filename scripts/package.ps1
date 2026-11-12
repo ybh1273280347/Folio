@@ -13,6 +13,8 @@ if (-not $SkipBuild) {
 $releaseName = 'Folio-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff')
 $destination = Join-Path $projectDirectory ("dist\releases\$releaseName")
 $executable = Join-Path $destination 'Folio.exe'
+$stableDirectory = Join-Path $projectDirectory 'dist\Folio'
+$stableExecutable = Join-Path $stableDirectory 'Folio.exe'
 $releaseRoot = (Join-Path $projectDirectory 'dist\releases').TrimEnd('\') + '\'
 $legacyExecutable = Join-Path $projectDirectory 'dist\Folio\Folio.exe'
 if (-not $KeepRunning) {
@@ -33,19 +35,25 @@ Copy-Item -LiteralPath (Join-Path $projectDirectory 'vendor\gpui-pdf\LICENSE') -
 Copy-Item -LiteralPath (Join-Path $projectDirectory 'README.md') -Destination $destination
 Copy-Item -LiteralPath (Join-Path $projectDirectory 'resources\fonts\OFL.txt') -Destination (Join-Path $destination 'STIX-Fonts-OFL.txt')
 Copy-Item -LiteralPath (Join-Path $projectDirectory 'resources\fonts\GUST-FONT-LICENSE.txt') -Destination $destination
+$null = New-Item -ItemType Directory -Path $stableDirectory -Force
+Copy-Item -LiteralPath $executable -Destination $stableExecutable -Force
+Copy-Item -LiteralPath (Join-Path $projectDirectory 'resources\icon.ico') -Destination $stableDirectory -Force
+$null = & (Join-Path $PSScriptRoot 'register-file-associations.ps1') -ExecutablePath $stableExecutable
 $desktop = [Environment]::GetFolderPath('Desktop')
 $shortcutPath = Join-Path $desktop 'Folio GPUI.lnk'
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
-$shortcut.TargetPath = $executable
-$shortcut.WorkingDirectory = $destination
-$shortcut.IconLocation = (Join-Path $destination 'icon.ico')
+$shortcut.TargetPath = $stableExecutable
+$shortcut.WorkingDirectory = $stableDirectory
+$shortcut.IconLocation = (Join-Path $stableDirectory 'icon.ico')
 $shortcut.Description = 'Folio native GPUI workspace'
 $shortcut.Save()
 $launcherPath = Join-Path $projectDirectory '启动 Folio.cmd'
-Set-Content -LiteralPath $launcherPath -Encoding Ascii -Value "@echo off`r`nstart `"`" `"%~dp0dist\releases\$releaseName\Folio.exe`" %*"
+Set-Content -LiteralPath $launcherPath -Encoding Ascii -Value "@echo off`r`nstart `"`" `"%~dp0dist\Folio\Folio.exe`" %*"
 Write-Output "Published: $executable"
+Write-Output "Stable launcher: $stableExecutable"
 Write-Output "Desktop shortcut: $shortcutPath"
+Write-Output 'PDF/Markdown/LaTeX Open With entries registered for this user; choose Folio in Windows Default Apps to make it the default.'
 if ($Launch) {
-    Start-Process -FilePath $executable -WorkingDirectory $destination -WindowStyle Normal
+    Start-Process -FilePath $stableExecutable -WorkingDirectory $stableDirectory -WindowStyle Normal
 }
