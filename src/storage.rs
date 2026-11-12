@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     files,
-    model::{AnnotationItem, AppSettings, Engine, Project, ProjectConfig},
+    model::{AnnotationItem, AppSettings, Engine, Project, ProjectConfig, WorkspaceSession},
 };
 
 pub fn data_directory() -> io::Result<PathBuf> {
@@ -40,6 +40,17 @@ pub fn load_projects() -> io::Result<ProjectConfig> {
 
 pub fn save_projects(config: &ProjectConfig) -> io::Result<()> {
     write_json(&data_directory()?.join("projects.json"), config)
+}
+
+pub fn load_workspace_sessions() -> io::Result<std::collections::BTreeMap<String, WorkspaceSession>>
+{
+    read_json(&data_directory()?.join("workspace-sessions.json"))
+}
+
+pub fn save_workspace_sessions(
+    sessions: &std::collections::BTreeMap<String, WorkspaceSession>,
+) -> io::Result<()> {
+    write_json(&data_directory()?.join("workspace-sessions.json"), sessions)
 }
 
 pub fn load_settings() -> io::Result<AppSettings> {
