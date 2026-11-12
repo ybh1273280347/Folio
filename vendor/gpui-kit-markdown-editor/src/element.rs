@@ -239,7 +239,13 @@ impl RenderOnce for BlockEditor {
             // Units to lay out: the visible range (binary search over the
             // prefix sums) plus pinned units (selection ends, IME).
             let (first, last) = match window_span {
-                None => (0, n),
+                // Before prepaint provides the real viewport, measure only a
+                // few screens. Measuring the whole document here defeats
+                // virtualization precisely on the first, uncached frame.
+                None => (
+                    0,
+                    (index.find(window.viewport_size().height * 3.) + 1).min(n),
+                ),
                 Some((top, bottom)) => {
                     let first = index.find(top.max(px(0.))).min(n);
                     (first, (index.find(bottom) + 1).min(n).max(first))

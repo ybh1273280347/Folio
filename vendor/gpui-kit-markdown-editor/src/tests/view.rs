@@ -312,6 +312,55 @@ fn events(
     count
 }
 
+/// Loading must not autosave a preview, and the first edit must retain the tail.
+#[gpui::test]
+fn prepared_model_replaces_preview_without_losing_document_tail(cx: &mut TestAppContext) {
+    let (editor, cx) = open(cx, "preview");
+    let changed = events(&editor, cx);
+    let prepared = std::thread::spawn(|| {
+        crate::BlockEditorModel::from_markdown(
+            "first paragraph\n\n## 最后一节\n\n完整正文 [link][target]\n\n[target]: https://example.com",
+            gpui_kit::base::text::MarkdownExtensions::default(),
+        )
+        .unwrap()
+    })
+    .join()
+    .unwrap();
+    editor.update(cx, |e, cx| {
+        e.set_readonly(true, cx);
+        e.set_model(prepared, cx);
+        e.set_readonly(false, cx);
+    });
+    draw(cx);
+    assert_eq!(*changed.borrow(), 0, "loading must not emit a document edit");
+    type_text(cx, "edited ");
+    let source = source(&editor, cx);
+    assert!(source.starts_with("edited first paragraph"));
+    assert!(source.contains("## 最后一节"));
+    assert!(source.contains("https://example.com"));
+    assert_eq!(*changed.borrow(), 1);
+}
+
+#[gpui::test]
+fn unknown_viewport_does_not_lay_out_the_whole_document(cx: &mut TestAppContext) {
+    let doc = "paragraph\n\n".repeat(2000);
+    let (editor, cx) = open(cx, &doc);
+    editor.update(cx, |e, cx| {
+        // Exercise the same absence of viewport measurements as a cold open.
+        e.cull.borrow_mut().visible = None;
+        cx.notify();
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    editor.read_with(cx, |e, _| {
+        let first = e.model().document().leaves().next().unwrap().id();
+        let last = e.model().document().leaves().last().unwrap().id();
+        assert!(e.frame.borrow().leaf(first).is_some());
+        assert!(e.frame.borrow().leaf(last).is_none());
+    });
+}
+
 /// Review P1: an empty composition must not leave an undo group open.
 #[gpui::test]
 fn empty_ime_mark_does_not_leak_undo_group(cx: &mut TestAppContext) {
@@ -962,9 +1011,10 @@ fn culled_spacers_keep_block_positions(cx: &mut TestAppContext) {
     });
     caret_at(&editor, cx, target, 0);
     draw(cx);
-    // A frame with culling off (no visible span yet) lays out everything.
+    // Force a full-layout reference frame to compare spacer geometry.
     editor.update(cx, |e, cx| {
-        e.cull.borrow_mut().visible = None;
+        let height = e.cull.borrow().index.prefix(usize::MAX);
+        e.cull.borrow_mut().visible = Some((px(0.), height));
         cx.notify();
     });
     cx.update(|window, cx| {

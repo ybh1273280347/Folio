@@ -280,15 +280,12 @@ pub const MAIN_TEX_COLOR: u32 = 0x5c7f9f;
 
 pub fn file_icon(path: &str, asset: bool, main: bool) -> AnyElement {
     if path.to_lowercase().ends_with(".pdf") {
-        return div()
-            .text_size(px(9.))
-            .text_color(rgb(0xb45b57))
-            .border_1()
-            .border_color(rgb(0xd5a7a3))
-            .rounded(px(3.))
-            .px_1()
+        return Icon::default()
+            .data(include_bytes!("../resources/icons/file-pdf.svg"))
+            .w(px(16.))
+            .h(px(18.))
+            .text_color(rgb(0xd93025))
             .flex_shrink_0()
-            .child("PDF")
             .into_any_element();
     }
     let name = if asset {

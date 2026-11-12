@@ -16,8 +16,8 @@ use gpui_kit::{
     *,
 };
 use markdown_editor::{
-    BlockEditor, BlockEditorEvent, BlockEditorState, BlockId, BlockKind, BlockPosition,
-    BlockSelection, ColumnAlign, EditorCommand, MarkChange, MarkKind, TableEdit,
+    BlockEditor, BlockEditorEvent, BlockEditorModel, BlockEditorState, BlockId, BlockKind,
+    BlockPosition, BlockSelection, ColumnAlign, EditorCommand, MarkChange, MarkKind, TableEdit,
 };
 use std::{cell::RefCell, ops::Range, path::PathBuf, rc::Rc};
 
@@ -208,6 +208,9 @@ pub struct MarkdownPane {
     headings: Vec<OutlineHeading>,
     source_editor: Entity<EditorState>,
     visual_editor: Entity<BlockEditorState>,
+    extensions: MarkdownExtensions,
+    // The preview is never the saved document; editing resumes after the full model arrives.
+    loading: Option<Task<()>>,
     source: bool,
     outline: bool,
     reading: bool,
@@ -254,6 +257,9 @@ impl MarkdownPane {
     /// The workspace hosts this capture independently of the selected tab.
     pub fn export_element(&self) -> Option<AnyElement> {
         self.export.borrow().as_ref()?;
+        if self.loading.is_some() {
+            return None;
+        }
         let request = self.export.clone();
         let editor = self.visual_editor.clone();
         let math = self.math.clone();
@@ -327,11 +333,7 @@ impl MarkdownPane {
         cx: &mut Context<Self>,
     ) {
         if self.source {
-            self.visual_editor.update(cx, |editor, cx| {
-                editor
-                    .set_source(&self.text, cx)
-                    .expect("current Markdown parses")
-            });
+            self.load_visual(cx);
         }
         *self.export.borrow_mut() = Some(request);
         self.export_width = if self.settings.line_width_limited {
@@ -359,10 +361,7 @@ impl MarkdownPane {
         let visual_editor = cx.new(|cx| {
             let mut editor = BlockEditorState::new(window, cx);
             editor
-                .set_markdown_extensions(extensions, cx)
-                .expect("current Markdown parses with the configured GPUI extensions");
-            editor
-                .set_source(&text, cx)
+                .set_markdown_extensions(extensions.clone(), cx)
                 .expect("current Markdown parses with the configured GPUI extensions");
             editor.set_scroll_handle(scroll.clone());
             editor
@@ -432,7 +431,6 @@ impl MarkdownPane {
                 .line_number(false)
                 .soft_wrap(true)
                 .searchable(true)
-                .default_value(text.clone())
         });
         let link_input = cx.new(|cx| InputState::new(window, cx).placeholder("输入链接 URL (回车确认)"));
         cx.subscribe_in(
@@ -515,6 +513,8 @@ impl MarkdownPane {
             window,
             |pane: &mut Self, state, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) && pane.source {
+                    // A source edit supersedes any model currently being prepared.
+                    pane.loading = None;
                     pane.text = state.read(cx).value().to_string();
                     pane.parse_outline();
                     cx.emit(MarkdownEvent::Change(pane.text.clone()));
@@ -618,6 +618,8 @@ impl MarkdownPane {
             headings: Vec::new(),
             source_editor,
             visual_editor,
+            extensions,
+            loading: None,
             source: false,
             outline: false,
             reading,
@@ -652,18 +654,66 @@ impl MarkdownPane {
             _visual_subscription: visual_subscription,
             _math_subscription: math_subscription,
         };
-        pane.parse_outline();
+        pane.load_visual(cx);
         pane
     }
 
+    fn load_visual(&mut self, cx: &mut Context<Self>) {
+        self.loading = None;
+        // Bound first-paint work in bytes, even for OCR paragraphs with no blank lines.
+        // The full parse still sees the original document, preserving fences and references.
+        const PREVIEW_BYTES: usize = 8 * 1024;
+        const BACKGROUND_BYTES: usize = 32 * 1024;
+        let long = self.text.len() > BACKGROUND_BYTES;
+        let preview_end = if long {
+            let end = self.text.floor_char_boundary(PREVIEW_BYTES);
+            self.text[..end].rfind('\n').unwrap_or(end)
+        } else {
+            self.text.len()
+        };
+        self.visual_editor.update(cx, |editor, cx| {
+            editor.set_readonly(long, cx);
+            editor
+                .set_source(&self.text[..preview_end], cx)
+                .expect("Markdown preview parses with the configured GPUI extensions");
+        });
+        if !long {
+            self.parse_outline();
+            return;
+        }
+        self.headings.clear();
+        let text = self.text.clone();
+        let extensions = self.extensions.clone();
+        let prepared = cx.background_executor().spawn(async move {
+            let model = BlockEditorModel::from_markdown(&text, extensions)
+                .expect("full Markdown parses with the configured GPUI extensions");
+            (model, Self::outline_headings(&text))
+        });
+        self.loading = Some(cx.spawn(async move |this, cx| {
+            let (model, headings) = prepared.await;
+            let _ = this.update(cx, |pane, cx| {
+                pane.visual_editor.update(cx, |editor, cx| {
+                    editor.set_model(model, cx);
+                    editor.set_readonly(false, cx);
+                });
+                pane.headings = headings;
+                pane.loading = None;
+                cx.notify();
+            });
+        }));
+    }
+
     fn parse_outline(&mut self) {
+        self.headings = Self::outline_headings(&self.text);
+    }
+
+    fn outline_headings(text: &str) -> Vec<OutlineHeading> {
         let arena = Arena::new();
-        let root = parse_document(&arena, &self.text, &Options::default());
+        let root = parse_document(&arena, text, &Options::default());
         let lines: Vec<_> = std::iter::once(0)
-            .chain(self.text.match_indices('\n').map(|(offset, _)| offset + 1))
+            .chain(text.match_indices('\n').map(|(offset, _)| offset + 1))
             .collect();
-        self.headings = root
-            .descendants()
+        root.descendants()
             .filter_map(|node| {
                 let data = node.data.borrow();
                 let NodeValue::Heading(heading) = &data.value else {
@@ -680,7 +730,7 @@ impl MarkdownPane {
                     .copied()
                     .unwrap_or(0)
                     + position.end.column)
-                    .min(self.text.len());
+                    .min(text.len());
                 let title = node
                     .descendants()
                     .filter_map(|child| match &child.data.borrow().value {
@@ -695,7 +745,7 @@ impl MarkdownPane {
                     title,
                 })
             })
-            .collect();
+            .collect()
     }
 
     pub fn toggle_outline(&mut self, cx: &mut Context<Self>) {
@@ -851,15 +901,12 @@ impl MarkdownPane {
             return;
         }
         self.text = text.to_owned();
-        self.parse_outline();
-        self.visual_editor.update(cx, |editor, cx| {
-            editor
-                .set_source(text, cx)
-                .expect("external Markdown parses with the configured GPUI extensions");
-        });
-        self.source_editor.update(cx, |editor, cx| {
-            editor.set_value(text.to_owned(), window, cx)
-        });
+        self.load_visual(cx);
+        if self.source {
+            self.source_editor.update(cx, |editor, cx| {
+                editor.set_value(text.to_owned(), window, cx)
+            });
+        }
         cx.notify();
     }
 
@@ -895,11 +942,7 @@ impl MarkdownPane {
                 });
             });
         } else {
-            self.visual_editor.update(cx, |editor, cx| {
-                editor
-                    .set_source(&self.text, cx)
-                    .expect("source mode Markdown parses with the configured GPUI extensions");
-            });
+            self.load_visual(cx);
             self.defer_focus_visual(window, cx);
         }
         cx.emit(MarkdownEvent::Focus);
@@ -2256,7 +2299,13 @@ impl Render for MarkdownPane {
                             .pr_6()
                             .pt_6()
                             .pb(trailing_space)
-                            .child(BlockEditor::new(&self.visual_editor)),
+                            .child(BlockEditor::new(&self.visual_editor))
+                            .when(self.loading.is_some(), |content| {
+                                content.child(
+                                    div().mt_4().text_sm().text_color(rgb(0x787774))
+                                        .child("正在加载后续内容…"),
+                                )
+                            }),
                     ))
                     .children(block_handle)
                     .children(floating_toolbar)

@@ -186,8 +186,8 @@ struct Geometry {
 
 impl CullState {
     /// Drop layout-dependent measurements when wrapping or zoom changes.
-    /// The current frame's spacers are stale; the next render measures all
-    /// units before culling resumes.
+    /// The current frame's spacers are stale; the next render measures visible
+    /// units again, starting with a bounded first-frame estimate.
     pub(crate) fn set_geometry(
         &mut self,
         width: Pixels,
