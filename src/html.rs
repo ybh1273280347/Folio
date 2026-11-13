@@ -11,8 +11,12 @@ use gpui_kit::*;
 use gpui_webview::WebView;
 use sha2::{Digest, Sha256};
 use std::{
+    cell::RefCell,
+    future::Future,
     path::{Component, Path, PathBuf},
-    sync::mpsc,
+    pin::Pin,
+    sync::{Arc, Mutex, mpsc},
+    task::{Context as TaskContext, Poll, Waker},
 };
 
 const BORDER: u32 = 0xe8e7e3;
@@ -29,6 +33,18 @@ enum HtmlInternalEvent {
     NavigateInternal(String),
 }
 
+struct ParentWindowHandle(raw_window_handle::RawWindowHandle);
+
+impl raw_window_handle::HasWindowHandle for ParentWindowHandle {
+    fn window_handle(
+        &self,
+    ) -> std::result::Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        // SAFETY: `HtmlPane` only awaits creation inside `cx.spawn_in(window, ...)`,
+        // which is scoped to the live GPUI `Window` on the main UI thread.
+        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(self.0) })
+    }
+}
+
 pub struct HtmlPane {
     file_path: PathBuf,
     root_dir: PathBuf,
@@ -37,10 +53,11 @@ pub struct HtmlPane {
     fallback_url: String,
     is_reading: bool,
     webview: Option<Entity<WebView>>,
-    web_context: Option<wry::WebContext>,
     events_rx: Option<mpsc::Receiver<HtmlInternalEvent>>,
+    init_task: Option<Task<()>>,
     visible: bool,
     attempted: bool,
+    released: bool,
     loading: bool,
     using_fallback: bool,
     error: Option<String>,
@@ -58,9 +75,10 @@ impl Focusable for HtmlPane {
 
 impl Drop for HtmlPane {
     fn drop(&mut self) {
+        self.released = true;
+        self.init_task = None;
         self.events_rx = None;
         self.webview = None;
-        self.web_context = None;
     }
 }
 
@@ -77,7 +95,12 @@ impl HtmlPane {
         let entry_url = build_virtual_url(&virtual_host, &canonical_root, &canonical_file);
         let fallback_url = url::Url::from_file_path(&canonical_file)
             .map(|url| url.into())
-            .unwrap_or_else(|_| format!("file:///{}", canonical_file.to_string_lossy().replace('\\', "/")));
+            .unwrap_or_else(|_| {
+                format!(
+                    "file:///{}",
+                    canonical_file.to_string_lossy().replace('\\', "/")
+                )
+            });
 
         Self {
             file_path: canonical_file,
@@ -87,10 +110,11 @@ impl HtmlPane {
             fallback_url,
             is_reading,
             webview: None,
-            web_context: None,
             events_rx: None,
+            init_task: None,
             visible: false,
             attempted: false,
+            released: false,
             loading: false,
             using_fallback: false,
             error: None,
@@ -103,18 +127,9 @@ impl HtmlPane {
         &self.file_path
     }
 
-    pub fn root_dir(&self) -> &Path {
-        &self.root_dir
-    }
-
-    pub fn set_visible(
-        &mut self,
-        visible: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_visible(&mut self, visible: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.visible = visible;
-        if visible && self.webview.is_none() && !self.attempted {
+        if visible && self.webview.is_none() && !self.attempted && !self.released {
             self.ensure_webview(window, cx);
         }
         if let Some(webview) = &self.webview {
@@ -136,7 +151,7 @@ impl HtmlPane {
             self.loading = true;
             let _ = webview.read(cx).raw().reload();
             cx.notify();
-        } else if self.visible {
+        } else if self.visible && self.init_task.is_none() {
             self.attempted = false;
             self.error = None;
             self.ensure_webview(window, cx);
@@ -145,13 +160,14 @@ impl HtmlPane {
     }
 
     pub fn release(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.released = true;
+        self.init_task = None;
         if let Some(webview) = self.webview.take() {
             webview.update(cx, |view, _| {
                 view.hide();
             });
         }
         self.events_rx = None;
-        self.web_context = None;
         self.loading = false;
         self.attempted = false;
     }
@@ -192,94 +208,132 @@ impl HtmlPane {
         self.attempted = true;
         self.error = None;
         self.using_fallback = false;
+        self.loading = true;
+
+        let Ok(raw_handle) =
+            raw_window_handle::HasWindowHandle::window_handle(window).map(|h| h.as_raw())
+        else {
+            self.loading = false;
+            self.error = Some("无法获取父窗口句柄".into());
+            return;
+        };
+        let parent = ParentWindowHandle(raw_handle);
 
         let data_dir = storage::data_directory().ok().map(|dir| dir.join("webview2"));
-        if let Some(dir) = &data_dir {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let mut context = wry::WebContext::new(data_dir);
 
-        let (tx, rx) = mpsc::channel();
-        let allowed_origin = format!("https://{}", self.virtual_host);
-        let allowed_prefix = format!("{allowed_origin}/");
-        let fallback_prefix = url::Url::from_directory_path(&self.root_dir)
-            .map(|u| u.to_string())
-            .unwrap_or_default();
+        let virtual_host = self.virtual_host.clone();
+        let root_dir = self.root_dir.clone();
+        let entry_url = self.entry_url.clone();
+        let fallback_url = self.fallback_url.clone();
 
-        let nav_tx = tx.clone();
-        let nav_origin = allowed_origin.clone();
-        let nav_prefix = allowed_prefix.clone();
-        let nav_fallback = fallback_prefix.clone();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let (tx, rx) = mpsc::channel();
+            let allowed_origin = format!("https://{virtual_host}");
+            let allowed_prefix = format!("{allowed_origin}/");
+            let fallback_prefix = url::Url::from_directory_path(&root_dir)
+                .map(|u| u.to_string())
+                .unwrap_or_default();
 
-        let new_win_tx = tx.clone();
-        let new_win_origin = allowed_origin;
-        let new_win_prefix = allowed_prefix;
+            let nav_tx = tx.clone();
+            let nav_origin = allowed_origin.clone();
+            let nav_prefix = allowed_prefix.clone();
+            let nav_fallback = fallback_prefix;
 
-        let load_tx = tx;
+            let new_win_tx = tx.clone();
+            let new_win_origin = allowed_origin;
+            let new_win_prefix = allowed_prefix;
 
-        let builder = wry::WebViewBuilder::new_with_web_context(&mut context)
-            .with_devtools(cfg!(debug_assertions))
-            .with_navigation_handler(move |uri| {
-                if uri == "about:blank"
-                    || uri == nav_origin
-                    || uri.starts_with(&nav_prefix)
-                    || uri.starts_with("data:")
-                    || uri.starts_with("blob:")
-                    || (!nav_fallback.is_empty() && uri.starts_with(&nav_fallback))
+            let load_tx = tx;
+
+            let result: Result<wry::WebView, String> = async {
+                let mut builder = wry::WebViewBuilder::new()
+                    .with_bounds(wry::Rect::default())
+                    .with_devtools(cfg!(debug_assertions))
+                    .with_navigation_handler(move |uri| {
+                        if uri == "about:blank"
+                            || uri == nav_origin
+                            || uri.starts_with(&nav_prefix)
+                            || uri.starts_with("data:")
+                            || uri.starts_with("blob:")
+                            || (!nav_fallback.is_empty() && uri.starts_with(&nav_fallback))
+                        {
+                            return true;
+                        }
+                        if uri.starts_with("http://") || uri.starts_with("https://") {
+                            let _ = nav_tx.send(HtmlInternalEvent::OpenExternal(uri));
+                        }
+                        false
+                    })
+                    .with_new_window_req_handler(move |uri, _| {
+                        if uri == new_win_origin || uri.starts_with(&new_win_prefix) {
+                            let _ = new_win_tx.send(HtmlInternalEvent::NavigateInternal(uri));
+                        } else if uri.starts_with("http://") || uri.starts_with("https://") {
+                            let _ = new_win_tx.send(HtmlInternalEvent::OpenExternal(uri));
+                        }
+                        wry::NewWindowResponse::Deny
+                    })
+                    .with_on_page_load_handler(move |event, _| {
+                        let is_loading = matches!(event, wry::PageLoadEvent::Started);
+                        let _ = load_tx.send(HtmlInternalEvent::PageLoad(is_loading));
+                    });
+
+                #[cfg(target_os = "windows")]
                 {
-                    return true;
+                    use wry::WebViewBuilderExtWindows;
+                    let env = get_or_create_environment_async(data_dir).await?;
+                    builder = builder.with_environment(env);
                 }
-                if uri.starts_with("http://") || uri.starts_with("https://") {
-                    let _ = nav_tx.send(HtmlInternalEvent::OpenExternal(uri));
-                }
-                false
-            })
-            .with_new_window_req_handler(move |uri, _| {
-                if uri == new_win_origin || uri.starts_with(&new_win_prefix) {
-                    let _ = new_win_tx.send(HtmlInternalEvent::NavigateInternal(uri));
-                } else if uri.starts_with("http://") || uri.starts_with("https://") {
-                    let _ = new_win_tx.send(HtmlInternalEvent::OpenExternal(uri));
-                }
-                wry::NewWindowResponse::Deny
-            })
-            .with_on_page_load_handler(move |event, _| {
-                let is_loading = matches!(event, wry::PageLoadEvent::Started);
-                let _ = load_tx.send(HtmlInternalEvent::PageLoad(is_loading));
-            });
 
-        match WebView::build(builder, window, cx) {
-            Ok(webview) => {
-                let webview_entity = cx.new(|_| webview);
-                let mapping_result = webview_entity.read(cx);
-                let map_res = apply_virtual_host_mapping(
-                    mapping_result,
-                    &self.virtual_host,
-                    &self.root_dir,
-                );
-                let target_url = match map_res {
-                    Ok(()) => self.entry_url.clone(),
+                builder
+                    .build_as_child_async(&parent)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+            .await;
+
+            let _ = this.update_in(cx, |pane, window, cx| {
+                pane.init_task = None;
+                if pane.released {
+                    return;
+                }
+                match result {
+                    Ok(wry_webview) => {
+                        let webview = WebView::new(wry_webview, window, cx);
+                        let webview_entity = cx.new(|_| webview);
+                        let map_res = apply_virtual_host_mapping(
+                            webview_entity.read(cx),
+                            &virtual_host,
+                            &root_dir,
+                        );
+                        let target_url = match map_res {
+                            Ok(()) => entry_url,
+                            Err(err) => {
+                                eprintln!(
+                                    "WebView2 virtual host mapping failed, falling back to file URL: {err}"
+                                );
+                                pane.using_fallback = true;
+                                fallback_url
+                            }
+                        };
+                        webview_entity.update(cx, |view, _| {
+                            view.load_url(&target_url);
+                            if !pane.visible {
+                                view.hide();
+                            }
+                        });
+                        pane.webview = Some(webview_entity);
+                        pane.events_rx = Some(rx);
+                    }
                     Err(err) => {
-                        eprintln!("WebView2 virtual host mapping failed, falling back to file URL: {err}");
-                        self.using_fallback = true;
-                        self.fallback_url.clone()
+                        pane.loading = false;
+                        pane.error = Some(format!("无法启动 WebView2：{err}"));
                     }
-                };
-                self.loading = true;
-                webview_entity.update(cx, |view, _| {
-                    view.load_url(&target_url);
-                    if !self.visible {
-                        view.hide();
-                    }
-                });
-                self.webview = Some(webview_entity);
-                self.web_context = Some(context);
-                self.events_rx = Some(rx);
-            }
-            Err(err) => {
-                self.loading = false;
-                self.error = Some(format!("无法启动 WebView2：{err}"));
-            }
-        }
+                }
+                cx.notify();
+            });
+        });
+
+        self.init_task = Some(task);
     }
 
     fn display_name(&self) -> String {
@@ -326,7 +380,9 @@ impl Render for HtmlPane {
             .border_color(rgb(BORDER))
             .child(
                 ui::control("html-back", IconName::ChevronLeft)
-                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("后退").build(window, cx))
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("后退").build(window, cx)
+                    })
                     .on_click(cx.listener(|pane, _, _, cx| {
                         if let Some(wv) = &pane.webview {
                             wv.update(cx, |view, _| {
@@ -337,7 +393,9 @@ impl Render for HtmlPane {
             )
             .child(
                 ui::control("html-forward", IconName::ChevronRight)
-                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("前进").build(window, cx))
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("前进").build(window, cx)
+                    })
                     .on_click(cx.listener(|pane, _, _, cx| {
                         if let Some(wv) = &pane.webview {
                             wv.update(cx, |view, _| {
@@ -348,7 +406,9 @@ impl Render for HtmlPane {
             )
             .child(
                 ui::control("html-reload", IconName::RotateCcw)
-                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("刷新页面").build(window, cx))
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("刷新页面").build(window, cx)
+                    })
                     .on_click(cx.listener(|pane, _, window, cx| {
                         pane.reload(window, cx);
                     })),
@@ -379,7 +439,10 @@ impl Render for HtmlPane {
             )
             .child(
                 ui::control("html-external", IconName::ExternalLink)
-                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("在默认浏览器中打开").build(window, cx))
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("在默认浏览器中打开")
+                            .build(window, cx)
+                    })
                     .on_click(cx.listener(|pane, _, _, cx| {
                         pane.open_in_external_browser(cx);
                     })),
@@ -388,7 +451,9 @@ impl Render for HtmlPane {
         if !self.is_reading {
             toolbar = toolbar.child(
                 ui::control("html-close", IconName::Close)
-                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("关闭标签页").build(window, cx))
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("关闭标签页").build(window, cx)
+                    })
                     .on_click(cx.listener(|_, _, _, cx| {
                         cx.emit(HtmlPaneEvent::Close);
                     })),
@@ -409,29 +474,35 @@ impl Render for HtmlPane {
                     .gap_3()
                     .p_6()
                     .text_color(rgb(MUTED))
-                    .child(div().text_sm().font_semibold().text_color(rgb(0x37352f)).child("WebView2 初始化失败"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .text_color(rgb(0x37352f))
+                            .child("WebView2 初始化失败"),
+                    )
                     .child(div().text_xs().max_w(px(460.)).child(err.clone()))
                     .child(
                         div()
                             .flex()
                             .gap_2()
-                            .child(ui::button_secondary("html-retry", "重试").on_click(cx.listener(
-                                |pane, _, window, cx| {
+                            .child(ui::button_secondary("html-retry", "重试").on_click(
+                                cx.listener(|pane, _, window, cx| {
                                     pane.attempted = false;
                                     pane.error = None;
                                     pane.ensure_webview(window, cx);
                                     cx.notify();
-                                },
-                            )))
-                            .child(ui::button_primary("html-open-browser", "在默认浏览器中打开").on_click(
-                                cx.listener(|pane, _, _, cx| {
-                                    pane.open_in_external_browser(cx);
                                 }),
-                            )),
+                            ))
+                            .child(
+                                ui::button_primary("html-open-browser", "在默认浏览器中打开")
+                                    .on_click(cx.listener(|pane, _, _, cx| {
+                                        pane.open_in_external_browser(cx);
+                                    })),
+                            ),
                     ),
             );
         } else if !self.visible {
-            // Keep GPUI layout clean while hidden (e.g. when a modal overlay is open).
             root = root.child(
                 div()
                     .flex_1()
@@ -490,11 +561,99 @@ fn build_virtual_url(host: &str, root: &Path, file: &Path) -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn apply_virtual_host_mapping(
-    webview: &WebView,
-    host: &str,
-    folder: &Path,
-) -> Result<(), String> {
+thread_local! {
+    static SHARED_WEBVIEW2_ENV: RefCell<Option<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment>> = const { RefCell::new(None) };
+}
+
+#[cfg(target_os = "windows")]
+struct OneshotState<T> {
+    value: Option<T>,
+    waker: Option<Waker>,
+}
+
+#[cfg(target_os = "windows")]
+struct OneshotFuture<T>(Arc<Mutex<OneshotState<T>>>);
+
+#[cfg(target_os = "windows")]
+impl<T> Future for OneshotFuture<T> {
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        let mut state = self.0.lock().expect("oneshot mutex");
+        if let Some(value) = state.value.take() {
+            Poll::Ready(value)
+        } else {
+            state.waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn create_environment_for_dir(
+    data_dir: &Path,
+) -> Result<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment, String> {
+    use webview2_com::{
+        CreateCoreWebView2EnvironmentCompletedHandler,
+        Microsoft::Web::WebView2::Win32::CreateCoreWebView2EnvironmentWithOptions,
+    };
+    use windows_core::{HSTRING, PCWSTR};
+
+    let _ = std::fs::create_dir_all(data_dir);
+    let state = Arc::new(Mutex::new(OneshotState {
+        value: None,
+        waker: None,
+    }));
+    let sender = state.clone();
+    let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
+        move |error_code, environment| {
+            let outcome = match error_code {
+                Ok(()) => environment
+                    .ok_or_else(|| "WebView2 环境回调返回空指针".to_owned()),
+                Err(err) => Err(format!("WebView2 环境创建失败：{err}")),
+            };
+            let mut guard = sender.lock().expect("oneshot mutex");
+            guard.value = Some(outcome);
+            if let Some(waker) = guard.waker.take() {
+                waker.wake();
+            }
+            Ok(())
+        },
+    ));
+    let dir_h = HSTRING::from(data_dir.to_string_lossy().as_ref());
+    unsafe {
+        CreateCoreWebView2EnvironmentWithOptions(PCWSTR::null(), &dir_h, None, &handler)
+    }
+    .map_err(|e| format!("CreateCoreWebView2EnvironmentWithOptions 调用失败：{e}"))?;
+
+    OneshotFuture(state).await
+}
+
+#[cfg(target_os = "windows")]
+async fn get_or_create_environment_async(
+    primary_dir: Option<PathBuf>,
+) -> Result<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment, String> {
+    if let Some(env) = SHARED_WEBVIEW2_ENV.with(|cell| cell.borrow().clone()) {
+        return Ok(env);
+    }
+    let primary = primary_dir.unwrap_or_else(|| std::env::temp_dir().join("folio-gpui-webview2"));
+    let env = match create_environment_for_dir(&primary).await {
+        Ok(env) => env,
+        Err(first_err) => {
+            let isolated = primary.with_file_name(format!("webview2-{}", std::process::id()));
+            create_environment_for_dir(&isolated).await.map_err(|second_err| {
+                format!("{first_err}；隔离目录重试仍失败：{second_err}")
+            })?
+        }
+    };
+    SHARED_WEBVIEW2_ENV.with(|cell| {
+        *cell.borrow_mut() = Some(env.clone());
+    });
+    Ok(env)
+}
+
+#[cfg(target_os = "windows")]
+fn apply_virtual_host_mapping(webview: &WebView, host: &str, folder: &Path) -> Result<(), String> {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW, ICoreWebView2_3,
     };
