@@ -1,4 +1,4 @@
-param([switch]$SkipBuild, [switch]$Launch, [switch]$KeepRunning)
+﻿param([switch]$SkipBuild, [switch]$Launch, [switch]$KeepRunning)
 $ErrorActionPreference = 'Stop'
 $projectDirectory = Split-Path -Parent $PSScriptRoot
 $compiler = (Get-Command gcc).Source
@@ -27,6 +27,9 @@ foreach ($process in Get-Process -Name Folio -ErrorAction SilentlyContinue | Whe
 }
 New-Item -ItemType Directory -Path $destination -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $projectDirectory 'target\release\folio-gpui-prototype.exe') -Destination $executable
+$webview2Loader = Get-ChildItem -Path (Join-Path $projectDirectory 'target\release\build\webview2-com-sys-*\out\x64\WebView2Loader.dll') -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not $webview2Loader) { throw 'WebView2Loader.dll not found in target\release\build.' }
+Copy-Item -LiteralPath $webview2Loader.FullName -Destination (Join-Path $destination 'WebView2Loader.dll') -Force
 Copy-Item -LiteralPath (Join-Path $projectDirectory 'resources\icon.ico') -Destination $destination
 Copy-Item -LiteralPath (Join-Path $projectDirectory 'vendor\latex-rust\LICENSE-MIT') -Destination (Join-Path $destination 'LaTeX-Rust-LICENSE-MIT.txt')
 Copy-Item -LiteralPath (Join-Path $projectDirectory 'vendor\latex-rust\NOTICE') -Destination (Join-Path $destination 'LaTeX-Rust-NOTICE.txt')
@@ -38,6 +41,7 @@ Copy-Item -LiteralPath (Join-Path $projectDirectory 'resources\fonts\OFL.txt') -
 Copy-Item -LiteralPath (Join-Path $projectDirectory 'resources\fonts\GUST-FONT-LICENSE.txt') -Destination $destination
 $null = New-Item -ItemType Directory -Path $stableDirectory -Force
 Copy-Item -LiteralPath $executable -Destination $stableExecutable -Force
+Copy-Item -LiteralPath $webview2Loader.FullName -Destination (Join-Path $stableDirectory 'WebView2Loader.dll') -Force
 Copy-Item -LiteralPath (Join-Path $projectDirectory 'resources\icon.ico') -Destination $stableDirectory -Force
 $null = & (Join-Path $PSScriptRoot 'register-file-associations.ps1') -ExecutablePath $stableExecutable
 $desktop = [Environment]::GetFolderPath('Desktop')

@@ -1,6 +1,7 @@
 //! Workspace orchestration: disk-backed drafts, project actions and asynchronous builds.
 //! Disk revisions arbitrate external edits; conflicted drafts never autosave over them.
 use crate::theme::color as rgb;
+use crate::html::{HtmlPane, HtmlPaneEvent};
 use crate::markdown::{MarkdownEvent, MarkdownPane};
 use crate::math::MathRenderer;
 use crate::pdf::PdfPane;
@@ -243,6 +244,7 @@ pub struct Workspace {
     preview: Option<PathBuf>,
     build_pdf: Option<Entity<PdfPane>>,
     pdf_panes: BTreeMap<String, Entity<PdfPane>>,
+    html_panes: BTreeMap<String, Entity<HtmlPane>>,
     notice: Option<String>,
     notice_until: Option<Instant>,
     name_action: Option<NameAction>,
@@ -266,8 +268,68 @@ impl Workspace {
             .map(str::to_ascii_lowercase)
             .as_deref()
         {
-            Some("pdf" | "png" | "jpg" | "jpeg" | "webp" | "gif") => FileKind::Asset,
+            Some("pdf" | "png" | "jpg" | "jpeg" | "webp" | "gif" | "html" | "htm") => {
+                FileKind::Asset
+            }
             _ => FileKind::Text,
+        }
+    }
+
+    fn is_html_path(path: &str) -> bool {
+        let lower = path.to_lowercase();
+        lower.ends_with(".html") || lower.ends_with(".htm")
+    }
+
+    fn html_root_dir(&self, full: &Path) -> PathBuf {
+        self.directory_workspace()
+            .map(|project| PathBuf::from(&project.folder))
+            .unwrap_or_else(|| {
+                full.parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| PathBuf::from("."))
+            })
+    }
+
+    fn add_html_pane(
+        &mut self,
+        key: String,
+        file_path: PathBuf,
+        root_dir: PathBuf,
+        is_reading: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pane = cx.new(|cx| HtmlPane::new(file_path, root_dir, is_reading, cx));
+        let close_key = key.strip_prefix("reading:").unwrap_or(&key).to_owned();
+        cx.subscribe_in(
+            &pane,
+            window,
+            move |app, _, event: &HtmlPaneEvent, window, cx| match event {
+                HtmlPaneEvent::Close => {
+                    if is_reading {
+                        app.close_reading_pane(&close_key, window, cx);
+                    } else {
+                        app.close_tab(&close_key, window, cx);
+                    }
+                }
+                HtmlPaneEvent::OpenExternal(url) => {
+                    cx.open_url(url);
+                }
+            },
+        )
+        .detach();
+        self.html_panes.insert(key, pane);
+    }
+
+    fn release_html_pane(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pane) = self.html_panes.remove(key) {
+            pane.update(cx, |pane, cx| pane.release(window, cx));
+        }
+    }
+
+    fn release_all_html_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for (_, pane) in std::mem::take(&mut self.html_panes) {
+            pane.update(cx, |pane, cx| pane.release(window, cx));
         }
     }
 
@@ -428,6 +490,7 @@ impl Workspace {
             preview: None,
             build_pdf: None,
             pdf_panes: BTreeMap::new(),
+            html_panes: BTreeMap::new(),
             notice: None,
             notice_until: None,
             name_action: None,
@@ -513,6 +576,7 @@ impl Workspace {
     fn clear_open_documents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.release_build_pdf(window, cx);
         self.release_all_pdf_panes(window, cx);
+        self.release_all_html_panes(window, cx);
         self.documents.clear();
         self.tabs.clear();
         self.active.clear();
@@ -772,7 +836,7 @@ impl Workspace {
             .set_title("打开文档")
             .add_filter(
                 "Folio 支持的文件",
-                &["pdf", "md", "tex", "ltx", "bib", "sty", "cls"],
+                &["pdf", "md", "tex", "ltx", "bib", "sty", "cls", "html", "htm"],
             );
         self.dialog_open = true;
         cx.spawn_in(window, async move |this, cx| {
@@ -996,6 +1060,10 @@ impl Workspace {
                 file.path.clone(),
                 cx.new(|cx| PdfPane::new(full.clone(), window, cx)),
             );
+        }
+        if Self::is_html_path(&file.path) && !self.html_panes.contains_key(&file.path) {
+            let root_dir = self.html_root_dir(&full);
+            self.add_html_pane(file.path.clone(), full.clone(), root_dir, false, window, cx);
         }
         if file.kind == FileKind::Text && !self.documents.contains_key(&file.path) {
             let disk = if self.directory_workspace().is_some() {
@@ -1307,6 +1375,7 @@ impl Workspace {
             self.close_requested = true;
             return false;
         }
+        self.release_all_html_panes(window, cx);
         true
     }
 
@@ -1351,6 +1420,7 @@ impl Workspace {
         }
         self.tabs.retain(|tab| tab != path);
         self.release_pdf_pane(path, window, cx);
+        self.release_html_pane(path, window, cx);
         self.markdown_panes.remove(path);
         if !self.reading_panes.iter().any(|pane| pane == path) {
             self.documents.remove(path);
@@ -1491,6 +1561,14 @@ impl Workspace {
             self.pdf_panes
                 .insert(key, cx.new(|cx| PdfPane::new(full, window, cx)));
         }
+        if !changed.is_empty() {
+            for pane in self.html_panes.values() {
+                let file_path = pane.read(cx).file_path().to_path_buf();
+                if changed.contains(&file_path) {
+                    pane.update(cx, |pane, cx| pane.reload(window, cx));
+                }
+            }
+        }
         cx.notify();
         Ok(())
     }
@@ -1556,6 +1634,9 @@ impl Workspace {
                                         || self.pdf_panes.keys().any(|key| {
                                             let file = key.strip_prefix("reading:").unwrap_or(key);
                                             PathBuf::from(file) == *path
+                                        })
+                                        || self.html_panes.values().any(|pane| {
+                                            pane.read(cx).file_path() == *path
                                         }))
                             }
                         })
@@ -1629,6 +1710,7 @@ impl Workspace {
                     self.cancellation = None;
                     self.build_events = None;
                     if self.close_requested {
+                        self.release_all_html_panes(window, cx);
                         window.remove_window();
                         cx.quit();
                         return;
@@ -1682,6 +1764,10 @@ impl Workspace {
         {
             self.batch_next = None;
             self.compile(&Compile, window, cx);
+        }
+        let html_panes: Vec<_> = self.html_panes.values().cloned().collect();
+        for pane in html_panes {
+            pane.update(cx, |pane, cx| pane.poll(window, cx));
         }
     }
     fn compile_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2012,6 +2098,8 @@ impl Workspace {
                 self.markdown_panes.remove(&format!("reading:{path}"));
                 self.release_pdf_pane(&path, window, cx);
                 self.release_pdf_pane(&format!("reading:{path}"), window, cx);
+                self.release_html_pane(&path, window, cx);
+                self.release_html_pane(&format!("reading:{path}"), window, cx);
                 if self.focused_markdown.as_deref() == Some(&path) {
                     self.focused_markdown = Some(renamed.clone());
                 }
@@ -2039,6 +2127,28 @@ impl Workspace {
                         self.pdf_panes.insert(
                             format!("reading:{renamed}"),
                             cx.new(|cx| PdfPane::new(root.join(&renamed), window, cx)),
+                        );
+                    }
+                }
+                if Self::is_html_path(&renamed) {
+                    if self.tabs.contains(&renamed) {
+                        self.add_html_pane(
+                            renamed.clone(),
+                            root.join(&renamed),
+                            root.clone(),
+                            false,
+                            window,
+                            cx,
+                        );
+                    }
+                    if self.reading_panes.contains(&renamed) {
+                        self.add_html_pane(
+                            format!("reading:{renamed}"),
+                            root.join(&renamed),
+                            root.clone(),
+                            true,
+                            window,
+                            cx,
                         );
                     }
                 }
@@ -2183,6 +2293,8 @@ impl Workspace {
             self.documents.remove(&path);
             self.release_pdf_pane(&path, window, cx);
             self.release_pdf_pane(&format!("reading:{path}"), window, cx);
+            self.release_html_pane(&path, window, cx);
+            self.release_html_pane(&format!("reading:{path}"), window, cx);
             self.markdown_panes.remove(&path);
             self.markdown_panes.remove(&format!("reading:{path}"));
             self.reading_panes.retain(|pane| pane != &path);
@@ -2326,6 +2438,7 @@ impl Workspace {
             self.tabs.retain(|tab| tab != &file.path);
             self.markdown_panes.remove(&file.path);
             self.release_pdf_pane(&file.path, window, cx);
+            self.release_html_pane(&file.path, window, cx);
         }
         self.active = active;
         if file.path.to_lowercase().ends_with(".md") {
@@ -2338,6 +2451,18 @@ impl Workspace {
             self.pdf_panes.insert(
                 format!("reading:{}", file.path),
                 cx.new(|cx| PdfPane::new(full, window, cx)),
+            );
+        }
+        if Self::is_html_path(&file.path) {
+            let full = self.document_path(&file.path);
+            let root_dir = self.html_root_dir(&full);
+            self.add_html_pane(
+                format!("reading:{}", file.path),
+                full,
+                root_dir,
+                true,
+                window,
+                cx,
             );
         }
         if !self.reading_panes.contains(&file.path) {
@@ -2361,6 +2486,7 @@ impl Workspace {
         }
         self.markdown_panes.remove(&format!("reading:{path}"));
         self.release_pdf_pane(&format!("reading:{path}"), window, cx);
+        self.release_html_pane(&format!("reading:{path}"), window, cx);
         if self.focused_markdown.as_deref() == Some(path) {
             self.focused_markdown = None;
         }
@@ -2430,6 +2556,8 @@ impl Workspace {
         pane = pane.child(titlebar);
         if let Some(pdf) = self.pdf_panes.get(&format!("reading:{path}")) {
             pane = pane.child(div().flex_1().min_h_0().child(pdf.clone()));
+        } else if let Some(html) = self.html_panes.get(&format!("reading:{path}")) {
+            pane = pane.child(div().flex_1().min_h_0().child(html.clone()));
         } else if let Some(markdown) = self.markdown_panes.get(&format!("reading:{path}")) {
             pane = pane.child(div().flex_1().min_h_0().child(markdown.clone()));
         }
@@ -2938,7 +3066,7 @@ impl Workspace {
                             .child(name.clone()),
                     )
                     .when(
-                        pdf_file || file.path.to_lowercase().ends_with(".md"),
+                        pdf_file || Self::is_html_path(&file.path) || file.path.to_lowercase().ends_with(".md"),
                         |row| {
                             row.child(
                                 crate::ui::control(
@@ -3017,6 +3145,7 @@ impl Workspace {
                         )
                         .when(
                             split.path.to_lowercase().ends_with(".pdf")
+                                || Self::is_html_path(&split.path)
                                 || split.path.to_lowercase().ends_with(".md"),
                             |menu| {
                                 menu.item(PopupMenuItem::new("在分屏中打开").on_click(
@@ -3404,7 +3533,9 @@ impl Workspace {
             }
         } else if !self.active.is_empty() {
             let full = self.document_path(&self.active);
-            if let Some(pane) = self.pdf_panes.get(&self.active) {
+            if let Some(pane) = self.html_panes.get(&self.active) {
+                area = area.child(div().flex_1().min_h_0().child(pane.clone()));
+            } else if let Some(pane) = self.pdf_panes.get(&self.active) {
                 area = area.child(div().flex_1().min_h_0().child(pane.clone()));
             } else {
                 area = area.child(
@@ -3569,6 +3700,14 @@ impl Render for Workspace {
             .collect();
         for (key, pane) in &self.pdf_panes {
             let visible = key.starts_with("reading:") || *key == self.active;
+            pane.update(cx, |pane, cx| pane.set_visible(visible, window, cx));
+        }
+        let modal_open = self.show_preferences
+            || self.name_action.is_some()
+            || self.dialog_prompt.is_some()
+            || self.dialog_open;
+        for (key, pane) in &self.html_panes {
+            let visible = !modal_open && (key.starts_with("reading:") || *key == self.active);
             pane.update(cx, |pane, cx| pane.set_visible(visible, window, cx));
         }
         if let Some(pane) = &self.build_pdf {

@@ -3,6 +3,7 @@
 mod compiler;
 mod build_log;
 mod files;
+mod html;
 mod markdown;
 mod markdown_pdf;
 mod math;
@@ -20,6 +21,10 @@ use gpui_kit::*;
 use workspace::Workspace;
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "true");
+    }
     gpui_kit::application().with_assets(ui::Assets).run(|cx| {
         gpui_kit::init(cx);
         math_layout::register_fonts(cx);

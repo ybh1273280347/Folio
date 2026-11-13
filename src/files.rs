@@ -13,7 +13,7 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "txt", "md", "csv", "tsv", "dat", "tikz", "pgf", "asy", "json", "yaml", "yml", "toml", "eps",
     "svg",
 ];
-const ASSET_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "pdf"];
+const ASSET_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "pdf", "html", "htm"];
 pub const EXCLUDED_DIRECTORIES: &[&str] = &[
     ".git",
     "node_modules",
