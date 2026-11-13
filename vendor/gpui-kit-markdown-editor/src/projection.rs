@@ -29,16 +29,16 @@ pub(crate) struct ProjectedBlock {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LeafInfo {
     pub(crate) block: BlockId,
-    /// Caret offsets are 0/1 (code blocks in the spike).
+    /// Atomic block caret offsets are 0 (before) and 1 (after).
     pub(crate) atomic: bool,
-    /// Model text length (bytes); for atomic leaves the rendered text length.
+    /// Model text length in bytes, or 1 for an atomic block.
     pub(crate) len: usize,
 }
 
 #[derive(Default)]
 pub(crate) struct Snapshot {
     pub(crate) blocks: Vec<Rc<ProjectedBlock>>,
-    /// Leaves that have a rendered text layout, in document order.
+    /// All caret leaves, including blocks without a text layout, in document order.
     pub(crate) leaves: Rc<Vec<LeafInfo>>,
     /// Tables and their keyed cells, for node selection (no caret in cells).
     pub(crate) tables: Rc<Vec<(BlockId, Vec<BlockId>)>>,
@@ -143,6 +143,11 @@ fn leaf_info(doc: &EditorDocument, id: BlockId) -> Option<LeafInfo> {
             block: id,
             atomic: false,
             len: code.len(),
+        }),
+        BlockContent::Atom(_) => Some(LeafInfo {
+            block: id,
+            atomic: true,
+            len: 1,
         }),
         _ => None,
     }

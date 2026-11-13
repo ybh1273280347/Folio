@@ -2280,6 +2280,12 @@ impl Render for MarkdownPane {
                                 .flex()
                                 .items_center()
                                 .gap_1()
+                                .child({
+                                    let pane = cx.entity();
+                                    crate::ui::copy_document_button("md-copy-document-source", move |cx| {
+                                        pane.read(cx).text.clone()
+                                    })
+                                })
                                 .child(
                                     crate::ui::control("md-float-outline-src", IconName::ListTree)
                                         .on_click(cx.listener(|pane, _, _, cx| {
@@ -2420,6 +2426,14 @@ impl Render for MarkdownPane {
                                                 cx.notify();
                                             })),
                                     )
+                                })
+                                // Editing uses floating controls instead of the reading toolbar.
+                                // Copy the retained full source here too, including unloaded blocks.
+                                .child({
+                                    let pane = cx.entity();
+                                    crate::ui::copy_document_button("md-copy-document-visual", move |cx| {
+                                        pane.read(cx).text.clone()
+                                    })
                                 })
                                 .child(
                                     crate::ui::control("md-float-outline", IconName::ListTree)

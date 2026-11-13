@@ -279,7 +279,12 @@ impl MathPlugin {
         div()
             .cursor_pointer()
             .child(element)
-            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                // A normal click belongs to the editor's selection/drag path.
+                // Open LaTeX editing only on double-click, including inline math.
+                if event.click_count != 2 || event.modifiers.shift {
+                    return;
+                }
                 renderer
                     .update(cx, |_, cx| {
                         cx.emit(MathReady::Edit {
