@@ -160,7 +160,11 @@ icon_assets!(
         Type,
         Sparkles,
         Copy,
-        Check
+        Check,
+        Globe,
+        ExternalLink,
+        ChevronLeft,
+        ChevronRight
     ]
 );
 
@@ -380,7 +384,8 @@ pub fn button_danger_soft(id: impl Into<ElementId>, text: impl Into<SharedString
 pub const MAIN_TEX_COLOR: u32 = 0x5c7f9f;
 
 pub fn file_icon(path: &str, asset: bool, main: bool) -> AnyElement {
-    if path.to_lowercase().ends_with(".pdf") {
+    let lower = path.to_lowercase();
+    if lower.ends_with(".pdf") {
         return Icon::default()
             .data(include_bytes!("../resources/icons/file-pdf.svg"))
             .w(px(16.))
@@ -389,11 +394,18 @@ pub fn file_icon(path: &str, asset: bool, main: bool) -> AnyElement {
             .flex_shrink_0()
             .into_any_element();
     }
+    if lower.ends_with(".html") || lower.ends_with(".htm") {
+        return div()
+            .flex_shrink_0()
+            .text_color(rgb(0xd97706))
+            .child(icon(IconName::Globe))
+            .into_any_element();
+    }
     let name = if asset {
         IconName::FileImage
-    } else if path.ends_with(".tex") {
+    } else if lower.ends_with(".tex") {
         IconName::FileCode
-    } else if path.ends_with(".bib") {
+    } else if lower.ends_with(".bib") {
         IconName::Library
     } else {
         IconName::FileText
@@ -402,7 +414,7 @@ pub fn file_icon(path: &str, asset: bool, main: bool) -> AnyElement {
         .flex_shrink_0()
         .text_color(rgb(if main {
             MAIN_TEX_COLOR
-        } else if path.ends_with(".tex") {
+        } else if lower.ends_with(".tex") {
             0x8b989f
         } else {
             0x787774
