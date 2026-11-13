@@ -35,7 +35,7 @@ fn main() {
                     cx,
                 ))),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Folio · LaTeX 工作台".into()),
+                    title: Some("Folio".into()),
                     appears_transparent: true,
                     ..Default::default()
                 }),

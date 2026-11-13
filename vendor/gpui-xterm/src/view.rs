@@ -377,15 +377,12 @@ impl TerminalView {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        // Key bindings are resolved before ordinary key handlers; stopping this
-        // event also keeps unbound text keystrokes away from app-level observers.
-        cx.stop_propagation();
-
         let key = event.keystroke.key.to_lowercase();
         let control = event.keystroke.modifiers.control;
         let shift = event.keystroke.modifiers.shift;
 
         if control && !shift && key == "c" {
+            cx.stop_propagation();
             if self.write_input_bytes(b"\x03") {
                 cx.notify();
             }
@@ -393,11 +390,13 @@ impl TerminalView {
         }
 
         if control && shift && key == "c" {
+            cx.stop_propagation();
             self.copy_selection();
             return;
         }
 
         if control && shift && key == "v" {
+            cx.stop_propagation();
             if self.paste_from_clipboard() {
                 cx.notify();
             }
@@ -407,12 +406,20 @@ impl TerminalView {
         if let Some(ref handler) = self.key_handler
             && handler(event)
         {
+            cx.stop_propagation();
             return;
         }
 
         if should_defer_text_input_to_ime(event) {
+            // Windows translates an unhandled key into WM_CHAR; consuming it
+            // here suppresses ordinary English input. Text and IME commits both
+            // reach replace_text_in_range, so never also write these key bytes.
             return;
         }
+
+        // Only protocol keys handled here are consumed; host shortcuts exclude
+        // the GpuiXterm focus context so printable text can keep propagating.
+        cx.stop_propagation();
 
         if key == "tab" {
             let wrote = self.write_input_bytes(if event.keystroke.modifiers.shift {

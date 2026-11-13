@@ -20,7 +20,9 @@ use gpui_kit::{
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PreferencesTab {
-    Appearance,
+    Fonts,
+    Theme,
+    View,
     Shortcuts,
     Terminal,
 }
@@ -29,6 +31,7 @@ pub struct SettingsChanged(pub AppSettings);
 pub struct Preferences {
     settings: AppSettings,
     tab: PreferencesTab,
+    appearance_expanded: bool,
     recording: Option<&'static str>,
     focus: FocusHandle,
     interface_font: Entity<SelectState<SearchableVec<String>>>,
@@ -44,7 +47,7 @@ pub struct Preferences {
     theme_colors: Vec<(ColorRole, Entity<ColorPickerState>)>,
     terminal_shell: Entity<InputState>,
     terminal_args: Entity<TextareaState>,
-    terminal_font_family: Entity<InputState>,
+    terminal_font_family: Entity<SelectState<SearchableVec<String>>>,
     terminal_font_size: Entity<SliderState>,
     terminal_panel_width: Entity<SliderState>,
     editing_theme: bool,
@@ -108,18 +111,6 @@ impl Preferences {
             }
         })
         .detach();
-        let terminal_font_family = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("例如 Consolas")
-                .default_value(settings.terminal.font_family.clone())
-        });
-        cx.subscribe(&terminal_font_family, |panel, state, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                panel.settings.terminal.font_family = state.read(cx).value().to_string();
-                panel.changed(cx);
-            }
-        })
-        .detach();
         let terminal_font_size = cx.new(|_| {
             SliderState::new()
                 .min(10.)
@@ -151,6 +142,29 @@ impl Preferences {
         let mut fonts = cx.text_system().all_font_names();
         fonts.sort();
         fonts.dedup();
+        let terminal_font_family = cx.new(|cx| {
+            SelectState::new(SearchableVec::new(fonts.clone()), None, window, cx).searchable(true)
+        });
+        terminal_font_family.update(cx, |state, cx| {
+            state.set_selected_value(
+                &if settings.terminal.font_family.is_empty() {
+                    "Consolas".into()
+                } else {
+                    settings.terminal.font_family.clone()
+                },
+                window,
+                cx,
+            );
+        });
+        cx.subscribe(
+            &terminal_font_family,
+            |panel, _, event: &SelectEvent<SearchableVec<String>>, cx| {
+                if let SelectEvent::Confirm(Some(font)) = event {
+                    panel.settings.terminal.font_family = font.clone();
+                    panel.changed(cx);
+                }
+            },
+        ).detach();
         fonts.insert(0, "系统默认".into());
         let interface_font = cx.new(|cx| {
             SelectState::new(SearchableVec::new(fonts.clone()), None, window, cx).searchable(true)
@@ -348,7 +362,8 @@ impl Preferences {
         .detach();
         Self {
             settings,
-            tab: PreferencesTab::Appearance,
+            tab: PreferencesTab::Fonts,
+            appearance_expanded: true,
             recording: None,
             focus: cx.focus_handle(),
             interface_font,
@@ -418,8 +433,16 @@ impl Preferences {
         self.terminal_args.update(cx, |input, cx| {
             input.set_value(terminal_args.clone(), window, cx);
         });
-        self.terminal_font_family.update(cx, |input, cx| {
-            input.set_value(settings.terminal.font_family.clone(), window, cx);
+        self.terminal_font_family.update(cx, |state, cx| {
+            state.set_selected_value(
+                &if settings.terminal.font_family.is_empty() {
+                    "Consolas".into()
+                } else {
+                    settings.terminal.font_family.clone()
+                },
+                window,
+                cx,
+            );
         });
         self.terminal_font_size.update(cx, |state, cx| {
             state.set_value(settings.terminal.font_size as f32, window, cx)
@@ -495,6 +518,13 @@ impl Preferences {
                         panel.settings.theme.saved.remove(&panel.settings.theme.active);
                         panel.select_theme("浅色", window, cx);
                     }))))))
+            .child(div().flex().justify_start().child(
+                control("reset-theme", "恢复默认主题")
+                    .on_click(cx.listener(|panel, _, window, cx| {
+                        panel.settings.theme.restore_presets();
+                        panel.select_theme("浅色", window, cx);
+                    })),
+            ))
             .into_any_element()
     }
     fn size_row(
@@ -526,7 +556,7 @@ impl Preferences {
             .into_any_element()
     }
 
-    fn render_appearance(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_fonts(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .flex()
             .flex_col()
@@ -535,9 +565,8 @@ impl Preferences {
                 div()
                     .text_lg()
                     .font_semibold()
-                    .child("外观设置"),
+                    .child("外观 / 字体"),
             )
-            .child(self.render_theme(cx))
             .child(
                 div()
                     .flex()
@@ -656,34 +685,31 @@ impl Preferences {
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .justify_between()
-                    .child("显示行号（TeX / Markdown 源码）")
+                    .flex_col()
+                    .gap_2()
+                    .child("终端字体")
+                    .child(Select::new(&self.terminal_font_family))
                     .child(
-                        control("show-line-numbers", if self.settings.show_line_numbers { "已开启" } else { "已关闭" })
-                            .on_click(cx.listener(|panel, _, _, cx| {
-                                panel.settings.show_line_numbers = !panel.settings.show_line_numbers;
-                                panel.changed(cx);
-                            })),
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x787774))
+                            .child("可搜索系统已安装字体，建议选择等宽字体。修改后立即应用到已打开的终端。"),
                     ),
             )
             .child(
-                div().flex().items_center().justify_between()
-                    .child("编辑器限制行宽")
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
                     .child(
-                        control(
-                            "limit-width",
-                            if self.settings.line_width_limited {
-                                "已开启"
-                            } else {
-                                "已关闭"
-                            },
-                        )
-                        .on_click(cx.listener(|panel, _, _, cx| {
-                            panel.settings.line_width_limited = !panel.settings.line_width_limited;
-                            panel.changed(cx);
-                        })),
-                    ),
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child("终端字号")
+                            .child(format!("{} px", self.settings.terminal.font_size)),
+                    )
+                    .child(Slider::new(&self.terminal_font_size)),
             )
             .child(
                 div()
@@ -712,18 +738,23 @@ impl Preferences {
             )
             .child(
                 div().flex().justify_start().child(
-                    control("reset-appearance", "恢复默认外观").on_click(cx.listener(
+                    control("reset-fonts", "恢复默认字体").on_click(cx.listener(
                         |panel, _, window, cx| {
-                            let keybindings = panel.settings.keybindings.clone();
-                            let terminal = panel.settings.terminal.clone();
-                            let mut theme = panel.settings.theme.clone();
-                            theme.restore_presets();
-                            panel.settings = AppSettings {
-                                keybindings,
-                                theme,
-                                terminal,
-                                ..AppSettings::default()
-                            };
+                            // Each appearance page resets only its own settings.
+                            let defaults = AppSettings::default();
+                            panel.settings.interface_font = defaults.interface_font;
+                            panel.settings.editor_font = defaults.editor_font;
+                            panel.settings.inline_code_font = defaults.inline_code_font;
+                            panel.settings.block_code_font = defaults.block_code_font;
+                            panel.settings.math_font = defaults.math_font;
+                            panel.settings.interface_font_size = defaults.interface_font_size;
+                            panel.settings.editor_font_size = defaults.editor_font_size;
+                            panel.settings.markdown_font_size = defaults.markdown_font_size;
+                            panel.settings.inline_code_scale = defaults.inline_code_scale;
+                            panel.settings.math_scale = defaults.math_scale;
+                            panel.settings.inline_math_scale = defaults.inline_math_scale;
+                            panel.settings.terminal.font_family = defaults.terminal.font_family;
+                            panel.settings.terminal.font_size = defaults.terminal.font_size;
                             let settings = panel.settings.clone();
                             panel.sync(&settings, window, cx);
                             panel.interface_font.update(cx, |state, cx| {
@@ -736,6 +767,47 @@ impl Preferences {
                         },
                     )),
                 ),
+            )
+            .into_any_element()
+    }
+
+    fn render_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_5()
+            .child(div().text_lg().font_semibold().child("外观 / 视图"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child("显示行号（TeX / Markdown 源码）")
+                    .child(
+                        control("show-line-numbers", if self.settings.show_line_numbers { "已开启" } else { "已关闭" })
+                            .on_click(cx.listener(|panel, _, _, cx| {
+                                panel.settings.show_line_numbers = !panel.settings.show_line_numbers;
+                                panel.changed(cx);
+                            })),
+                    ),
+            )
+            .child(
+                div().flex().items_center().justify_between()
+                    .child("编辑器限制行宽")
+                    .child(
+                        control(
+                            "limit-width",
+                            if self.settings.line_width_limited {
+                                "已开启"
+                            } else {
+                                "已关闭"
+                            },
+                        )
+                        .on_click(cx.listener(|panel, _, _, cx| {
+                            panel.settings.line_width_limited = !panel.settings.line_width_limited;
+                            panel.changed(cx);
+                        })),
+                    ),
             )
             .into_any_element()
     }
@@ -773,35 +845,6 @@ impl Preferences {
                             .text_color(rgb(0x787774))
                             .child("每行作为一个独立参数传给 shell；不会按空格、引号或 shell 语法拆分。"),
                     ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child("终端字体")
-                    .child(Input::new(&self.terminal_font_family))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x787774))
-                            .child("输入系统中已安装的等宽字体名称，例如 Consolas。"),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child("终端字号")
-                            .child(format!("{} px", self.settings.terminal.font_size)),
-                    )
-                    .child(Slider::new(&self.terminal_font_size)),
             )
             .child(
                 div()
@@ -1030,7 +1073,12 @@ impl Render for Preferences {
                 }))
         };
         let body = match self.tab {
-            PreferencesTab::Appearance => self.render_appearance(cx),
+            PreferencesTab::Fonts => self.render_fonts(cx),
+            PreferencesTab::Theme => div().flex().flex_col().gap_5()
+                .child(div().text_lg().font_semibold().child("外观 / 主题"))
+                .child(self.render_theme(cx))
+                .into_any_element(),
+            PreferencesTab::View => self.render_view(cx),
             PreferencesTab::Shortcuts => self.render_shortcuts(cx),
             PreferencesTab::Terminal => self.render_terminal(),
         };
@@ -1080,7 +1128,7 @@ impl Render for Preferences {
             .text_color(rgb(0x37352f))
             .child(
                 div()
-                    .w(px(148.))
+                    .w(px(172.))
                     .flex_shrink_0()
                     .flex()
                     .flex_col()
@@ -1096,13 +1144,31 @@ impl Render for Preferences {
                             .font_semibold()
                             .child("设置"),
                     )
-                    .child(nav_item(
-                        "pref-tab-appearance",
-                        PreferencesTab::Appearance,
-                        IconName::Palette,
-                        "外观",
-                        self.tab == PreferencesTab::Appearance,
-                        cx,
+                    .child(
+                        div().id("pref-appearance-group")
+                            .flex().items_center().gap_2().px_3().py_2()
+                            .rounded(px(6.)).cursor_pointer().text_sm()
+                            .hover(|s| s.bg(rgb(0xefefed)))
+                            .child(crate::ui::icon(if self.appearance_expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            }))
+                            .child("外观")
+                            .on_click(cx.listener(|panel, _, _, cx| {
+                                panel.appearance_expanded = !panel.appearance_expanded;
+                                cx.notify();
+                            })),
+                    )
+                    .when(self.appearance_expanded, |nav| nav.child(
+                        div().ml_3().pl_2().border_l_1().border_color(rgb(0xe8e7e3))
+                            .flex().flex_col().gap_1()
+                            .child(nav_item("pref-tab-fonts", PreferencesTab::Fonts,
+                                IconName::Type, "字体", self.tab == PreferencesTab::Fonts, cx))
+                            .child(nav_item("pref-tab-theme", PreferencesTab::Theme,
+                                IconName::Palette, "主题", self.tab == PreferencesTab::Theme, cx))
+                            .child(nav_item("pref-tab-view", PreferencesTab::View,
+                                IconName::Columns2, "视图", self.tab == PreferencesTab::View, cx))
                     ))
                     .child(nav_item(
                         "pref-tab-shortcuts",
