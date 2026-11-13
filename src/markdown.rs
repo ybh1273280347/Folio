@@ -22,6 +22,8 @@ use markdown_editor::{
 };
 use std::{cell::RefCell, ops::Range, path::PathBuf, rc::Rc};
 
+mod emoji;
+
 pub enum MarkdownEvent {
     RenameTitle(String),
     Change(String),
@@ -156,6 +158,13 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         keywords: &["img", "image", "pic", "tp", "图片"],
         icon: IconName::Image,
     },
+    SlashCommand {
+        id: "emoji",
+        title: "表情符号",
+        hint: ":",
+        keywords: &["emoji", "emote", "smile", "bq", "表情", "符号"],
+        icon: IconName::Sparkles,
+    },
 ];
 
 fn extract_slash_query(prefix: &str) -> Option<(usize, String)> {
@@ -184,6 +193,21 @@ fn filter_slash_commands(query: &str) -> Vec<&'static SlashCommand> {
                 || cmd.keywords.iter().any(|k| k.contains(&q))
         })
         .collect()
+}
+
+/// Both menus share token replacement, keyboard navigation and caret anchoring.
+/// The leading colon is kept in the display query to distinguish emoji search.
+fn quick_insert_items(prefix: &str) -> Option<(usize, String, Vec<&'static SlashCommand>)> {
+    if let Some((len, query)) = emoji::query(prefix) {
+        let items = emoji::ITEMS.iter().filter(|item| {
+            query.is_empty() || item.title.contains(&query)
+                || item.keywords.iter().any(|word| word.contains(&query))
+        }).collect();
+        return Some((len, format!(":{query}"), items));
+    }
+    let (len, query) = extract_slash_query(prefix)?;
+    let items = filter_slash_commands(&query);
+    Some((len, query, items))
 }
 
 fn hsla_for_color_name(name: &str) -> Hsla {
@@ -397,16 +421,20 @@ impl MarkdownPane {
         let weak_pane = cx.weak_entity();
         visual_editor.update(cx, |editor, _| {
             editor.set_slash_key_handler(move |editor, key, window, cx| {
-                if editor.selection_window_bounds().is_some() {
+                // Completion belongs to prose; code and IME composition keep
+                // their own Enter/Tab semantics instead of accepting an emoji.
+                if editor.is_readonly() || editor.is_composing()
+                    || editor.block_kind_at_caret() == Some(BlockKind::CodeBlock)
+                    || editor.selection_window_bounds().is_some()
+                {
                     return false;
                 }
                 let Some(prefix) = editor.caret_prefix().map(str::to_owned) else {
                     return false;
                 };
-                let Some((token_len, query)) = extract_slash_query(&prefix) else {
+                let Some((token_len, _, items)) = quick_insert_items(&prefix) else {
                     return false;
                 };
-                let items = filter_slash_commands(&query);
                 if items.is_empty() {
                     return false;
                 }
@@ -560,6 +588,7 @@ impl MarkdownPane {
                     pane.text = editor.read(cx).source();
                     pane.parse_outline();
                     pane.slash_index = 0;
+                    pane.slash_scroll.set_offset(point(px(0.), px(0.)));
                     if let Some(dismissed) = &pane.dismissed_slash_prefix
                         && editor.read(cx).caret_prefix() != Some(dismissed.as_str())
                     {
@@ -826,15 +855,17 @@ impl MarkdownPane {
             return None;
         }
         let editor = self.visual_editor.read(cx);
-        if editor.selection_window_bounds().is_some() {
+        if editor.is_readonly() || editor.is_composing()
+            || editor.block_kind_at_caret() == Some(BlockKind::CodeBlock)
+            || editor.selection_window_bounds().is_some()
+        {
             return None;
         }
         let prefix = editor.caret_prefix()?;
         if self.dismissed_slash_prefix.as_deref() == Some(prefix) {
             return None;
         }
-        let (token_len, query) = extract_slash_query(prefix)?;
-        let items = filter_slash_commands(&query);
+        let (token_len, query, items) = quick_insert_items(prefix)?;
         if items.is_empty() {
             return None;
         }
@@ -864,6 +895,23 @@ impl MarkdownPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let replacement = if cmd_id == "emoji" {
+            Some(":")
+        } else {
+            emoji::ITEMS.iter().find(|item| item.id == cmd_id).map(|item| item.hint)
+        };
+        if let Some(replacement) = replacement {
+            // Replace the search token in one edit: Undo restores it, and UTF-8
+            // byte lengths stay aligned even for Chinese queries and joined emoji.
+            self.visual_editor.update(cx, |editor, cx| {
+                if let Ok(mut range) = editor.capture_suffix(token_len) {
+                    let _ = editor.replace_captured(&mut range, replacement, cx);
+                }
+                editor.focus(window, cx);
+            });
+            cx.notify();
+            return;
+        }
         self.visual_editor.update(cx, |editor, cx| {
             if let Ok(mut range) = editor.capture_suffix(token_len) {
                 let _ = editor.replace_captured(&mut range, "", cx);
@@ -1695,7 +1743,12 @@ impl MarkdownPane {
                                 .items_center()
                                 .justify_center()
                                 .text_color(rgb(0x37352f))
-                                .child(crate::ui::icon(cmd.icon).w(px(15.)).h(px(15.))),
+                                .child(if cmd.id.starts_with("emoji:") {
+                                    div().font_family("Segoe UI Emoji").text_size(px(20.))
+                                        .child(cmd.hint).into_any_element()
+                                } else {
+                                    crate::ui::icon(cmd.icon).w(px(15.)).h(px(15.)).into_any_element()
+                                }),
                         )
                         .child(
                             div()
@@ -1723,7 +1776,7 @@ impl MarkdownPane {
                         } else {
                             rgb(0x787774)
                         })
-                        .child(cmd.hint),
+                        .child(cmd.id.strip_prefix("emoji:").unwrap_or(cmd.hint)),
                 )
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |pane, _, window, cx| {
@@ -1731,7 +1784,13 @@ impl MarkdownPane {
                 }))
         });
 
-        let header_label = if query.is_empty() {
+        let header_label = if let Some(query) = query.strip_prefix(':') {
+            if query.is_empty() {
+                "表情符号 · 输入中文或英文搜索".to_owned()
+            } else {
+                format!("表情: {query} (↑↓选择 · Enter确认)")
+            }
+        } else if query.is_empty() {
             "基础与排版块 (↑↓选择 · Enter确认)".to_owned()
         } else {
             format!("过滤: /{query}")
@@ -2763,7 +2822,7 @@ impl Render for MarkdownPane {
             .on_key_down(cx.listener(|pane, ev: &KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "escape" {
                     if let Some(prefix) = pane.visual_editor.read(cx).caret_prefix()
-                        && extract_slash_query(prefix).is_some()
+                        && quick_insert_items(prefix).is_some()
                     {
                         pane.dismissed_slash_prefix = Some(prefix.to_owned());
                         cx.stop_propagation();
