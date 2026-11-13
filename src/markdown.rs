@@ -319,11 +319,10 @@ impl MarkdownPane {
                     canvas(
                         move |_, window, cx| {
                             let content = BlockEditor::document(&editor, window, cx);
+                            let background: Hsla = gpui_kit::rgb(crate::theme::palette().surface).into();
                             let mut element =
                                 div().w(width).p_6()
-                                    // Capture the canvas color with the text so dark exports
-                                    // cannot put light glyphs on an unpainted white page.
-                                    .bg(gpui_kit::rgb(crate::theme::palette().surface))
+                                    .bg(background)
                                     .child(content).into_any_element();
                             let size = element.layout_as_root(
                                 size(AvailableSpace::Definite(width), AvailableSpace::MinContent),
@@ -334,9 +333,11 @@ impl MarkdownPane {
                             window.with_document_mask(bounds, |window| {
                                 element.prepaint_at(Point::default(), window, cx);
                             });
-                            (element, size)
+                            // Keep the page background tied to these paint operations;
+                            // the worker thread cannot read the UI thread's theme palette.
+                            (element, size, background)
                         },
-                        move |_, (mut element, size), window, cx| {
+                        move |_, (mut element, size, background), window, cx| {
                             let bounds = Bounds::new(Point::default(), size);
                             let ops = window.with_document_mask(bounds, |window| {
                                 window.capture_vectors(|window| element.paint(window, cx))
@@ -360,7 +361,7 @@ impl MarkdownPane {
                             };
                             let request = request.borrow_mut().take().expect("one export request");
                             std::thread::spawn(move || {
-                                crate::markdown_pdf::publish(request, ops, size, faces)
+                                crate::markdown_pdf::publish(request, ops, size, background, faces)
                             });
                         },
                     )

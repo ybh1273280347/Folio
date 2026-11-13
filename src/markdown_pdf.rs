@@ -20,6 +20,9 @@ use std::{
     time::Instant,
 };
 
+const PAGE_WIDTH: f32 = 595.276;
+const PAGE_HEIGHT: f32 = 841.89;
+
 pub struct ExportRequest {
     pub destination: PathBuf,
     pub preview: PathBuf,
@@ -50,9 +53,10 @@ pub fn publish(
     request: ExportRequest,
     ops: Vec<VectorPaint>,
     size: Size<Pixels>,
+    background: Hsla,
     faces: io::Result<FontFaces>,
 ) {
-    let result = faces.and_then(|faces| write(&request, &ops, size, faces));
+    let result = faces.and_then(|faces| write(&request, &ops, size, background, faces));
     (request.complete)(result);
 }
 
@@ -60,6 +64,7 @@ fn write(
     request: &ExportRequest,
     ops: &[VectorPaint],
     size: Size<Pixels>,
+    background: Hsla,
     faces: FontFaces,
 ) -> io::Result<BuildResult> {
     let cancelled = || BuildResult {
@@ -123,8 +128,8 @@ fn write(
         );
     }
     let mut document = Document::new();
-    let scale = 595.276 / f32::from(size.width);
-    let page_height = 841.89 / scale;
+    let scale = PAGE_WIDTH / f32::from(size.width);
+    let page_height = PAGE_HEIGHT / scale;
     let mut top = 0.;
     let height = f32::from(size.height);
     while top < height {
@@ -165,8 +170,13 @@ fn write(
                 }
             }
         }
-        let mut page = document.start_page_with(PageSettings::from_wh(595.276, 841.89).unwrap());
+        let mut page = document.start_page_with(PageSettings::from_wh(PAGE_WIDTH, PAGE_HEIGHT).unwrap());
         let mut surface = page.surface();
+        // Page fill uses PDF coordinates before document transforms and clipping.
+        // Content backgrounds stop at page breaks or the document's final line;
+        // the remaining paper area must use the same captured theme color.
+        set_fill(&mut surface, background);
+        surface.draw_path(&rectangle(0., 0., PAGE_WIDTH, PAGE_HEIGHT).unwrap());
         surface.push_transform(&Transform::from_scale(scale, scale));
         surface.push_transform(&Transform::from_translate(0., -top));
         let page_clip = rectangle(0., top, f32::from(size.width), bottom - top).unwrap();
