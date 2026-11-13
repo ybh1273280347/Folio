@@ -403,6 +403,20 @@ impl TerminalView {
             return;
         }
 
+        if control && !shift && !event.keystroke.modifiers.alt && key == "v" {
+            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                if clipboard.get_image().is_err()
+                    && let Ok(text) = clipboard.get_text()
+                {
+                    cx.stop_propagation();
+                    if self.paste_text(&text) {
+                        cx.notify();
+                    }
+                    return;
+                }
+            }
+        }
+
         if let Some(ref handler) = self.key_handler
             && handler(event)
         {

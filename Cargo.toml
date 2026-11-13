@@ -10,6 +10,7 @@ dirs = "6.0.0"
 dunce = "1.0.5"
 gpui-kit = { version = "0.9.1", default-features = false, features = ["component", "syntect", "assets"] }
 gpui-webview = "0.9.1"
+raw-window-handle = "0.6"
 wry = { version = "0.53.3", package = "lb-wry" }
 gpui-kit-markdown-editor = { path = "vendor/gpui-kit-markdown-editor", default-features = false }
 gpui_xterm = { path = "vendor/gpui-xterm" }

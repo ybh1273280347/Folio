@@ -2250,6 +2250,7 @@ dependencies = [
  "markdown",
  "notify",
  "portable-pty",
+ "raw-window-handle",
  "rfd",
  "serde",
  "serde_json",
