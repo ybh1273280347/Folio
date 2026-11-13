@@ -3,11 +3,57 @@ use crate::theme::color as rgb;
 use gpui_kit::{
     assets::{IconName, icon_assets},
     base::StyledExt,
-    component::Icon,
+    component::{Icon, button::{Button, ButtonVariants}},
     prelude::FluentBuilder,
     *,
 };
 use std::borrow::Cow;
+
+/// Read the current draft only when clicked; feedback belongs to this document's button.
+pub fn copy_document_button(
+    id: impl Into<ElementId>,
+    read_text: impl Fn(&App) -> String + 'static,
+) -> impl IntoElement {
+    CopyDocumentButton { id: id.into(), read_text: Box::new(read_text) }
+}
+
+#[derive(IntoElement)]
+struct CopyDocumentButton {
+    id: ElementId,
+    read_text: Box<dyn Fn(&App) -> String>,
+}
+
+struct CopyFeedback {
+    copied: bool,
+    reset: Task<()>,
+}
+
+impl RenderOnce for CopyDocumentButton {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let feedback = window.use_keyed_state(self.id.clone(), cx, |_, _| CopyFeedback {
+            copied: false, reset: Task::ready(()),
+        });
+        let copied = feedback.read(cx).copied;
+        Button::new(self.id).ghost().compact().w(px(28.)).h(px(28.))
+            .icon(icon(if copied { IconName::Check } else { IconName::Copy }))
+            .tooltip(if copied { "已复制全文" } else { "复制全文" })
+            .on_click(move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string((self.read_text)(cx)));
+                feedback.update(cx, |feedback, cx| {
+                    feedback.copied = true;
+                    cx.notify();
+                    // Repeated clicks replace the pending reset instead of starting a polling loop.
+                    feedback.reset = cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+                        let _ = this.update(cx, |feedback, cx| {
+                            feedback.copied = false;
+                            cx.notify();
+                        });
+                    });
+                });
+            })
+    }
+}
 
 /// Keep preview, live Markdown and PDF typography relative to the same body size.
 pub fn inline_code_style(settings: &crate::model::AppSettings) -> StyleRefinement {

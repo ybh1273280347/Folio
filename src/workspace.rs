@@ -309,8 +309,13 @@ impl Workspace {
         let math = cx.new(MathRenderer::new);
         math.update(cx, |renderer, cx| renderer.set_appearance(&settings, cx));
         let preferences = cx.new(|cx| Preferences::new(settings.clone(), window, cx));
-        cx.subscribe(&preferences, |app, _, event: &SettingsChanged, cx| {
+        cx.subscribe_in(&preferences, window, |app, _, event: &SettingsChanged, window, cx| {
             app.settings = event.0.clone();
+            for document in app.documents.values() {
+                document.editor.update(cx, |editor, cx| {
+                    editor.set_line_number(app.settings.show_line_numbers, window, cx);
+                });
+            }
             crate::theme::apply(app.settings.theme.palette, cx);
             bind_shortcuts(&app.settings, cx);
             app.math.update(cx, |renderer, cx| {
@@ -976,6 +981,7 @@ impl Workspace {
             let editor = cx.new(|cx| {
                 EditorState::new(window, cx)
                     .language(language)
+                    .line_number(self.settings.show_line_numbers)
                     .searchable(true)
                     .default_value(if file.path.to_lowercase().ends_with(".md") {
                         String::new()
@@ -3303,6 +3309,12 @@ impl Workspace {
             if let Some(markdown) = self.markdown_panes.get(&self.active) {
                 area = area.child(div().flex_1().min_h_0().child(markdown.clone()));
             } else {
+                let editor = document.editor.clone();
+                area = area.child(div().h(px(32.)).px_3().flex().items_center().justify_end()
+                    .child(crate::ui::copy_document_button(
+                        SharedString::from(format!("copy-document:{}", document.path.display())),
+                        move |cx| editor.read(cx).value().to_string(),
+                    )));
                 area = area.child(
                     div()
                         .relative()

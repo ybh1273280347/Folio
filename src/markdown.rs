@@ -456,7 +456,7 @@ impl MarkdownPane {
         });
         let source_editor = cx.new(|cx| {
             EditorState::new(window, cx)
-                .line_number(false)
+                .line_number(settings.show_line_numbers)
                 .soft_wrap(true)
                 .searchable(true)
         });
@@ -922,6 +922,9 @@ impl MarkdownPane {
     ) {
         if self.settings != *settings {
             self.settings = settings.clone();
+            self.source_editor.update(cx, |editor, cx| {
+                editor.set_line_number(settings.show_line_numbers, window, cx);
+            });
             self.visual_editor.update(cx, |editor, cx| {
                 editor.set_code_styles(crate::ui::inline_code_style(settings), crate::ui::block_code_style(settings), cx);
             });
@@ -2201,7 +2204,14 @@ impl Render for MarkdownPane {
                     )
                     .child(action("md-source", "源码").on_click(
                         cx.listener(|pane, _, window, cx| pane.toggle_source(window, cx)),
-                    )),
+                    ))
+                    .child({
+                        let pane = cx.entity();
+                        crate::ui::copy_document_button("md-copy-document", move |cx| {
+                            // The pane retains the full Markdown, including content not yet rendered.
+                            pane.read(cx).text.clone()
+                        })
+                    }),
             );
 
         let mut content = div().relative().flex().flex_1().min_w_0().min_h_0().overflow_hidden();
