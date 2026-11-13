@@ -412,6 +412,14 @@ impl<'a> BlockRef<'a> {
         }
     }
 
+    /// The fenced code language; absent for plain code and non-code blocks.
+    pub fn code_language(&self) -> Option<&'a str> {
+        match self.doc.kind(self.id)? {
+            BlockKindData::CodeBlock { lang, .. } => lang.as_deref(),
+            _ => None,
+        }
+    }
+
     pub fn parent(&self) -> Option<BlockRef<'a>> {
         self.doc
             .parent(self.id)

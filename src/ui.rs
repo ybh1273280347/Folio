@@ -113,6 +113,7 @@ icon_assets!(
         RotateCcw,
         Type,
         Sparkles,
+        Copy,
         Check
     ]
 );
