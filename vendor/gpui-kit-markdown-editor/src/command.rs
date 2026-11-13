@@ -617,7 +617,7 @@ impl BlockEditorModel {
         {
             return self.heading_to_paragraph(range.start.block, "heading_backspace");
         }
-        if range.is_collapsed() && self.select_adjacent_table(range.start, forward)? {
+        if range.is_collapsed() && self.select_adjacent_object(range.start, forward)? {
             return Ok(());
         }
         // Backspace at the start of a quote's first paragraph, or of a list
@@ -767,7 +767,9 @@ impl BlockEditorModel {
     /// Enter: split the text block (in a list, a new item; in an empty item, exit or outdent).
     pub fn split_block(&mut self) -> Result<(), CommandError> {
         let range = self.resolved()?;
-        if range.is_collapsed() && self.doc.kind(range.start.block) == Some(&BlockKindData::Custom) {
+        if range.is_collapsed() && matches!(self.doc.get(range.start.block).map(|entry| &entry.content), Some(BlockContent::Atom(_))) {
+            // Atomic blocks have two caret sides; Enter opens a paragraph on that
+            // side rather than trying to split a rule or a rendered formula as text.
             return self.transact(EditOrigin::Command("split_block"), |tx| {
                 let (parent, index) = tx.doc.index_in_parent(range.start.block)
                     .ok_or(PositionError::UnknownBlock(range.start.block))?;
@@ -843,17 +845,25 @@ impl BlockEditorModel {
         })
     }
 
-    /// Arrow down past the end of a code block that ends the document (or
-    /// its container): add an empty paragraph after it and move there.
-    pub(crate) fn exit_code_block(&mut self) -> Result<bool, CommandError> {
+    /// Let arrows leave a code or atomic block at either document edge.
+    /// Create a real editable paragraph only when navigation reaches that edge.
+    pub(crate) fn exit_block_edge(&mut self, after: bool) -> Result<bool, CommandError> {
         let Some(pos) = self.caret() else {
             return Ok(false);
         };
-        if self.doc.plain(pos.block).is_none() {
+        if !matches!(self.doc.get(pos.block).map(|entry| &entry.content), Some(BlockContent::Plain(_) | BlockContent::Atom(_))) {
             return Ok(false);
         }
-        self.transact(EditOrigin::Command("exit_code_block"), |tx| {
-            Ok(caret(exit_below(tx, pos.block)?))
+        self.transact(EditOrigin::Command("exit_block_edge"), |tx| {
+            if after {
+                return Ok(caret(exit_below(tx, pos.block)?));
+            }
+            let (parent, index) = tx.doc.index_in_parent(pos.block)
+                .ok_or(PositionError::UnknownBlock(pos.block))?;
+            let paragraph = DetachedBlock::paragraph(InlineText::new());
+            let id = paragraph.id;
+            tx.insert(parent, index, vec![paragraph])?;
+            Ok(caret(BlockPosition::new(id, 0)))
         })
     }
 
@@ -1354,10 +1364,9 @@ impl BlockEditorModel {
         })
     }
 
-    /// Backspace at the start of a block after a table (or Delete at the end
-    /// of one before it) selects the table as a node instead of editing its
-    /// cells (no in-place cell editing yet).
-    fn select_adjacent_table(
+    /// At a text boundary, select the adjacent table or code block as an object.
+    /// A second delete removes it; navigation keys remain available for entering it.
+    fn select_adjacent_object(
         &mut self,
         pos: BlockPosition,
         forward: bool,
@@ -1380,15 +1389,15 @@ impl BlockEditorModel {
         } else {
             ix.checked_sub(1).and_then(|i| leaves.get(i))
         };
-        let Some(&cell) = neighbour else {
+        let Some(&next) = neighbour else {
             return Ok(false);
         };
-        let Some(table) = self.table_of(cell) else {
+        let Some(block) = self.table_of(next).or_else(|| self.doc.plain(next).map(|_| next)) else {
             return Ok(false);
         };
         self.set_selection(BlockSelection::Blocks {
-            anchor: table,
-            head: table,
+            anchor: block,
+            head: block,
         })?;
         Ok(true)
     }

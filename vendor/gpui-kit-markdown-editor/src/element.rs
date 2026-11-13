@@ -9,6 +9,7 @@
 //! Paint never updates the editor entity.
 
 use std::{cell::Cell, collections::HashMap, ops::Range, rc::Rc};
+use std::sync::{Arc, Mutex};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -25,6 +26,33 @@ use gpui_kit::base::StyledExt as _;
 use gpui_kit::base::text::editor_host::{
     BlockNode, FlowPosition, collect_leaf_geometry,
 };
+
+type AtomBounds = Arc<Mutex<HashMap<BlockId, Bounds<Pixels>>>>;
+
+/// Add measuring surfaces only to the live view, leaving the source and PDF projection intact.
+/// Recursing with model IDs also covers formulas and rules inside lists and quotes.
+fn with_atom_surfaces(node: &BlockNode, id: BlockId, doc: &super::document::EditorDocument) -> BlockNode {
+    if matches!(doc.get(id).map(|entry| &entry.content), Some(super::document::BlockContent::Atom(_))) {
+        return BlockNode::Surface {
+            name: format!("editor-atom-{}", id.as_u64()).into(),
+            children: vec![node.clone()],
+            span: None,
+        };
+    }
+    let mut node = node.clone();
+    match &mut node {
+        BlockNode::Root { children, .. }
+        | BlockNode::Blockquote { children, .. }
+        | BlockNode::List { children, .. }
+        | BlockNode::ListItem { children, .. } => {
+            for (child, id) in children.iter_mut().zip(doc.children(id)) {
+                *child = with_atom_surfaces(child, *id, doc);
+            }
+        }
+        _ => {}
+    }
+    node
+}
 
 /// Items per cull unit of a long top-level list.
 const LIST_CHUNK: usize = 32;
@@ -163,8 +191,21 @@ impl RenderOnce for BlockEditor {
         // before deriving body-relative node metrics and culling geometry.
         let mut typography = window.text_style();
         typography.refine(&self.style.text);
+        let atom_bounds: AtomBounds = Arc::default();
+        let mut extensions = (*extensions).clone();
+        for leaf in snapshot.leaves.iter().filter(|leaf| leaf.atomic) {
+            let id = leaf.block;
+            let bounds = atom_bounds.clone();
+            extensions = extensions.block_surface(format!("editor-atom-{}", id.as_u64()), move |_, _| {
+                let bounds = bounds.clone();
+                div().relative().min_h(px(20.)).child(
+                    canvas(move |area, _, _| { bounds.lock().expect("atom bounds").insert(id, area); }, |_, _, _, _| {})
+                        .absolute().top_0().left_0().size_full(),
+                )
+            });
+        }
         let node_cx = render_cx
-            .with_markdown_extensions(extensions)
+            .with_markdown_extensions(Arc::new(extensions))
             .with_body_font_size(typography.font_size.to_pixels(window.rem_size()));
         let (cull, revision) = {
             let state = self.state.read(cx);
@@ -273,7 +314,12 @@ impl RenderOnce for BlockEditor {
                 let flow = unit.flow;
                 let is_last_node = node_ix + 1 == count;
                 let node = &snapshot.blocks[unit.block].nodes[unit.node];
-                let element = match (&unit.items, node) {
+                let live_node = if unit.items.is_none() {
+                    with_atom_surfaces(node, unit.id, &self.state.read(cx).model.doc)
+                } else {
+                    node.clone()
+                };
+                let element = match (&unit.items, &live_node) {
                     (
                         Some((range, ids)),
                         BlockNode::List {
@@ -285,7 +331,8 @@ impl RenderOnce for BlockEditor {
                     ) => {
                         let last_chunk = range.end == ids.len();
                         let chunk = BlockNode::List {
-                            children: items[range.clone()].to_vec(),
+                            children: items[range.clone()].iter().zip(&ids[range.clone()])
+                                .map(|(node, id)| with_atom_surfaces(node, *id, &self.state.read(cx).model.doc)).collect(),
                             ordered: *ordered,
                             start: if *ordered {
                                 Some(start.unwrap_or(1) + range.start as u32)
@@ -320,7 +367,7 @@ impl RenderOnce for BlockEditor {
                             .child(super::code_ui::header(&self.state, unit.id, &code_cx, window, cx))
                             .into_any_element()
                     }
-                    _ => node.render(node_ix, flow.last(is_last_node), &node_cx, window, cx),
+                    _ => live_node.render(node_ix, flow.last(is_last_node), &node_cx, window, cx),
                 };
                 // Per-block accessibility node around the rendered block.
                 let element = match block_role(node) {
@@ -453,6 +500,7 @@ impl RenderOnce for BlockEditor {
                         .into_any_element(),
                 ),
                 content_bounds,
+                atom_bounds,
                 padding: root_style.padding,
                 typography,
                 caret_was_visible,
@@ -469,6 +517,7 @@ struct EditorRoot {
     state: Entity<BlockEditorState>,
     child: Option<AnyElement>,
     backgrounds: Option<LeafBackgrounds>,
+    atom_bounds: AtomBounds,
     snapshot: Rc<Snapshot>,
     style: BlockEditorStyle,
     content_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -574,6 +623,7 @@ impl Element for EditorRoot {
                 self.snapshot.leaves.clone(),
                 &self.snapshot.tables,
             );
+            frame.insert_atoms(&self.snapshot.leaves, &self.atom_bounds.lock().expect("atom bounds"));
             frame.content = Some(self.content_bounds.get());
             {
                 let state = self.state.read(cx);
@@ -642,6 +692,13 @@ impl Element for EditorRoot {
         let collapsed = state.selection_ranges().is_empty();
         let marked = state.marked_range();
         let caret = state.model.caret();
+        let selected_atoms: Vec<_> = state.selection_ranges().into_iter()
+            .filter(|(_, range)| !range.is_empty())
+            .filter_map(|(id, _)| {
+                let frame = state.frame.borrow();
+                let leaf = frame.leaf(id)?;
+                leaf.info.atomic.then(|| leaf.bounds())
+            }).collect();
         let show_caret = state.show_caret(window, cx) && collapsed;
         let frame = state.frame.clone();
         let menu_line = state.table_menu.as_ref().map(|m| (m.table, m.line));
@@ -708,6 +765,13 @@ impl Element for EditorRoot {
 
         let frame = frame.borrow();
         let style = &self.style;
+        // Atomic content is painted before this overlay. Keep it translucent,
+        // and let whole-block selection paint once instead of stacking two fills.
+        if selected_area.is_none() {
+            for bounds in selected_atoms {
+                window.paint_quad(fill(bounds, style.selection().opacity(0.12)));
+            }
+        }
         // Block handle: a grip in the left edge of the hovered table or code
         // block; clicking the edge node-selects it (`block_handle_at`).
         let mouse = window.mouse_position();
@@ -764,9 +828,9 @@ impl Element for EditorRoot {
             window.paint_quad(gpui::quad(
                 area,
                 px(4.),
-                style.selection().opacity(0.35),
-                px(2.),
-                style.caret(),
+                style.selection().opacity(0.12),
+                px(1.),
+                style.caret().opacity(0.4),
                 gpui::BorderStyle::Solid,
             ));
         }

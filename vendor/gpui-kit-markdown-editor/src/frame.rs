@@ -35,7 +35,8 @@ pub(crate) fn into_frame(
             frame.index.insert(info.block, frame.leaves.len());
             frame.leaves.push(LeafGeom {
                 info: *info,
-                geometry,
+                bounds: geometry.bounds(),
+                geometry: Some(geometry),
                 align: ColumnAlign::None,
             });
         }
@@ -45,7 +46,8 @@ pub(crate) fn into_frame(
 
 pub(crate) struct LeafGeom {
     pub(crate) info: LeafInfo,
-    geometry: LeafGeometry,
+    geometry: Option<LeafGeometry>,
+    bounds: Bounds<Pixels>,
     /// A table cell's column alignment. gpui-kit paints centred and
     /// right-aligned cell text shifted inside the text element, but
     /// `LeafGeometry` positions are unshifted; `row_shift` puts it back.
@@ -56,14 +58,15 @@ impl LeafGeom {
     /// How far the row at `y` (an unshifted line top) is painted right of
     /// where `LeafGeometry` reports it, for an aligned table cell.
     fn row_shift(&self, y: Pixels) -> Pixels {
-        if matches!(self.align, ColumnAlign::None | ColumnAlign::Left) {
+        if self.info.atomic || matches!(self.align, ColumnAlign::None | ColumnAlign::Left) {
             return px(0.);
         }
-        let len = self.geometry.len();
+        let geometry = self.geometry.as_ref().expect("text leaf geometry");
+        let len = geometry.len();
         let b = self.bounds();
         let (mut lo, mut hi) = (None::<Pixels>, None::<Pixels>);
         for i in 0..=len {
-            let p = self.geometry.position_for_index(i);
+            let p = geometry.position_for_index(i);
             if (p.y - y).abs() < px(0.5) {
                 lo = Some(lo.map_or(p.x, |v: Pixels| v.min(p.x)));
                 hi = Some(hi.map_or(p.x, |v: Pixels| v.max(p.x)));
@@ -82,22 +85,22 @@ impl LeafGeom {
     }
 
     pub(crate) fn bounds(&self) -> Bounds<Pixels> {
-        self.geometry.bounds()
+        self.bounds
     }
 
     pub(crate) fn line_height(&self) -> Pixels {
-        self.geometry.line_height()
+        self.geometry.as_ref().map_or(self.bounds.size.height, |g| g.line_height())
     }
 
     /// Height of the caret: the font's ascent + descent (like a text
     /// input's caret), not the whole line box, which includes leading.
     pub(crate) fn caret_height(&self) -> Pixels {
-        self.geometry.caret_height()
+        self.geometry.as_ref().map_or(self.bounds.size.height.min(px(20.)), |g| g.caret_height())
     }
 
     /// Rendered index for a model offset.
     fn index(&self, offset: usize) -> usize {
-        let len = self.geometry.len();
+        let len = self.geometry.as_ref().map_or(1, |g| g.len());
         if self.info.atomic {
             if offset == 0 { 0 } else { len }
         } else {
@@ -107,31 +110,33 @@ impl LeafGeom {
 
     /// Top of the caret at `offset`, window coordinates.
     pub(crate) fn caret_point(&self, offset: usize) -> Point<Pixels> {
-        let mut p = self.geometry.position_for_index(self.index(offset));
+        if self.info.atomic {
+            return point(if offset == 0 { self.bounds.left() } else { self.bounds.right() }, self.bounds.top());
+        }
+        let mut p = self.geometry.as_ref().expect("text leaf geometry").position_for_index(self.index(offset));
         p.x += self.row_shift(p.y);
         p
     }
 
     /// Closest model offset for a window point.
     pub(crate) fn offset_at(&self, at: Point<Pixels>) -> usize {
+        if self.info.atomic {
+            return usize::from(at.x > self.bounds.center().x);
+        }
+        let geometry = self.geometry.as_ref().expect("text leaf geometry");
         let mut at = at;
         if !matches!(self.align, ColumnAlign::None | ColumnAlign::Left) {
             // The row under `at`, then undo its alignment shift.
-            let row = self.geometry.index_for_position(at);
-            let y = self.geometry.position_for_index(row).y;
+            let row = geometry.index_for_position(at);
+            let y = geometry.position_for_index(row).y;
             at.x -= self.row_shift(y);
         }
-        let index = self.geometry.index_for_position(at);
-        if self.info.atomic {
-            usize::from(index * 2 > self.geometry.len().max(1))
-        } else {
-            index.min(self.info.len)
-        }
+        geometry.index_for_position(at).min(self.info.len)
     }
 
     /// The inline atom drawn under `at`, as its leaf byte range.
     pub(crate) fn atom_at(&self, at: Point<Pixels>) -> Option<Range<usize>> {
-        self.geometry.atom_at(at)
+        self.geometry.as_ref()?.atom_at(at)
     }
 }
 
@@ -152,6 +157,24 @@ pub(crate) struct FrameLayout {
 }
 
 impl FrameLayout {
+    /// Merge non-text block boxes into the same document order as text geometry.
+    /// The renderer has no keyed text layout for rules or display formulas.
+    pub(crate) fn insert_atoms(&mut self, leaves: &[LeafInfo], bounds: &HashMap<BlockId, Bounds<Pixels>>) {
+        for info in leaves.iter().filter(|info| info.atomic) {
+            if let Some(bounds) = bounds.get(&info.block) {
+                self.leaves.push(LeafGeom {
+                    info: *info,
+                    geometry: None,
+                    bounds: *bounds,
+                    align: ColumnAlign::None,
+                });
+            }
+        }
+        let order: HashMap<_, _> = leaves.iter().enumerate().map(|(ix, info)| (info.block, ix)).collect();
+        self.leaves.sort_by_key(|leaf| order[&leaf.info.block]);
+        self.index = self.leaves.iter().enumerate().map(|(ix, leaf)| (leaf.info.block, ix)).collect();
+    }
+
     pub(crate) fn leaf(&self, block: BlockId) -> Option<&LeafGeom> {
         self.index.get(&block).map(|ix| &self.leaves[*ix])
     }
@@ -252,11 +275,13 @@ impl FrameLayout {
             caret.y - lh * 0.5
         };
         let bounds = leaf.bounds();
-        if y >= bounds.top() && y < bounds.bottom() {
-            return Some(BlockPosition::new(
-                leaf.info.block,
-                leaf.offset_at(point(x, y)),
-            ));
+        if !leaf.info.atomic && y >= bounds.top() && y < bounds.bottom() {
+            let offset = leaf.offset_at(point(x, y));
+            // Code padding can still be inside the box after its last visual line.
+            // A hit that maps back to the same caret must continue into the next block.
+            if offset != pos.offset {
+                return Some(BlockPosition::new(leaf.info.block, offset));
+            }
         }
         // The next leaf above/below that is not side by side with this one
         // (skips the rest of a table row), then the nearest in its band.

@@ -1534,11 +1534,11 @@ impl BlockEditorState {
                 let offset = if down { 0 } else { next.len };
                 BlockPosition::new(next.block, offset)
             }
-            (_, None) if down && self.model.doc.plain(head.block).is_some() && !extend => {
+            (_, None) if !extend && (leaves[ix].atomic || self.model.doc.plain(head.block).is_some()) => {
                 drop(frame);
                 self.edit(
-                    EditOrigin::Command("exit_code_block"),
-                    |m| m.exit_code_block().map(|_| ()),
+                    EditOrigin::Command("exit_block_edge"),
+                    |m| m.exit_block_edge(down).map(|_| ()),
                     cx,
                 );
                 return;
@@ -1991,9 +1991,12 @@ impl BlockEditorState {
 
     /// Mouse: place or extend the caret at a window point.
     pub(crate) fn mouse_at(&mut self, at: Point<Pixels>, extend: bool, cx: &mut Context<Self>) {
-        // Block handle: a click in the left edge beside a table or code
-        // block (left of its text) selects the block as a node.
-        if !extend && let Some(block) = self.block_handle_at(at) {
+        // Non-text blocks are selectable objects across their whole visible box;
+        // code keeps text editing in its body and node selection at its handle.
+        let atom = self.frame.borrow().leaves.iter()
+            .find(|leaf| leaf.info.atomic && leaf.bounds().contains(&at))
+            .map(|leaf| leaf.info.block);
+        if !extend && let Some(block) = atom.or_else(|| self.block_handle_at(at)) {
             self.goal_x = None;
             self.end_composition();
             let _ = self.model.set_selection(BlockSelection::Blocks {
