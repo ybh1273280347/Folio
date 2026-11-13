@@ -565,6 +565,17 @@ impl Preferences {
                     .flex()
                     .items_center()
                     .justify_between()
+                    .child("显示行号（TeX / Markdown 源码）")
+                    .child(
+                        control("show-line-numbers", if self.settings.show_line_numbers { "已开启" } else { "已关闭" })
+                            .on_click(cx.listener(|panel, _, _, cx| {
+                                panel.settings.show_line_numbers = !panel.settings.show_line_numbers;
+                                panel.changed(cx);
+                            })),
+                    ),
+            )
+            .child(
+                div().flex().items_center().justify_between()
                     .child("编辑器限制行宽")
                     .child(
                         control(
