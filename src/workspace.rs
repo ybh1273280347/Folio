@@ -5,6 +5,7 @@ use crate::markdown::{MarkdownEvent, MarkdownPane};
 use crate::math::MathRenderer;
 use crate::pdf::PdfPane;
 use crate::preferences::{Preferences, SettingsChanged};
+use crate::terminal::{TerminalPane, TerminalPaneEvent};
 use crate::{
     compiler, files,
     model::{
@@ -22,7 +23,6 @@ use gpui_kit::{
         menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
         progress::Progress,
         resizable::{h_resizable, resizable_panel, v_resizable},
-        text::TextView,
     },
     prelude::FluentBuilder,
     *,
@@ -84,7 +84,7 @@ pub fn bind_shortcuts(settings: &AppSettings, cx: &mut App) {
     let mut bindings = vec![
         KeyBinding::new("ctrl-c", gpui_kit::component::input::Copy, Some("FolioPdf")),
         KeyBinding::new("ctrl-z", UndoFileDelete, Some("FolioFileTree")),
-        KeyBinding::new("escape", Dismiss, None),
+        KeyBinding::new("escape", Dismiss, Some("!GpuiXterm")),
     ];
     fn push_key<A: Action>(
         bindings: &mut Vec<KeyBinding>,
@@ -95,7 +95,9 @@ pub fn bind_shortcuts(settings: &AppSettings, cx: &mut App) {
         let trimmed = key.trim().to_owned();
         if !trimmed.is_empty() {
             let static_key: &'static str = Box::leak(trimmed.into_boxed_str());
-            bindings.push(KeyBinding::new(static_key, action, ctx));
+            // GPUI evaluates the negation across the complete focus context stack.
+            // Workspace shortcuts must not steal control sequences from a TUI.
+            bindings.push(KeyBinding::new(static_key, action, ctx.or(Some("!GpuiXterm"))));
         }
     }
     push_key(&mut bindings, settings.key_for("save"), Save, None);
@@ -235,6 +237,9 @@ pub struct Workspace {
     build_duration: Duration,
     logs: String,
     show_logs: bool,
+    terminal: Entity<TerminalPane>,
+    show_terminal: bool,
+    terminal_maximized: bool,
     preview: Option<PathBuf>,
     build_pdf: Option<Entity<PdfPane>>,
     pdf_panes: BTreeMap<String, Entity<PdfPane>>,
@@ -309,8 +314,21 @@ impl Workspace {
         let math = cx.new(MathRenderer::new);
         math.update(cx, |renderer, cx| renderer.set_appearance(&settings, cx));
         let preferences = cx.new(|cx| Preferences::new(settings.clone(), window, cx));
+        let terminal = cx.new(|cx| TerminalPane::new(settings.terminal.clone(), settings.theme.palette, cx));
+        cx.subscribe_in(&terminal, window, |app, _, event: &TerminalPaneEvent, window, cx| {
+            match event {
+                TerminalPaneEvent::Hide => {
+                    app.show_terminal = false; app.terminal_maximized = false;
+                    app.terminal.update(cx, |pane, _| pane.hide());
+                    app.focus.focus(window, cx);
+                }
+                TerminalPaneEvent::ToggleMaximize => app.terminal_maximized = !app.terminal_maximized,
+            }
+            cx.notify();
+        }).detach();
         cx.subscribe_in(&preferences, window, |app, _, event: &SettingsChanged, window, cx| {
             app.settings = event.0.clone();
+            app.terminal.update(cx, |pane, cx| pane.sync(&app.settings.terminal, app.settings.theme.palette, cx));
             for document in app.documents.values() {
                 document.editor.update(cx, |editor, cx| {
                     editor.set_line_number(app.settings.show_line_numbers, window, cx);
@@ -404,6 +422,9 @@ impl Workspace {
             build_duration: Duration::ZERO,
             logs: String::new(),
             show_logs: false,
+            terminal,
+            show_terminal: false,
+            terminal_maximized: false,
             preview: None,
             build_pdf: None,
             pdf_panes: BTreeMap::new(),
@@ -445,6 +466,25 @@ impl Workspace {
             .projects
             .iter()
             .find(|project| Some(&project.id) == self.config.active_id.as_ref())
+    }
+
+    fn terminal_directory(&self) -> PathBuf {
+        self.directory_workspace().map(|project| PathBuf::from(&project.folder))
+            .or_else(|| (!self.active.is_empty()).then(|| self.document_path(&self.active)).and_then(|path| path.parent().map(Path::to_path_buf)))
+            .unwrap_or_else(|| dirs::home_dir().expect("user home"))
+    }
+
+    fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_terminal = !self.show_terminal;
+        self.terminal_maximized = false;
+        if self.show_terminal {
+            let directory = self.terminal_directory();
+            self.terminal.update(cx, |pane, cx| pane.open(directory, window, cx));
+        } else {
+            self.terminal.update(cx, |pane, _| pane.hide());
+            self.focus.focus(window, cx);
+        }
+        cx.notify();
     }
 
     // Save only navigation state; documents themselves remain authoritative on disk.
@@ -3248,6 +3288,9 @@ impl Workspace {
                     .overflow_y_scroll()
                     .children(rows),
             )
+            .child(button("sidebar-terminal", "›_  终端")
+                .mx_2().text_color(rgb(MUTED))
+                .on_click(cx.listener(|app, _, window, cx| app.toggle_terminal(window, cx))))
             .child(
                 button("preferences", "⚙  设置")
                     .m_2()
@@ -3519,6 +3562,9 @@ fn button(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Stateful<D
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // New sessions follow the active workspace; live shells retain their cwd.
+        let directory = self.terminal_directory();
+        self.terminal.update(cx, |pane, _| pane.set_directory(directory));
         let exports: Vec<_> = self
             .markdown_export
             .iter()
@@ -3567,6 +3613,7 @@ impl Render for Workspace {
             });
         let resize_app = cx.entity();
         let area_width = f32::from(window.viewport_size().width)
+            - if self.show_terminal && !self.terminal_maximized { self.settings.terminal.panel_width } else { 0. }
             - if self.settings.sidebar_open {
                 self.settings.sidebar_width + 16.
             } else {
@@ -3671,53 +3718,39 @@ impl Render for Workspace {
                     .size(px(self.settings.log_height))
                     .size_range(px(100.)..px(700.))
                     .fixed()
-                    .child(
-                        div()
-                            .id("build-log")
-                            .size_full()
-                            .overflow_y_scroll()
-                            .p_3()
-                            .bg(rgb(0xffffff))
-                            .rounded(px(6.))
-                            .font_family("Consolas")
-                            .text_xs()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .mb_2()
-                                    .child("编译日志")
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .gap_2()
-                                            .child(button("copy-build-log", "复制全部").on_click(
-                                                cx.listener(|app, _, _, cx| {
-                                                    cx.write_to_clipboard(
-                                                        ClipboardItem::new_string(app.logs.clone()),
-                                                    );
-                                                }),
-                                            ))
-                                            .child(
-                                                crate::ui::control("close-logs", IconName::Close)
-                                                    .on_click(cx.listener(|app, _, _, cx| {
-                                                        app.show_logs = false;
-                                                        cx.notify();
-                                                    })),
-                                            ),
-                                    ),
-                            )
-                            .child(
-                                TextView::markdown(
-                                    "build-log-text",
-                                    format!("````text\n{}\n````", self.logs),
-                                )
-                                .selectable(true),
-                            ),
-                    ),
+                    .child(crate::build_log::panel(self.logs.clone(), cx.listener(|app, _, _, cx| {
+                        app.show_logs = false;
+                        cx.notify();
+                    }))),
             );
         }
+        let editor_with_terminal = h_resizable(match (self.show_terminal, self.terminal_maximized) {
+            (true, true) => "terminal-maximized",
+            (true, false) => "editor-with-terminal",
+            _ => "editor-without-terminal",
+        })
+            .on_resize({
+                let app = cx.entity();
+                move |state, _, cx| {
+                    let width = state.read(cx).sizes().last().map(|size| f32::from(*size));
+                    app.update(cx, |app, cx| {
+                        if app.show_terminal && !app.terminal_maximized && let Some(width) = width {
+                            app.settings.terminal.panel_width = width;
+                            if let Err(error) = storage::save_settings(&app.settings) { app.report(error, cx); }
+                        }
+                    });
+                }
+            })
+            .when(!self.show_terminal || !self.terminal_maximized, |body| {
+                body.child(resizable_panel().child(div().flex().flex_col().size_full().min_w_0().min_h_0()
+                    .p_2().gap_2().child(vertical_work_area)))
+            })
+            .when(self.show_terminal, |body| {
+                body.child(resizable_panel()
+                    .when(!self.terminal_maximized, |panel| panel
+                        .size(px(self.settings.terminal.panel_width)).size_range(px(280.)..px(1600.)).fixed())
+                    .child(self.terminal.clone()))
+            });
         let mut app = div()
             .children(exports)
             .relative()
@@ -3946,11 +3979,14 @@ impl Render for Workspace {
                             }),
                     )
                     .child(
-                        button("logs", "终端").on_click(cx.listener(|app, _, _, cx| {
+                        button("logs", "编译日志").on_click(cx.listener(|app, _, _, cx| {
                             app.show_logs = !app.show_logs;
                             cx.notify();
                         })),
                     )
+                    .child(button("toggle-terminal", "终端").on_click(cx.listener(|app, _, window, cx| {
+                        app.toggle_terminal(window, cx);
+                    })))
                     .when(!self.show_build_preview, |header| {
                         header.child(button("show-build-preview", "◫").on_click(cx.listener(
                             |app, _, _, cx| {
@@ -4022,19 +4058,7 @@ impl Render for Workspace {
                                 .child(self.render_sidebar(cx)),
                         )
                     })
-                    .child(
-                        resizable_panel().child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .flex_1()
-                                .min_w_0()
-                                .min_h_0()
-                                .p_2()
-                                .gap_2()
-                                .child(vertical_work_area),
-                        ),
-                    ),
+                    .child(resizable_panel().child(editor_with_terminal)),
                 ),
             )
             .child(

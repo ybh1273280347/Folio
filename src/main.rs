@@ -1,6 +1,7 @@
 //! Isolated native desktop entry point; Electron sources and data stay untouched.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 mod compiler;
+mod build_log;
 mod files;
 mod markdown;
 mod markdown_pdf;
@@ -11,6 +12,7 @@ mod pdf;
 mod preferences;
 mod storage;
 mod theme;
+mod terminal;
 mod ui;
 mod workspace;
 

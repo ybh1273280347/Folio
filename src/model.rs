@@ -303,6 +303,34 @@ impl MathFont {
     }
 }
 
+/// Persisted terminal launch and display preferences; live sessions stay runtime-only.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TerminalSettings {
+    /// Empty selects the automatic PowerShell shell.
+    pub shell: String,
+    /// Process arguments, passed individually without shell-style string splitting.
+    pub args: Vec<String>,
+    /// Font family used to render terminal cells.
+    pub font_family: String,
+    /// Terminal font size in pixels.
+    pub font_size: u8,
+    /// Preferred terminal panel width in pixels.
+    pub panel_width: f32,
+}
+
+impl Default for TerminalSettings {
+    fn default() -> Self {
+        Self {
+            shell: String::new(),
+            args: vec!["-NoLogo".into()],
+            font_family: "Consolas".into(),
+            font_size: 14,
+            panel_width: 520.,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
@@ -329,6 +357,8 @@ pub struct AppSettings {
     pub sidebar_open: bool,
     pub sidebar_width: f32,
     pub log_height: f32,
+    /// User-configurable terminal launch and display settings.
+    pub terminal: TerminalSettings,
     pub keybindings: BTreeMap<String, String>,
 }
 
@@ -387,6 +417,7 @@ impl Default for AppSettings {
             sidebar_open: true,
             sidebar_width: 232.,
             log_height: 220.,
+            terminal: TerminalSettings::default(),
             keybindings: BTreeMap::new(),
         }
     }
