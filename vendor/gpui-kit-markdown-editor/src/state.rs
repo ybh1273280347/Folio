@@ -990,6 +990,31 @@ impl BlockEditorState {
         &self.style
     }
 
+    /// Change one code block's language without moving the selection or editing its text.
+    pub fn set_code_language(
+        &mut self,
+        block: BlockId,
+        language: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        use super::kind::BlockKindData;
+        let Some(BlockKindData::CodeBlock { meta, .. }) = self.model.doc.kind(block) else {
+            return;
+        };
+        let kind = BlockKindData::CodeBlock {
+            lang: language.filter(|lang| !lang.is_empty()).map(Into::into),
+            meta: meta.clone(),
+        };
+        self.end_composition();
+        self.edit(EditOrigin::Command("code_language"), |model| {
+            model.transact(EditOrigin::Command("code_language"), |tx| {
+                tx.set_kind(block, kind)?;
+                // Metadata changes retain the selection and share normal undo/save events.
+                Ok(None)
+            }).map(|_| ())
+        }, cx);
+    }
+
     /// Change code presentation without editing the document or its undo history.
     pub fn set_code_styles(
         &mut self,

@@ -308,6 +308,18 @@ impl RenderOnce for BlockEditor {
                             cx,
                         )
                     }
+                    (_, BlockNode::CodeBlock(_)) => {
+                        // Reserve a header inside the block; culling measures it together
+                        // with the code, while document/PDF rendering stays free of controls.
+                        let style = node_cx.style().clone().with_code_block(
+                            node_cx.style().code_block().clone().pt(px(42.)),
+                        );
+                        let code_cx = node_cx.clone().with_style(style);
+                        let code = node.render(node_ix, flow.last(is_last_node), &code_cx, window, cx);
+                        div().relative().w_full().child(code)
+                            .child(super::code_ui::header(&self.state, unit.id, &code_cx, window, cx))
+                            .into_any_element()
+                    }
                     _ => node.render(node_ix, flow.last(is_last_node), &node_cx, window, cx),
                 };
                 // Per-block accessibility node around the rendered block.
