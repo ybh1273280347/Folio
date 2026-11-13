@@ -114,7 +114,9 @@ impl Typesetter {
             height: dim(&boxed.height) + dim(&boxed.depth),
             baseline: dim(&boxed.height),
         };
-        layout.place(&boxed, 0., layout.baseline, rgb(0x37352f).into());
+        // Default ink follows the current text color at paint time; explicit TeX
+        // colors stay in the cached geometry and survive theme changes.
+        layout.place(&boxed, 0., layout.baseline, None);
         Ok(layout)
     }
 }
@@ -127,14 +129,14 @@ enum Operation {
         x: f32,
         y: f32,
         size: f32,
-        color: Hsla,
+        color: Option<Hsla>,
     },
     Rect {
         x: f32,
         y: f32,
         width: f32,
         height: f32,
-        color: Hsla,
+        color: Option<Hsla>,
     },
     Line {
         x1: f32,
@@ -142,7 +144,7 @@ enum Operation {
         x2: f32,
         y2: f32,
         thickness: f32,
-        color: Hsla,
+        color: Option<Hsla>,
     },
 }
 pub struct MathLayout {
@@ -161,7 +163,7 @@ fn color(value: &latex_rust::Color) -> Hsla {
 
 impl MathLayout {
     // Coordinates are baseline-relative; positive shift raises a child.
-    fn place(&mut self, b: &MathBox, x: f32, parent_y: f32, ink: Hsla) {
+    fn place(&mut self, b: &MathBox, x: f32, parent_y: f32, ink: Option<Hsla>) {
         let y = parent_y - dim(&b.shift);
         let (w, h, d) = (dim(&b.width), dim(&b.height), dim(&b.depth));
         match &b.content {
@@ -204,9 +206,9 @@ impl MathLayout {
                     self.place(child, x, y, ink);
                 }
             }
-            BoxContent::Color(c, inner) => self.place(inner, x, y, color(c)),
+            BoxContent::Color(c, inner) => self.place(inner, x, y, Some(color(c))),
             BoxContent::BackColor(c, inner) => {
-                self.rect(x, y - h, w, h + d, color(c));
+                self.rect(x, y - h, w, h + d, Some(color(c)));
                 self.place(inner, x, y, ink);
             }
             BoxContent::Line {
@@ -229,7 +231,7 @@ impl MathLayout {
                 inner,
             } => {
                 let t = dim(thickness);
-                let c = stroke.as_ref().map(color).unwrap_or(ink);
+                let c = stroke.as_ref().map(color).or(ink);
                 self.rect(x, y - h, w, t, c);
                 self.rect(x, y + d - t, w, t, c);
                 self.rect(x, y - h, t, h + d, c);
@@ -238,7 +240,7 @@ impl MathLayout {
             }
         }
     }
-    fn rect(&mut self, x: f32, y: f32, width: f32, height: f32, color: Hsla) {
+    fn rect(&mut self, x: f32, y: f32, width: f32, height: f32, color: Option<Hsla>) {
         self.operations.push(Operation::Rect {
             x,
             y,
@@ -277,7 +279,7 @@ impl MathLayout {
                             face,
                             GlyphId(id.into()),
                             px(size * scale),
-                            color,
+                            color.unwrap_or(window.text_style().color),
                         )
                         .expect("native formula glyph paints");
                 }
@@ -292,7 +294,7 @@ impl MathLayout {
                         origin + point(px(x * scale), px(y * scale)),
                         size(px(width * scale), px(height * scale)),
                     ),
-                    color,
+                    color.unwrap_or(window.text_style().color),
                 )),
                 Operation::Line {
                     x1,
@@ -305,7 +307,7 @@ impl MathLayout {
                     let mut path = PathBuilder::stroke(px(thickness * scale));
                     path.move_to(origin + point(px(x1 * scale), px(y1 * scale)));
                     path.line_to(origin + point(px(x2 * scale), px(y2 * scale)));
-                    window.paint_path(path.build().expect("formula line"), color);
+                    window.paint_path(path.build().expect("formula line"), color.unwrap_or(window.text_style().color));
                 }
             }
         }

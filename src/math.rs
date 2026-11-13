@@ -1,4 +1,5 @@
 //! Shared in-process math layout worker and native GPUI formula glyph rendering.
+use crate::theme::color as rgb;
 use crate::{
     math_layout::MathLayout,
     model::{AppSettings, MathFont},

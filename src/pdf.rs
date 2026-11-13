@@ -1,6 +1,7 @@
 //! PDF lifetime follows the visible workspace pane; the GPUI viewer owns page
 //! virtualization, off-thread rendering, zoom anchoring, fit-to-viewport,
 //! Chrome-style fluorescent highlights, and box-selection of effective content.
+use crate::theme::color as rgb;
 use crate::{
     model::{AnnotationItem, AnnotationRect, HIGHLIGHT_COLORS},
     storage, ui,
@@ -68,7 +69,7 @@ impl PdfPane {
             .find(|(n, _, _)| *n == name)
             .map(|(_, _, h)| *h)
             .unwrap_or(0xfacc15);
-        rgb(hex).into()
+        gpui_kit::rgb(hex).into()
     }
 
     fn build_highlights(&self) -> Vec<Highlight> {
@@ -125,7 +126,7 @@ impl PdfPane {
         let view = cx.new(|cx| PdfView::new(path, style, Rc::new(|| 1.), window, cx));
         let palette: Vec<(SharedString, Hsla)> = HIGHLIGHT_COLORS
             .iter()
-            .map(|(id, _label, hex)| (SharedString::from(*id), rgb(*hex).into()))
+            .map(|(id, _label, hex)| (SharedString::from(*id), gpui_kit::rgb(*hex).into()))
             .collect();
         let weak = cx.entity().downgrade();
         let weak_click = weak.clone();
@@ -353,7 +354,7 @@ impl PdfPane {
                                             .id(("pdf-ann-color", idx))
                                             .size(px(16.))
                                             .rounded(px(8.))
-                                            .bg(rgb(*hex))
+                                            .bg(gpui_kit::rgb(*hex))
                                             .border_1()
                                             .border_color(if is_current {
                                                 rgb(0x37352f)
