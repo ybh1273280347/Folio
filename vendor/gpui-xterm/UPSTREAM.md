@@ -17,6 +17,8 @@ This directory vendors the pinned upstream source. Local changes are kept in
   expose windowless title and exit observers for hidden panes.
 - route mouse buttons, movement and wheel events using the negotiated mouse
   encoding; keep Shift selection and alternate-screen scrolling available.
+- leave printable key events unconsumed so Windows can generate WM_CHAR and
+  deliver English text through the same input handler as IME commits.
 
 The original upstream license and package metadata remain alongside these
 local patches.

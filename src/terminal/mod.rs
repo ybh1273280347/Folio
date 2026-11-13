@@ -301,7 +301,8 @@ impl Render for TerminalPane {
                         Button::new("new-terminal")
                             .ghost()
                             .compact()
-                            .label("新建")
+                            .label("+")
+                            .tooltip("新建终端")
                             .on_click(
                                 cx.listener(|pane, _, window, cx| pane.new_session(window, cx)),
                             ),
@@ -334,7 +335,7 @@ impl Render for TerminalPane {
                         area.child(view)
                     })
                     .when(current.is_none(), |area| {
-                        area.p_4().child("点击“新建”打开终端")
+                        area.p_4().child("点击“+”新建终端")
                     }),
             )
             .when_some(current, |area, tab| {

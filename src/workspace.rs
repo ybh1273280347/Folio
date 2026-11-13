@@ -3288,9 +3288,6 @@ impl Workspace {
                     .overflow_y_scroll()
                     .children(rows),
             )
-            .child(button("sidebar-terminal", "›_  终端")
-                .mx_2().text_color(rgb(MUTED))
-                .on_click(cx.listener(|app, _, window, cx| app.toggle_terminal(window, cx))))
             .child(
                 button("preferences", "⚙  设置")
                     .m_2()
@@ -3817,13 +3814,7 @@ impl Render for Workspace {
                                     .text_size(px(24.))
                                     .child("ƒ"),
                             )
-                            .child(div().font_semibold().child("Folio"))
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(MUTED))
-                                    .child("LaTeX 工作台"),
-                            ),
+                            .child(div().font_semibold().child("Folio")),
                     )
                     .child(
                         crate::ui::control(
@@ -3979,7 +3970,12 @@ impl Render for Workspace {
                             }),
                     )
                     .child(
-                        button("logs", "编译日志").on_click(cx.listener(|app, _, _, cx| {
+                        crate::ui::control("logs", IconName::ListTree)
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new("编译日志")
+                                .build(window, cx)
+                        })
+                        .on_click(cx.listener(|app, _, _, cx| {
                             app.show_logs = !app.show_logs;
                             cx.notify();
                         })),
