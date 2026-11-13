@@ -1,0 +1,36 @@
+[package]
+name = "gpui_xterm"
+version = "0.3.0"
+edition = "2024"
+description = "Reusable xterm-like terminal component for GPUI"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Modolet/gpui_xterm"
+homepage = "https://github.com/Modolet/gpui_xterm"
+documentation = "https://docs.rs/gpui_xterm"
+keywords = ["gpui", "terminal", "xterm", "pty", "ui"]
+categories = ["gui"]
+include = [
+  "/src/**/*",
+  "/examples/**/*",
+  "/Cargo.toml",
+  "/Cargo.lock",
+  "/README.md",
+  "/LICENSE",
+]
+
+[lib]
+name = "gpui_xterm"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+alacritty_terminal = "0.25.1"
+anyhow = "1"
+arboard = { version = "3", features = ["wayland-data-control"] }
+flume = "0.12"
+gpui-kit = { version = "0.9.0", default-features = false, features = ["component"] }
+parking_lot = "0.12"
+ropey = "1"
+
+[workspace]

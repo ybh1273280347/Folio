@@ -10,7 +10,7 @@ use gpui_kit::{
     base::StyledExt,
     component::{
         color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState},
-        input::{Input, InputState},
+        input::{Input, InputEvent, InputState, Textarea, TextareaState},
         select::{SearchableVec, Select, SelectEvent, SelectState},
         slider::{Slider, SliderEvent, SliderState},
     },
@@ -22,6 +22,7 @@ use gpui_kit::{
 pub enum PreferencesTab {
     Appearance,
     Shortcuts,
+    Terminal,
 }
 
 pub struct SettingsChanged(pub AppSettings);
@@ -41,6 +42,11 @@ pub struct Preferences {
     inline_math_scale: Entity<SliderState>,
     theme_name: Entity<InputState>,
     theme_colors: Vec<(ColorRole, Entity<ColorPickerState>)>,
+    terminal_shell: Entity<InputState>,
+    terminal_args: Entity<TextareaState>,
+    terminal_font_family: Entity<InputState>,
+    terminal_font_size: Entity<SliderState>,
+    terminal_panel_width: Entity<SliderState>,
     editing_theme: bool,
     error: Option<String>,
 }
@@ -76,6 +82,72 @@ impl Preferences {
             }).detach();
             (role, picker)
         }).collect();
+        let terminal_shell = cx.new(|cx| InputState::new(window, cx).placeholder("自动使用 PowerShell"));
+        if !settings.terminal.shell.is_empty() {
+            terminal_shell.update(cx, |input, cx| {
+                input.set_value(settings.terminal.shell.clone(), window, cx);
+            });
+        }
+        cx.subscribe(&terminal_shell, |panel, state, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                panel.settings.terminal.shell = state.read(cx).value().to_string();
+                panel.changed(cx);
+            }
+        })
+        .detach();
+        let terminal_args_value = settings.terminal.args.join("\n");
+        let terminal_args = cx.new(|cx| {
+            TextareaState::new(window, cx).default_value(terminal_args_value)
+        });
+        cx.subscribe(&terminal_args, |panel, state, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let lines = state.read(cx).value().to_string();
+                // Each line is already one process argument; quotes and spaces stay literal.
+                panel.settings.terminal.args = lines.lines().map(str::to_owned).collect();
+                panel.changed(cx);
+            }
+        })
+        .detach();
+        let terminal_font_family = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("例如 Consolas")
+                .default_value(settings.terminal.font_family.clone())
+        });
+        cx.subscribe(&terminal_font_family, |panel, state, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                panel.settings.terminal.font_family = state.read(cx).value().to_string();
+                panel.changed(cx);
+            }
+        })
+        .detach();
+        let terminal_font_size = cx.new(|_| {
+            SliderState::new()
+                .min(10.)
+                .max(32.)
+                .step(1.)
+                .default_value(settings.terminal.font_size as f32)
+        });
+        cx.subscribe(&terminal_font_size, |panel, _, event: &SliderEvent, cx| {
+            if let SliderEvent::Change(value) = event {
+                panel.settings.terminal.font_size = value.end().round() as u8;
+                panel.changed(cx);
+            }
+        })
+        .detach();
+        let terminal_panel_width = cx.new(|_| {
+            SliderState::new()
+                .min(280.)
+                .max(1600.)
+                .step(10.)
+                .default_value(settings.terminal.panel_width)
+        });
+        cx.subscribe(&terminal_panel_width, |panel, _, event: &SliderEvent, cx| {
+            if let SliderEvent::Change(value) = event {
+                panel.settings.terminal.panel_width = (value.end() / 10.).round() * 10.;
+                panel.changed(cx);
+            }
+        })
+        .detach();
         let mut fonts = cx.text_system().all_font_names();
         fonts.sort();
         fonts.dedup();
@@ -290,6 +362,11 @@ impl Preferences {
             sizes,
             theme_name,
             theme_colors,
+            terminal_shell,
+            terminal_args,
+            terminal_font_family,
+            terminal_font_size,
+            terminal_panel_width,
             editing_theme: false,
             error: None,
         }
@@ -333,6 +410,22 @@ impl Preferences {
         });
         self.math_font.update(cx, |state, cx| {
             state.set_selected_value(&settings.math_font.family().to_owned(), window, cx)
+        });
+        self.terminal_shell.update(cx, |input, cx| {
+            input.set_value(settings.terminal.shell.clone(), window, cx);
+        });
+        let terminal_args = settings.terminal.args.join("\n");
+        self.terminal_args.update(cx, |input, cx| {
+            input.set_value(terminal_args.clone(), window, cx);
+        });
+        self.terminal_font_family.update(cx, |input, cx| {
+            input.set_value(settings.terminal.font_family.clone(), window, cx);
+        });
+        self.terminal_font_size.update(cx, |state, cx| {
+            state.set_value(settings.terminal.font_size as f32, window, cx)
+        });
+        self.terminal_panel_width.update(cx, |state, cx| {
+            state.set_value(settings.terminal.panel_width, window, cx)
         });
     }
     fn changed(&mut self, cx: &mut Context<Self>) {
@@ -622,11 +715,13 @@ impl Preferences {
                     control("reset-appearance", "恢复默认外观").on_click(cx.listener(
                         |panel, _, window, cx| {
                             let keybindings = panel.settings.keybindings.clone();
+                            let terminal = panel.settings.terminal.clone();
                             let mut theme = panel.settings.theme.clone();
                             theme.restore_presets();
                             panel.settings = AppSettings {
                                 keybindings,
                                 theme,
+                                terminal,
                                 ..AppSettings::default()
                             };
                             let settings = panel.settings.clone();
@@ -641,6 +736,87 @@ impl Preferences {
                         },
                     )),
                 ),
+            )
+            .into_any_element()
+    }
+
+    fn render_terminal(&self) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_5()
+            .child(div().text_lg().font_semibold().child("终端设置"))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child("Shell 命令")
+                    .child(Input::new(&self.terminal_shell))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x787774))
+                            .child("留空时自动使用 PowerShell。默认参数不含 -NoProfile，因此会加载 shell 的用户 profile。"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child("启动参数")
+                    .child(Textarea::new(&self.terminal_args).h(px(112.)))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x787774))
+                            .child("每行作为一个独立参数传给 shell；不会按空格、引号或 shell 语法拆分。"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child("终端字体")
+                    .child(Input::new(&self.terminal_font_family))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x787774))
+                            .child("输入系统中已安装的等宽字体名称，例如 Consolas。"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child("终端字号")
+                            .child(format!("{} px", self.settings.terminal.font_size)),
+                    )
+                    .child(Slider::new(&self.terminal_font_size)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child("终端面板宽度")
+                            .child(format!("{:.0} px", self.settings.terminal.panel_width)),
+                    )
+                    .child(Slider::new(&self.terminal_panel_width)),
             )
             .into_any_element()
     }
@@ -856,6 +1032,7 @@ impl Render for Preferences {
         let body = match self.tab {
             PreferencesTab::Appearance => self.render_appearance(cx),
             PreferencesTab::Shortcuts => self.render_shortcuts(cx),
+            PreferencesTab::Terminal => self.render_terminal(),
         };
         div()
             .track_focus(&self.focus)
@@ -933,6 +1110,14 @@ impl Render for Preferences {
                         IconName::Keyboard,
                         "快捷键",
                         self.tab == PreferencesTab::Shortcuts,
+                        cx,
+                    ))
+                    .child(nav_item(
+                        "pref-tab-terminal",
+                        PreferencesTab::Terminal,
+                        IconName::CodeXml,
+                        "终端",
+                        self.tab == PreferencesTab::Terminal,
                         cx,
                     )),
             )
