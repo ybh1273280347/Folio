@@ -306,8 +306,16 @@ impl MathFont {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
+    /// Themes store colors only; typography and layout remain independent settings.
+    pub theme: crate::theme::ThemeSettings,
     pub interface_font: String,
     pub editor_font: String,
+    /// Empty selects the renderer's default monospace family.
+    pub inline_code_font: String,
+    /// Empty keeps the renderer's default monospace family for fenced code blocks.
+    pub block_code_font: String,
+    /// Inline code size divided by the Markdown body size (not the UI rem size).
+    pub inline_code_scale: f32,
     pub interface_font_size: u8,
     pub editor_font_size: u8,
     pub markdown_font_size: u8,
@@ -359,8 +367,12 @@ impl AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            theme: crate::theme::ThemeSettings::default(),
             interface_font: String::new(),
             editor_font: String::new(),
+            inline_code_font: String::new(),
+            block_code_font: String::new(),
+            inline_code_scale: 0.875,
             interface_font_size: 14,
             editor_font_size: 14,
             markdown_font_size: 14,

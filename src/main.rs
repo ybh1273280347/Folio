@@ -10,6 +10,7 @@ mod model;
 mod pdf;
 mod preferences;
 mod storage;
+mod theme;
 mod ui;
 mod workspace;
 
@@ -22,6 +23,7 @@ fn main() {
         math_layout::register_fonts(cx);
         markdown_editor::init(cx);
         let initial_settings = storage::load_settings().unwrap_or_default();
+        theme::apply(initial_settings.theme.palette, cx);
         workspace::bind_shortcuts(&initial_settings, cx);
         gpui_kit::open_window(
             WindowOptions {

@@ -1,12 +1,16 @@
 //! Appearance and shortcut preferences are persisted independently of project files and PDF typesetting.
+use crate::theme::color as rgb;
 use crate::{
     model::{AppSettings, MathFont, SHORTCUT_DEFS},
     storage,
+    theme::ColorRole,
 };
 use gpui_kit::{
     assets::IconName,
     base::StyledExt,
     component::{
+        color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState},
+        input::{Input, InputState},
         select::{SearchableVec, Select, SelectEvent, SelectState},
         slider::{Slider, SliderEvent, SliderState},
     },
@@ -28,16 +32,50 @@ pub struct Preferences {
     focus: FocusHandle,
     interface_font: Entity<SelectState<SearchableVec<String>>>,
     editor_font: Entity<SelectState<SearchableVec<String>>>,
+    inline_code_font: Entity<SelectState<SearchableVec<String>>>,
+    block_code_font: Entity<SelectState<SearchableVec<String>>>,
+    inline_code_scale: Entity<SliderState>,
     math_font: Entity<SelectState<SearchableVec<String>>>,
     sizes: [Entity<SliderState>; 3],
     math_scale: Entity<SliderState>,
     inline_math_scale: Entity<SliderState>,
+    theme_name: Entity<InputState>,
+    theme_colors: Vec<(ColorRole, Entity<ColorPickerState>)>,
+    editing_theme: bool,
     error: Option<String>,
 }
 impl EventEmitter<SettingsChanged> for Preferences {}
 
 impl Preferences {
     pub fn new(settings: AppSettings, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let theme_name = cx.new(|cx| {
+            let mut input = InputState::new(window, cx).placeholder("主题名称");
+            if settings.theme.active != "自定义（未保存）" {
+                input.set_value(settings.theme.active.clone(), window, cx);
+            }
+            input
+        });
+        let theme_colors = ColorRole::ALL.iter().map(|(role, _)| {
+            let role = *role;
+            let picker = cx.new(|cx| {
+                let mut state = ColorPickerState::new(window, cx);
+                state.set_value(gpui_kit::rgb(settings.theme.palette.get(role)), window, cx);
+                state
+            });
+            cx.subscribe(&picker, move |panel, _, event: &ColorPickerEvent, cx| {
+                if let ColorPickerEvent::Change(Some(color)) = event {
+                    // Pickers can supply alpha; theme surfaces are deliberately opaque.
+                    let color = color.to_rgb();
+                    let hex = ((color.r * 255.).round() as u32) << 16
+                        | ((color.g * 255.).round() as u32) << 8
+                        | (color.b * 255.).round() as u32;
+                    panel.settings.theme.palette.set(role, hex);
+                    panel.settings.theme.active = "自定义（未保存）".into();
+                    panel.changed(cx);
+                }
+            }).detach();
+            (role, picker)
+        }).collect();
         let mut fonts = cx.text_system().all_font_names();
         fonts.sort();
         fonts.dedup();
@@ -46,8 +84,60 @@ impl Preferences {
             SelectState::new(SearchableVec::new(fonts.clone()), None, window, cx).searchable(true)
         });
         let editor_font = cx.new(|cx| {
+            SelectState::new(SearchableVec::new(fonts.clone()), None, window, cx).searchable(true)
+        });
+        fonts[0] = "默认等宽字体".into();
+        let inline_code_font = cx.new(|cx| {
+            SelectState::new(SearchableVec::new(fonts.clone()), None, window, cx).searchable(true)
+        });
+        let block_code_font = cx.new(|cx| {
             SelectState::new(SearchableVec::new(fonts), None, window, cx).searchable(true)
         });
+        let inline_code_scale = cx.new(|_| {
+            SliderState::new()
+                .min(0.5)
+                .max(1.5)
+                .step(0.025)
+                .default_value(settings.inline_code_scale)
+        });
+        cx.subscribe(&inline_code_scale, |panel, _, event: &SliderEvent, cx| {
+            if let SliderEvent::Change(value) = event {
+                panel.settings.inline_code_scale = (value.end() * 40.).round() / 40.;
+                panel.changed(cx);
+            }
+        })
+        .detach();
+        for (selector, selected, inline) in [
+            (&inline_code_font, &settings.inline_code_font, true),
+            (&block_code_font, &settings.block_code_font, false),
+        ] {
+            selector.update(cx, |state, cx| {
+                state.set_selected_value(
+                    &if selected.is_empty() {
+                        "默认等宽字体".into()
+                    } else {
+                        selected.clone()
+                    },
+                    window,
+                    cx,
+                );
+            });
+            cx.subscribe(
+                selector,
+                move |panel, _, event: &SelectEvent<SearchableVec<String>>, cx| {
+                    if let SelectEvent::Confirm(Some(font)) = event {
+                        let selected = if inline {
+                            &mut panel.settings.inline_code_font
+                        } else {
+                            &mut panel.settings.block_code_font
+                        };
+                        *selected = if font == "默认等宽字体" { String::new() } else { font.clone() };
+                        panel.changed(cx);
+                    }
+                },
+            )
+            .detach();
+        }
         let sizes = std::array::from_fn(|index| {
             cx.new(|_| {
                 SliderState::new()
@@ -191,16 +281,43 @@ impl Preferences {
             focus: cx.focus_handle(),
             interface_font,
             editor_font,
+            inline_code_font,
+            block_code_font,
+            inline_code_scale,
             math_font,
             math_scale,
             inline_math_scale,
             sizes,
+            theme_name,
+            theme_colors,
+            editing_theme: false,
             error: None,
         }
     }
     pub fn sync(&mut self, settings: &AppSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.settings = settings.clone();
+        self.sync_theme_colors(window, cx);
+        if settings.theme.active != "自定义（未保存）" {
+            self.theme_name.update(cx, |input, cx| {
+                input.set_value(settings.theme.active.clone(), window, cx);
+            });
+        }
         self.recording = None;
+        self.inline_code_scale.update(cx, |state, cx| {
+            state.set_value(settings.inline_code_scale, window, cx)
+        });
+        for (selector, selected) in [
+            (&self.inline_code_font, &settings.inline_code_font),
+            (&self.block_code_font, &settings.block_code_font),
+        ] {
+            selector.update(cx, |state, cx| {
+                state.set_selected_value(
+                    &if selected.is_empty() { "默认等宽字体".into() } else { selected.clone() },
+                    window,
+                    cx,
+                );
+            });
+        }
         for (slider, size) in self.sizes.iter().zip([
             settings.interface_font_size,
             settings.editor_font_size,
@@ -219,11 +336,73 @@ impl Preferences {
         });
     }
     fn changed(&mut self, cx: &mut Context<Self>) {
+        crate::theme::apply(self.settings.theme.palette, cx);
         self.error = storage::save_settings(&self.settings)
             .err()
             .map(|error| error.to_string());
         cx.emit(SettingsChanged(self.settings.clone()));
         cx.notify();
+    }
+
+    fn sync_theme_colors(&self, window: &mut Window, cx: &mut Context<Self>) {
+        for (role, picker) in &self.theme_colors {
+            picker.update(cx, |state, cx| {
+                state.set_value(gpui_kit::rgb(self.settings.theme.palette.get(*role)), window, cx);
+            });
+        }
+    }
+
+    fn select_theme(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings.theme.select(name);
+        self.sync_theme_colors(window, cx);
+        self.theme_name.update(cx, |input, cx| {
+            input.set_value(name, window, cx);
+        });
+        self.changed(cx);
+    }
+
+    fn render_theme(&self, cx: &mut Context<Self>) -> AnyElement {
+        let choices = ["浅色".to_owned(), "深色".to_owned()].into_iter()
+            .chain(self.settings.theme.saved.keys()
+                .filter(|name| !matches!(name.as_str(), "浅色" | "深色")).cloned())
+            .map(|name| {
+                let selected = self.settings.theme.active == name;
+                let select_name = name.clone();
+                crate::ui::button_secondary(SharedString::from(format!("theme-{name}")), name)
+                    .when(selected, |button| button.bg(rgb(0xe8e7e4)).border_color(rgb(0x52769a)))
+                    .on_click(cx.listener(move |panel, _, window, cx| panel.select_theme(&select_name, window, cx)))
+            });
+        let colors = self.theme_colors.iter().zip(ColorRole::ALL).map(|((_, picker), (_, label))| {
+            div().flex().items_center().justify_between().gap_3()
+                .child(label).child(ColorPicker::new(picker))
+        });
+        let custom_selected = !matches!(self.settings.theme.active.as_str(), "浅色" | "深色")
+            && self.settings.theme.saved.contains_key(&self.settings.theme.active);
+        div().flex().flex_col().gap_3()
+            .child(div().font_semibold().child("主题"))
+            .child(div().flex().flex_wrap().gap_2().children(choices))
+            .child(div().flex().items_center().justify_between()
+                .child(format!("当前：{}", self.settings.theme.active))
+                .child(crate::ui::button_secondary("edit-theme", if self.editing_theme { "收起配色" } else { "编辑配色" })
+                    .on_click(cx.listener(|panel, _, _, cx| { panel.editing_theme = !panel.editing_theme; cx.notify(); }))))
+            .when(self.editing_theme, |section| section
+            .child(div().flex().flex_col().gap_1().children(colors))
+            .child(div().flex().items_center().gap_2()
+                .child(div().flex_1().min_w_0().child(Input::new(&self.theme_name)))
+                .child(crate::ui::button_secondary("save-theme", "保存主题")
+                    .on_click(cx.listener(|panel, _, _, cx| {
+                        let name = panel.theme_name.read(cx).value().to_string();
+                        match panel.settings.theme.save(&name) {
+                            Ok(()) => panel.changed(cx),
+                            Err(error) => { panel.error = Some(error.into()); cx.notify(); }
+                        }
+                    })))
+                .when(custom_selected, |row| row.child(crate::ui::button("delete-theme", "删除主题")
+                    .on_click(cx.listener(|panel, _, window, cx| {
+                        panel.settings.theme.saved.remove(&panel.settings.theme.active);
+                        panel.select_theme("浅色", window, cx);
+                    }))))))
+            .into_any_element()
     }
     fn size_row(
         &self,
@@ -265,6 +444,7 @@ impl Preferences {
                     .font_semibold()
                     .child("外观设置"),
             )
+            .child(self.render_theme(cx))
             .child(
                 div()
                     .flex()
@@ -284,6 +464,66 @@ impl Preferences {
             .child(self.size_row("ui-size", "界面字号", self.settings.interface_font_size, cx))
             .child(self.size_row("editor-size", "编辑器字号", self.settings.editor_font_size, cx))
             .child(self.size_row("markdown-size", "Markdown 字号", self.settings.markdown_font_size, cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child("行内代码字体")
+                    .child(Select::new(&self.inline_code_font)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .child("行内代码字号 / Markdown 正文")
+                            .child(format!(
+                                "{:.1}% · {:.1} px",
+                                self.settings.inline_code_scale * 100.,
+                                self.settings.markdown_font_size as f32 * self.settings.inline_code_scale,
+                            )),
+                    )
+                    .child(Slider::new(&self.inline_code_scale))
+                    .child(
+                        div()
+                            .p_3()
+                            .rounded(px(5.))
+                            .bg(rgb(0xf7f6f5))
+                            .font_family(if self.settings.interface_font.is_empty() {
+                                SharedString::from("Segoe UI")
+                            } else {
+                                self.settings.interface_font.clone().into()
+                            })
+                            .text_size(px(self.settings.markdown_font_size as f32))
+                            .child(
+                                gpui_kit::base::text::markdown("合并 `c3(3)` 和 `c8(4)`，得新结点 `7`；根结点 `100`。")
+                                    .style(
+                                        gpui_kit::base::text::TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx))
+                                            .with_inline_code_style(crate::ui::inline_code_style(&self.settings)),
+                                    ),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child("块级代码字体")
+                    .child(Select::new(&self.block_code_font))
+                    .child(
+                        gpui_kit::base::text::markdown("```rust\nlet root = merge(39, 61);\nprintln!(\"root = {}\", root);\n```")
+                            .style(
+                                gpui_kit::base::text::TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx))
+                                    .with_code_block(crate::ui::block_code_style(&self.settings)),
+                            ),
+                    ),
+            )
             .child(
                 div()
                     .flex()
@@ -371,8 +611,11 @@ impl Preferences {
                     control("reset-appearance", "恢复默认外观").on_click(cx.listener(
                         |panel, _, window, cx| {
                             let keybindings = panel.settings.keybindings.clone();
+                            let mut theme = panel.settings.theme.clone();
+                            theme.restore_presets();
                             panel.settings = AppSettings {
                                 keybindings,
+                                theme,
                                 ..AppSettings::default()
                             };
                             let settings = panel.settings.clone();

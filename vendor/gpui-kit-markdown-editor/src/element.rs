@@ -23,7 +23,7 @@ use super::{cull::Measured, id::BlockId, projection::Snapshot, state::*, style::
 use crate::support::secondary_modifier;
 use gpui_kit::base::StyledExt as _;
 use gpui_kit::base::text::editor_host::{
-    BlockNode, FlowPosition, RenderContext, collect_leaf_geometry,
+    BlockNode, FlowPosition, collect_leaf_geometry,
 };
 
 /// Items per cull unit of a long top-level list.
@@ -42,7 +42,7 @@ impl BlockEditor {
     /// Use the editor's snapshot and node renderer without selection, caret or viewport culling.
     pub fn document(state: &Entity<BlockEditorState>, window: &mut Window, cx: &mut App) -> AnyElement {
         let (snapshot, extensions) = state.update(cx, |state, _| (state.snapshot(), state.model.doc.extensions.clone()));
-        let context = RenderContext::from_app(cx).on_link_click(|_,_,_,_|{})
+        let context = state.read(cx).render_context(cx)
             .with_markdown_extensions(extensions)
             .with_body_font_size(window.text_style().font_size.to_pixels(window.rem_size()));
         let nodes: Vec<&BlockNode> = snapshot.blocks.iter().flat_map(|block| block.nodes.iter()).collect();
@@ -97,7 +97,7 @@ impl RenderOnce for BlockEditor {
         let theme = gpui_kit::base::Theme::global(cx);
         // Links are followed by the editor itself (Cmd/Ctrl-click); the shared
         // renderer must never open a URL on its own.
-        let render_cx = RenderContext::from_app(cx).on_link_click(|_, _, _, _| {});
+        let render_cx = self.state.read(cx).render_context(cx);
         let text_style = render_cx.style().clone();
         let mut style = self.state.read(cx).style.resolved(&theme.tokens);
         if style.selection_is_default() {

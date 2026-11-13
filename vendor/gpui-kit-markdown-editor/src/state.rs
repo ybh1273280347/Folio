@@ -24,7 +24,7 @@ use super::{
     transaction::EditOrigin,
 };
 use crate::support::BlinkCursor;
-use gpui_kit::base::text::MarkdownExtensions;
+use gpui_kit::base::text::{MarkdownExtensions, editor_host::RenderContext};
 
 pub(crate) const CONTEXT: &str = "BlockEditor";
 /// Side of the whole-table corner handle, in px.
@@ -371,6 +371,8 @@ pub struct BlockEditorState {
     pub(crate) focus_handle: FocusHandle,
     pub(crate) blink_cursor: Entity<BlinkCursor>,
     pub(crate) style: BlockEditorStyle,
+    inline_code_style: gpui::StyleRefinement,
+    block_code_style: gpui::StyleRefinement,
     pub(crate) projection: ProjectionCache,
     /// Last complete frame, written by the element after prepaint.
     pub(crate) frame: Rc<RefCell<FrameLayout>>,
@@ -450,6 +452,8 @@ impl BlockEditorState {
             focus_handle,
             blink_cursor,
             style: BlockEditorStyle::default(),
+            inline_code_style: gpui::StyleRefinement::default(),
+            block_code_style: gpui::StyleRefinement::default(),
             projection: ProjectionCache::default(),
             frame: Rc::default(),
             cull: Rc::default(),
@@ -984,6 +988,32 @@ impl BlockEditorState {
     /// The editor style overrides in effect.
     pub fn editor_style(&self) -> &BlockEditorStyle {
         &self.style
+    }
+
+    /// Change code presentation without editing the document or its undo history.
+    pub fn set_code_styles(
+        &mut self,
+        inline: gpui::StyleRefinement,
+        block: gpui::StyleRefinement,
+        cx: &mut Context<Self>,
+    ) {
+        if self.inline_code_style == inline && self.block_code_style == block {
+            return;
+        }
+        self.inline_code_style = inline;
+        self.block_code_style = block;
+        // Font changes can rewrap off-screen blocks; their measured heights are stale.
+        *self.cull.borrow_mut() = Default::default();
+        cx.notify();
+    }
+
+    /// Editing and document export must shape the same glyphs and line breaks.
+    pub(crate) fn render_context(&self, cx: &App) -> RenderContext {
+        let context = RenderContext::from_app(cx).on_link_click(|_, _, _, _| {});
+        let style = context.style().clone()
+            .with_inline_code_style(self.inline_code_style.clone())
+            .with_code_block(self.block_code_style.clone());
+        context.with_style(style)
     }
 
     /// The scroll container the editor sits in (its `track_scroll` handle).

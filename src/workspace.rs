@@ -1,5 +1,6 @@
 //! Workspace orchestration: disk-backed drafts, project actions and asynchronous builds.
 //! Disk revisions arbitrate external edits; conflicted drafts never autosave over them.
+use crate::theme::color as rgb;
 use crate::markdown::{MarkdownEvent, MarkdownPane};
 use crate::math::MathRenderer;
 use crate::pdf::PdfPane;
@@ -310,6 +311,7 @@ impl Workspace {
         let preferences = cx.new(|cx| Preferences::new(settings.clone(), window, cx));
         cx.subscribe(&preferences, |app, _, event: &SettingsChanged, cx| {
             app.settings = event.0.clone();
+            crate::theme::apply(app.settings.theme.palette, cx);
             bind_shortcuts(&app.settings, cx);
             app.math.update(cx, |renderer, cx| {
                 renderer.set_appearance(&app.settings, cx)
@@ -2582,15 +2584,35 @@ impl Workspace {
             }
         }
         let mut entries: Vec<_> = entries.iter().collect();
-        // Sort each path component so folders precede files at every depth,
-        // while keeping each folder immediately followed by its own children.
+        // Group sibling files as PDF, Markdown, TeX sources/support, then other
+        // extensions. Component-wise keys keep folders first and children together.
         entries.sort_by_cached_key(|(path, folder)| {
             let mut parts = path.split('/').peekable();
             let mut key = Vec::new();
             while let Some(part) = parts.next() {
+                let name = part.to_lowercase();
+                let extension = Path::new(&name)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .unwrap_or_default();
+                let group = if parts.peek().is_some() || **folder {
+                    0
+                } else if name == ".latexmkrc" {
+                    3
+                } else {
+                    match extension {
+                        "pdf" => 1,
+                        "md" => 2,
+                        "tex" | "ltx" | "bib" | "sty" | "cls" | "bst" | "bbx" | "cbx"
+                        | "cfg" | "def" | "clo" | "ist" | "glsdefs" | "tikz" | "pgf"
+                        | "asy" => 3,
+                        _ => 4,
+                    }
+                };
                 key.push((
-                    parts.peek().is_none() && !**folder,
-                    part.to_lowercase(),
+                    group,
+                    if group == 4 { extension.to_owned() } else { String::new() },
+                    name,
                     part.to_owned(),
                 ));
             }
@@ -2828,7 +2850,7 @@ impl Workspace {
                                 s.bg(rgb(0x165dff))
                                     .border_1()
                                     .border_color(rgb(0x165dff))
-                                    .text_color(rgb(0xffffff))
+                                    .text_color(crate::theme::on_accent())
                                     .active(|a| a.bg(rgb(0x0e42d2)).border_color(rgb(0x0e42d2)))
                                     .child(crate::ui::icon(IconName::Check).w(px(10.)).h(px(10.)))
                             })
@@ -3091,6 +3113,27 @@ impl Workspace {
                             div()
                                 .flex()
                                 .gap_1()
+                                .child(crate::ui::control("refresh-files", IconName::RotateCcw)
+                                    .tooltip(|window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new("刷新文件列表")
+                                            .build(window, cx)
+                                    })
+                                    .on_click(cx.listener(|app, _, window, cx| {
+                                        // Manual refresh reconciles the whole directory and all open
+                                        // drafts, regardless of pending watcher event filtering.
+                                        app.watch_paths.clear();
+                                        app.watch_tree = true;
+                                        app.watch_changed = None;
+                                        match app.refresh_files(window, cx) {
+                                            Ok(()) => {
+                                                app.selected_files.retain(|path| {
+                                                    app.files.iter().any(|file| &file.path == path)
+                                                });
+                                                app.report("已刷新文件列表。", cx);
+                                            }
+                                            Err(error) => app.report(error, cx),
+                                        }
+                                    })))
                                 .child(button("new-file", "+").on_click(cx.listener(
                                     |app, _, window, cx| {
                                         app.start_name(NameAction::Create, "", window, cx)
@@ -3262,13 +3305,14 @@ impl Workspace {
             } else {
                 area = area.child(
                     div()
+                        .relative()
                         .flex_1()
                         .min_h_0()
                         .min_w_0()
                         .p_2()
                         .flex()
                         .justify_center()
-                        .on_scroll(cx.listener(|app, event: &ScrollEvent, _, cx| {
+                        .child(crate::ui::ctrl_scroll_capture(cx.listener(|app, event: &ScrollEvent, _, cx| {
                             if event.modifiers.control {
                                 let delta = if event.delta.pixel_delta(px(20.)).y > px(0.) {
                                     1
@@ -3284,7 +3328,7 @@ impl Workspace {
                                 cx.stop_propagation();
                                 cx.notify();
                             }
-                        }))
+                        })))
                         .child(
                             div()
                                 .size_full()
@@ -3927,8 +3971,8 @@ impl Render for Workspace {
                                     .w(px(42.))
                                     .h_full()
                                     .rounded_none()
-                                    .hover(|s| s.bg(rgb(0xdf5151)).text_color(rgb(0xffffff)))
-                                    .active(|s| s.bg(rgb(0xb92d2d)).text_color(rgb(0xffffff)))
+                                    .hover(|s| s.bg(rgb(0xdf5151)).text_color(crate::theme::on_accent()))
+                                    .active(|s| s.bg(rgb(0xb92d2d)).text_color(crate::theme::on_accent()))
                                     .window_control_area(WindowControlArea::Close),
                             ),
                     ),
@@ -4110,12 +4154,18 @@ impl Render for Workspace {
         if self.show_preferences {
             app = app.child(
                 div()
+                    .id("preferences-overlay")
                     .absolute()
                     .inset_0()
                     .flex()
                     .items_center()
                     .justify_center()
                     .bg(rgba(0x00000030))
+                    // Occlude background hitboxes while leaving the dialog's
+                    // child inputs and scroll container interactive.
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_scroll(|_, _, cx| cx.stop_propagation())
                     .child(
                         div()
                             .relative()

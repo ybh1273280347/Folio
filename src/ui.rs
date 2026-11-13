@@ -1,4 +1,5 @@
 //! Shared Lucide controls use the same restrained icon treatment as Folio's web UI.
+use crate::theme::color as rgb;
 use gpui_kit::{
     assets::{IconName, icon_assets},
     base::StyledExt,
@@ -7,6 +8,59 @@ use gpui_kit::{
     *,
 };
 use std::borrow::Cow;
+
+/// Keep preview, live Markdown and PDF typography relative to the same body size.
+pub fn inline_code_style(settings: &crate::model::AppSettings) -> StyleRefinement {
+    let mut style = StyleRefinement::default()
+        .text_size(px(settings.markdown_font_size as f32 * settings.inline_code_scale));
+    if settings.theme.palette != crate::theme::Palette::light() {
+        style = style.bg(gpui_kit::rgb(settings.theme.palette.code_background));
+    }
+    if !settings.inline_code_font.is_empty() {
+        style = style.font_family(settings.inline_code_font.clone());
+    }
+    style
+}
+
+pub fn block_code_style(settings: &crate::model::AppSettings) -> StyleRefinement {
+    // Match the default 13px code at 14px body size, then scale with Ctrl+wheel.
+    let mut style = StyleRefinement::default()
+        .text_size(px(settings.markdown_font_size as f32 * 13. / 14.));
+    if settings.theme.palette != crate::theme::Palette::light() {
+        style = style.bg(gpui_kit::rgb(settings.theme.palette.code_background));
+    }
+    if !settings.block_code_font.is_empty() {
+        style = style.font_family(settings.block_code_font.clone());
+    }
+    style
+}
+
+/// Insert before scrollable children so Ctrl+wheel is consumed in capture,
+/// before their native bubble-phase scrolling can change the offset.
+pub fn ctrl_scroll_capture(
+    listener: impl Fn(&ScrollEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    canvas(
+        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+        move |_, hitbox, window, _| {
+            window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
+                if phase == DispatchPhase::Capture
+                    && event.modifiers.control
+                    && hitbox.should_handle_scroll(window)
+                {
+                    // Consume even at the zoom limits. Overlays occlude this
+                    // hitbox, so their scrolling and inputs remain local.
+                    cx.stop_propagation();
+                    if event.delta.pixel_delta(px(20.)).y != px(0.) {
+                        listener(event, window, cx);
+                    }
+                }
+            });
+        },
+    )
+    .absolute()
+    .inset_0()
+}
 
 icon_assets!(
     FolioIcons,
@@ -228,7 +282,7 @@ pub fn button_primary(id: impl Into<ElementId>, text: impl Into<SharedString>) -
     button_base(id, text.into())
         .px_3()
         .font_medium()
-        .text_color(rgb(0xffffff))
+        .text_color(crate::theme::on_accent())
         .bg(rgb(0x52769a))
         .border_1()
         .border_color(rgb(0x47698c))
@@ -246,7 +300,7 @@ pub fn button_danger(id: impl Into<ElementId>, text: impl Into<SharedString>) ->
     button_base(id, text.into())
         .px_3()
         .font_medium()
-        .text_color(rgb(0xffffff))
+        .text_color(crate::theme::on_accent())
         .bg(rgb(0xd4373f))
         .border_1()
         .border_color(rgb(0xbf2f37))

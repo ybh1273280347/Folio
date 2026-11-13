@@ -1,0 +1,85 @@
+//! Appearance contracts can run without starting a GPU window or opening user files.
+#![allow(dead_code)]
+#[path = "../src/model.rs"]
+mod model;
+#[path = "../src/theme.rs"]
+mod theme;
+#[path = "../src/ui.rs"]
+mod ui;
+
+use gpui_kit::px;
+use model::AppSettings;
+use theme::{ColorRole, Palette};
+
+#[test]
+fn existing_preferences_keep_the_light_theme_and_their_typography() {
+    let settings: AppSettings = serde_json::from_str(
+        r#"{"markdownFontSize":22,"blockCodeFont":"Consolas","inlineCodeScale":0.8}"#,
+    )
+    .unwrap();
+    assert_eq!(settings.theme.palette, Palette::light());
+    assert_eq!(settings.markdown_font_size, 22);
+    assert_eq!(settings.block_code_font, "Consolas");
+    assert_eq!(settings.inline_code_scale, 0.8);
+}
+
+#[test]
+fn custom_colors_survive_save_switch_and_preferences_round_trip() {
+    let mut settings = AppSettings::default();
+    settings.editor_font = "Consolas".into();
+    settings.markdown_font_size = 23;
+    settings.math_scale = 2.1;
+    settings.theme.select("深色");
+    settings.theme.palette.set(ColorRole::Accent, 0x84a578);
+    let custom = settings.theme.palette;
+    settings.theme.save("夜间写作").unwrap();
+    settings.theme.select("浅色");
+    assert_eq!(settings.theme.palette, Palette::light());
+    let mut restored: AppSettings =
+        serde_json::from_slice(&serde_json::to_vec(&settings).unwrap()).unwrap();
+    restored.theme.select("夜间写作");
+    assert_eq!(restored.theme.palette, custom);
+    assert_eq!(restored.editor_font, "Consolas");
+    assert_eq!(restored.markdown_font_size, 23);
+    assert_eq!(restored.math_scale, 2.1);
+    restored.theme.select("深色");
+    assert_eq!(restored.theme.palette, Palette::dark());
+}
+
+#[test]
+fn preset_overrides_persist_and_reset_restores_both_builtins() {
+    let mut settings = AppSettings::default();
+    settings.theme.save("自用主题").unwrap();
+    for name in ["浅色", "深色"] {
+        settings.theme.select(name);
+        settings.theme.palette.set(ColorRole::Accent, 0x84a578);
+        settings.theme.save(name).unwrap();
+    }
+    let mut restored: AppSettings =
+        serde_json::from_slice(&serde_json::to_vec(&settings).unwrap()).unwrap();
+    for name in ["浅色", "深色"] {
+        restored.theme.select(name);
+        assert_eq!(restored.theme.palette.accent, 0x84a578);
+    }
+    restored.theme.restore_presets();
+    assert_eq!(restored.theme.palette, Palette::light());
+    restored.theme.select("深色");
+    assert_eq!(restored.theme.palette, Palette::dark());
+    restored.theme.select("自用主题");
+    assert_eq!(restored.theme.active, "自用主题");
+    assert_eq!(restored.theme.palette, Palette::light());
+}
+
+#[test]
+fn fenced_code_scales_with_body_size_and_keeps_its_selected_font() {
+    let mut settings = AppSettings::default();
+    settings.block_code_font = "Consolas".into();
+    let initial = ui::block_code_style(&settings);
+    settings.markdown_font_size = 26;
+    let zoomed = ui::block_code_style(&settings);
+    let initial_size = initial.text.font_size.unwrap().to_pixels(px(16.));
+    let zoomed_size = zoomed.text.font_size.unwrap().to_pixels(px(16.));
+    assert!((f32::from(initial_size) - 13.).abs() < 0.01);
+    assert!((f32::from(zoomed_size) / f32::from(initial_size) - 26. / 14.).abs() < 0.001);
+    assert_eq!(initial.text.font_family, zoomed.text.font_family);
+}

@@ -1,5 +1,6 @@
 //! Markdown panes share one GPUI block editor for live editing and keep the
 //! source editor only for the explicit source-mode toggle.
+use crate::theme::color as rgb;
 use crate::math::{MathReady, MathRenderer, formula_id};
 use crate::model::{AnnotationItem, AppSettings, HIGHLIGHT_COLORS};
 use crate::storage;
@@ -295,7 +296,11 @@ impl MarkdownPane {
                         move |_, window, cx| {
                             let content = BlockEditor::document(&editor, window, cx);
                             let mut element =
-                                div().w(width).p_6().child(content).into_any_element();
+                                div().w(width).p_6()
+                                    // Capture the canvas color with the text so dark exports
+                                    // cannot put light glyphs on an unpainted white page.
+                                    .bg(gpui_kit::rgb(crate::theme::palette().surface))
+                                    .child(content).into_any_element();
                             let size = element.layout_as_root(
                                 size(AvailableSpace::Definite(width), AvailableSpace::MinContent),
                                 window,
@@ -386,6 +391,7 @@ impl MarkdownPane {
                 .set_markdown_extensions(extensions.clone(), cx)
                 .expect("current Markdown parses with the configured GPUI extensions");
             editor.set_scroll_handle(scroll.clone());
+            editor.set_code_styles(crate::ui::inline_code_style(&settings), crate::ui::block_code_style(&settings), cx);
             editor
         });
         let weak_pane = cx.weak_entity();
@@ -916,6 +922,9 @@ impl MarkdownPane {
     ) {
         if self.settings != *settings {
             self.settings = settings.clone();
+            self.visual_editor.update(cx, |editor, cx| {
+                editor.set_code_styles(crate::ui::inline_code_style(settings), crate::ui::block_code_style(settings), cx);
+            });
             self.math
                 .update(cx, |renderer, cx| renderer.set_appearance(settings, cx));
             cx.notify();
@@ -1537,7 +1546,7 @@ impl MarkdownPane {
                     .w(px(22.))
                     .h(px(22.))
                     .rounded(px(11.))
-                    .bg(rgb(*hex))
+                    .bg(gpui_kit::rgb(*hex))
                     .border_2()
                     .border_color(if selected {
                         rgb(0x1f2328)
@@ -2014,7 +2023,7 @@ impl MarkdownPane {
                 .w(px(16.))
                 .h(px(16.))
                 .rounded(px(8.))
-                .bg(rgb(*hex))
+                .bg(gpui_kit::rgb(*hex))
                 .border_2()
                 .border_color(if selected {
                     rgb(0x1f2328)
@@ -2183,6 +2192,9 @@ impl Render for MarkdownPane {
                         )
                         .on_click(cx.listener(|pane, _, _, cx| {
                             pane.settings.markdown_font_size = 14;
+                            pane.visual_editor.update(cx, |editor, cx| {
+                                editor.set_code_styles(crate::ui::inline_code_style(&pane.settings), crate::ui::block_code_style(&pane.settings), cx);
+                            });
                             cx.emit(MarkdownEvent::Zoom(14));
                             cx.notify();
                         })),
@@ -2274,6 +2286,30 @@ impl Render for MarkdownPane {
                     }),
             );
         } else {
+            // The title is document content, so it shares the body's scroll
+            // owner and width instead of occupying a fixed row above the canvas.
+            let document_title = div()
+                .id("markdown-title")
+                // The input uses percentage width; give it a full-width flex
+                // row and a definite height inside the scrollable document.
+                .flex()
+                .w_full()
+                .h(px(80.))
+                .flex_shrink_0()
+                .pb_6()
+                .on_key_down(cx.listener(|pane, event: &KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "escape" {
+                        let path = pane.path.clone();
+                        pane.set_path(path, window, cx);
+                        pane.focus(window, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+                .child(Input::new(&self.title_input)
+                    .appearance(false).bordered(false)
+                    .w_full().h(px(56.)).px_0().py_0()
+                    .text_size(px(32.)).line_height(relative(1.25))
+                    .font_semibold().text_color(rgb(0x37352f)));
             let floating_toolbar =
                 self.render_floating_selection_toolbar(pane_origin, pane_size, cx);
             let slash_menu = self.render_slash_menu(pane_origin, pane_size, cx);
@@ -2313,6 +2349,8 @@ impl Render for MarkdownPane {
                     }))
                     .child(
                         div()
+                            .flex()
+                            .flex_col()
                             .w_full()
                             .flex_shrink_0()
                             .when(self.settings.line_width_limited, |content| {
@@ -2322,6 +2360,7 @@ impl Render for MarkdownPane {
                             .pr_6()
                             .pt_6()
                             .pb(trailing_space)
+                            .child(document_title)
                             .child(BlockEditor::new(&self.visual_editor))
                             .when(self.loading.is_some(), |content| {
                                 content.child(
@@ -2676,23 +2715,26 @@ impl Render for MarkdownPane {
             .flex_col()
             .bg(rgb(0xffffff))
             .when(self.reading, |pane| pane.child(toolbar))
-            .child(div().id("markdown-title").flex().justify_center().flex_shrink_0().pt_6().pb_3()
-                    .on_key_down(cx.listener(|pane, event: &KeyDownEvent, window, cx| {
-                        if event.keystroke.key == "escape" {
-                            let path = pane.path.clone();
-                            pane.set_path(path, window, cx);
-                            pane.focus(window, cx);
-                            cx.stop_propagation();
-                        }
-                    })).child(
-                        div().w_full().pl(px(54.)).pr_6()
-                            .when(self.settings.line_width_limited, |title| title.max_w(px(850.)))
-                            .child(Input::new(&self.title_input)
-                                .appearance(false).bordered(false)
-                                .w_full().h(px(56.)).px_0().py_0()
-                                .text_size(px(32.)).line_height(relative(1.25))
-                                .font_semibold().text_color(rgb(0x37352f)))
-                    ))
+            .child(crate::ui::ctrl_scroll_capture(cx.listener(|pane, event: &ScrollEvent, _, cx| {
+                if event.modifiers.control {
+                    let delta = if event.delta.pixel_delta(px(20.)).y > px(0.) {
+                        1
+                    } else {
+                        -1
+                    };
+                    pane.settings.markdown_font_size =
+                        (pane.settings.markdown_font_size as i16 + delta).clamp(11, 26) as u8;
+                    pane.visual_editor.update(cx, |editor, cx| {
+                        editor.set_code_styles(crate::ui::inline_code_style(&pane.settings), crate::ui::block_code_style(&pane.settings), cx);
+                    });
+                    pane.math.update(cx, |renderer, cx| {
+                        renderer.set_appearance(&pane.settings, cx)
+                    });
+                    cx.stop_propagation();
+                    cx.notify();
+                    cx.emit(MarkdownEvent::Zoom(pane.settings.markdown_font_size));
+                }
+            })))
             .child(content)
             .on_key_down(cx.listener(|pane, ev: &KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "escape" {
@@ -2774,23 +2816,6 @@ impl Render for MarkdownPane {
             )
             .on_action(cx.listener(|pane, _: &InsertTable, _, cx| {
                 pane.run_command(EditorCommand::InsertTable { rows: 3, cols: 3 }, cx)
-            }))
-            .on_scroll(cx.listener(|pane, event: &ScrollEvent, _, cx| {
-                if event.modifiers.control {
-                    let delta = if event.delta.pixel_delta(px(20.)).y > px(0.) {
-                        1
-                    } else {
-                        -1
-                    };
-                    pane.settings.markdown_font_size =
-                        (pane.settings.markdown_font_size as i16 + delta).clamp(11, 26) as u8;
-                    pane.math.update(cx, |renderer, cx| {
-                        renderer.set_appearance(&pane.settings, cx)
-                    });
-                    cx.stop_propagation();
-                    cx.notify();
-                    cx.emit(MarkdownEvent::Zoom(pane.settings.markdown_font_size));
-                }
             }))
             .context_menu(|menu, _, _| {
                 menu.menu("加粗", Box::new(Bold))
