@@ -899,6 +899,62 @@ impl BlockEditorState {
         }
     }
 
+    /// Case-insensitively selects and reveals the wrapped `index`-th match of `query`,
+    /// returning `(1_based_index, total_matches)` or `(0, 0)` when no matches exist.
+    pub fn search_occurrence(
+        &mut self,
+        query: &str,
+        index: isize,
+        cx: &mut Context<Self>,
+    ) -> (usize, usize) {
+        let query_chars: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
+        if query_chars.is_empty() {
+            return (0, 0);
+        }
+        let mut matches = Vec::new();
+        for leaf in self.model.document().leaves() {
+            let Some(text) = self.model.doc.leaf_text(leaf.id()) else {
+                continue;
+            };
+            let mut indices = text.char_indices().peekable();
+            while let Some((start, _)) = indices.next() {
+                let mut qi = 0usize;
+                let mut end = start;
+                let mut matched = true;
+                for (offset, ch) in text[start..].char_indices() {
+                    for lc in ch.to_lowercase() {
+                        if qi < query_chars.len() && lc == query_chars[qi] {
+                            qi += 1;
+                        } else {
+                            matched = false;
+                            break;
+                        }
+                    }
+                    end = start + offset + ch.len_utf8();
+                    if !matched || qi == query_chars.len() {
+                        break;
+                    }
+                }
+                if matched && qi == query_chars.len() {
+                    matches.push((leaf.id(), start, end));
+                }
+            }
+        }
+        let total = matches.len();
+        if total == 0 {
+            return (0, 0);
+        }
+        let chosen = index.rem_euclid(total as isize) as usize;
+        let (block, start, end) = matches[chosen];
+        let _ = self.model.set_selection(BlockSelection::Text {
+            anchor: BlockPosition::new(block, start),
+            head: BlockPosition::new(block, end),
+        });
+        self.selection_changed(cx);
+        self.reveal_caret(cx);
+        (chosen + 1, total)
+    }
+
     /// Returns `(top_block_id, representative_kind, window_bounds)` for the hovered or active top-level block.
     pub fn top_block_at_or_active(
         &self,
