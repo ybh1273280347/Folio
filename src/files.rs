@@ -318,6 +318,53 @@ pub fn create_folder(root: &Path, relative: &str) -> io::Result<()> {
     fs::create_dir_all(target)
 }
 
+pub fn rename_folder(root: &Path, relative: &str, name: &str) -> io::Result<String> {
+    let name = name.trim();
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name
+            .chars()
+            .any(|char| char == '/' || char == '\\' || "<>:\"|?*".contains(char))
+        || EXCLUDED_DIRECTORIES.contains(&name)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "请输入有效的文件夹名称。",
+        ));
+    }
+    let source = project_path(root, relative)?;
+    if !source.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "请选择项目内的文件夹。",
+        ));
+    }
+    let current_name = source
+        .file_name()
+        .and_then(|part| part.to_str())
+        .unwrap_or_default();
+    let parent = Path::new(relative)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    let renamed = parent.map_or_else(
+        || name.to_owned(),
+        |parent| format!("{}/{}", parent.to_string_lossy().replace('\\', "/"), name),
+    );
+    if current_name == name {
+        return Ok(renamed);
+    }
+    let destination = source.with_file_name(name);
+    if !current_name.eq_ignore_ascii_case(name) && destination.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "同名文件夹或文件已存在。",
+        ));
+    }
+    fs::rename(&source, &destination)?;
+    Ok(renamed)
+}
+
 pub fn delete_folder_files(root: &Path, relative: &str) -> io::Result<()> {
     let folder = project_path(root, relative)?;
     if !folder.is_dir() {
@@ -442,5 +489,24 @@ mod tests {
             fs::read_to_string(temp.path().join("nested/keep.bin")).unwrap(),
             "keep"
         );
+    }
+
+    #[test]
+    fn folder_rename_preserves_contents_and_rejects_invalid_names() {
+        let temp = tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("parent/old_dir")).unwrap();
+        fs::create_dir_all(temp.path().join("parent/occupied")).unwrap();
+        fs::write(temp.path().join("parent/old_dir/note.md"), "hello").unwrap();
+
+        let renamed = rename_folder(temp.path(), "parent/old_dir", "new_dir").unwrap();
+        assert_eq!(renamed, "parent/new_dir");
+        assert!(!temp.path().join("parent/old_dir").exists());
+        assert_eq!(
+            fs::read_to_string(temp.path().join("parent/new_dir/note.md")).unwrap(),
+            "hello"
+        );
+        assert!(rename_folder(temp.path(), &renamed, "occupied").is_err());
+        assert!(rename_folder(temp.path(), &renamed, "bad/name").is_err());
+        assert!(rename_folder(temp.path(), &renamed, ".git").is_err());
     }
 }
