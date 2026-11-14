@@ -207,11 +207,31 @@ pub fn create_file(root: &Path, relative: &str) -> io::Result<()> {
 
 /// Create a persistent quick note without replacing an existing numbered note.
 pub fn create_markdown(root: &Path) -> io::Result<ProjectFile> {
+    create_markdown_in(root, None)
+}
+
+pub fn create_markdown_in(root: &Path, folder: Option<&str>) -> io::Result<ProjectFile> {
+    let prefix = folder
+        .map(|folder| folder.trim().trim_matches(['/', '\\']))
+        .filter(|folder| !folder.is_empty());
     let mut number = 1;
     loop {
-        let name = if number == 1 { "未命名.md".to_owned() } else { format!("未命名{number}.md") };
-        match create_file(root, &name) {
-            Ok(()) => return Ok(ProjectFile { path: name, kind: FileKind::Text }),
+        let name = if number == 1 {
+            "未命名.md".to_owned()
+        } else {
+            format!("未命名{number}.md")
+        };
+        let relative = match prefix {
+            Some(folder) => format!("{folder}/{name}"),
+            None => name,
+        };
+        match create_file(root, &relative) {
+            Ok(()) => {
+                return Ok(ProjectFile {
+                    path: relative,
+                    kind: FileKind::Text,
+                });
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => number += 1,
             Err(error) => return Err(error),
         }
