@@ -59,7 +59,6 @@ pub struct HtmlPane {
     attempted: bool,
     released: bool,
     loading: bool,
-    using_fallback: bool,
     error: Option<String>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -116,7 +115,6 @@ impl HtmlPane {
             attempted: false,
             released: false,
             loading: false,
-            using_fallback: false,
             error: None,
             focus_handle: cx.focus_handle(),
             _subscriptions: Vec::new(),
@@ -207,7 +205,6 @@ impl HtmlPane {
     fn ensure_webview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.attempted = true;
         self.error = None;
-        self.using_fallback = false;
         self.loading = true;
 
         let Ok(raw_handle) =
@@ -248,6 +245,7 @@ impl HtmlPane {
             let result: Result<wry::WebView, String> = async {
                 let mut builder = wry::WebViewBuilder::new()
                     .with_bounds(wry::Rect::default())
+                    .with_hotkeys_zoom(true)
                     .with_devtools(cfg!(debug_assertions))
                     .with_navigation_handler(move |uri| {
                         if uri == "about:blank"
@@ -311,7 +309,6 @@ impl HtmlPane {
                                 eprintln!(
                                     "WebView2 virtual host mapping failed, falling back to file URL: {err}"
                                 );
-                                pane.using_fallback = true;
                                 fallback_url
                             }
                         };
@@ -352,13 +349,11 @@ impl Render for HtmlPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let filename = self.display_name();
         let status_label = if self.error.is_some() {
-            "加载失败"
+            Some("加载失败")
         } else if self.loading {
-            "正在加载…"
-        } else if self.using_fallback {
-            "本地文件回退模式"
+            Some("正在加载…")
         } else {
-            "WebView2 · 虚拟主机映射"
+            None
         };
 
         let mut root = div()
@@ -430,12 +425,12 @@ impl Render for HtmlPane {
                             .font_medium()
                             .child(filename),
                     )
-                    .child(
+                    .children(status_label.map(|status| {
                         div()
                             .text_xs()
                             .text_color(rgb(MUTED))
-                            .child(format!("· {status_label}")),
-                    ),
+                            .child(format!("· {status}"))
+                    })),
             )
             .child(
                 ui::control("html-external", IconName::ExternalLink)

@@ -257,6 +257,7 @@ pub struct Workspace {
     dialog_prompt: Option<DialogPrompt>,
     dialog_retry: Option<Box<dyn FnOnce(&mut Self, &mut Window, &mut Context<Self>)>>,
     dialog_open: bool,
+    editor_zoom_hud: crate::ui::ZoomHud,
     _tick: Task<()>,
 }
 
@@ -503,6 +504,7 @@ impl Workspace {
             dialog_prompt: None,
             dialog_retry: None,
             dialog_open: false,
+            editor_zoom_hud: crate::ui::ZoomHud::default(),
             _tick: tick,
         };
         let result = match initial_location {
@@ -3506,6 +3508,11 @@ impl Workspace {
                                 if let Err(error) = storage::save_settings(&app.settings) {
                                     app.report(error, cx);
                                 }
+                                app.editor_zoom_hud.show(
+                                    app.settings.editor_font_size,
+                                    cx,
+                                    |app| &mut app.editor_zoom_hud,
+                                );
                                 cx.stop_propagation();
                                 cx.notify();
                             }
@@ -3528,6 +3535,10 @@ impl Workspace {
                                             self.settings.editor_font.clone().into()
                                         }),
                                 ),
+                        )
+                        .when_some(
+                            self.editor_zoom_hud.render("editor-zoom-hud"),
+                            |area, hud| area.child(hud),
                         ),
                 );
             }

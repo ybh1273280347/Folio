@@ -108,6 +108,126 @@ pub fn ctrl_scroll_capture(
     .inset_0()
 }
 
+/// Transient bottom-right pill badge showing the current font size on Ctrl+wheel zoom.
+pub struct ZoomHud {
+    font_size: u8,
+    visible: bool,
+    fading: bool,
+    generation: u64,
+    fade_generation: u64,
+    timer: Task<()>,
+}
+
+impl Default for ZoomHud {
+    fn default() -> Self {
+        Self {
+            font_size: 14,
+            visible: false,
+            fading: false,
+            generation: 0,
+            fade_generation: 0,
+            timer: Task::ready(()),
+        }
+    }
+}
+
+impl ZoomHud {
+    pub fn show<T: 'static>(
+        &mut self,
+        font_size: u8,
+        cx: &mut Context<T>,
+        access: fn(&mut T) -> &mut Self,
+    ) {
+        if !self.visible {
+            self.generation = self.generation.wrapping_add(1);
+        }
+        self.font_size = font_size;
+        self.visible = true;
+        self.fading = false;
+        self.timer = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(950))
+                .await;
+            let keep_going = this
+                .update(cx, |owner, cx| {
+                    let hud = access(owner);
+                    if !hud.visible {
+                        return false;
+                    }
+                    hud.fading = true;
+                    hud.fade_generation = hud.fade_generation.wrapping_add(1);
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !keep_going {
+                return;
+            }
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            let _ = this.update(cx, |owner, cx| {
+                let hud = access(owner);
+                hud.visible = false;
+                hud.fading = false;
+                cx.notify();
+            });
+        });
+    }
+
+    pub fn render(&self, id: &'static str) -> Option<AnyElement> {
+        if !self.visible {
+            return None;
+        }
+        let mut bg = rgb(0xfafaf9);
+        bg.a = 0.90;
+        let mut border = rgb(0xe6e5e1);
+        border.a = 0.90;
+
+        let pill = div()
+            .px_2p5()
+            .py_1()
+            .rounded_full()
+            .bg(bg)
+            .border_1()
+            .border_color(border)
+            .shadow(vec![
+                BoxShadow::new(px(0.), px(2.), hsla(0., 0., 0., 0.08)).blur_radius(px(8.)),
+            ])
+            .text_xs()
+            .font_medium()
+            .text_color(rgb(0x5d5d5a))
+            .child(format!("{}px", self.font_size));
+
+        let animated = if self.fading {
+            pill.with_animation(
+                (id, self.fade_generation.wrapping_mul(2).wrapping_add(1)),
+                Animation::new(std::time::Duration::from_millis(250))
+                    .with_easing(ease_out_quint()),
+                |el, t| el.opacity(1. - t),
+            )
+            .into_any_element()
+        } else {
+            pill.with_animation(
+                (id, self.generation.wrapping_mul(2)),
+                Animation::new(std::time::Duration::from_millis(120))
+                    .with_easing(ease_out_quint()),
+                |el, t| el.opacity(t),
+            )
+            .into_any_element()
+        };
+
+        Some(
+            div()
+                .absolute()
+                .bottom_3()
+                .right_3()
+                .child(animated)
+                .into_any_element(),
+        )
+    }
+}
+
 icon_assets!(
     FolioIcons,
     [

@@ -273,6 +273,7 @@ pub struct MarkdownPane {
     annotation_list_focus: FocusHandle,
     show_annotations_drawer: bool,
     note_input: Entity<InputState>,
+    zoom_hud: crate::ui::ZoomHud,
     _source_subscription: Subscription,
     _visual_subscription: Subscription,
     _math_subscription: Subscription,
@@ -709,6 +710,7 @@ impl MarkdownPane {
             annotation_list_focus: cx.focus_handle(),
             show_annotations_drawer: false,
             note_input,
+            zoom_hud: crate::ui::ZoomHud::default(),
             _source_subscription: source_subscription,
             _visual_subscription: visual_subscription,
             _math_subscription: math_subscription,
@@ -2814,12 +2816,20 @@ impl Render for MarkdownPane {
                     pane.math.update(cx, |renderer, cx| {
                         renderer.set_appearance(&pane.settings, cx)
                     });
+                    pane.zoom_hud.show(
+                        pane.settings.markdown_font_size,
+                        cx,
+                        |pane| &mut pane.zoom_hud,
+                    );
                     cx.stop_propagation();
                     cx.notify();
                     cx.emit(MarkdownEvent::Zoom(pane.settings.markdown_font_size));
                 }
             })))
             .child(content)
+            .when_some(self.zoom_hud.render("md-zoom-hud"), |pane, hud| {
+                pane.child(hud)
+            })
             .on_key_down(cx.listener(|pane, ev: &KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "escape" {
                     if let Some(prefix) = pane.visual_editor.read(cx).caret_prefix()
