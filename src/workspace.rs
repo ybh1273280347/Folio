@@ -2860,7 +2860,7 @@ impl Workspace {
                     let remove_id = id.clone();
                     menu.item(
                         PopupMenuItem::new("在资源管理器中显示")
-                            .on_click(move |_, _, cx| cx.reveal_path(&root)),
+                            .on_click(move |_, _, cx| reveal_path(&root, cx)),
                     )
                     .item(
                         PopupMenuItem::new("重命名项目…").on_click(move |_, window, cx| {
@@ -3125,7 +3125,7 @@ impl Workspace {
                             .separator()
                             .item(
                                 PopupMenuItem::new("在资源管理器中显示")
-                                    .on_click(move |_, _, cx| cx.reveal_path(&full)),
+                                    .on_click(move |_, _, cx| reveal_path(&full, cx)),
                             )
                             .separator()
                             .item(
@@ -3318,7 +3318,7 @@ impl Workspace {
                         let split_app = app.clone();
                         menu.item(
                             PopupMenuItem::new("在资源管理器中显示")
-                                .on_click(move |_, _, cx| cx.reveal_path(&reveal)),
+                                .on_click(move |_, _, cx| reveal_path(&reveal, cx)),
                         )
                         .item(
                             PopupMenuItem::new("复制完整路径").on_click(move |_, _, cx| {
@@ -3830,7 +3830,7 @@ impl Workspace {
                     .when_some(self.preview.clone(), |toolbar, path| {
                         toolbar.child(
                             button("reveal-output", "在资源管理器中显示")
-                                .on_click(move |_, _, cx| cx.reveal_path(&path)),
+                                .on_click(move |_, _, cx| reveal_path(&path, cx)),
                         )
                     })
                     .child(
@@ -4604,5 +4604,17 @@ impl Render for Workspace {
             ));
         }
         app
+    }
+}
+
+fn reveal_path(path: &Path, cx: &App) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = cx;
+        crate::files::reveal_path_windows(path);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        cx.reveal_path(path);
     }
 }

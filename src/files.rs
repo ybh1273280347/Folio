@@ -380,6 +380,95 @@ pub fn delete_folder_files(root: &Path, relative: &str) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn files_app_executable() -> Option<PathBuf> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let is_files_default = [
+        r"HKCU\Software\Classes\Folder\shell\open\command",
+        r"HKCU\Software\Classes\Directory\shell\open\command",
+    ]
+    .into_iter()
+    .any(|key| {
+        Command::new("reg")
+            .args(["query", key, "/ve"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .is_some_and(|output| {
+                let stdout = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+                stdout.contains("files.app.launcher.exe")
+                    || stdout.contains("files-stable")
+                    || stdout.contains("files-preview")
+                    || stdout.contains("files-dev")
+            })
+    });
+    if !is_files_default {
+        return None;
+    }
+
+    let local_app_data = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+    let windows_apps = local_app_data.join("Microsoft").join("WindowsApps");
+
+    if let Ok(branch) = fs::read_to_string(local_app_data.join("Files").join("Branch.txt")) {
+        let alias = branch.trim();
+        if !alias.is_empty() {
+            let candidate = windows_apps.join(format!("{alias}.exe"));
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    for alias in ["files-stable.exe", "files-preview.exe", "files-dev.exe"] {
+        let candidate = windows_apps.join(alias);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+pub fn reveal_path_windows(path: &Path) {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    if path.as_os_str().is_empty() {
+        return;
+    }
+    let target = path.to_path_buf();
+    std::thread::spawn(move || {
+        let normalized = dunce::canonicalize(&target)
+            .unwrap_or_else(|_| PathBuf::from(target.to_string_lossy().replace('/', "\\")));
+        let has_parent = normalized.parent().is_some();
+
+        if let Some(files_exe) = files_app_executable() {
+            let mut command = Command::new(&files_exe);
+            if has_parent {
+                command.arg("-select").arg(&normalized);
+            } else {
+                command.arg(&normalized);
+            }
+            if command.spawn().is_ok() {
+                return;
+            }
+        }
+
+        let mut explorer = Command::new("explorer.exe");
+        if has_parent {
+            let escaped = normalized.to_string_lossy().replace('"', "");
+            explorer.raw_arg(format!("/select,\"{escaped}\""));
+        } else {
+            explorer.arg(&normalized);
+        }
+        let _ = explorer.spawn();
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::Path};
