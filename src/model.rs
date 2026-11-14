@@ -106,6 +106,12 @@ pub const SHORTCUT_DEFS: &[ShortcutDef] = &[
         label: "插入 / 编辑链接",
         default_key: "ctrl-k",
     },
+    ShortcutDef {
+        id: "md_find",
+        category: "Markdown 编辑",
+        label: "文档内查找",
+        default_key: "ctrl-f",
+    },
 ];
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]

@@ -168,6 +168,12 @@ pub fn bind_shortcuts(settings: &AppSettings, cx: &mut App) {
         markdown_editor::EditLink,
         Some("BlockEditor"),
     );
+    push_key(
+        &mut bindings,
+        settings.key_for("md_find"),
+        crate::markdown::FindInDocument,
+        Some("FolioMarkdownVisual"),
+    );
     cx.bind_keys(bindings);
 }
 #[derive(Clone, Copy, PartialEq)]

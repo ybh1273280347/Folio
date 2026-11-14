@@ -46,7 +46,8 @@ actions!(
         BulletList,
         TaskList,
         InsertImage,
-        InsertTable
+        InsertTable,
+        FindInDocument
     ]
 );
 
@@ -262,6 +263,8 @@ pub struct MarkdownPane {
     search_open: bool,
     search_input: Entity<InputState>,
     search_occurrence: usize,
+    search_match_index: usize,
+    search_match_total: usize,
     // Left gutter block handle & menu
     mouse_pos: Option<Point<Pixels>>,
     hovered_block_id: Option<BlockId>,
@@ -513,35 +516,15 @@ impl MarkdownPane {
             window,
             |pane: &mut Self, state, event: &InputEvent, _, cx| match event {
                 InputEvent::Change => {
-                    pane.search_occurrence = 0;
-                    let q = state.read(cx).value().trim().to_string();
-                    if !q.is_empty() {
-                        pane.visual_editor.update(cx, |editor, cx| {
-                            editor.select_quote_occurrence(&q, 0, cx);
-                        });
-                    }
+                    let q = state.read(cx).value().to_string();
+                    pane.run_search(&q, 0, cx);
                     cx.notify();
                 }
                 InputEvent::PressEnter { shift, .. } => {
-                    let q = state.read(cx).value().trim().to_string();
-                    if !q.is_empty() {
-                        if *shift {
-                            pane.search_occurrence = pane.search_occurrence.saturating_sub(1);
-                        } else {
-                            pane.search_occurrence += 1;
-                        }
-                        let next = pane.search_occurrence;
-                        let matched = pane.visual_editor.update(cx, |editor, cx| {
-                            editor.select_quote_occurrence(&q, next, cx)
-                        });
-                        if !matched && next > 0 {
-                            pane.search_occurrence = 0;
-                            pane.visual_editor.update(cx, |editor, cx| {
-                                editor.select_quote_occurrence(&q, 0, cx);
-                            });
-                        }
-                        cx.notify();
-                    }
+                    let q = state.read(cx).value().to_string();
+                    let delta = if *shift { -1 } else { 1 };
+                    pane.step_search(&q, delta, cx);
+                    cx.notify();
                 }
                 _ => {}
             },
@@ -701,6 +684,8 @@ impl MarkdownPane {
             search_open: false,
             search_input,
             search_occurrence: 0,
+            search_match_index: 0,
+            search_match_total: 0,
             mouse_pos: None,
             hovered_block_id: None,
             block_menu_for: None,
@@ -1013,6 +998,64 @@ impl MarkdownPane {
         window.defer(cx, move |window, cx| {
             visual_editor.update(cx, |editor, cx| editor.focus(window, cx));
         });
+    }
+
+    fn run_search(&mut self, query: &str, index: isize, cx: &mut Context<Self>) {
+        if query.is_empty() {
+            self.search_occurrence = 0;
+            self.search_match_index = 0;
+            self.search_match_total = 0;
+            return;
+        }
+        let (matched_index, total) = self
+            .visual_editor
+            .update(cx, |editor, cx| editor.search_occurrence(query, index, cx));
+        self.search_match_index = matched_index;
+        self.search_match_total = total;
+        self.search_occurrence = matched_index.saturating_sub(1);
+    }
+
+    fn step_search(&mut self, query: &str, delta: isize, cx: &mut Context<Self>) {
+        if query.is_empty() {
+            self.run_search(query, 0, cx);
+            return;
+        }
+        let next = self.search_occurrence as isize + delta;
+        self.run_search(query, next, cx);
+    }
+
+    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.source {
+            return;
+        }
+        let selected = self
+            .visual_editor
+            .read(cx)
+            .selected_plain_text()
+            .unwrap_or_default();
+        self.search_open = true;
+        if !selected.is_empty() {
+            self.run_search(&selected, 0, cx);
+        } else {
+            let existing = self.search_input.read(cx).value().to_string();
+            self.run_search(&existing, self.search_occurrence as isize, cx);
+        }
+        let search_input = self.search_input.clone();
+        window.defer(cx, move |window, cx| {
+            search_input.update(cx, |input, cx| {
+                if !selected.is_empty() {
+                    input.set_value(selected, window, cx);
+                }
+                input.focus(window, cx);
+            });
+        });
+        cx.notify();
+    }
+
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_open = false;
+        self.defer_focus_visual(window, cx);
+        cx.notify();
     }
 
     pub fn toggle_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1491,21 +1534,7 @@ impl MarkdownPane {
                 self.search_open,
                 crate::ui::icon(IconName::Search).into_any_element(),
                 Box::new(cx.listener(|pane, _, window, cx| {
-                    let selected = pane
-                        .visual_editor
-                        .read(cx)
-                        .selected_plain_text()
-                        .unwrap_or_default();
-                    pane.search_open = true;
-                    pane.search_occurrence = 0;
-                    let search_input = pane.search_input.clone();
-                    window.defer(cx, move |window, cx| {
-                        search_input.update(cx, |input, cx| {
-                            input.set_value(selected, window, cx);
-                            input.focus(window, cx);
-                        });
-                    });
-                    cx.notify();
+                    pane.open_search(window, cx);
                 })),
             ))
             // 8. Add Comment / Annotation (💬+)
@@ -2541,14 +2570,31 @@ impl Render for MarkdownPane {
                                 })),
                         )
                     })
-                    .when(self.search_open, |area| {
+                    .when(self.search_open && !self.source, |area| {
+                        let query = self.search_input.read(cx).value().to_string();
+                        let count_label = if query.is_empty() {
+                            None
+                        } else if self.search_match_total == 0 {
+                            Some("0/0".to_owned())
+                        } else {
+                            Some(format!("{}/{}", self.search_match_index, self.search_match_total))
+                        };
+                        let right_offset = if self.reading {
+                            if self.annotations.is_empty() {
+                                px(16.)
+                            } else {
+                                px(72.)
+                            }
+                        } else {
+                            px(140.)
+                        };
                         area.child(
                             div()
                                 .id("md-search-bar")
                                 .absolute()
                                 .top_3()
-                                .right(px(140.))
-                                .w(px(260.))
+                                .right(right_offset)
+                                .w(px(340.))
                                 .px_2p5()
                                 .py_1()
                                 .rounded(px(8.))
@@ -2558,13 +2604,39 @@ impl Render for MarkdownPane {
                                 .shadow_md()
                                 .flex()
                                 .items_center()
-                                .gap_1p5()
+                                .gap_1()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .child(Input::new(&self.search_input).flex_1().min_w_0())
+                                .when_some(count_label, |bar, label| {
+                                    bar.child(
+                                        div()
+                                            .px_1()
+                                            .text_xs()
+                                            .text_color(rgb(0x787774))
+                                            .flex_shrink_0()
+                                            .child(label),
+                                    )
+                                })
+                                .child(
+                                    crate::ui::control("prev-md-search", IconName::ChevronUp)
+                                        .on_click(cx.listener(|pane, _, _, cx| {
+                                            let q = pane.search_input.read(cx).value().to_string();
+                                            pane.step_search(&q, -1, cx);
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    crate::ui::control("next-md-search", IconName::ChevronDown)
+                                        .on_click(cx.listener(|pane, _, _, cx| {
+                                            let q = pane.search_input.read(cx).value().to_string();
+                                            pane.step_search(&q, 1, cx);
+                                            cx.notify();
+                                        })),
+                                )
                                 .child(
                                     crate::ui::control("close-md-search", IconName::Close)
-                                        .on_click(cx.listener(|pane, _, _, cx| {
-                                            pane.search_open = false;
-                                            cx.notify();
+                                        .on_click(cx.listener(|pane, _, window, cx| {
+                                            pane.close_search(window, cx);
                                         })),
                                 ),
                         )
@@ -2796,6 +2868,7 @@ impl Render for MarkdownPane {
         div()
             .relative()
             .size_full()
+            .when(!self.source, |pane| pane.key_context("FolioMarkdownVisual"))
             .track_focus(&self.focus)
             .flex()
             .flex_col()
@@ -2830,7 +2903,7 @@ impl Render for MarkdownPane {
             .when_some(self.zoom_hud.render("md-zoom-hud"), |pane, hud| {
                 pane.child(hud)
             })
-            .on_key_down(cx.listener(|pane, ev: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|pane, ev: &KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" {
                     if let Some(prefix) = pane.visual_editor.read(cx).caret_prefix()
                         && quick_insert_items(prefix).is_some()
@@ -2847,12 +2920,16 @@ impl Render for MarkdownPane {
                         || pane.active_annotation_id.is_some()
                         || pane.search_open
                     {
+                        let was_search = pane.search_open;
                         pane.show_turn_into = false;
                         pane.show_color_picker = false;
                         pane.link_editing = false;
                         pane.block_menu_for = None;
                         pane.active_annotation_id = None;
                         pane.search_open = false;
+                        if was_search {
+                            pane.defer_focus_visual(window, cx);
+                        }
                         cx.stop_propagation();
                         cx.notify();
                     }
@@ -2867,6 +2944,16 @@ impl Render for MarkdownPane {
                     cx.emit(MarkdownEvent::Focus);
                 }),
             )
+            .on_action(cx.listener(|pane, _: &FindInDocument, window, cx| {
+                pane.open_search(window, cx);
+            }))
+            .on_action(cx.listener(
+                |pane, _: &gpui_kit::component::input::Search, window, cx| {
+                    if !pane.source {
+                        pane.open_search(window, cx);
+                    }
+                },
+            ))
             .on_action(
                 cx.listener(|pane, _: &ToggleSource, window, cx| pane.toggle_source(window, cx)),
             )
