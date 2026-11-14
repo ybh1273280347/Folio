@@ -78,6 +78,7 @@ enum NameAction {
     Create,
     CreateFolder,
     RenameFile(String),
+    RenameFolder(String),
     RenameProject(String),
 }
 
@@ -2171,6 +2172,166 @@ impl Workspace {
                 self.folders = files::list_folders(&root).unwrap_or_default();
                 storage::save_projects(&self.config)?;
             }
+            NameAction::RenameFolder(folder_path) => {
+                let root = PathBuf::from(
+                    &self
+                        .directory_workspace()
+                        .expect("folder tree has a directory")
+                        .folder,
+                );
+                let renamed = files::rename_folder(&root, &folder_path, &name)?;
+                if renamed != folder_path {
+                    let old_prefix = format!("{folder_path}/");
+                    let remap = |value: &str| -> Option<String> {
+                        if value == folder_path {
+                            Some(renamed.clone())
+                        } else {
+                            value
+                                .strip_prefix(&old_prefix)
+                                .map(|rest| format!("{renamed}/{rest}"))
+                        }
+                    };
+                    let doc_keys: Vec<String> = self
+                        .documents
+                        .keys()
+                        .filter(|key| key.starts_with(&old_prefix))
+                        .cloned()
+                        .collect();
+                    for old_key in doc_keys {
+                        if let Some(mut document) = self.documents.remove(&old_key) {
+                            let new_key = remap(&old_key).expect("matched prefix");
+                            document.path = root.join(&new_key);
+                            document._subscription =
+                                self.subscribe_editor(new_key.clone(), &document.editor, cx);
+                            self.documents.insert(new_key, document);
+                        }
+                    }
+                    for tab in &mut self.tabs {
+                        if let Some(new_path) = remap(tab) {
+                            *tab = new_path;
+                        }
+                    }
+                    if let Some(new_active) = remap(&self.active) {
+                        self.active = new_active;
+                    }
+                    if let Some(focused) = self.focused_markdown.as_deref().and_then(remap) {
+                        self.focused_markdown = Some(focused);
+                    }
+                    for pane in &mut self.reading_panes {
+                        if let Some(new_path) = remap(pane) {
+                            *pane = new_path;
+                        }
+                    }
+                    let md_keys: Vec<String> = self
+                        .markdown_panes
+                        .keys()
+                        .filter(|key| {
+                            let rel = key.strip_prefix("reading:").unwrap_or(key);
+                            rel.starts_with(&old_prefix)
+                        })
+                        .cloned()
+                        .collect();
+                    for old_key in md_keys {
+                        if let Some(pane) = self.markdown_panes.remove(&old_key) {
+                            let reading = old_key.starts_with("reading:");
+                            let old_rel = old_key.strip_prefix("reading:").unwrap_or(&old_key);
+                            let new_rel = remap(old_rel).expect("matched prefix");
+                            let new_key = if reading {
+                                format!("reading:{new_rel}")
+                            } else {
+                                new_rel.clone()
+                            };
+                            pane.update(cx, |pane, cx| {
+                                pane.set_path(root.join(&new_rel), window, cx)
+                            });
+                            self.markdown_panes.insert(new_key, pane);
+                        }
+                    }
+                    let pdf_keys: Vec<String> = self
+                        .pdf_panes
+                        .keys()
+                        .filter(|key| {
+                            let rel = key.strip_prefix("reading:").unwrap_or(key);
+                            rel.starts_with(&old_prefix)
+                        })
+                        .cloned()
+                        .collect();
+                    for old_key in pdf_keys {
+                        self.release_pdf_pane(&old_key, window, cx);
+                        let reading = old_key.starts_with("reading:");
+                        let old_rel = old_key.strip_prefix("reading:").unwrap_or(&old_key);
+                        let new_rel = remap(old_rel).expect("matched prefix");
+                        let new_key = if reading {
+                            format!("reading:{new_rel}")
+                        } else {
+                            new_rel.clone()
+                        };
+                        self.pdf_panes.insert(
+                            new_key,
+                            cx.new(|cx| PdfPane::new(root.join(&new_rel), window, cx)),
+                        );
+                    }
+                    let html_keys: Vec<String> = self
+                        .html_panes
+                        .keys()
+                        .filter(|key| {
+                            let rel = key.strip_prefix("reading:").unwrap_or(key);
+                            rel.starts_with(&old_prefix)
+                        })
+                        .cloned()
+                        .collect();
+                    for old_key in html_keys {
+                        self.release_html_pane(&old_key, window, cx);
+                        let reading = old_key.starts_with("reading:");
+                        let old_rel = old_key.strip_prefix("reading:").unwrap_or(&old_key);
+                        let new_rel = remap(old_rel).expect("matched prefix");
+                        let new_key = if reading {
+                            format!("reading:{new_rel}")
+                        } else {
+                            new_rel.clone()
+                        };
+                        self.add_html_pane(
+                            new_key,
+                            root.join(&new_rel),
+                            root.clone(),
+                            reading,
+                            window,
+                            cx,
+                        );
+                    }
+                    for set in [
+                        &mut self.selected_files,
+                        &mut self.markdown_changed,
+                        &mut self.collapsed_folders,
+                    ] {
+                        let moved: Vec<String> = set
+                            .iter()
+                            .filter(|item| *item == &folder_path || item.starts_with(&old_prefix))
+                            .cloned()
+                            .collect();
+                        for old_item in moved {
+                            set.remove(&old_item);
+                            if let Some(new_item) = remap(&old_item) {
+                                set.insert(new_item);
+                            }
+                        }
+                    }
+                    let project = self
+                        .config
+                        .projects
+                        .iter_mut()
+                        .find(|project| Some(&project.id) == self.config.active_id.as_ref());
+                    if let Some(project) = project {
+                        if let Some(new_main) = remap(&project.main_file) {
+                            project.main_file = new_main;
+                        }
+                    }
+                    self.watch_tree = true;
+                    self.files = files::list_files(&root)?;
+                    self.folders = files::list_folders(&root).unwrap_or_default();
+                    storage::save_projects(&self.config)?;
+                }
+            }
             NameAction::RenameProject(id) => {
                 if name.is_empty() {
                     return Err(io::Error::other("项目名称不能为空。"));
@@ -2925,9 +3086,16 @@ impl Workspace {
                         .context_menu(move |menu, _, _| {
                             let full = full.clone();
                             let deleted = deleted.clone();
+                            let renamed_path = deleted.clone();
+                            let renamed_name = Path::new(&deleted)
+                                .file_name()
+                                .expect("folder has name")
+                                .to_string_lossy()
+                                .into_owned();
                             let folder_prefix = format!("{deleted}/");
                             let folder_prefix_dir = folder_prefix.clone();
                             let app = app.clone();
+                            let rename_app = app.clone();
                             let create_file_app = app.clone();
                             let create_folder_app = app.clone();
                             menu.item(PopupMenuItem::new("新建文件…").on_click(
@@ -2960,6 +3128,18 @@ impl Workspace {
                                     .on_click(move |_, _, cx| cx.reveal_path(&full)),
                             )
                             .separator()
+                            .item(
+                                PopupMenuItem::new("重命名…").on_click(move |_, window, cx| {
+                                    rename_app.update(cx, |app, cx| {
+                                        app.start_name(
+                                            NameAction::RenameFolder(renamed_path.clone()),
+                                            &renamed_name,
+                                            window,
+                                            cx,
+                                        )
+                                    })
+                                }),
+                            )
                             .item(
                                 PopupMenuItem::new("删除文件夹…").on_click(move |_, window, cx| {
                                     app.update(cx, |app, cx| {
@@ -4270,6 +4450,7 @@ impl Render for Workspace {
                 NameAction::Create => "新建文件",
                 NameAction::CreateFolder => "新建文件夹",
                 NameAction::RenameFile(_) => "重命名文件",
+                NameAction::RenameFolder(_) => "重命名文件夹",
                 NameAction::RenameProject(_) => "重命名项目",
             };
             app = app.child(
