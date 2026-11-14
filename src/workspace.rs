@@ -210,6 +210,7 @@ pub struct Workspace {
     focused_markdown: Option<String>,
     markdown_changed: BTreeSet<String>,
     collapsed_folders: BTreeSet<String>,
+    focused_folder: Option<String>,
     selected_files: BTreeSet<String>,
     deleted_files: Vec<(String, Vec<(String, Vec<u8>)>, String)>,
     file_tree_focus: FocusHandle,
@@ -457,6 +458,7 @@ impl Workspace {
             focused_markdown: None,
             markdown_changed: BTreeSet::new(),
             collapsed_folders: BTreeSet::new(),
+            focused_folder: None,
             selected_files: BTreeSet::new(),
             deleted_files: Vec::new(),
             file_tree_focus: cx.focus_handle(),
@@ -611,6 +613,7 @@ impl Workspace {
         self.files.clear();
         self.folders.clear();
         self.collapsed_folders.clear();
+        self.focused_folder = None;
         self.selected_files.clear();
         self.logs.clear();
         self.build_status = BuildStatus::Idle;
@@ -715,6 +718,7 @@ impl Workspace {
         self.preview = None;
         self.clear_open_documents(window, cx);
         self.collapsed_folders.clear();
+        self.focused_folder = None;
         self.selected_files.clear();
         let previous_pdf = storage::data_directory()?
             .join("builds")
@@ -1489,6 +1493,13 @@ impl Workspace {
             if self.watch_paths.is_empty() || self.watch_tree {
                 self.files = files::list_files(root)?;
                 self.folders = files::list_folders(root).unwrap_or_default();
+                if self
+                    .focused_folder
+                    .as_ref()
+                    .is_some_and(|folder| !self.folders.contains(folder))
+                {
+                    self.focused_folder = None;
+                }
             }
         }
         let changed = std::mem::take(&mut self.watch_paths);
@@ -2037,17 +2048,54 @@ impl Workspace {
         Ok(())
     }
 
+    fn focused_folder_prefix(&self) -> String {
+        self.focused_folder
+            .as_deref()
+            .filter(|folder| !folder.is_empty())
+            .map_or_else(String::new, |folder| format!("{folder}/"))
+    }
+
+    fn expand_ancestors(&mut self, relative: &str) {
+        let mut prefix = String::new();
+        let parts: Vec<_> = relative.split('/').collect();
+        for part in parts.iter().take(parts.len().saturating_sub(1)) {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(part);
+            self.collapsed_folders.remove(&prefix);
+        }
+    }
+
     fn new_markdown(&mut self, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
+        let folder = self.focused_folder.clone();
+        self.new_markdown_in(folder.as_deref(), window, cx)
+    }
+
+    fn new_markdown_in(
+        &mut self,
+        folder: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> io::Result<()> {
         if self.directory_workspace().is_none() {
-            if self.cancellation.is_some() || self.batch_running { return Ok(()); }
-            if !self.confirm_drafts(window, cx, |app, window, cx| {
-                if let Err(error) = app.new_markdown(window, cx) { app.report(error, cx); }
-            }) { return Ok(()); }
+            if self.cancellation.is_some() || self.batch_running {
+                return Ok(());
+            }
+            let target_folder = folder.map(ToOwned::to_owned);
+            if !self.confirm_drafts(window, cx, move |app, window, cx| {
+                if let Err(error) = app.new_markdown_in(target_folder.as_deref(), window, cx) {
+                    app.report(error, cx);
+                }
+            }) {
+                return Ok(());
+            }
             self.select_project("__folio_default", window, cx)?;
         }
         let root = PathBuf::from(&self.directory_workspace().unwrap().folder);
-        let file = files::create_markdown(&root)?;
+        let file = files::create_markdown_in(&root, folder)?;
         self.files = files::list_files(&root)?;
+        self.expand_ancestors(&file.path);
         self.open_file(&file, window, cx)
     }
 
@@ -2065,12 +2113,14 @@ impl Workspace {
                 files::create_file(&root, &name)?;
                 self.files = files::list_files(&root)?;
                 self.folders = files::list_folders(&root).unwrap_or_default();
+                let normalized = name.trim().replace('\\', "/");
                 let file = self
                     .files
                     .iter()
-                    .find(|file| file.path == name)
+                    .find(|file| file.path == normalized)
                     .expect("new supported file appears in scan")
                     .clone();
+                self.expand_ancestors(&file.path);
                 self.open_file(&file, window, cx)?;
             }
             NameAction::CreateFolder => {
@@ -2078,6 +2128,11 @@ impl Workspace {
                 files::create_folder(&root, &name)?;
                 self.files = files::list_files(&root)?;
                 self.folders = files::list_folders(&root).unwrap_or_default();
+                let created = name
+                    .trim()
+                    .trim_matches(['/', '\\'])
+                    .replace('\\', "/");
+                self.expand_ancestors(&created);
             }
             NameAction::RenameFile(path) => {
                 let root = PathBuf::from(&self.directory_workspace().expect("file tree has a directory").folder);
@@ -2315,6 +2370,9 @@ impl Workspace {
                                 set.insert(new_item);
                             }
                         }
+                    }
+                    if let Some(focused) = self.focused_folder.as_deref().and_then(remap) {
+                        self.focused_folder = Some(focused);
                     }
                     let project = self
                         .config
@@ -3031,6 +3089,7 @@ impl Workspace {
                 }
                 if *folder {
                     let toggled = path.clone();
+                    let is_focused = self.focused_folder.as_deref() == Some(path);
                     let full = PathBuf::from(&self.directory_workspace().expect("folder has project").folder)
                         .join(path);
                     let deleted = path.clone();
@@ -3044,6 +3103,7 @@ impl Workspace {
                         .gap_2()
                         .pl(px(12. + depth as f32 * 15.))
                         .cursor_pointer()
+                        .when(is_focused, |row| row.bg(rgb(0xedf2fa)))
                         .hover(|style| style.bg(rgb(0xefefed)))
                         .active(|style| style.bg(rgb(crate::ui::PRESSED_BG)))
                         .child(crate::ui::icon(if self.collapsed_folders.contains(path) {
@@ -3077,15 +3137,19 @@ impl Workspace {
                                 },
                             )),
                         )
-                        .on_click(cx.listener(move |app, _, _, cx| {
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            cx.stop_propagation();
+                            app.focused_folder = Some(toggled.clone());
                             if !app.collapsed_folders.remove(&toggled) {
                                 app.collapsed_folders.insert(toggled.clone());
                             }
+                            app.file_tree_focus.focus(window, cx);
                             cx.notify();
                         }))
                         .context_menu(move |menu, _, _| {
                             let full = full.clone();
                             let deleted = deleted.clone();
+                            let new_md_folder = deleted.clone();
                             let renamed_path = deleted.clone();
                             let renamed_name = Path::new(&deleted)
                                 .file_name()
@@ -3096,9 +3160,24 @@ impl Workspace {
                             let folder_prefix_dir = folder_prefix.clone();
                             let app = app.clone();
                             let rename_app = app.clone();
+                            let new_md_app = app.clone();
                             let create_file_app = app.clone();
                             let create_folder_app = app.clone();
-                            menu.item(PopupMenuItem::new("新建文件…").on_click(
+                            menu.item(PopupMenuItem::new("新建 Markdown").on_click(
+                                move |_, window, cx| {
+                                    new_md_app.update(cx, |app, cx| {
+                                        app.focused_folder = Some(new_md_folder.clone());
+                                        if let Err(error) = app.new_markdown_in(
+                                            Some(&new_md_folder),
+                                            window,
+                                            cx,
+                                        ) {
+                                            app.report(error, cx);
+                                        }
+                                    })
+                                },
+                            ))
+                            .item(PopupMenuItem::new("新建文件…").on_click(
                                 move |_, window, cx| {
                                     create_file_app.update(cx, |app, cx| {
                                         app.start_name(
@@ -3300,6 +3379,8 @@ impl Workspace {
                             }),
                     )
                     .on_click(cx.listener(move |app, _, window, cx| {
+                        cx.stop_propagation();
+                        app.focused_folder = None;
                         if let Err(error) = app.open_file(&open, window, cx) {
                             app.report(error, cx);
                         }
@@ -3493,12 +3574,14 @@ impl Workspace {
                                     })))
                                 .child(button("new-file", "+").on_click(cx.listener(
                                     |app, _, window, cx| {
-                                        app.start_name(NameAction::Create, "", window, cx)
+                                        let prefix = app.focused_folder_prefix();
+                                        app.start_name(NameAction::Create, &prefix, window, cx)
                                     },
                                 )))
                                 .child(button("new-folder", "📁+").on_click(cx.listener(
                                     |app, _, window, cx| {
-                                        app.start_name(NameAction::CreateFolder, "", window, cx)
+                                        let prefix = app.focused_folder_prefix();
+                                        app.start_name(NameAction::CreateFolder, &prefix, window, cx)
                                     },
                                 )))
                                 .child(button("find-file", "⌕").on_click(cx.listener(
@@ -3594,6 +3677,12 @@ impl Workspace {
                     .key_context("FolioFileTree")
                     .track_focus(&self.file_tree_focus)
                     .on_action(cx.listener(Self::undo_file_delete))
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        if app.focused_folder.take().is_some() {
+                            cx.notify();
+                        }
+                        app.file_tree_focus.focus(window, cx);
+                    }))
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
