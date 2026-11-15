@@ -26,6 +26,34 @@ pub const EXCLUDED_DIRECTORIES: &[&str] = &[
     "runtime",
 ];
 
+pub fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2]))
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned())
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 pub fn is_relevant(path: &Path) -> bool {
     path.file_name().is_some_and(|name| name == ".latexmkrc")
         || extension_in(path, TEXT_EXTENSIONS)
@@ -617,5 +645,12 @@ mod tests {
         assert!(rename_folder(temp.path(), &renamed, "occupied").is_err());
         assert!(rename_folder(temp.path(), &renamed, "bad/name").is_err());
         assert!(rename_folder(temp.path(), &renamed, ".git").is_err());
+    }
+
+    #[test]
+    fn percent_decode_decodes_utf8_and_preserves_plus() {
+        assert_eq!(percent_decode("hello%20world+1.md"), "hello world+1.md");
+        assert_eq!(percent_decode("%E7%AC%94%E8%AE%B0.md"), "笔记.md");
+        assert_eq!(percent_decode("bad%ZZ%2"), "bad%ZZ%2");
     }
 }

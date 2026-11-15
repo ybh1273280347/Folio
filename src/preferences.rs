@@ -1,7 +1,7 @@
 //! Appearance and shortcut preferences are persisted independently of project files and PDF typesetting.
 use crate::theme::color as rgb;
 use crate::{
-    model::{AppSettings, MathFont, SHORTCUT_DEFS},
+    model::{AppSettings, InternalLinkOpenTarget, MathFont, SHORTCUT_DEFS},
     storage,
     theme::ColorRole,
 };
@@ -809,6 +809,60 @@ impl Preferences {
                         })),
                     ),
             )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(div().flex_1().min_w_0().child("内部文件链接跳转位置"))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        choice_button(
+                                            "link-target-main",
+                                            "主编辑区",
+                                            self.settings.internal_link_open_target
+                                                == InternalLinkOpenTarget::MainEditor,
+                                        )
+                                        .on_click(cx.listener(|panel, _, _, cx| {
+                                            panel.settings.internal_link_open_target =
+                                                InternalLinkOpenTarget::MainEditor;
+                                            panel.changed(cx);
+                                        })),
+                                    )
+                                    .child(
+                                        choice_button(
+                                            "link-target-split",
+                                            "右侧分屏",
+                                            self.settings.internal_link_open_target
+                                                == InternalLinkOpenTarget::SplitPane,
+                                        )
+                                        .on_click(cx.listener(|panel, _, _, cx| {
+                                            panel.settings.internal_link_open_target =
+                                                InternalLinkOpenTarget::SplitPane;
+                                            panel.changed(cx);
+                                        })),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .text_xs()
+                            .text_color(rgb(0x787774))
+                            .child("Ctrl+左键点击 Markdown 内部文件链接时的打开方式（非分屏类型仍在主编辑区打开）"),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -1034,6 +1088,14 @@ impl Preferences {
 }
 fn control(id: impl Into<ElementId>, label: &'static str) -> Stateful<Div> {
     crate::ui::button_secondary(id, label).px_3()
+}
+
+fn choice_button(id: impl Into<ElementId>, label: &'static str, selected: bool) -> Stateful<Div> {
+    if selected {
+        crate::ui::button_primary(id, label)
+    } else {
+        crate::ui::button_secondary(id, label).px_3()
+    }
 }
 impl Render for Preferences {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
