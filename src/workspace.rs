@@ -54,6 +54,8 @@ actions!(
         ToggleSidebar,
         FindFile,
         CloseTab,
+        CopyFilePath,
+        DeleteFileTreeItem,
         UndoFileDelete,
         Dismiss
     ]
@@ -85,6 +87,8 @@ enum NameAction {
 pub fn bind_shortcuts(settings: &AppSettings, cx: &mut App) {
     let mut bindings = vec![
         KeyBinding::new("ctrl-c", gpui_kit::component::input::Copy, Some("FolioPdf")),
+        KeyBinding::new("ctrl-c", CopyFilePath, Some("FolioFileTree")),
+        KeyBinding::new("delete", DeleteFileTreeItem, Some("FolioFileTree")),
         KeyBinding::new("ctrl-z", UndoFileDelete, Some("FolioFileTree")),
         KeyBinding::new("escape", Dismiss, Some("!GpuiXterm")),
     ];
@@ -1182,6 +1186,16 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> io::Result<()> {
+        self.open_file_with_focus(file, true, window, cx)
+    }
+
+    fn open_file_with_focus(
+        &mut self,
+        file: &ProjectFile,
+        focus_editor: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> io::Result<()> {
         self.focused_markdown = None;
         let full = self.document_path(&file.path);
         if file.path.to_lowercase().ends_with(".pdf") && !self.pdf_panes.contains_key(&file.path) {
@@ -1247,12 +1261,14 @@ impl Workspace {
             self.add_markdown_pane(&file.path, false, window, cx);
         }
         self.active = file.path.clone();
-        if let Some(pane) = self.markdown_panes.get(&file.path) {
-            pane.update(cx, |pane, cx| pane.focus(window, cx));
-        } else if let Some(document) = self.documents.get(&file.path) {
-            document
-                .editor
-                .update(cx, |editor, cx| editor.focus(window, cx));
+        if focus_editor {
+            if let Some(pane) = self.markdown_panes.get(&file.path) {
+                pane.update(cx, |pane, cx| pane.focus(window, cx));
+            } else if let Some(document) = self.documents.get(&file.path) {
+                document
+                    .editor
+                    .update(cx, |editor, cx| editor.focus(window, cx));
+            }
         }
         if let Err(error) = self.remember_session() {
             self.report(error, cx);
@@ -2683,6 +2699,75 @@ impl Workspace {
         cx.notify();
     }
 
+    fn copy_file_path(
+        &mut self,
+        _: &CopyFilePath,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.selected_files.is_empty() {
+            let paths: Vec<String> = self
+                .selected_files
+                .iter()
+                .map(|path| self.document_path(path).to_string_lossy().into_owned())
+                .collect();
+            let count = paths.len();
+            cx.write_to_clipboard(ClipboardItem::new_string(paths.join("\n")));
+            if count == 1 {
+                self.report("已复制完整路径。", cx);
+            } else {
+                self.report(format!("已复制 {count} 个文件的完整路径。"), cx);
+            }
+            return;
+        }
+        if let Some(folder) = &self.focused_folder
+            && let Some(project) = self.directory_workspace()
+        {
+            let full = PathBuf::from(&project.folder).join(folder);
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                full.to_string_lossy().into_owned(),
+            ));
+            self.report("已复制文件夹完整路径。", cx);
+            return;
+        }
+        if !self.active.is_empty() {
+            let full = self.document_path(&self.active);
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                full.to_string_lossy().into_owned(),
+            ));
+            self.report("已复制完整路径。", cx);
+        }
+    }
+
+    fn delete_file_tree_item(
+        &mut self,
+        _: &DeleteFileTreeItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.directory_workspace().is_none() || self.cancellation.is_some() {
+            return;
+        }
+        if !self.selected_files.is_empty() {
+            if self.selected_files.len() == 1 {
+                if let Some(path) = self.selected_files.iter().next().cloned() {
+                    self.delete_file(&path, window, cx);
+                }
+            } else {
+                self.delete_selected(window, cx);
+            }
+            return;
+        }
+        if let Some(folder) = self.focused_folder.clone() {
+            self.delete_folder(&folder, window, cx);
+            return;
+        }
+        if !self.active.is_empty() && self.files.iter().any(|file| file.path == self.active) {
+            let path = self.active.clone();
+            self.delete_file(&path, window, cx);
+        }
+    }
+
     fn undo_file_delete(
         &mut self,
         _: &UndoFileDelete,
@@ -3186,14 +3271,19 @@ impl Workspace {
                                 },
                             )),
                         )
-                        .on_click(cx.listener(move |app, _, window, cx| {
+                        .on_click(cx.listener(move |app, event: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
                             app.active = key.clone();
-                            if let Some(pane) = app.markdown_panes.get(&key) {
-                                pane.update(cx, |pane, cx| pane.focus(window, cx));
-                            } else if let Some(document) = app.documents.get(&key) {
-                                document
-                                    .editor
-                                    .update(cx, |editor, cx| editor.focus(window, cx));
+                            if event.click_count() >= 2 {
+                                if let Some(pane) = app.markdown_panes.get(&key) {
+                                    pane.update(cx, |pane, cx| pane.focus(window, cx));
+                                } else if let Some(document) = app.documents.get(&key) {
+                                    document
+                                        .editor
+                                        .update(cx, |editor, cx| editor.focus(window, cx));
+                                }
+                            } else {
+                                app.file_tree_focus.focus(window, cx);
                             }
                             if let Err(error) = app.remember_session() {
                                 app.report(error, cx);
@@ -3503,11 +3593,16 @@ impl Workspace {
                                 )
                             }),
                     )
-                    .on_click(cx.listener(move |app, _, window, cx| {
+                    .on_click(cx.listener(move |app, event: &ClickEvent, window, cx| {
                         cx.stop_propagation();
                         app.focused_folder = None;
-                        if let Err(error) = app.open_file(&open, window, cx) {
+                        if let Err(error) =
+                            app.open_file_with_focus(&open, event.click_count() >= 2, window, cx)
+                        {
                             app.report(error, cx);
+                        }
+                        if event.click_count() < 2 {
+                            app.file_tree_focus.focus(window, cx);
                         }
                     }))
                     .context_menu(move |menu, _, _| {
@@ -3801,6 +3896,8 @@ impl Workspace {
                     .id("file-tree-scroll")
                     .key_context("FolioFileTree")
                     .track_focus(&self.file_tree_focus)
+                    .on_action(cx.listener(Self::copy_file_path))
+                    .on_action(cx.listener(Self::delete_file_tree_item))
                     .on_action(cx.listener(Self::undo_file_delete))
                     .on_click(cx.listener(|app, _, window, cx| {
                         if app.focused_folder.take().is_some() {
