@@ -29,6 +29,7 @@ pub enum MarkdownEvent {
     Change(String),
     Focus,
     Zoom(u8),
+    OpenLink(String),
 }
 
 actions!(
@@ -259,6 +260,8 @@ pub struct MarkdownPane {
     active_highlight_color: String,
     link_editing: bool,
     link_input: Entity<InputState>,
+    hovered_link: Option<SharedString>,
+    pending_anchor: Option<String>,
     // Inline search state
     search_open: bool,
     search_input: Entity<InputState>,
@@ -622,6 +625,15 @@ impl MarkdownPane {
                     });
                     cx.notify();
                 }
+                BlockEditorEvent::LinkClicked { url } => {
+                    pane.handle_link_click(url.as_ref(), window, cx);
+                }
+                BlockEditorEvent::LinkHovered { url } => {
+                    if pane.hovered_link != *url {
+                        pane.hovered_link = url.clone();
+                        cx.notify();
+                    }
+                }
                 BlockEditorEvent::Focus => cx.emit(MarkdownEvent::Focus),
                 _ => {}
             },
@@ -681,6 +693,8 @@ impl MarkdownPane {
             active_highlight_color: "yellow".to_owned(),
             link_editing: false,
             link_input,
+            hovered_link: None,
+            pending_anchor: None,
             search_open: false,
             search_input,
             search_occurrence: 0,
@@ -744,6 +758,9 @@ impl MarkdownPane {
                 });
                 pane.headings = headings;
                 pane.loading = None;
+                if let Some(anchor) = pane.pending_anchor.take() {
+                    pane.reveal_anchor(&anchor, None, cx);
+                }
                 cx.notify();
             });
         }));
@@ -799,6 +816,42 @@ impl MarkdownPane {
         cx.notify();
     }
 
+    fn handle_link_click(&mut self, raw: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let url = raw.trim();
+        if url.is_empty() {
+            return;
+        }
+        if let Some(fragment) = url.strip_prefix('#') {
+            self.navigate_to_anchor(fragment, window, cx);
+            return;
+        }
+        cx.emit(MarkdownEvent::OpenLink(url.to_owned()));
+    }
+
+    pub fn navigate_to_anchor(&mut self, anchor: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loading.is_some() {
+            self.pending_anchor = Some(anchor.to_owned());
+            return;
+        }
+        self.reveal_anchor(anchor, Some(window), cx);
+    }
+
+    fn reveal_anchor(&mut self, anchor: &str, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        let Some(index) = self.find_heading_index(anchor) else {
+            return;
+        };
+        if let Some(window) = window {
+            self.navigate_heading(index, window, cx);
+        } else {
+            self.select_visual_heading(index, None, cx);
+            cx.notify();
+        }
+    }
+
+    fn find_heading_index(&self, anchor: &str) -> Option<usize> {
+        match_heading_index(&self.headings, anchor)
+    }
+
     fn navigate_heading(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.source {
             let Some(heading) = self.headings.get(index) else {
@@ -813,19 +866,31 @@ impl MarkdownPane {
                 editor.set_cursor_position(Position::new(line as u32, 0), window, cx)
             });
         } else {
-            let headings = self
-                .visual_editor
-                .read(cx)
-                .model()
-                .document()
-                .leaves()
-                .filter(|block| matches!(block.kind(), BlockKind::Heading { .. }))
-                .map(|block| block.id())
-                .collect::<Vec<_>>();
-            let Some(&block) = headings.get(index) else {
-                return;
-            };
-            let visual_editor = self.visual_editor.clone();
+            self.select_visual_heading(index, Some(window), cx);
+        }
+        cx.notify();
+    }
+
+    fn select_visual_heading(
+        &mut self,
+        index: usize,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        let headings = self
+            .visual_editor
+            .read(cx)
+            .model()
+            .document()
+            .leaves()
+            .filter(|block| matches!(block.kind(), BlockKind::Heading { .. }))
+            .map(|block| block.id())
+            .collect::<Vec<_>>();
+        let Some(&block) = headings.get(index) else {
+            return;
+        };
+        let visual_editor = self.visual_editor.clone();
+        if let Some(window) = window {
             window.defer(cx, move |window, cx| {
                 visual_editor.update(cx, |editor, cx| {
                     let _ = editor
@@ -834,8 +899,13 @@ impl MarkdownPane {
                     editor.focus(window, cx);
                 });
             });
+        } else {
+            visual_editor.update(cx, |editor, cx| {
+                let _ = editor
+                    .set_selection(BlockSelection::caret(BlockPosition::new(block, 0)), cx);
+                editor.reveal_caret(cx);
+            });
         }
-        cx.notify();
     }
 
     fn active_slash_state(&self, cx: &App) -> Option<(usize, String, Vec<&'static SlashCommand>)> {
@@ -1061,6 +1131,7 @@ impl MarkdownPane {
     pub fn toggle_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.source = !self.source;
         if self.source {
+            self.hovered_link = None;
             let text = self.text.clone();
             let source_editor = self.source_editor.clone();
             window.defer(cx, move |window, cx| {
@@ -2575,6 +2646,33 @@ impl Render for MarkdownPane {
                                 })),
                         )
                     })
+                    .when_some(self.hovered_link.as_ref(), |area, url| {
+                        let action = if cfg!(target_os = "macos") {
+                            "Cmd+左键"
+                        } else {
+                            "Ctrl+左键"
+                        };
+                        let verb = if url.starts_with('#') { "跳转" } else { "打开" };
+                        area.child(
+                            div()
+                                .id("md-link-hover-pill")
+                                .absolute()
+                                .bottom_2()
+                                .left_3()
+                                .max_w(px(520.))
+                                .px_2()
+                                .py_1()
+                                .rounded(px(6.))
+                                .bg(rgb(0xf7f7f5))
+                                .border_1()
+                                .border_color(rgb(0xe2e4e8))
+                                .shadow_sm()
+                                .text_xs()
+                                .text_color(rgb(0x5b5b58))
+                                .text_ellipsis()
+                                .child(format!("{action} {verb}：{url}")),
+                        )
+                    })
                     .when(self.search_open && !self.source, |area| {
                         let query = self.search_input.read(cx).value().to_string();
                         let count_label = if query.is_empty() {
@@ -3104,5 +3202,96 @@ impl Render for MarkdownPane {
                     ),
                 ))
             })
+    }
+}
+
+fn match_heading_index(headings: &[OutlineHeading], anchor: &str) -> Option<usize> {
+    let decoded = crate::files::percent_decode(anchor);
+    let target = decoded.trim();
+    if target.is_empty() {
+        return None;
+    }
+    if let Some(index) = headings
+        .iter()
+        .position(|heading| heading.title.trim().eq_ignore_ascii_case(target))
+    {
+        return Some(index);
+    }
+    let target_slug = heading_slug(target);
+    if !target_slug.is_empty()
+        && let Some(index) = headings
+            .iter()
+            .position(|heading| heading_slug(&heading.title) == target_slug)
+    {
+        return Some(index);
+    }
+    let collapsed = collapse_hyphens(&target_slug);
+    if !collapsed.is_empty() {
+        return headings
+            .iter()
+            .position(|heading| collapse_hyphens(&heading_slug(&heading.title)) == collapsed);
+    }
+    None
+}
+
+fn heading_slug(text: &str) -> String {
+    text.trim()
+        .to_lowercase()
+        .chars()
+        .filter_map(|ch| {
+            if ch.is_alphanumeric() || ch == '-' || ch == '_' {
+                Some(ch)
+            } else if ch.is_whitespace() {
+                Some('-')
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn collapse_hyphens(slug: &str) -> String {
+    let mut out = String::with_capacity(slug.len());
+    let mut prev_hyphen = true;
+    for ch in slug.chars() {
+        if ch == '-' {
+            if !prev_hyphen {
+                out.push('-');
+                prev_hyphen = true;
+            }
+        } else {
+            out.push(ch);
+            prev_hyphen = false;
+        }
+    }
+    if out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heading_anchor_matches_exact_slug_and_percent_encoded() {
+        let headings = vec![
+            OutlineHeading {
+                range: 0..10,
+                level: 1,
+                title: "1. 背景介绍".to_owned(),
+            },
+            OutlineHeading {
+                range: 12..30,
+                level: 2,
+                title: "Quick Start Guide".to_owned(),
+            },
+        ];
+        assert_eq!(match_heading_index(&headings, "1.%20背景介绍"), Some(0));
+        assert_eq!(match_heading_index(&headings, "1-背景介绍"), Some(0));
+        assert_eq!(match_heading_index(&headings, "quick-start-guide"), Some(1));
+        assert_eq!(match_heading_index(&headings, "Quick Start Guide"), Some(1));
+        assert_eq!(match_heading_index(&headings, "missing"), None);
     }
 }

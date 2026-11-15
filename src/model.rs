@@ -337,6 +337,14 @@ impl Default for TerminalSettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum InternalLinkOpenTarget {
+    #[default]
+    MainEditor,
+    SplitPane,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
@@ -357,6 +365,7 @@ pub struct AppSettings {
     pub inline_math_scale: f32,
     pub math_font: MathFont,
     pub line_width_limited: bool,
+    pub internal_link_open_target: InternalLinkOpenTarget,
     /// Shared by TeX and Markdown source editors; rendered Markdown has no source-line gutter.
     pub show_line_numbers: bool,
     pub editor_ratio: f32,
@@ -418,6 +427,7 @@ impl Default for AppSettings {
             inline_math_scale: 1.,
             math_font: MathFont::StixTwo,
             line_width_limited: true,
+            internal_link_open_target: InternalLinkOpenTarget::MainEditor,
             show_line_numbers: false,
             editor_ratio: 0.5,
             sidebar_open: true,
