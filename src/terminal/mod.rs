@@ -153,6 +153,7 @@ impl TerminalPane {
         self.next_id += 1;
         let directory = self.directory.clone();
         let settings = self.settings.clone();
+        let is_dark = self.palette.is_dark();
         self.sessions.push(SessionTab {
             id,
             title: format!("终端 {id}"),
@@ -166,7 +167,7 @@ impl TerminalPane {
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { session::start(&settings, &directory) })
+                .spawn(async move { session::start(&settings, &directory, is_dark) })
                 .await;
             let _ = this.update_in(cx, |pane, window, cx| {
                 let Some(index) = pane.sessions.iter().position(|tab| tab.id == id) else {

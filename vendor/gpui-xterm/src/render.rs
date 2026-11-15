@@ -1,4 +1,4 @@
-use crate::colors::ColorPalette;
+use crate::colors::{ColorPalette, ensure_minimum_contrast};
 use crate::event::GpuiEventProxy;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point as AlacPoint};
@@ -61,6 +61,8 @@ pub struct TerminalRenderer {
 
     pub line_height_multiplier: f32,
 
+    pub minimum_contrast: f32,
+
     pub palette: ColorPalette,
 }
 
@@ -80,8 +82,14 @@ impl TerminalRenderer {
             cell_width,
             cell_height,
             line_height_multiplier,
+            minimum_contrast: 4.5,
             palette,
         }
+    }
+
+    pub fn with_minimum_contrast(mut self, minimum_contrast: f32) -> Self {
+        self.minimum_contrast = minimum_contrast;
+        self
     }
 
     pub fn measure_cell(&mut self, window: &mut Window) {
@@ -129,8 +137,13 @@ impl TerminalRenderer {
                 continue;
             }
 
-            let fg_color = self.palette.resolve(cell.fg, colors);
-            let bg_color = self.palette.resolve(cell.bg, colors);
+            let (fg_color, bg_color) = self.palette.resolve_cell(
+                cell.fg,
+                cell.bg,
+                cell.flags,
+                colors,
+                self.minimum_contrast,
+            );
             let bold = cell.flags.contains(Flags::BOLD);
             let italic = cell.flags.contains(Flags::ITALIC);
             let underline = cell.flags.contains(Flags::UNDERLINE);
@@ -334,7 +347,10 @@ impl TerminalRenderer {
             for (col_idx, cell) in cells {
                 let ch = cell.c;
 
-                if ch == ' ' || ch == '\0' || cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                if ch == ' '
+                    || ch == '\0'
+                    || cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::HIDDEN)
+                {
                     continue;
                 }
 
@@ -343,9 +359,19 @@ impl TerminalRenderer {
 
                 let point = AlacPoint::new(line, Column(col_idx));
                 let selected = selection_contains(&selection_range, point);
-                let mut fg_color = self.palette.resolve(cell.fg, colors);
+                let (mut fg_color, bg_color) = self.palette.resolve_cell(
+                    cell.fg,
+                    cell.bg,
+                    cell.flags,
+                    colors,
+                    self.minimum_contrast,
+                );
                 if selected {
-                    fg_color = self.palette.foreground();
+                    fg_color = ensure_minimum_contrast(
+                        self.palette.foreground(),
+                        bg_color,
+                        self.minimum_contrast,
+                    );
                 }
 
                 let cell_bounds = Bounds {

@@ -11,8 +11,8 @@ pub fn config(settings: &TerminalSettings, palette: Palette) -> TerminalConfig {
     let colors = colors.foreground(r, g, b).cursor(r, g, b);
     let (r, g, b) = rgb(palette.selection);
     let colors = colors.selection(r, g, b);
-    // ANSI indices retain their red/green/etc. meaning; truecolor output remains
-    // under the TUI's control rather than being globally recolored by the editor.
+    // Light-mode ANSI white slots map to readable grays/charcoal to avoid the
+    // white-on-white trap; gpui-xterm's minimum_contrast also guards TrueColor.
     let colors = if palette.is_dark() {
         colors
             .black(0x20, 0x20, 0x1e)
@@ -40,15 +40,15 @@ pub fn config(settings: &TerminalSettings, palette: Palette) -> TerminalConfig {
             .blue(0x32, 0x62, 0x9b)
             .magenta(0x86, 0x48, 0x9e)
             .cyan(0x28, 0x72, 0x75)
-            .white(0xd0, 0xce, 0xc8)
-            .bright_black(0x78, 0x77, 0x74)
+            .white(0x5c, 0x5b, 0x56)
+            .bright_black(0x73, 0x72, 0x6f)
             .bright_red(0xca, 0x49, 0x49)
             .bright_green(0x4b, 0x85, 0x4e)
             .bright_yellow(0xa2, 0x76, 0x1b)
             .bright_blue(0x47, 0x7b, 0xb8)
             .bright_magenta(0xa1, 0x60, 0xb9)
             .bright_cyan(0x36, 0x8d, 0x90)
-            .bright_white(0xff, 0xff, 0xff)
+            .bright_white(0x37, 0x35, 0x2f)
     };
     TerminalConfig {
         font_family: if settings.font_family.trim().is_empty() {
