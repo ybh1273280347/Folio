@@ -24,8 +24,7 @@ pub struct PdfPane {
     annotation_list_focus: FocusHandle,
     annotation_comment_input: Entity<InputState>,
     annotations_drawer_open: bool,
-    translate_error: Option<String>,
-    translate_task: Task<()>,
+    translate: crate::translate::TranslatePopover,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -59,8 +58,7 @@ impl PdfPane {
             annotation_list_focus: cx.focus_handle(),
             annotation_comment_input,
             annotations_drawer_open: false,
-            translate_error: None,
-            translate_task: Task::ready(()),
+            translate: crate::translate::TranslatePopover::default(),
             _subscriptions: vec![sub],
         };
         this.view = Some(this.open_view(window, cx));
@@ -190,11 +188,12 @@ impl PdfPane {
                 window.defer(cx, move |_, cx| {
                     if let Some(pane) = weak_translate.upgrade() {
                         pane.update(cx, |pane, cx| {
-                            pane.translate_task = crate::translate::spawn_pot_translate(
+                            crate::translate::TranslatePopover::open_and_translate(
                                 pane,
                                 text.clone(),
+                                None,
                                 cx,
-                                |this, err| this.translate_error = err,
+                                |this| &mut this.translate,
                             );
                         });
                     }
@@ -594,12 +593,14 @@ impl Render for PdfPane {
                     .h_full()
                     .when_some(self.view.clone(), |area, view| area.child(view))
                     .children(self.render_active_annotation_popover(cx))
-                    .when_some(self.translate_error.as_deref(), |area, error| {
-                        area.child(crate::translate::render_error_toast(
-                            "pdf-translate-error",
-                            error,
-                        ))
-                    }),
+                    .children(self.translate.render(
+                        "pdf-translate",
+                        None,
+                        None,
+                        None,
+                        cx,
+                        |this| &mut this.translate,
+                    )),
             )
             ;
         let content = if let Some(drawer) = self.render_annotations_drawer(cx) {
@@ -611,7 +612,19 @@ impl Render for PdfPane {
             viewer.into_any_element()
         };
         div().size_full().track_focus(&self.annotation_list_focus)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                if this.translate.is_open() {
+                    this.translate.dismiss();
+                    cx.notify();
+                }
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" && this.translate.is_open() {
+                    this.translate.dismiss();
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 // The comment input has its own focus, so deletion keys there still edit text.
                 if matches!(event.keystroke.key.as_str(), "delete" | "backspace") && this.annotation_list_focus.is_focused(window) {
                     if let Some(id) = this.selected_annotation_id {

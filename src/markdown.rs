@@ -280,8 +280,7 @@ pub struct MarkdownPane {
     show_annotations_drawer: bool,
     note_input: Entity<InputState>,
     zoom_hud: crate::ui::ZoomHud,
-    translate_error: Option<String>,
-    translate_task: Task<()>,
+    translate: crate::translate::TranslatePopover,
     _source_subscription: Subscription,
     _visual_subscription: Subscription,
     _math_subscription: Subscription,
@@ -712,8 +711,7 @@ impl MarkdownPane {
             show_annotations_drawer: false,
             note_input,
             zoom_hud: crate::ui::ZoomHud::default(),
-            translate_error: None,
-            translate_task: Task::ready(()),
+            translate: crate::translate::TranslatePopover::default(),
             _source_subscription: source_subscription,
             _visual_subscription: visual_subscription,
             _math_subscription: math_subscription,
@@ -1621,18 +1619,20 @@ impl MarkdownPane {
                     pane.create_or_focus_annotation(window, cx);
                 })),
             ))
-            // 9. Translate via Pot (译)
+            // 9. Translate selection (译)
             .child(tool_btn(
                 "ft-translate",
-                false,
+                self.translate.is_open(),
                 div().text_xs().font_semibold().child("译").into_any_element(),
-                Box::new(cx.listener(|pane, _, window, cx| {
+                Box::new(cx.listener(move |pane, _, window, cx| {
                     if let Some(text) = pane.visual_editor.read(cx).selected_plain_text() {
-                        pane.translate_task = crate::translate::spawn_pot_translate(
+                        let anchor = point(rel_x, rel_y + px(44.));
+                        crate::translate::TranslatePopover::open_and_translate(
                             pane,
                             text,
+                            Some(anchor),
                             cx,
-                            |this, err| this.translate_error = err,
+                            |this| &mut this.translate,
                         );
                     }
                     pane.defer_focus_visual(window, cx);
@@ -2520,6 +2520,14 @@ impl Render for MarkdownPane {
             let block_handle = self.render_left_block_handle(pane_origin, cx);
             let annotation_popover =
                 self.render_active_annotation_popover(pane_origin, pane_size, cx);
+            let translate_popover = self.translate.render(
+                "md-translate",
+                Some(self.settings.interface_font.as_str()),
+                Some(self.settings.interface_font_size),
+                Some(pane_size),
+                cx,
+                |this| &mut this.translate,
+            );
 
             content = content.child(
                 // Floating controls must be outside the scroll owner: their
@@ -2577,6 +2585,7 @@ impl Render for MarkdownPane {
                     .children(floating_toolbar)
                     .children(slash_menu)
                     .children(annotation_popover)
+                    .children(translate_popover)
                     .when(!self.reading, |area| {
                         area.child(
                             div()
@@ -2764,12 +2773,6 @@ impl Render for MarkdownPane {
                                         })),
                                 ),
                         )
-                    })
-                    .when_some(self.translate_error.as_deref(), |area, error| {
-                        area.child(crate::translate::render_error_toast(
-                            "md-translate-error",
-                            error,
-                        ))
                     })
                     .child(
                         div().absolute().inset_0().child(
@@ -3049,6 +3052,7 @@ impl Render for MarkdownPane {
                         || pane.block_menu_for.is_some()
                         || pane.active_annotation_id.is_some()
                         || pane.search_open
+                        || pane.translate.is_open()
                     {
                         let was_search = pane.search_open;
                         pane.show_turn_into = false;
@@ -3057,6 +3061,7 @@ impl Render for MarkdownPane {
                         pane.block_menu_for = None;
                         pane.active_annotation_id = None;
                         pane.search_open = false;
+                        pane.translate.dismiss();
                         if was_search {
                             pane.defer_focus_visual(window, cx);
                         }
@@ -3071,6 +3076,10 @@ impl Render for MarkdownPane {
                     pane.show_turn_into = false;
                     pane.show_color_picker = false;
                     pane.block_menu_for = None;
+                    if pane.translate.is_open() {
+                        pane.translate.dismiss();
+                        cx.notify();
+                    }
                     cx.emit(MarkdownEvent::Focus);
                 }),
             )
