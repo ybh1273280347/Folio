@@ -24,6 +24,8 @@ pub struct PdfPane {
     annotation_list_focus: FocusHandle,
     annotation_comment_input: Entity<InputState>,
     annotations_drawer_open: bool,
+    translate_error: Option<String>,
+    translate_task: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -57,6 +59,8 @@ impl PdfPane {
             annotation_list_focus: cx.focus_handle(),
             annotation_comment_input,
             annotations_drawer_open: false,
+            translate_error: None,
+            translate_task: Task::ready(()),
             _subscriptions: vec![sub],
         };
         this.view = Some(this.open_view(window, cx));
@@ -131,6 +135,7 @@ impl PdfPane {
         let weak = cx.entity().downgrade();
         let weak_click = weak.clone();
         let weak_drawer = weak.clone();
+        let weak_translate = weak.clone();
         let highlights = self.build_highlights();
         view.update(cx, |v, cx| {
             v.fit_width(cx);
@@ -176,6 +181,21 @@ impl PdfPane {
                         pane.update(cx, |pane, cx| {
                             pane.annotations_drawer_open = !pane.annotations_drawer_open;
                             cx.notify();
+                        });
+                    }
+                });
+            }));
+            v.set_on_translate(Rc::new(move |text, window, cx| {
+                let weak_translate = weak_translate.clone();
+                window.defer(cx, move |_, cx| {
+                    if let Some(pane) = weak_translate.upgrade() {
+                        pane.update(cx, |pane, cx| {
+                            pane.translate_task = crate::translate::spawn_pot_translate(
+                                pane,
+                                text.clone(),
+                                cx,
+                                |this, err| this.translate_error = err,
+                            );
                         });
                     }
                 });
@@ -573,7 +593,13 @@ impl Render for PdfPane {
                     .min_w(px(0.))
                     .h_full()
                     .when_some(self.view.clone(), |area, view| area.child(view))
-                    .children(self.render_active_annotation_popover(cx)),
+                    .children(self.render_active_annotation_popover(cx))
+                    .when_some(self.translate_error.as_deref(), |area, error| {
+                        area.child(crate::translate::render_error_toast(
+                            "pdf-translate-error",
+                            error,
+                        ))
+                    }),
             )
             ;
         let content = if let Some(drawer) = self.render_annotations_drawer(cx) {
