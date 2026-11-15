@@ -1901,7 +1901,12 @@ impl MarkdownPane {
             BlockKind::Table => "▦",
             _ => "T",
         };
-        let rel_x = (bounds.origin.x - pane_origin.x - px(46.)).max(px(4.));
+        let gutter_offset = if kind == BlockKind::Table {
+            px(52.)
+        } else {
+            px(46.)
+        };
+        let rel_x = (bounds.origin.x - pane_origin.x - gutter_offset).max(px(2.));
         let rel_y = bounds.origin.y - pane_origin.y + px(1.);
 
         let handle = div()
