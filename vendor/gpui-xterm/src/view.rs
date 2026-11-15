@@ -492,6 +492,10 @@ impl TerminalView {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // GPUI delivers drops through mouse-up bubbling to the terminal's parent.
+        if cx.has_active_drag() {
+            return;
+        }
         cx.stop_propagation();
         if !self.dragging_selection && !event.modifiers.shift && self.mouse_reporting() {
             if let Some(code) = mouse_button_code(event.button) {
@@ -516,6 +520,9 @@ impl TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if cx.has_active_drag() {
+            return;
+        }
         let mode = self.state.mode();
         if !self.dragging_selection
             && !event.modifiers.shift
@@ -871,7 +878,7 @@ impl TerminalView {
         false
     }
 
-    fn paste_text(&self, text: &str) -> bool {
+    pub fn paste_text(&self, text: &str) -> bool {
         let text = normalize_paste_text(text);
         if text.is_empty() {
             return false;

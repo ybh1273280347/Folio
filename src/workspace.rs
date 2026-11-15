@@ -3473,8 +3473,22 @@ impl Workspace {
                     .to_string_lossy()
                     .to_string();
                 let is_selected = self.selected_files.contains(path);
+                let dragged_paths = if is_selected {
+                    self.selected_files.iter().map(|path| self.document_path(path)).collect()
+                } else {
+                    vec![full.clone()]
+                };
+                let preview_font: SharedString = if self.settings.interface_font.is_empty() {
+                    "Segoe UI".into()
+                } else {
+                    self.settings.interface_font.clone().into()
+                };
+                let preview_font_size = self.settings.interface_font_size;
                 div()
                     .id(SharedString::from(format!("file-{}", file.path)))
+                    .on_drag(crate::terminal::DraggedPaths(dragged_paths), move |paths, offset, _, cx| {
+                        cx.new(|_| crate::terminal::PathsPreview { paths: paths.0.clone(), offset, font: preview_font.clone(), font_size: preview_font_size })
+                    })
                     .flex()
                     .items_center()
                     .h(px(29.))
