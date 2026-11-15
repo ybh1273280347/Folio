@@ -3,14 +3,26 @@
 //! clicking it selects that column / row as `BlockSelection::Cells` and
 //! opens a small menu of table commands.
 
-use gpui::{Bounds, Context, Pixels, Point, point, px, size};
+use std::time::Duration;
+
+use gpui::{
+    AnyElement, App, Bounds, ClipboardItem, Context, Entity, InteractiveElement, IntoElement,
+    MouseButton, ParentElement, Pixels, Point, Styled, Task, Window, div, point, px, size,
+};
+use gpui_kit::{
+    base::text::editor_host::ColumnAlign,
+    component::{
+        ActiveTheme as _, Icon, IconName, Sizable as _,
+        button::{Button, ButtonVariants},
+    },
+};
 
 use super::{
+    document::EditorDocument,
     id::BlockId,
     state::BlockEditorState,
     table::{TableEdit, TableLine},
 };
-use gpui_kit::base::text::editor_host::ColumnAlign;
 
 /// Extra reach around a table where its grips still show.
 const REACH: f32 = 28.;
@@ -175,7 +187,7 @@ impl BlockEditorState {
         };
         match (menu.line, item) {
             (TableLine::Row(0), MenuItem::Edit(TableEdit::RemoveRow)) => {
-                Err("The header row can't be deleted")
+                Err("表头行不可删除")
             }
             _ => Ok(()),
         }
@@ -229,6 +241,18 @@ impl BlockEditorState {
             self.grip_hover = on_grip;
             cx.notify();
         }
+    }
+
+    pub(crate) fn is_table_active_for_controls(&self, table: BlockId) -> bool {
+        self.table_hover.iter().any(|(t, _)| *t == table)
+            || self.table_menu.as_ref().is_some_and(|m| m.table == table)
+            || self.model.selected_blocks().is_some_and(|(parent, range)| {
+                self.model
+                    .doc
+                    .children(parent)
+                    .get(range)
+                    .is_some_and(|ids| ids.contains(&table))
+            })
     }
 }
 
@@ -312,24 +336,14 @@ pub(crate) fn render_menu(
     };
     let items: Vec<gpui::AnyElement> = match menu.line {
         TableLine::Column(_) => vec![
-            item(
-                "tm-col-left",
-                "Insert column left",
-                TableEdit::AddColumnLeft,
-            )
-            .into_any_element(),
-            item(
-                "tm-col-right",
-                "Insert column right",
-                TableEdit::AddColumnRight,
-            )
-            .into_any_element(),
-            item("tm-col-delete", "Delete column", TableEdit::RemoveColumn).into_any_element(),
+            item("tm-col-left", "左侧插入列", TableEdit::AddColumnLeft).into_any_element(),
+            item("tm-col-right", "右侧插入列", TableEdit::AddColumnRight).into_any_element(),
+            item("tm-col-delete", "删除列", TableEdit::RemoveColumn).into_any_element(),
         ],
         TableLine::Row(_) => vec![
-            item("tm-row-above", "Insert row above", TableEdit::AddRowAbove).into_any_element(),
-            item("tm-row-below", "Insert row below", TableEdit::AddRowBelow).into_any_element(),
-            item("tm-row-delete", "Delete row", TableEdit::RemoveRow).into_any_element(),
+            item("tm-row-above", "上方插入行", TableEdit::AddRowAbove).into_any_element(),
+            item("tm-row-below", "下方插入行", TableEdit::AddRowBelow).into_any_element(),
+            item("tm-row-delete", "删除行", TableEdit::RemoveRow).into_any_element(),
         ],
     };
     let current = s.table_menu_align();
@@ -364,15 +378,15 @@ pub(crate) fn render_menu(
             .mt_1()
             .border_t_1()
             .border_color(border)
-            .child(div().text_color(muted).text_xs().child("Alignment"))
+            .child(div().text_color(muted).text_xs().child("对齐方式"))
             .child(
                 div()
                     .flex()
                     .gap_1()
-                    .child(choice("tm-align-left", "Left", ColumnAlign::Left))
-                    .child(choice("tm-align-center", "Centre", ColumnAlign::Center))
-                    .child(choice("tm-align-right", "Right", ColumnAlign::Right))
-                    .child(choice("tm-align-none", "None", ColumnAlign::None)),
+                    .child(choice("tm-align-left", "左对齐", ColumnAlign::Left))
+                    .child(choice("tm-align-center", "居中", ColumnAlign::Center))
+                    .child(choice("tm-align-right", "右对齐", ColumnAlign::Right))
+                    .child(choice("tm-align-none", "默认", ColumnAlign::None)),
             )
     });
     let entity = state.clone();
@@ -404,5 +418,157 @@ pub(crate) fn render_menu(
         )
         .with_priority(1)
         .into_any_element(),
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TableCopyFormat {
+    Markdown,
+    Tsv,
+}
+
+struct TableCopyTools {
+    copied: Option<TableCopyFormat>,
+    reset_copy: Task<()>,
+}
+
+impl TableCopyTools {
+    fn new() -> Self {
+        Self {
+            copied: None,
+            reset_copy: Task::ready(()),
+        }
+    }
+
+    fn copied(&mut self, format: TableCopyFormat, cx: &mut Context<Self>) {
+        self.copied = Some(format);
+        cx.notify();
+        self.reset_copy = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1500))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.copied = None;
+                cx.notify();
+            });
+        });
+    }
+}
+
+pub(crate) fn table_markdown(doc: &EditorDocument, table: BlockId) -> String {
+    super::serialize::join_blocks(doc, &[table])
+}
+
+pub(crate) fn table_tsv(doc: &EditorDocument, table: BlockId) -> String {
+    super::table::grid(doc, table)
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|cell| {
+                    let raw = match doc.inline(cell) {
+                        Some(inline) if !inline.text().contains('\u{fffc}') => {
+                            inline.text().to_owned()
+                        }
+                        Some(inline) => super::serialize::inline_markdown(inline),
+                        None => doc.leaf_text(cell).unwrap_or("").to_owned(),
+                    };
+                    raw.replace(['\t', '\r', '\n'], " ")
+                })
+                .collect::<Vec<_>>()
+                .join("\t")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Floating top-right copy controls shown while a table is hovered, selected,
+/// or showing post-copy feedback.
+pub(crate) fn copy_controls(
+    state: &Entity<BlockEditorState>,
+    table: BlockId,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<AnyElement> {
+    let tools = window.use_keyed_state(("table-copy-tools", table.as_u64() as usize), cx, |_, _| {
+        TableCopyTools::new()
+    });
+    let copied = tools.read(cx).copied;
+    if !state.read(cx).is_table_active_for_controls(table) && copied.is_none() {
+        return None;
+    }
+
+    let theme = cx.theme();
+    let table_key = table.as_u64() as usize;
+    let copy_button = |id_prefix: &'static str,
+                       label: &'static str,
+                       tip: &'static str,
+                       copied_tip: &'static str,
+                       format: TableCopyFormat| {
+        let is_copied = copied == Some(format);
+        let editor = state.clone();
+        let tools = tools.clone();
+        Button::new((id_prefix, table_key))
+            .ghost()
+            .compact()
+            .small()
+            .h(px(22.))
+            .px_1p5()
+            .icon(
+                Icon::new(if is_copied {
+                    IconName::Check
+                } else {
+                    IconName::Copy
+                })
+                .w(px(12.))
+                .h(px(12.)),
+            )
+            .label(label)
+            .tooltip(if is_copied { copied_tip } else { tip })
+            .on_click(move |_, _, cx| {
+                let text = {
+                    let doc = &editor.read(cx).model.doc;
+                    match format {
+                        TableCopyFormat::Markdown => table_markdown(doc, table),
+                        TableCopyFormat::Tsv => table_tsv(doc, table),
+                    }
+                };
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                tools.update(cx, |tools, cx| tools.copied(format, cx));
+            })
+    };
+
+    Some(
+        div()
+            .id(("table-copy-controls", table_key))
+            .occlude()
+            .absolute()
+            .top(px(4.))
+            .right(px(4.))
+            .flex()
+            .items_center()
+            .gap_0p5()
+            .px_1()
+            .py_0p5()
+            .rounded(px(6.))
+            .bg(theme.popover.opacity(0.94))
+            .border_1()
+            .border_color(theme.border)
+            .shadow_sm()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(copy_button(
+                "copy-table-md",
+                "MD",
+                "复制为 Markdown 表格",
+                "已复制 Markdown",
+                TableCopyFormat::Markdown,
+            ))
+            .child(copy_button(
+                "copy-table-tsv",
+                "TSV",
+                "复制为表格文本（可粘贴到 Excel）",
+                "已复制 TSV",
+                TableCopyFormat::Tsv,
+            ))
+            .into_any_element(),
     )
 }
