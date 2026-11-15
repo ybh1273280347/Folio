@@ -17,7 +17,7 @@ use crate::{
 };
 use gpui_kit::{
     assets::IconName,
-    base::StyledExt,
+    base::{Scrollbar, ScrollbarMode, StyledExt},
     component::{
         button::{Button, ButtonVariants},
         input::{Editor, EditorState, Input, InputEvent, InputState},
@@ -248,6 +248,7 @@ pub struct Workspace {
     show_trash: bool,
     next_trash_cleanup: Instant,
     file_tree_focus: FocusHandle,
+    sidebar_scroll: ScrollHandle,
     show_build_preview: bool,
     files: Vec<ProjectFile>,
     folders: Vec<String>,
@@ -502,6 +503,7 @@ impl Workspace {
             show_trash: false,
             next_trash_cleanup: Instant::now(),
             file_tree_focus: cx.focus_handle(),
+            sidebar_scroll: ScrollHandle::new(),
             show_build_preview: false,
             files: Vec::new(),
             folders: Vec::new(),
@@ -3807,10 +3809,13 @@ impl Workspace {
                     .into_any_element()
                 })();
                 let bounds = self.tree_row_bounds.clone();
-                div().relative().child(row).child(
+                div().id(SharedString::from(format!("tree-row-{row_path}"))).relative()
+                    // The child handles file dragging; blank-space presses belong to marquee selection.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(row).child(
                     canvas(move |area, _, _| {
                         bounds.lock().expect("tree bounds").insert(row_path.clone(), (is_file, area));
-                    }, |_, _, _, _| {}).absolute().size_full(),
+                    }, |_, _, _, _| {}).absolute().top_0().left_0().size_full(),
                 )
             });
         let default_space = div()
@@ -3864,21 +3869,24 @@ impl Workspace {
                 }) { return; }
                 if let Err(error) = app.select_loose_files(window, cx) { app.report(error, cx); }
             })))
-            .child(div().pt_5().pb_2().px_4().text_xs().text_color(rgb(MUTED)).child("项目"))
-            .child(div().id("project-list-scroll").flex().flex_col().flex_1().min_h_0().overflow_y_scroll()
+            .child(div().relative().flex_1().min_h_0().child(
+                div().id("sidebar-content-scroll").flex().flex_col().size_full().overflow_y_scroll()
+                .track_scroll(&self.sidebar_scroll)
+                .child(div().pt_5().pb_2().px_4().flex_shrink_0().text_xs().text_color(rgb(MUTED)).child("项目"))
                 .children(projects)
                 .child(div().id("add-project").flex().flex_shrink_0().items_center().gap_2().mx_2().px_2().h(px(32.))
                     .rounded(px(4.)).cursor_pointer().text_color(rgb(MUTED))
                     .hover(|style| style.bg(rgb(0xefefed)))
                     .child(crate::ui::icon(IconName::Plus)).child("添加本地项目")
-                    .on_click(cx.listener(|app, _, window, cx| app.add_project(&OpenProject, window, cx)))))
+                    .on_click(cx.listener(|app, _, window, cx| app.add_project(&OpenProject, window, cx))))
             .child(
                 div()
                     .flex()
                     .justify_between()
                     .items_center()
                     .px_4()
-                    .pt_5()
+                    .pt_2()
+                    .flex_shrink_0()
                     .pb_2()
                     .text_xs()
                     .text_color(rgb(MUTED))
@@ -4015,8 +4023,9 @@ impl Workspace {
                 )
             })
             .child(
-                div().relative().flex_1().min_h_0().child(div()
+                div().relative().flex_shrink_0().child(div()
                     .id("file-tree-scroll")
+                    .flex().flex_col().w_full()
                     .key_context("FolioFileTree")
                     .track_focus(&self.file_tree_focus)
                     .on_action(cx.listener(Self::copy_file_path))
@@ -4035,6 +4044,10 @@ impl Workspace {
                         cx.notify();
                     }))
                     .on_mouse_move(cx.listener(|app, event: &MouseMoveEvent, _, cx| {
+                        if cx.has_active_drag() {
+                            if app.tree_drag.take().is_some() { cx.notify(); }
+                            return;
+                        }
                         let Some(drag) = app.tree_drag.as_mut() else { return; };
                         if !event.dragging() { return; }
                         drag.current = event.position;
@@ -4064,28 +4077,22 @@ impl Workspace {
                         }
                         app.file_tree_focus.focus(window, cx);
                     }))
-                    .size_full()
-                    .min_h_0()
-                    .overflow_y_scroll()
                     .children(rows)
                     .child(div().h(px(48.)).flex_shrink_0()))
                     .when_some(self.tree_drag.as_ref().filter(|drag| drag.moved).map(TreeSelectionDrag::bounds), |area, selection| {
                         area.child(canvas(|_, _, _| (), move |_, _, window, _| {
                             window.paint_quad(fill(selection, rgb(0x165dff).opacity(0.18)));
-                        }).absolute().size_full())
+                        }).absolute().top_0().left_0().size_full())
                     }),
-            )
-            .child(
-                button("preferences", "⚙  设置")
-                    .m_2()
-                    .text_color(rgb(MUTED))
-                    .on_click(cx.listener(|app, _, window, cx| {
-                        app.preferences
-                            .update(cx, |panel, cx| panel.sync(&app.settings, window, cx));
-                        app.show_preferences = true;
-                        cx.notify();
-                    })),
-            )
+            ))
+                .child(div().absolute().top(px(20.)).bottom(px(20.)).left_0().right_0().child(
+                    Scrollbar::vertical(&self.sidebar_scroll)
+                        .mode(ScrollbarMode::Always)
+                        .styles(|styles| styles
+                            .thumb(|style| style.bg(rgb(0xd9d9d7)).width(px(6.)).inset(px(1.)).radius(px(4.)).min_length(px(24.)))
+                            .thumb_hover(|style| style.bg(rgb(0xbcbcb9)).width(px(6.)).inset(px(1.)).radius(px(4.)))
+                            .thumb_active(|style| style.bg(rgb(0xa8a8a5)).width(px(6.)).inset(px(1.)).radius(px(4.)))),
+                )))
             .child(div().mx_4().h(px(1.)).bg(rgb(0xeae9e6)))
             .child({
                 let bounds = self.trash_bounds.clone();
@@ -4115,6 +4122,15 @@ impl Workspace {
                         app.delete_folder(&dragged.0, window, cx);
                     }))
             })
+            .child(div().id("preferences").flex().items_center().gap_2()
+                .mx_2().mb_2().px_2().h(px(32.)).rounded(px(4.)).cursor_pointer()
+                .text_color(rgb(MUTED)).hover(|style| style.bg(rgb(0xefefed)))
+                .child(crate::ui::icon(IconName::Settings)).child("设置")
+                .on_click(cx.listener(|app, _, window, cx| {
+                    app.preferences.update(cx, |panel, cx| panel.sync(&app.settings, window, cx));
+                    app.show_preferences = true;
+                    cx.notify();
+                })))
             .into_any_element()
     }
 
