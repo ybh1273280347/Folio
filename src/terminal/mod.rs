@@ -5,21 +5,23 @@ mod theme;
 use crate::{model::TerminalSettings, theme::Palette};
 use gpui_kit::{assets::IconName, prelude::FluentBuilder, *};
 use gpui_xterm::TerminalView;
-use std::{path::PathBuf, sync::mpsc::TryRecvError, time::Duration};
+use std::{path::PathBuf, sync::{Arc, Mutex, mpsc::TryRecvError}, time::Duration};
 
 #[derive(Clone)]
-pub struct DraggedPaths(pub Vec<PathBuf>);
+pub struct DraggedPaths(pub Vec<PathBuf>, pub String);
 
 pub struct PathsPreview {
     pub paths: Vec<PathBuf>,
     pub offset: Point<Pixels>,
     pub font: SharedString,
     pub font_size: u8,
+    pub trash_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
 }
 
 impl Render for PathsPreview {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let count = self.paths.len();
+        let over_trash = self.trash_bounds.lock().expect("trash bounds").is_some_and(|bounds| bounds.contains(&window.mouse_position()));
         div().pl(self.offset.x + px(12.)).pt(self.offset.y + px(12.))
             .child(
                 div().flex().flex_col().gap_1().p_2().min_w(px(160.)).max_w(px(300.))
@@ -28,7 +30,7 @@ impl Render for PathsPreview {
                     .font_family(self.font.clone()).text_size(px(self.font_size as f32)).shadow_sm()
                     .child(div().flex().items_center().gap_1()
                         .child(crate::ui::icon(IconName::Copy).w(px(14.)).h(px(14.)))
-                        .child(if count == 1 { "复制".into() } else { format!("复制 {count} 项") }))
+                        .child(if over_trash { format!("移入废纸篓 {count} 项") } else if count == 1 { "复制".into() } else { format!("复制 {count} 项") }))
                     .children(self.paths.iter().take(4).map(|path| {
                         let name = path.file_name().expect("file has name").to_string_lossy().into_owned();
                         div().flex().items_center().gap_2().min_w_0()

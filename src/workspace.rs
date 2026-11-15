@@ -200,15 +200,17 @@ pub fn bind_shortcuts(settings: &AppSettings, cx: &mut App) {
 enum Dialog {
     Drafts,
     CloseTab,
-    DeleteFile,
-    DeleteFolder,
     DeleteSelected,
     RemoveProject,
+    TrashPurge,
+    TrashClear,
+    TrashConflict,
 }
 #[derive(Clone)]
 enum DialogButtons {
     SaveDiscardCancel,
     Confirm(String),
+    RestoreConflict,
 }
 #[derive(Clone)]
 struct DialogPrompt {
@@ -240,7 +242,10 @@ pub struct Workspace {
     selected_files: BTreeSet<String>,
     tree_row_bounds: Arc<Mutex<BTreeMap<String, (bool, Bounds<Pixels>)>>>,
     tree_drag: Option<TreeSelectionDrag>,
-    deleted_files: Vec<(String, Vec<(String, Vec<u8>)>, String)>,
+    trash_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
+    trash_entries: Vec<crate::trash::TrashEntry>,
+    show_trash: bool,
+    next_trash_cleanup: Instant,
     file_tree_focus: FocusHandle,
     show_build_preview: bool,
     files: Vec<ProjectFile>,
@@ -490,7 +495,10 @@ impl Workspace {
             selected_files: BTreeSet::new(),
             tree_row_bounds: Arc::new(Mutex::new(BTreeMap::new())),
             tree_drag: None,
-            deleted_files: Vec::new(),
+            trash_bounds: Arc::new(Mutex::new(None)),
+            trash_entries: Vec::new(),
+            show_trash: false,
+            next_trash_cleanup: Instant::now(),
             file_tree_focus: cx.focus_handle(),
             show_build_preview: false,
             files: Vec::new(),
@@ -629,6 +637,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> io::Result<()> {
+        self.show_trash = false;
         self.remember_session()?;
         self.watcher = None;
         self.watch_events = None;
@@ -713,6 +722,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> io::Result<()> {
+        self.show_trash = false;
         self.remember_session()?;
         self.watcher = None;
         self.watch_events = None;
@@ -1748,6 +1758,13 @@ impl Workspace {
         Ok(())
     }
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if Instant::now() >= self.next_trash_cleanup {
+            self.next_trash_cleanup = Instant::now() + Duration::from_secs(3600);
+            if let Err(error) = crate::trash::cleanup().and_then(|_| crate::trash::list()).map(|entries| self.trash_entries = entries) {
+                self.report(error, cx);
+            }
+            cx.notify();
+        }
         if self
             .notice_until
             .is_some_and(|deadline| Instant::now() >= deadline)
@@ -2570,40 +2587,11 @@ impl Workspace {
         Ok(())
     }
     fn delete_file(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.cancellation.is_some() {
-            return;
-        }
-        let retry_path = path.to_owned();
-        if self.ask(
-            Dialog::DeleteFile,
-            format!("删除 {path}？"),
-            "删除后可在文件树中按 Ctrl+Z 撤销。".into(),
-            DialogButtons::Confirm("删除".into()),
-            window,
-            cx,
-            move |app, window, cx| app.delete_file(&retry_path, window, cx),
-        ) != Some(rfd::MessageDialogResult::Ok)
-        {
-            return;
-        }
-        self.delete_paths(vec![path.to_owned()], window, cx);
+        self.confirm_trash(vec![path.to_owned()], window, cx);
     }
 
     fn delete_folder(&mut self, folder: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.cancellation.is_some() {
-            return;
-        }
-        let retry_folder = folder.to_owned();
-        if self.ask(
-            Dialog::DeleteFolder,
-            format!("删除文件夹 {folder} 内的项目文件？"),
-            "仅删除支持的项目文件，其他文件保留。".into(),
-            DialogButtons::Confirm("删除".into()),
-            window,
-            cx,
-            move |app, window, cx| app.delete_folder(&retry_folder, window, cx),
-        ) != Some(rfd::MessageDialogResult::Ok)
-        {
             return;
         }
         let prefix = format!("{folder}/");
@@ -2613,26 +2601,32 @@ impl Workspace {
             .filter(|file| file.path.starts_with(&prefix))
             .map(|file| file.path.clone())
             .collect();
-        self.delete_paths(paths, window, cx);
+        self.confirm_trash(paths, window, cx);
     }
 
     fn delete_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_files.is_empty() || self.cancellation.is_some() {
             return;
         }
+        self.confirm_trash(self.selected_files.iter().cloned().collect(), window, cx);
+    }
+
+    fn confirm_trash(&mut self, paths: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if paths.is_empty() || self.cancellation.is_some() { return; }
+        let retry = paths.clone();
         if self.ask(
             Dialog::DeleteSelected,
-            format!("删除选中的 {} 个文件？", self.selected_files.len()),
-            "删除后可在文件树中按 Ctrl+Z 撤销。".into(),
-            DialogButtons::Confirm("删除".into()),
+            format!("将 {} 个文件移入废纸篓？", paths.len()),
+            "文件保留 7 天，可在废纸篓恢复。文件夹内仅处理受支持的项目文件。".into(),
+            DialogButtons::Confirm("移入废纸篓".into()),
             window,
             cx,
-            |app, window, cx| app.delete_selected(window, cx),
+            move |app, window, cx| app.confirm_trash(retry, window, cx),
         ) != Some(rfd::MessageDialogResult::Ok)
         {
             return;
         }
-        self.delete_paths(self.selected_files.iter().cloned().collect(), window, cx);
+        self.delete_paths(paths, window, cx);
     }
 
     fn delete_paths(&mut self, paths: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
@@ -2657,21 +2651,19 @@ impl Workspace {
         let root = Path::new(&project.folder);
         let mut deleted = Vec::new();
         let mut failed = false;
+        let batch = uuid::Uuid::new_v4().to_string();
         for path in paths {
-            let result = files::project_path(root, &path).and_then(|full| {
-                let bytes = std::fs::read(&full)?;
-                std::fs::remove_file(full)?;
-                Ok(bytes)
-            });
-            let bytes = match result {
-                Ok(bytes) => bytes,
+            let result = crate::trash::put(&project.id, root, &path, &batch, project.main_file == path);
+            let entry = match result {
+                Ok(entry) => entry,
                 Err(error) => {
                     failed = true;
                     self.report(error, cx);
                     break;
                 }
             };
-            deleted.push((path.clone(), bytes));
+            deleted.push(path.clone());
+            self.trash_entries.push(entry);
             self.documents.remove(&path);
             self.release_pdf_pane(&path, window, cx);
             self.release_pdf_pane(&format!("reading:{path}"), window, cx);
@@ -2693,19 +2685,16 @@ impl Workspace {
             self.active = self.tabs.last().cloned().unwrap_or_default();
         }
         let main = project.main_file.clone();
-        if deleted.iter().any(|(path, _)| path == &main) {
-            self.config
-                .projects
-                .iter_mut()
-                .find(|p| p.id == project.id)
-                .unwrap()
-                .main_file
-                .clear();
+        if deleted.iter().any(|path| path == &main) {
+            if project.id == self.default_workspace.id {
+                self.default_workspace.main_file.clear();
+            } else if let Some(project) = self.config.projects.iter_mut().find(|p| p.id == project.id) {
+                project.main_file.clear();
+            }
             if let Err(error) = storage::save_projects(&self.config) {
                 self.report(error, cx);
             }
         }
-        self.deleted_files.push((project.id, deleted, main));
         if let Err(error) = self.refresh_files(window, cx) {
             self.report(error, cx);
         }
@@ -2714,7 +2703,7 @@ impl Workspace {
         }
         self.file_tree_focus.focus(window, cx);
         if !failed {
-            self.report("已删除，按 Ctrl+Z 撤销。", cx);
+            self.report("已移入废纸篓，按 Ctrl+Z 撤销。", cx);
         }
         cx.notify();
     }
@@ -2794,60 +2783,80 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((project_id, mut files, main)) = self.deleted_files.pop() else {
-            return;
-        };
-        if self
-            .directory_workspace()
-            .is_none_or(|project| project.id != project_id)
-        {
-            self.deleted_files.push((project_id, files, main));
-            self.report("请切回删除文件时所在的项目。", cx);
-            return;
-        }
-        let root = PathBuf::from(&self.directory_workspace().unwrap().folder);
-        // create_new prevents undo from overwriting a file created after deletion.
-        while let Some((path, bytes)) = files.pop() {
-            let result = (|| -> io::Result<()> {
-                use std::io::Write;
-                let relative = Path::new(&path);
-                let parent = relative.parent().unwrap();
-                let parent = if parent.as_os_str().is_empty() {
-                    dunce::canonicalize(&root)?
-                } else {
-                    files::project_path(&root, &parent.to_string_lossy())?
-                };
-                let target = parent.join(relative.file_name().unwrap());
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(target)?
-                    .write_all(&bytes)
-            })();
-            if let Err(error) = result {
-                files.push((path, bytes));
-                self.deleted_files.push((project_id, files, main));
-                self.report(error, cx);
-                if let Err(error) = self.refresh_files(window, cx) {
-                    self.report(error, cx);
-                }
+        let Some(project) = self.directory_workspace() else { return; };
+        let Some(batch) = self.trash_entries.iter().rev().find(|entry| entry.project_id == project.id).map(|entry| entry.batch.clone()) else { return; };
+        let ids = self.trash_entries.iter().filter(|entry| entry.batch == batch).map(|entry| entry.id.clone()).collect();
+        self.restore_trash(ids, window, cx);
+    }
+
+    fn restore_trash(&mut self, mut ids: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        while let Some(id) = ids.first().cloned() {
+            let Some(entry) = self.trash_entries.iter().find(|entry| entry.id == id).cloned() else {
+                ids.remove(0);
+                continue;
+            };
+            if !entry.project_root.is_dir() {
+                self.report("原项目目录不存在，文件仍保留在废纸篓。", cx);
                 return;
             }
+            let mut target = entry.project_root.join(&entry.relative);
+            if target.exists() {
+                let retry = ids.clone();
+                let Some(choice) = self.ask(Dialog::TrashConflict, "原位置已有同名文件".into(), target.display().to_string(), DialogButtons::RestoreConflict, window, cx, move |app, window, cx| app.restore_trash(retry, window, cx)) else { return; };
+                match choice {
+                    rfd::MessageDialogResult::Yes => {
+                        if self.directory_workspace().is_some_and(|project| project.id == entry.project_id && Path::new(&project.folder) == entry.project_root) {
+                            self.delete_paths(vec![entry.relative.clone()], window, cx);
+                            if target.exists() { return; }
+                        } else {
+                            let batch = uuid::Uuid::new_v4().to_string();
+                            match crate::trash::put(&entry.project_id, &entry.project_root, &entry.relative, &batch, false) {
+                                Ok(replaced) => self.trash_entries.push(replaced),
+                                Err(error) => { self.report(error, cx); return; }
+                            }
+                        }
+                    }
+                    rfd::MessageDialogResult::No => {
+                        let original = target.clone();
+                        let stem = original.file_stem().expect("file name").to_string_lossy();
+                        let extension = original.extension().map(|value| format!(".{}", value.to_string_lossy())).unwrap_or_default();
+                        let mut number = 1;
+                        while target.exists() {
+                            target = original.with_file_name(format!("{stem} ({number}){extension}"));
+                            number += 1;
+                        }
+                    }
+                    _ => { ids.remove(0); continue; }
+                }
+            }
+            let result = std::fs::create_dir_all(target.parent().expect("file parent"))
+                .and_then(|_| crate::trash::restore(&entry, &target));
+            if let Err(error) = result { self.report(error, cx); return; }
+            self.trash_entries.retain(|item| item.id != id);
+            if entry.was_main && target == entry.project_root.join(&entry.relative) {
+                if entry.project_id == self.default_workspace.id && self.default_workspace.main_file.is_empty() {
+                    self.default_workspace.main_file = entry.relative.clone();
+                } else if let Some(project) = self.config.projects.iter_mut().find(|project| project.id == entry.project_id && project.main_file.is_empty()) {
+                    project.main_file = entry.relative.clone();
+                    if let Err(error) = storage::save_projects(&self.config) { self.report(error, cx); }
+                }
+            }
+            ids.remove(0);
         }
-        let project = self
-            .config
-            .projects
-            .iter_mut()
-            .find(|p| p.id == project_id)
-            ;
-        if let Some(project) = project && !main.is_empty() && project.main_file.is_empty() && root.join(&main).is_file() {
-            project.main_file = main;
-        }
-        if let Err(error) = storage::save_projects(&self.config) {
-            self.report(error, cx);
-        }
-        if let Err(error) = self.refresh_files(window, cx) {
-            self.report(error, cx);
+        if let Err(error) = self.refresh_files(window, cx) { self.report(error, cx); }
+        cx.notify();
+    }
+
+    fn purge_trash(&mut self, ids: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if ids.is_empty() { return; }
+        let all = ids.len() > 1 || ids.len() == self.trash_entries.len();
+        let retry = ids.clone();
+        if self.ask(if all { Dialog::TrashClear } else { Dialog::TrashPurge }, format!("彻底删除 {} 个文件？", ids.len()), "删除后无法从 Folio 废纸篓恢复。".into(), DialogButtons::Confirm("彻底删除".into()), window, cx, move |app, window, cx| app.purge_trash(retry, window, cx)) != Some(rfd::MessageDialogResult::Ok) { return; }
+        for id in ids {
+            if let Some(entry) = self.trash_entries.iter().find(|entry| entry.id == id).cloned() {
+                if let Err(error) = crate::trash::purge(&entry) { self.report(error, cx); return; }
+                self.trash_entries.retain(|entry| entry.id != id);
+            }
         }
         cx.notify();
     }
@@ -3066,6 +3075,38 @@ impl Workspace {
         cx.notify();
     }
 
+    fn render_trash(&self, cx: &mut Context<Self>) -> AnyElement {
+        let entries = self.trash_entries.iter().rev().map(|entry| {
+            let restore = entry.id.clone();
+            let purge = entry.id.clone();
+            let date = |timestamp: u64| chrono::DateTime::from_timestamp(timestamp as i64, 0)
+                .map(|date| date.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_default();
+            div().flex().items_center().gap_3().px_4().py_3().border_b_1().border_color(rgb(BORDER))
+                .child(crate::ui::file_icon(&entry.relative, false, false))
+                .child(div().flex_1().min_w_0().flex().flex_col().gap_1()
+                    .child(div().text_ellipsis().child(Path::new(&entry.relative).file_name().expect("file name").to_string_lossy().into_owned()))
+                    .child(div().text_xs().text_color(rgb(MUTED)).text_ellipsis().child(entry.project_root.join(&entry.relative).display().to_string()))
+                    .child(div().text_xs().text_color(rgb(MUTED)).child(format!("删除：{}  ·  清理：{}", date(entry.deleted_at), date(entry.deleted_at + 7 * 24 * 3600)))))
+                .child(crate::ui::button_secondary(SharedString::from(format!("trash-restore-{}", entry.id)), "恢复")
+                    .on_click(cx.listener(move |app, _, window, cx| app.restore_trash(vec![restore.clone()], window, cx))))
+                .child(crate::ui::button_danger_soft(SharedString::from(format!("trash-purge-{}", entry.id)), "彻底删除")
+                    .on_click(cx.listener(move |app, _, window, cx| app.purge_trash(vec![purge.clone()], window, cx))))
+        });
+        div().size_full().flex().flex_col().bg(rgb(0xffffff))
+            .child(div().flex().items_center().justify_between().px_5().py_4().border_b_1().border_color(rgb(BORDER))
+                .child(div().font_semibold().child(format!("废纸篓 · {} 项", self.trash_entries.len())))
+                .child(crate::ui::button_danger_soft("trash-clear", "清空废纸篓")
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        let ids = app.trash_entries.iter().map(|entry| entry.id.clone()).collect();
+                        app.purge_trash(ids, window, cx);
+                    }))))
+            .child(div().id("trash-list").flex_1().min_h_0().overflow_y_scroll()
+                .when(self.trash_entries.is_empty(), |area| area.p_5().text_color(rgb(MUTED)).child("废纸篓为空"))
+                .children(entries))
+            .into_any_element()
+    }
+
     fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
         let user_project = self.config.active_id.is_some();
         let projects = self.config.projects.iter().map(|project| {
@@ -3137,7 +3178,7 @@ impl Workspace {
                         }),
                 )
                 .on_click(
-                    cx.listener(move |app, _, window, cx| app.switch_project(&id, window, cx)),
+                    cx.listener(move |app, _, window, cx| { app.show_trash = false; app.switch_project(&id, window, cx); cx.notify(); }),
                 )
                 .context_menu(move |menu, _, _| {
                     let root = root.clone();
@@ -3297,6 +3338,7 @@ impl Workspace {
                         )
                         .on_click(cx.listener(move |app, event: &ClickEvent, window, cx| {
                             cx.stop_propagation();
+                            app.show_trash = false;
                             app.active = key.clone();
                             if event.click_count() >= 2 {
                                 if let Some(pane) = app.markdown_panes.get(&key) {
@@ -3378,6 +3420,7 @@ impl Workspace {
                         )
                         .on_click(cx.listener(move |app, _, window, cx| {
                             cx.stop_propagation();
+                            app.show_trash = false;
                             app.focused_folder = Some(toggled.clone());
                             if !app.collapsed_folders.remove(&toggled) {
                                 app.collapsed_folders.insert(toggled.clone());
@@ -3509,10 +3552,12 @@ impl Workspace {
                     self.settings.interface_font.clone().into()
                 };
                 let preview_font_size = self.settings.interface_font_size;
+                let drag_project = self.directory_workspace().expect("file has project").id.clone();
+                let trash_bounds = self.trash_bounds.clone();
                 div()
                     .id(SharedString::from(format!("file-{}", file.path)))
-                    .on_drag(crate::terminal::DraggedPaths(dragged_paths), move |paths, offset, _, cx| {
-                        cx.new(|_| crate::terminal::PathsPreview { paths: paths.0.clone(), offset, font: preview_font.clone(), font_size: preview_font_size })
+                    .on_drag(crate::terminal::DraggedPaths(dragged_paths, drag_project), move |paths, offset, _, cx| {
+                        cx.new(|_| crate::terminal::PathsPreview { paths: paths.0.clone(), offset, font: preview_font.clone(), font_size: preview_font_size, trash_bounds: trash_bounds.clone() })
                     })
                     .flex()
                     .items_center()
@@ -3635,6 +3680,7 @@ impl Workspace {
                     )
                     .on_click(cx.listener(move |app, event: &ClickEvent, window, cx| {
                         cx.stop_propagation();
+                        app.show_trash = false;
                         if event.modifiers().control {
                             if !app.selected_files.remove(&clicked_path) {
                                 app.selected_files.insert(clicked_path.clone());
@@ -3752,7 +3798,7 @@ impl Workspace {
             .hover(|style| style.bg(rgb(0xefefed)))
             .child(crate::ui::icon(IconName::FileText))
             .child(div().flex_1().child("默认空间"))
-            .on_click(cx.listener(|app, _, window, cx| app.switch_to_default(window, cx)));
+            .on_click(cx.listener(|app, _, window, cx| { app.show_trash = false; app.switch_to_default(window, cx); cx.notify(); }));
         div()
             .w_full()
             .min_w_0()
@@ -3765,6 +3811,25 @@ impl Workspace {
             .bg(rgb(0xfbfbfa))
             .border_r_1()
             .border_color(rgb(BORDER))
+            .child({
+                let bounds = self.trash_bounds.clone();
+                div().id("trash-entry").relative().flex().items_center().gap_2()
+                    .mx_2().mt_2().px_2().h(px(32.)).rounded(px(4.)).cursor_pointer()
+                    .when(self.show_trash, |row| row.bg(rgb(0xe8e7e4)))
+                    .hover(|style| style.bg(rgb(0xefefed)))
+                    .drag_over::<crate::terminal::DraggedPaths>(|style, _, _, _| style.bg(rgb(0xdde9f6)))
+                    .child(crate::ui::icon(IconName::Trash))
+                    .child("废纸篓")
+                    .child(canvas(move |area, _, _| { *bounds.lock().expect("trash bounds") = Some(area); }, |_, _, _, _| {}).absolute().size_full())
+                    .on_click(cx.listener(|app, _, _, cx| { app.show_trash = true; cx.notify(); }))
+                    .on_drop(cx.listener(|app, dragged: &crate::terminal::DraggedPaths, window, cx| {
+                        let Some(project) = app.directory_workspace() else { return; };
+                        if project.id != dragged.1 { app.report("来源项目已切换，请重新拖动。", cx); return; }
+                        let root = PathBuf::from(&project.folder);
+                        let paths: Vec<String> = dragged.0.iter().filter_map(|path| path.strip_prefix(&root).ok().map(|path| path.to_string_lossy().replace('\\', "/"))).collect();
+                        if paths.len() == dragged.0.len() { app.confirm_trash(paths, window, cx); }
+                    }))
+            })
             .child(
                 div()
                     .flex()
@@ -3789,6 +3854,7 @@ impl Workspace {
                 .child(crate::ui::icon(IconName::Files))
                 .child("独立文件")
                 .on_click(cx.listener(|app, _, window, cx| {
+                app.show_trash = false;
                 if app.directory_workspace().is_none() { return; }
                 if app.cancellation.is_some() || app.batch_running || !app.confirm_drafts(window, cx, |app, window, cx| {
                     if let Err(error) = app.select_loose_files(window, cx) { app.report(error, cx); }
@@ -4299,10 +4365,10 @@ impl Render for Workspace {
             .filter_map(|pane| pane.read(cx).export_element())
             .collect();
         for (key, pane) in &self.pdf_panes {
-            let visible = key.starts_with("reading:") || *key == self.active;
+            let visible = !self.show_trash && (key.starts_with("reading:") || *key == self.active);
             pane.update(cx, |pane, cx| pane.set_visible(visible, window, cx));
         }
-        let modal_open = self.show_preferences
+        let modal_open = self.show_trash || self.show_preferences
             || self.name_action.is_some()
             || self.dialog_prompt.is_some()
             || self.dialog_open;
@@ -4312,7 +4378,7 @@ impl Render for Workspace {
         }
         if let Some(pane) = &self.build_pdf {
             pane.update(cx, |pane, cx| {
-                pane.set_visible(self.show_build_preview, window, cx)
+                pane.set_visible(self.show_build_preview && !self.show_trash, window, cx)
             });
         }
         let title = self
@@ -4793,7 +4859,7 @@ impl Render for Workspace {
                                 .child(self.render_sidebar(cx)),
                         )
                     })
-                    .child(resizable_panel().child(editor_with_terminal)),
+                    .child(resizable_panel().child(if self.show_trash { self.render_trash(cx) } else { editor_with_terminal.into_any_element() })),
                 ),
             )
             .child(
@@ -4987,6 +5053,11 @@ impl Render for Workspace {
                 DialogButtons::Confirm(confirm) => vec![
                     ("取消".to_string(), rfd::MessageDialogResult::Cancel, false),
                     (confirm, rfd::MessageDialogResult::Ok, true),
+                ],
+                DialogButtons::RestoreConflict => vec![
+                    ("跳过".to_string(), rfd::MessageDialogResult::Cancel, false),
+                    ("保留两个".to_string(), rfd::MessageDialogResult::No, false),
+                    ("替换".to_string(), rfd::MessageDialogResult::Yes, true),
                 ],
             };
             let choices =
