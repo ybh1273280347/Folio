@@ -237,6 +237,8 @@ icon_assets!(
         CodeXml,
         Code,
         PencilLine,
+        NotebookPen,
+        Files,
         Trash,
         SlidersHorizontal,
         FileCode,
