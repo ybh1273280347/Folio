@@ -367,6 +367,20 @@ impl RenderOnce for BlockEditor {
                             .child(super::code_ui::header(&self.state, unit.id, &code_cx, window, cx))
                             .into_any_element()
                     }
+                    (_, BlockNode::Table(_)) => {
+                        let table = live_node.render(node_ix, flow.last(is_last_node), &node_cx, window, cx);
+                        div()
+                            .relative()
+                            .w_full()
+                            .child(table)
+                            .children(super::table_ui::copy_controls(
+                                &self.state,
+                                unit.id,
+                                window,
+                                cx,
+                            ))
+                            .into_any_element()
+                    }
                     _ => live_node.render(node_ix, flow.last(is_last_node), &node_cx, window, cx),
                 };
                 // Per-block accessibility node around the rendered block.
