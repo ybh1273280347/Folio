@@ -35,7 +35,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -63,6 +63,22 @@ actions!(
 const BG: u32 = 0xf7f6f5;
 const BORDER: u32 = 0xe8e7e3;
 const MUTED: u32 = 0x787774;
+
+struct TreeSelectionDrag {
+    start: Point<Pixels>,
+    current: Point<Pixels>,
+    original: BTreeSet<String>,
+    moved: bool,
+}
+
+impl TreeSelectionDrag {
+    fn bounds(&self) -> Bounds<Pixels> {
+        Bounds::from_corners(
+            point(self.start.x.min(self.current.x), self.start.y.min(self.current.y)),
+            point(self.start.x.max(self.current.x), self.start.y.max(self.current.y)),
+        )
+    }
+}
 
 struct OpenDocument {
     path: PathBuf,
@@ -222,6 +238,8 @@ pub struct Workspace {
     collapsed_folders: BTreeSet<String>,
     focused_folder: Option<String>,
     selected_files: BTreeSet<String>,
+    tree_row_bounds: Arc<Mutex<BTreeMap<String, (bool, Bounds<Pixels>)>>>,
+    tree_drag: Option<TreeSelectionDrag>,
     deleted_files: Vec<(String, Vec<(String, Vec<u8>)>, String)>,
     file_tree_focus: FocusHandle,
     show_build_preview: bool,
@@ -470,6 +488,8 @@ impl Workspace {
             collapsed_folders: BTreeSet::new(),
             focused_folder: None,
             selected_files: BTreeSet::new(),
+            tree_row_bounds: Arc::new(Mutex::new(BTreeMap::new())),
+            tree_drag: None,
             deleted_files: Vec::new(),
             file_tree_focus: cx.focus_handle(),
             show_build_preview: false,
@@ -3223,6 +3243,7 @@ impl Workspace {
             }
             key
         });
+        self.tree_row_bounds.lock().expect("tree bounds").clear();
         let rows = entries
             .into_iter()
             .filter(|(path, _)| {
@@ -3233,6 +3254,9 @@ impl Workspace {
                         .any(|folder| path.starts_with(&format!("{folder}/")))
             })
             .map(|(path, folder)| {
+                let row_path = path.clone();
+                let is_file = !*folder && self.directory_workspace().is_some();
+                let row = (|| {
                 let depth = if self.directory_workspace().is_some() {
                     path.matches('/').count()
                 } else {
@@ -3460,6 +3484,7 @@ impl Workspace {
                 let row_rename = file.path.clone();
                 let row_delete = file.path.clone();
                 let selected_path = file.path.clone();
+                let clicked_path = file.path.clone();
                 let menu_app = cx.entity();
                 let row_name = Path::new(path)
                     .file_name()
@@ -3496,7 +3521,8 @@ impl Workspace {
                     .pr_2()
                     .gap_2()
                     .cursor_pointer()
-                    .when(self.active == file.path, |row| row.bg(rgb(0xe8e7e4)))
+                    .when(is_selected, |row| row.bg(rgb(0xdde9f6)))
+                    .when(!is_selected && self.active == file.path, |row| row.bg(rgb(0xe8e7e4)))
                     .hover(|style| style.bg(rgb(0xefefed)))
                     .active(|style| style.bg(rgb(crate::ui::PRESSED_BG)))
                     .child(
@@ -3609,6 +3635,15 @@ impl Workspace {
                     )
                     .on_click(cx.listener(move |app, event: &ClickEvent, window, cx| {
                         cx.stop_propagation();
+                        if event.modifiers().control {
+                            if !app.selected_files.remove(&clicked_path) {
+                                app.selected_files.insert(clicked_path.clone());
+                            }
+                            app.focused_folder = None;
+                            app.file_tree_focus.focus(window, cx);
+                            cx.notify();
+                            return;
+                        }
                         app.focused_folder = None;
                         if let Err(error) =
                             app.open_file_with_focus(&open, event.click_count() >= 2, window, cx)
@@ -3695,6 +3730,13 @@ impl Workspace {
                         }))
                     })
                     .into_any_element()
+                })();
+                let bounds = self.tree_row_bounds.clone();
+                div().relative().child(row).child(
+                    canvas(move |area, _, _| {
+                        bounds.lock().expect("tree bounds").insert(row_path.clone(), (is_file, area));
+                    }, |_, _, _, _| {}).absolute().size_full(),
+                )
             });
         let default_space = div()
             .id("default-space")
@@ -3906,23 +3948,65 @@ impl Workspace {
                 )
             })
             .child(
-                div()
+                div().relative().flex_1().min_h_0().child(div()
                     .id("file-tree-scroll")
                     .key_context("FolioFileTree")
                     .track_focus(&self.file_tree_focus)
                     .on_action(cx.listener(Self::copy_file_path))
                     .on_action(cx.listener(Self::delete_file_tree_item))
                     .on_action(cx.listener(Self::undo_file_delete))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|app, event: &MouseDownEvent, _, cx| {
+                        if app.directory_workspace().is_none() || app.tree_row_bounds.lock().expect("tree bounds").values().any(|(_, bounds)| bounds.contains(&event.position)) {
+                            return;
+                        }
+                        app.tree_drag = Some(TreeSelectionDrag {
+                            start: event.position,
+                            current: event.position,
+                            original: if event.modifiers.control { app.selected_files.clone() } else { BTreeSet::new() },
+                            moved: false,
+                        });
+                        cx.notify();
+                    }))
+                    .on_mouse_move(cx.listener(|app, event: &MouseMoveEvent, _, cx| {
+                        let Some(drag) = app.tree_drag.as_mut() else { return; };
+                        if !event.dragging() { return; }
+                        drag.current = event.position;
+                        if (drag.current - drag.start).magnitude() > 3.0 { drag.moved = true; }
+                        if drag.moved {
+                            let selection = drag.bounds();
+                            app.selected_files = drag.original.clone();
+                            // Bounds are measured in window coordinates, including the scroll offset.
+                            for (path, (is_file, bounds)) in app.tree_row_bounds.lock().expect("tree bounds").iter() {
+                                if *is_file && selection.intersects(bounds) { app.selected_files.insert(path.clone()); }
+                            }
+                        }
+                        cx.notify();
+                    }))
+                    .on_mouse_up(MouseButton::Left, cx.listener(|app, _, _, cx| {
+                        if let Some(drag) = app.tree_drag.take() {
+                            if !drag.moved { app.selected_files = drag.original; }
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_up_out(MouseButton::Left, cx.listener(|app, _, _, cx| {
+                        if app.tree_drag.take().is_some() { cx.notify(); }
+                    }))
                     .on_click(cx.listener(|app, _, window, cx| {
                         if app.focused_folder.take().is_some() {
                             cx.notify();
                         }
                         app.file_tree_focus.focus(window, cx);
                     }))
-                    .flex_1()
+                    .size_full()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .children(rows),
+                    .children(rows)
+                    .child(div().h(px(48.)).flex_shrink_0()))
+                    .when_some(self.tree_drag.as_ref().filter(|drag| drag.moved).map(TreeSelectionDrag::bounds), |area, selection| {
+                        area.child(canvas(|_, _, _| (), move |_, _, window, _| {
+                            window.paint_quad(fill(selection, rgb(0x165dff).opacity(0.18)));
+                        }).absolute().size_full())
+                    }),
             )
             .child(
                 button("preferences", "⚙  设置")
