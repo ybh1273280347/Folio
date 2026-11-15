@@ -52,6 +52,8 @@ pub fn start(settings: &TerminalSettings, cwd: &Path) -> Result<StartedSession, 
     command.env("COLORTERM", "truecolor");
     command.env("TERM_PROGRAM", "Folio");
     command.env("COLORFGBG", "15;0");
+    // The desktop launcher may inherit NO_COLOR from its parent, disabling shell colors.
+    command.env_remove("NO_COLOR");
     let mut child = pair
         .slave
         .spawn_command(command)

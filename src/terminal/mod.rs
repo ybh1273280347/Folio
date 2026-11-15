@@ -7,6 +7,39 @@ use gpui_kit::{assets::IconName, prelude::FluentBuilder, *};
 use gpui_xterm::TerminalView;
 use std::{path::PathBuf, sync::mpsc::TryRecvError, time::Duration};
 
+#[derive(Clone)]
+pub struct DraggedPaths(pub Vec<PathBuf>);
+
+pub struct PathsPreview {
+    pub paths: Vec<PathBuf>,
+    pub offset: Point<Pixels>,
+    pub font: SharedString,
+    pub font_size: u8,
+}
+
+impl Render for PathsPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let count = self.paths.len();
+        div().pl(self.offset.x + px(12.)).pt(self.offset.y + px(12.))
+            .child(
+                div().flex().flex_col().gap_1().p_2().min_w(px(160.)).max_w(px(300.))
+                    .rounded(px(6.)).border_1().border_color(gpui_kit::rgb(0xd8d8d8))
+                    .bg(gpui_kit::rgb(0xffffff)).text_color(gpui_kit::rgb(0x333333))
+                    .font_family(self.font.clone()).text_size(px(self.font_size as f32)).shadow_sm()
+                    .child(div().flex().items_center().gap_1()
+                        .child(crate::ui::icon(IconName::Copy).w(px(14.)).h(px(14.)))
+                        .child(if count == 1 { "复制".into() } else { format!("复制 {count} 项") }))
+                    .children(self.paths.iter().take(4).map(|path| {
+                        let name = path.file_name().expect("file has name").to_string_lossy().into_owned();
+                        div().flex().items_center().gap_2().min_w_0()
+                            .child(crate::ui::file_icon(&name, false, false))
+                            .child(div().min_w_0().text_ellipsis().child(name))
+                    }))
+                    .when(count > 4, |preview| preview.child(div().text_color(gpui_kit::rgb(0x787774)).child(format!("还有 {} 项", count - 4)))),
+            )
+    }
+}
+
 fn terminal_control(id: impl Into<ElementId>, name: IconName, palette: Palette) -> Stateful<Div> {
     div()
         .id(id)
@@ -57,6 +90,14 @@ pub struct TerminalPane {
 }
 
 impl TerminalPane {
+    fn drop_paths(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = self.sessions.iter().find(|tab| Some(tab.id) == self.active).and_then(|tab| tab.view.as_ref()) {
+            // Use the terminal's paste path so bracketed-paste applications receive the right protocol.
+            let text = paths.iter().map(|path| format!("\"{}\"", path.to_string_lossy())).collect::<Vec<_>>().join(" ");
+            view.read(cx).paste_text(&text);
+            self.focus(window, cx);
+        }
+    }
     pub fn new(settings: TerminalSettings, palette: Palette, cx: &mut Context<Self>) -> Self {
         cx.on_app_quit(|pane, _| {
             pane.sessions.clear();
@@ -307,6 +348,8 @@ impl Render for TerminalPane {
         let current = self.sessions.iter().find(|tab| Some(tab.id) == self.active);
         div()
             .id("folio-terminal")
+            .on_drop(cx.listener(|pane, paths: &DraggedPaths, window, cx| pane.drop_paths(&paths.0, window, cx)))
+            .on_drop(cx.listener(|pane, paths: &ExternalPaths, window, cx| pane.drop_paths(paths.paths(), window, cx)))
             .size_full()
             .flex()
             .flex_col()
