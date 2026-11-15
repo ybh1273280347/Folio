@@ -345,6 +345,22 @@ pub enum InternalLinkOpenTarget {
     SplitPane,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TranslateSettings {
+    pub baidu_app_id: String,
+    pub baidu_api_key: String,
+}
+
+impl Default for TranslateSettings {
+    fn default() -> Self {
+        Self {
+            baidu_app_id: "20261115002718243".into(),
+            baidu_api_key: "7hcEk72SGfFqfKQBXQgg".into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
@@ -374,6 +390,7 @@ pub struct AppSettings {
     pub log_height: f32,
     /// User-configurable terminal launch and display settings.
     pub terminal: TerminalSettings,
+    pub translate: TranslateSettings,
     pub keybindings: BTreeMap<String, String>,
 }
 
@@ -434,6 +451,7 @@ impl Default for AppSettings {
             sidebar_width: 232.,
             log_height: 220.,
             terminal: TerminalSettings::default(),
+            translate: TranslateSettings::default(),
             keybindings: BTreeMap::new(),
         }
     }

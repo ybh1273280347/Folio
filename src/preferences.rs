@@ -25,6 +25,7 @@ pub enum PreferencesTab {
     View,
     Shortcuts,
     Terminal,
+    Api,
 }
 
 pub struct SettingsChanged(pub AppSettings);
@@ -50,6 +51,8 @@ pub struct Preferences {
     terminal_font_family: Entity<SelectState<SearchableVec<String>>>,
     terminal_font_size: Entity<SliderState>,
     terminal_panel_width: Entity<SliderState>,
+    baidu_app_id: Entity<InputState>,
+    baidu_api_key: Entity<InputState>,
     editing_theme: bool,
     error: Option<String>,
 }
@@ -360,6 +363,32 @@ impl Preferences {
             },
         )
         .detach();
+        let baidu_app_id = cx.new(|cx| InputState::new(window, cx).placeholder("填写百度翻译 APP ID"));
+        if !settings.translate.baidu_app_id.is_empty() {
+            baidu_app_id.update(cx, |input, cx| {
+                input.set_value(settings.translate.baidu_app_id.clone(), window, cx);
+            });
+        }
+        cx.subscribe(&baidu_app_id, |panel, state, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                panel.settings.translate.baidu_app_id = state.read(cx).value().trim().to_owned();
+                panel.changed(cx);
+            }
+        })
+        .detach();
+        let baidu_api_key = cx.new(|cx| InputState::new(window, cx).placeholder("填写百度翻译密钥（API Key）"));
+        if !settings.translate.baidu_api_key.is_empty() {
+            baidu_api_key.update(cx, |input, cx| {
+                input.set_value(settings.translate.baidu_api_key.clone(), window, cx);
+            });
+        }
+        cx.subscribe(&baidu_api_key, |panel, state, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                panel.settings.translate.baidu_api_key = state.read(cx).value().trim().to_owned();
+                panel.changed(cx);
+            }
+        })
+        .detach();
         Self {
             settings,
             tab: PreferencesTab::Fonts,
@@ -382,6 +411,8 @@ impl Preferences {
             terminal_font_family,
             terminal_font_size,
             terminal_panel_width,
+            baidu_app_id,
+            baidu_api_key,
             editing_theme: false,
             error: None,
         }
@@ -449,6 +480,12 @@ impl Preferences {
         });
         self.terminal_panel_width.update(cx, |state, cx| {
             state.set_value(settings.terminal.panel_width, window, cx)
+        });
+        self.baidu_app_id.update(cx, |input, cx| {
+            input.set_value(settings.translate.baidu_app_id.clone(), window, cx);
+        });
+        self.baidu_api_key.update(cx, |input, cx| {
+            input.set_value(settings.translate.baidu_api_key.clone(), window, cx);
         });
     }
     fn changed(&mut self, cx: &mut Context<Self>) {
@@ -918,6 +955,163 @@ impl Preferences {
             .into_any_element()
     }
 
+    fn render_api(&self, _cx: &mut Context<Self>) -> AnyElement {
+        let baidu_ready = !self.settings.translate.baidu_app_id.trim().is_empty()
+            && !self.settings.translate.baidu_api_key.trim().is_empty();
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_5()
+            .child(div().text_lg().font_semibold().child("API 服务"))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .p_4()
+                    .rounded(px(8.))
+                    .bg(rgb(0xfafaf8))
+                    .border_1()
+                    .border_color(rgb(0xe8e7e3))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(div().font_semibold().child("翻译服务"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x787774))
+                                    .child("支持中英互译 · 优先 Google，失败时自动切换百度"),
+                            ),
+                    )
+                    .child(div().h(px(1.)).bg(rgb(0xebebe6)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0p5()
+                                    .min_w_0()
+                                    .child(div().font_medium().child("Google 翻译"))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0x787774))
+                                            .child("内置网页翻译接口，无需填写 API Key（依赖当前网络或系统代理）"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .px_2()
+                                    .py(px(2.))
+                                    .rounded(px(4.))
+                                    .bg(rgb(0xeaf5ee))
+                                    .border_1()
+                                    .border_color(rgb(0xc6e5d0))
+                                    .text_xs()
+                                    .text_color(rgb(0x237844))
+                                    .child("免配置"),
+                            ),
+                    )
+                    .child(div().h(px(1.)).bg(rgb(0xebebe6)))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2p5()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_0p5()
+                                            .min_w_0()
+                                            .child(div().font_medium().child("百度翻译"))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(0x787774))
+                                                    .child("通用文本翻译 API（fanyi-api.baidu.com），需配置 APP ID 与密钥"),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .px_2()
+                                            .py(px(2.))
+                                            .rounded(px(4.))
+                                            .when(baidu_ready, |b| {
+                                                b.bg(rgb(0xeef3f8))
+                                                    .border_1()
+                                                    .border_color(rgb(0xcbd9e6))
+                                                    .text_color(rgb(0x3a5a78))
+                                            })
+                                            .when(!baidu_ready, |b| {
+                                                b.bg(rgb(0xfff4e5))
+                                                    .border_1()
+                                                    .border_color(rgb(0xf2d3a6))
+                                                    .text_color(rgb(0x9a5b13))
+                                            })
+                                            .text_xs()
+                                            .child(if baidu_ready { "已配置" } else { "需配置密钥" }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1p5()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .w(px(96.))
+                                                    .flex_shrink_0()
+                                                    .text_xs()
+                                                    .text_color(rgb(0x5b5b58))
+                                                    .child("APP ID"),
+                                            )
+                                            .child(div().flex_1().min_w_0().child(Input::new(&self.baidu_app_id))),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .w(px(96.))
+                                                    .flex_shrink_0()
+                                                    .text_xs()
+                                                    .text_color(rgb(0x5b5b58))
+                                                    .child("API Key（密钥）"),
+                                            )
+                                            .child(div().flex_1().min_w_0().child(Input::new(&self.baidu_api_key))),
+                                    ),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_shortcuts(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut categories: Vec<&'static str> = Vec::new();
         for def in SHORTCUT_DEFS {
@@ -1143,6 +1337,7 @@ impl Render for Preferences {
             PreferencesTab::View => self.render_view(cx),
             PreferencesTab::Shortcuts => self.render_shortcuts(cx),
             PreferencesTab::Terminal => self.render_terminal(),
+            PreferencesTab::Api => self.render_api(cx),
         };
         div()
             .track_focus(&self.focus)
@@ -1246,6 +1441,14 @@ impl Render for Preferences {
                         IconName::CodeXml,
                         "终端",
                         self.tab == PreferencesTab::Terminal,
+                        cx,
+                    ))
+                    .child(nav_item(
+                        "pref-tab-api",
+                        PreferencesTab::Api,
+                        IconName::Globe,
+                        "API 服务",
+                        self.tab == PreferencesTab::Api,
                         cx,
                     )),
             )
