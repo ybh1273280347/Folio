@@ -14,6 +14,7 @@ mod preferences;
 mod storage;
 mod theme;
 mod terminal;
+mod trash;
 mod translate;
 mod ui;
 mod workspace;

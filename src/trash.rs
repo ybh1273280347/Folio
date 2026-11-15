@@ -1,0 +1,249 @@
+//! Persistent file trash for Folio.
+//!
+//! Each item owns a UUID directory containing its copied payload and metadata.
+//! A source file is removed only after both have been written durably, so an
+//! interrupted put leaves either the original or a listed trash copy.
+
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{self, Write},
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+const RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
+const PAYLOAD_FILE: &str = "payload";
+const METADATA_FILE: &str = "entry.json";
+const METADATA_TEMP_FILE: &str = "entry.json.tmp";
+
+/// A persisted file deletion and the information needed to restore it.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TrashEntry {
+    pub id: String,
+    pub batch: String,
+    pub project_id: String,
+    pub project_root: PathBuf,
+    pub relative: String,
+    pub deleted_at: u64,
+    #[serde(default)]
+    pub deleted_at_nanos: u32,
+    pub was_main: bool,
+}
+
+fn trash_directory() -> io::Result<PathBuf> {
+    Ok(crate::storage::data_directory()?.join("trash"))
+}
+
+fn sync_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        File::open(path)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+fn sync_parent(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    sync_directory(parent)
+}
+
+fn entry_directory(id: &str) -> io::Result<PathBuf> {
+    let parsed = Uuid::parse_str(id)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "无效的废纸篓条目 ID。"))?;
+    if parsed.to_string() != id {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "无效的废纸篓条目 ID。",
+        ));
+    }
+    Ok(trash_directory()?.join(id))
+}
+
+fn read_entry(directory: &Path) -> io::Result<TrashEntry> {
+    let bytes = fs::read(directory.join(METADATA_FILE))?;
+    let entry: TrashEntry = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    let directory_id = directory.file_name().and_then(|name| name.to_str());
+    if directory_id != Some(entry.id.as_str()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "废纸篓条目 ID 与存储目录不匹配。",
+        ));
+    }
+    Ok(entry)
+}
+
+fn persist_entry(directory: &Path, entry: &TrashEntry) -> io::Result<()> {
+    let bytes = serde_json::to_vec(entry).map_err(io::Error::other)?;
+    let temporary = directory.join(METADATA_TEMP_FILE);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+
+    // The final name appears atomically only after the complete JSON is durable.
+    fs::rename(&temporary, directory.join(METADATA_FILE))?;
+    sync_directory(directory)
+}
+
+/// Return every persisted trash item. Incomplete directories from an interrupted
+/// put have no final metadata file and are ignored; malformed metadata is an error.
+pub fn list() -> io::Result<Vec<TrashEntry>> {
+    let root = trash_directory()?;
+    let directories = match fs::read_dir(&root) {
+        Ok(directories) => directories,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+
+    let mut entries = Vec::new();
+    for item in directories {
+        let item = item?;
+        if !item.file_type()?.is_dir() {
+            continue;
+        }
+        let name = item.file_name();
+        let Some(id) = name.to_str() else { continue };
+        let Ok(parsed) = Uuid::parse_str(id) else {
+            continue;
+        };
+        if parsed.to_string() != id {
+            continue;
+        }
+        match read_entry(&item.path()) {
+            Ok(entry) => entries.push(entry),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    entries.sort_by(|left, right| {
+        left.deleted_at
+            .cmp(&right.deleted_at)
+            .then_with(|| left.deleted_at_nanos.cmp(&right.deleted_at_nanos))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(entries)
+}
+
+/// Copy a project file into persistent trash, publish its metadata, then remove
+/// the source. Any failure before the final removal leaves the source in place.
+pub fn put(
+    project_id: &str,
+    root: &Path,
+    relative: &str,
+    batch: &str,
+    was_main: bool,
+) -> io::Result<TrashEntry> {
+    let source = crate::files::project_path(root, relative)?;
+    let mut source_file = File::open(&source)?;
+    let source_metadata = source_file.metadata()?;
+    if !source_metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "只能将文件移入 Folio 废纸篓。",
+        ));
+    }
+
+    let trash_root = trash_directory()?;
+    fs::create_dir_all(&trash_root)?;
+    sync_parent(&trash_root)?;
+
+    let id = Uuid::new_v4().to_string();
+    let directory = trash_root.join(&id);
+    fs::create_dir(&directory)?;
+    sync_directory(&trash_root)?;
+
+    let payload_path = directory.join(PAYLOAD_FILE);
+    let mut payload = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&payload_path)?;
+    io::copy(&mut source_file, &mut payload)?;
+    payload.sync_all()?;
+    drop(payload);
+    sync_directory(&directory)?;
+
+    let deleted_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)?;
+    let entry = TrashEntry {
+        id,
+        batch: batch.to_owned(),
+        project_id: project_id.to_owned(),
+        project_root: root.to_path_buf(),
+        relative: relative.to_owned(),
+        deleted_at: deleted_at.as_secs(),
+        deleted_at_nanos: deleted_at.subsec_nanos(),
+        was_main,
+    };
+    persist_entry(&directory, &entry)?;
+
+    fs::remove_file(&source)?;
+    sync_parent(&source)?;
+    Ok(entry)
+}
+
+/// Restore into a new target file. The target and its parent are synced before
+/// removing the stored copy, so a failed or interrupted restore keeps recoverable data.
+pub fn restore(entry: &TrashEntry, target: &Path) -> io::Result<()> {
+    let directory = entry_directory(&entry.id)?;
+    read_entry(&directory)?;
+
+    let mut payload = File::open(directory.join(PAYLOAD_FILE))?;
+    let mut destination = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)?;
+    if let Err(error) =
+        io::copy(&mut payload, &mut destination).and_then(|_| destination.sync_all())
+    {
+        drop(destination);
+        fs::remove_file(target)?;
+        return Err(error);
+    }
+    drop(destination);
+    sync_parent(target)?;
+
+    fs::remove_file(directory.join(PAYLOAD_FILE))?;
+    sync_directory(&directory)?;
+    fs::remove_file(directory.join(METADATA_FILE))?;
+    sync_directory(&directory)?;
+    fs::remove_dir_all(&directory)?;
+    sync_parent(&directory)?;
+    Ok(())
+}
+
+/// Permanently remove one persisted trash item.
+pub fn purge(entry: &TrashEntry) -> io::Result<()> {
+    let directory = entry_directory(&entry.id)?;
+    read_entry(&directory)?;
+    fs::remove_dir_all(&directory)?;
+    sync_parent(&directory)
+}
+
+/// Permanently remove entries whose recorded deletion time is more than seven days old.
+pub fn cleanup() -> io::Result<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_secs();
+    let cutoff = now.saturating_sub(RETENTION_SECS);
+    for entry in list()? {
+        if entry.deleted_at <= cutoff {
+            purge(&entry)?;
+        }
+    }
+    Ok(())
+}
