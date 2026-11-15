@@ -40,6 +40,8 @@ pub struct TerminalConfig {
 
     pub padding: Edges<Pixels>,
 
+    pub minimum_contrast: f32,
+
     pub colors: ColorPalette,
 }
 
@@ -53,6 +55,7 @@ impl Default for TerminalConfig {
             scrollback: 10000,
             line_height_multiplier: 1.0,
             padding: Edges::all(px(0.0)),
+            minimum_contrast: 4.5,
             colors: ColorPalette::default(),
         }
     }
@@ -200,7 +203,8 @@ impl TerminalView {
             config.font_size,
             config.line_height_multiplier,
             config.colors.clone(),
-        );
+        )
+        .with_minimum_contrast(config.minimum_contrast);
 
         let focus_handle = cx.focus_handle().tab_stop(false);
 
@@ -824,6 +828,7 @@ impl TerminalView {
         self.renderer.font_family = config.font_family.clone();
         self.renderer.font_size = config.font_size;
         self.renderer.line_height_multiplier = config.line_height_multiplier;
+        self.renderer.minimum_contrast = config.minimum_contrast;
         self.renderer.palette = config.colors.clone();
 
         self.config = config;

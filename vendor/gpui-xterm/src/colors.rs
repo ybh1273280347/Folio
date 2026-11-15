@@ -1,3 +1,4 @@
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::{COUNT as TERM_COLOR_COUNT, Colors};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use gpui_kit::Hsla;
@@ -185,9 +186,7 @@ impl ColorPalette {
                         NamedColor::Background => self.background,
                         NamedColor::Cursor => self.cursor,
                         NamedColor::DimForeground => {
-                            let mut dim = self.foreground;
-                            dim.l *= 0.7;
-                            dim
+                            dim_towards_background(self.foreground, self.background)
                         }
                         NamedColor::BrightForeground => {
                             let mut bright = self.foreground;
@@ -213,9 +212,7 @@ impl ColorPalette {
                                 NamedColor::DimWhite => 7,
                                 _ => 7,
                             };
-                            let mut dim = self.ansi_colors[base_idx];
-                            dim.l *= 0.7;
-                            dim
+                            dim_towards_background(self.ansi_colors[base_idx], self.background)
                         }
                         _ => self.foreground,
                     }
@@ -224,6 +221,26 @@ impl ColorPalette {
             Color::Spec(rgb) => rgb_to_hsla(rgb),
             Color::Indexed(idx) => self.extended_colors[idx as usize],
         }
+    }
+
+    pub fn resolve_cell(
+        &self,
+        fg: Color,
+        bg: Color,
+        flags: Flags,
+        colors: &Colors,
+        min_contrast: f32,
+    ) -> (Hsla, Hsla) {
+        let mut fg_color = self.resolve(fg, colors);
+        let mut bg_color = self.resolve(bg, colors);
+        if flags.contains(Flags::DIM) && !is_pre_dimmed_named(fg) {
+            fg_color = dim_towards_background(fg_color, bg_color);
+        }
+        if flags.contains(Flags::INVERSE) {
+            std::mem::swap(&mut fg_color, &mut bg_color);
+        }
+        fg_color = ensure_minimum_contrast(fg_color, bg_color, min_contrast);
+        (fg_color, bg_color)
     }
 
     pub fn ansi_colors(&self) -> &[Hsla; 16] {
@@ -265,25 +282,118 @@ impl ColorPalette {
             256 => self.foreground,
             257 => self.background,
             258 => self.cursor,
-            259..=266 => {
-                let mut dim = self.ansi_colors[index - 259];
-                dim.l *= 0.7;
-                dim
-            }
+            259..=266 => dim_towards_background(self.ansi_colors[index - 259], self.background),
             267 => {
                 let mut bright = self.foreground;
                 bright.l = (bright.l * 1.2).min(1.0);
                 bright
             }
-            268 => {
-                let mut dim = self.foreground;
-                dim.l *= 0.7;
-                dim
-            }
+            268 => dim_towards_background(self.foreground, self.background),
             _ => return None,
         };
         Some(hsla_to_rgb(color))
     }
+}
+
+fn is_pre_dimmed_named(color: Color) -> bool {
+    matches!(
+        color,
+        Color::Named(
+            NamedColor::DimForeground
+                | NamedColor::DimBlack
+                | NamedColor::DimRed
+                | NamedColor::DimGreen
+                | NamedColor::DimYellow
+                | NamedColor::DimBlue
+                | NamedColor::DimMagenta
+                | NamedColor::DimCyan
+                | NamedColor::DimWhite
+        )
+    )
+}
+
+fn dim_towards_background(fg: Hsla, bg: Hsla) -> Hsla {
+    Hsla {
+        l: fg.l + (bg.l - fg.l) * 0.30,
+        ..fg
+    }
+}
+
+fn srgb_channel_to_linear(c: f32) -> f32 {
+    let c = c.clamp(0.0, 1.0);
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+pub fn relative_luminance(color: Hsla) -> f32 {
+    let rgba = color.to_rgb();
+    0.2126 * srgb_channel_to_linear(rgba.r)
+        + 0.7152 * srgb_channel_to_linear(rgba.g)
+        + 0.0722 * srgb_channel_to_linear(rgba.b)
+}
+
+pub fn contrast_ratio(a: Hsla, b: Hsla) -> f32 {
+    contrast_from_luminance(relative_luminance(a), relative_luminance(b))
+}
+
+fn contrast_from_luminance(l1: f32, l2: f32) -> f32 {
+    let (lighter, darker) = if l1 >= l2 { (l1, l2) } else { (l2, l1) };
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+/// Shift foreground lightness only when needed so text clears `min_contrast`
+/// against `bg`, preserving original hue and saturation.
+pub fn ensure_minimum_contrast(fg: Hsla, bg: Hsla, min_contrast: f32) -> Hsla {
+    if min_contrast <= 1.0 {
+        return fg;
+    }
+    let bg_lum = relative_luminance(bg);
+    let fg_lum = relative_luminance(fg);
+    if contrast_from_luminance(fg_lum, bg_lum) >= min_contrast {
+        return fg;
+    }
+
+    // Light backgrounds darken low-contrast text; dark backgrounds lighten it.
+    let dark_max = contrast_from_luminance(0.0, bg_lum);
+    let light_max = contrast_from_luminance(1.0, bg_lum);
+    let prefer_darker = bg_lum > 0.1791;
+    let go_darker = if prefer_darker {
+        dark_max >= min_contrast || dark_max >= light_max
+    } else {
+        light_max < min_contrast && dark_max > light_max
+    };
+
+    let (mut lo, mut hi) = if go_darker {
+        (0.0_f32, fg.l.clamp(0.0, 1.0))
+    } else {
+        (fg.l.clamp(0.0, 1.0), 1.0_f32)
+    };
+
+    let mut best = Hsla {
+        l: if go_darker { 0.0 } else { 1.0 },
+        ..fg
+    };
+    for _ in 0..16 {
+        let mid = 0.5 * (lo + hi);
+        let candidate = Hsla { l: mid, ..fg };
+        let meets = contrast_from_luminance(relative_luminance(candidate), bg_lum) >= min_contrast;
+        if meets {
+            best = candidate;
+            if go_darker {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        } else if go_darker {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    best
 }
 
 fn rgb_to_hsla(rgb: Rgb) -> Hsla {
@@ -531,5 +641,54 @@ mod tests {
         };
         let hsla = palette.resolve(Color::Spec(rgb), &colors);
         assert_eq!(hsla.a, 1.0);
+    }
+
+    #[test]
+    fn ensure_minimum_contrast_darkens_pale_text_on_white() {
+        let bg = rgb_to_hsla(Rgb {
+            r: 0xff,
+            g: 0xff,
+            b: 0xff,
+        });
+        let pale_gray = rgb_to_hsla(Rgb {
+            r: 0xd0,
+            g: 0xce,
+            b: 0xc8,
+        });
+        let adjusted = ensure_minimum_contrast(pale_gray, bg, 4.5);
+        assert!(contrast_ratio(adjusted, bg) >= 4.49);
+        assert!(adjusted.l < pale_gray.l);
+    }
+
+    #[test]
+    fn ensure_minimum_contrast_leaves_legible_colors_untouched() {
+        let bg = rgb_to_hsla(Rgb {
+            r: 0xff,
+            g: 0xff,
+            b: 0xff,
+        });
+        let blue = rgb_to_hsla(Rgb {
+            r: 0x32,
+            g: 0x62,
+            b: 0x9b,
+        });
+        let adjusted = ensure_minimum_contrast(blue, bg, 4.5);
+        assert_eq!(adjusted, blue);
+    }
+
+    #[test]
+    fn dim_towards_background_softens_light_theme_text_toward_white() {
+        let bg = rgb_to_hsla(Rgb {
+            r: 0xff,
+            g: 0xff,
+            b: 0xff,
+        });
+        let fg = rgb_to_hsla(Rgb {
+            r: 0x37,
+            g: 0x35,
+            b: 0x2f,
+        });
+        let dimmed = dim_towards_background(fg, bg);
+        assert!(dimmed.l > fg.l && dimmed.l < bg.l);
     }
 }
