@@ -2,18 +2,32 @@
 mod session;
 mod theme;
 
-use crate::{
-    model::TerminalSettings,
-    theme::{Palette, color as rgb},
-};
-use gpui_kit::{
-    assets::IconName,
-    component::button::{Button, ButtonVariants},
-    prelude::FluentBuilder,
-    *,
-};
+use crate::{model::TerminalSettings, theme::Palette};
+use gpui_kit::{assets::IconName, prelude::FluentBuilder, *};
 use gpui_xterm::TerminalView;
 use std::{path::PathBuf, sync::mpsc::TryRecvError, time::Duration};
+
+fn terminal_control(id: impl Into<ElementId>, name: IconName, palette: Palette) -> Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(27.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(5.))
+        .cursor_pointer()
+        .text_color(gpui_kit::rgb(palette.muted))
+        .hover(move |s| {
+            s.bg(gpui_kit::rgb(palette.hover))
+                .text_color(gpui_kit::rgb(palette.text))
+        })
+        .active(move |s| {
+            s.bg(gpui_kit::rgb(palette.pressed))
+                .text_color(gpui_kit::rgb(palette.text))
+        })
+        .child(crate::ui::icon(name))
+}
 
 pub enum TerminalPaneEvent {
     Hide,
@@ -95,7 +109,7 @@ impl TerminalPane {
             next_id: 1,
             directory: dirs::home_dir().expect("user home"),
             settings,
-            palette,
+            palette: theme::terminal_palette(palette),
             _poll: poll,
         }
     }
@@ -119,6 +133,7 @@ impl TerminalPane {
     }
 
     pub fn sync(&mut self, settings: &TerminalSettings, palette: Palette, cx: &mut Context<Self>) {
+        let palette = theme::terminal_palette(palette);
         if self.settings == *settings && self.palette == palette {
             return;
         }
@@ -153,7 +168,6 @@ impl TerminalPane {
         self.next_id += 1;
         let directory = self.directory.clone();
         let settings = self.settings.clone();
-        let is_dark = self.palette.is_dark();
         self.sessions.push(SessionTab {
             id,
             title: format!("终端 {id}"),
@@ -167,7 +181,7 @@ impl TerminalPane {
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { session::start(&settings, &directory, is_dark) })
+                .spawn(async move { session::start(&settings, &directory) })
                 .await;
             let _ = this.update_in(cx, |pane, window, cx| {
                 let Some(index) = pane.sessions.iter().position(|tab| tab.id == id) else {
@@ -245,8 +259,10 @@ impl TerminalPane {
 
 impl Render for TerminalPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = self.palette;
         let tabs = self.sessions.iter().map(|tab| {
             let id = tab.id;
+            let active = self.active == Some(id);
             div()
                 .id(("terminal-tab", id as usize))
                 .flex()
@@ -256,7 +272,18 @@ impl Render for TerminalPane {
                 .h(px(32.))
                 .rounded(px(4.))
                 .cursor_pointer()
-                .when(self.active == Some(id), |row| row.bg(rgb(0xefefed)))
+                .text_color(gpui_kit::rgb(if active {
+                    palette.text
+                } else {
+                    palette.muted
+                }))
+                .when(active, |row| row.bg(gpui_kit::rgb(palette.hover)))
+                .when(!active, |row| {
+                    row.hover(move |s| {
+                        s.bg(gpui_kit::rgb(palette.hover))
+                            .text_color(gpui_kit::rgb(palette.text))
+                    })
+                })
                 .child(
                     div()
                         .max_w(px(140.))
@@ -264,7 +291,7 @@ impl Render for TerminalPane {
                         .child(tab.title.clone()),
                 )
                 .child(
-                    crate::ui::control(("close-terminal", id as usize), IconName::Close)
+                    terminal_control(("close-terminal", id as usize), IconName::Close, palette)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |pane, _, window, cx| {
                             pane.close(id, window, cx);
@@ -285,8 +312,8 @@ impl Render for TerminalPane {
             .flex_col()
             .min_w_0()
             .min_h_0()
-            .bg(gpui_kit::rgb(self.palette.surface))
-            .text_color(gpui_kit::rgb(self.palette.text))
+            .bg(gpui_kit::rgb(palette.surface))
+            .text_color(gpui_kit::rgb(palette.text))
             .child(
                 div()
                     .flex()
@@ -296,25 +323,21 @@ impl Render for TerminalPane {
                     .px_2()
                     .gap_1()
                     .border_b_1()
-                    .border_color(gpui_kit::rgb(self.palette.border))
+                    .border_color(gpui_kit::rgb(palette.border))
                     .child(div().flex_1().min_w_0().child("终端"))
                     .child(
-                        Button::new("new-terminal")
-                            .ghost()
-                            .compact()
-                            .label("+")
-                            .tooltip("新建终端")
-                            .on_click(
-                                cx.listener(|pane, _, window, cx| pane.new_session(window, cx)),
-                            ),
-                    )
-                    .child(
-                        crate::ui::control("maximize-terminal", IconName::Maximize2).on_click(
-                            cx.listener(|_, _, _, cx| cx.emit(TerminalPaneEvent::ToggleMaximize)),
+                        terminal_control("new-terminal", IconName::Plus, palette).on_click(
+                            cx.listener(|pane, _, window, cx| pane.new_session(window, cx)),
                         ),
                     )
                     .child(
-                        crate::ui::control("hide-terminal", IconName::PanelRightOpen)
+                        terminal_control("maximize-terminal", IconName::Maximize2, palette)
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(TerminalPaneEvent::ToggleMaximize)
+                            })),
+                    )
+                    .child(
+                        terminal_control("hide-terminal", IconName::PanelRightOpen, palette)
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(TerminalPaneEvent::Hide))),
                     ),
             )
@@ -336,7 +359,9 @@ impl Render for TerminalPane {
                         area.child(view)
                     })
                     .when(current.is_none(), |area| {
-                        area.p_4().child("点击“+”新建终端")
+                        area.p_4()
+                            .text_color(gpui_kit::rgb(palette.muted))
+                            .child("点击“+”新建终端")
                     }),
             )
             .when_some(current, |area, tab| {
@@ -346,8 +371,9 @@ impl Render for TerminalPane {
                         .px_2()
                         .py_1()
                         .text_xs()
+                        .text_color(gpui_kit::rgb(palette.muted))
                         .border_t_1()
-                        .border_color(gpui_kit::rgb(self.palette.border))
+                        .border_color(gpui_kit::rgb(palette.border))
                         .child(div().text_ellipsis().child(tab.cwd.display().to_string()))
                         .when(!tab.status.is_empty(), |row| row.child(tab.status.clone())),
                 )

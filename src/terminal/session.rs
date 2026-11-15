@@ -24,11 +24,7 @@ pub struct TerminalProcess {
     job: Option<ProcessJob>,
 }
 
-pub fn start(
-    settings: &TerminalSettings,
-    cwd: &Path,
-    is_dark: bool,
-) -> Result<StartedSession, String> {
+pub fn start(settings: &TerminalSettings, cwd: &Path) -> Result<StartedSession, String> {
     let shell = if settings.shell.trim().is_empty() {
         find_on_path("pwsh.exe").unwrap_or_else(|| {
             PathBuf::from(std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into()))
@@ -55,7 +51,7 @@ pub fn start(
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
     command.env("TERM_PROGRAM", "Folio");
-    command.env("COLORFGBG", if is_dark { "15;0" } else { "0;15" });
+    command.env("COLORFGBG", "15;0");
     let mut child = pair
         .slave
         .spawn_command(command)
