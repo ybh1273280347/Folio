@@ -280,6 +280,8 @@ pub struct MarkdownPane {
     show_annotations_drawer: bool,
     note_input: Entity<InputState>,
     zoom_hud: crate::ui::ZoomHud,
+    translate_error: Option<String>,
+    translate_task: Task<()>,
     _source_subscription: Subscription,
     _visual_subscription: Subscription,
     _math_subscription: Subscription,
@@ -710,6 +712,8 @@ impl MarkdownPane {
             show_annotations_drawer: false,
             note_input,
             zoom_hud: crate::ui::ZoomHud::default(),
+            translate_error: None,
+            translate_task: Task::ready(()),
             _source_subscription: source_subscription,
             _visual_subscription: visual_subscription,
             _math_subscription: math_subscription,
@@ -1340,7 +1344,7 @@ impl MarkdownPane {
 
         let rel_x = (sel_bounds.origin.x - pane_origin.x - px(40.))
             .max(px(12.))
-            .min((pane_size.width - px(520.)).max(px(12.)));
+            .min((pane_size.width - px(560.)).max(px(12.)));
         let raw_y = sel_bounds.origin.y - pane_origin.y - px(48.);
         let rel_y = if raw_y < px(8.) {
             sel_bounds.bottom() - pane_origin.y + px(8.)
@@ -1615,6 +1619,23 @@ impl MarkdownPane {
                 crate::ui::icon(IconName::MessageSquarePlus).into_any_element(),
                 Box::new(cx.listener(|pane, _, window, cx| {
                     pane.create_or_focus_annotation(window, cx);
+                })),
+            ))
+            // 9. Translate via Pot (译)
+            .child(tool_btn(
+                "ft-translate",
+                false,
+                div().text_xs().font_semibold().child("译").into_any_element(),
+                Box::new(cx.listener(|pane, _, window, cx| {
+                    if let Some(text) = pane.visual_editor.read(cx).selected_plain_text() {
+                        pane.translate_task = crate::translate::spawn_pot_translate(
+                            pane,
+                            text,
+                            cx,
+                            |this, err| this.translate_error = err,
+                        );
+                    }
+                    pane.defer_focus_visual(window, cx);
                 })),
             ));
 
@@ -2743,6 +2764,12 @@ impl Render for MarkdownPane {
                                         })),
                                 ),
                         )
+                    })
+                    .when_some(self.translate_error.as_deref(), |area, error| {
+                        area.child(crate::translate::render_error_toast(
+                            "md-translate-error",
+                            error,
+                        ))
                     })
                     .child(
                         div().absolute().inset_0().child(

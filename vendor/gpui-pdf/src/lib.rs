@@ -472,6 +472,10 @@ pub type CreateAnnotationFn = Rc<
 #[cfg(feature = "markup")]
 pub type CreateAreaFn = Rc<dyn Fn(usize, NormRect, SharedString, &mut Window, &mut gpui::App)>;
 
+/// Invoked when the user clicks the translate action on the selection pill. (`markup` feature.)
+#[cfg(feature = "markup")]
+pub type TranslateSelectionFn = Rc<dyn Fn(String, &mut Window, &mut gpui::App)>;
+
 /// The normalized rect spanned by two drag endpoints, in either direction.
 /// (`markup` feature.)
 #[cfg(feature = "markup")]
@@ -655,6 +659,9 @@ pub struct PdfView {
     /// Host action for opening the annotations drawer from the viewer toolbar.
     #[cfg(feature = "markup")]
     on_toggle_annotations: Option<OpenExternalFn>,
+    /// Host action for translating the selected text from the floating selection pill.
+    #[cfg(feature = "markup")]
+    on_translate: Option<TranslateSelectionFn>,
     /// Host-supplied highlight colors `(label, fill)`; the picker shows these and the
     /// label is echoed back on create. Empty → a single default yellow.
     #[cfg(feature = "markup")]
@@ -823,6 +830,8 @@ impl PdfView {
             on_create_annotation: None,
             #[cfg(feature = "markup")]
             on_toggle_annotations: None,
+            #[cfg(feature = "markup")]
+            on_translate: None,
             #[cfg(feature = "markup")]
             palette: Vec::new(),
             #[cfg(feature = "markup")]
@@ -1098,6 +1107,30 @@ impl PdfView {
     #[cfg(feature = "markup")]
     pub fn set_on_toggle_annotations(&mut self, handler: OpenExternalFn) {
         self.on_toggle_annotations = Some(handler);
+    }
+
+    /// Add the host's selection translation action to the floating selection pill.
+    #[cfg(feature = "markup")]
+    pub fn set_on_translate(&mut self, handler: TranslateSelectionFn) {
+        self.on_translate = Some(handler);
+    }
+
+    #[cfg(feature = "markup")]
+    fn extract_selected_text(
+        &self,
+        pg: usize,
+        a: NormPoint,
+        b: NormPoint,
+        is_box: bool,
+    ) -> Option<String> {
+        let Some(TextSlot::Ready(pt)) = self.page_text.get(&pg) else {
+            return None;
+        };
+        if is_box {
+            pt.selected_text_in_rect(norm_rect_between(a, b))
+        } else {
+            pt.selected_text(a, b)
+        }
     }
 
     /// Create a highlight/annotation from drag endpoints `(a, b)` on `pg`.
@@ -2178,7 +2211,7 @@ impl Render for PdfView {
                     if !is_dragging && !rects.is_empty() {
                         let min_x = rects.iter().map(|r| r.x).fold(1.0_f32, f32::min);
                         let min_y = rects.iter().map(|r| r.y).fold(1.0_f32, f32::min);
-                        let pill_left = (min_x * page_width).clamp(8.0, (page_width - 250.0).max(8.0));
+                        let pill_left = (min_x * page_width).clamp(8.0, (page_width - 310.0).max(8.0));
                         let pill_top = if min_y * disp_h > 42.0 {
                             min_y * disp_h - 38.0
                         } else {
@@ -2273,22 +2306,41 @@ impl Render for PdfView {
                                     .hover(|s| s.bg(style.placeholder_bg))
                                     .child("复制")
                                     .on_click(cx.listener(move |this, _, _window, cx| {
-                                        if let Some(TextSlot::Ready(pt)) = this.page_text.get(&pg) {
-                                            let copied = if is_box {
-                                                pt.selected_text_in_rect(norm_rect_between(a, b))
-                                            } else {
-                                                pt.selected_text(a, b)
-                                            };
-                                            if let Some(text) = copied {
-                                                cx.write_to_clipboard(
-                                                    gpui::ClipboardItem::new_string(text),
-                                                );
-                                            }
+                                        if let Some(text) =
+                                            this.extract_selected_text(pg, a, b, is_box)
+                                        {
+                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                                text,
+                                            ));
                                         }
                                         this.text_sel = None;
                                         cx.notify();
                                     })),
                             );
+                        if let Some(translate) = self.on_translate.clone() {
+                            pill = pill.child(
+                                div()
+                                    .id(SharedString::from(format!("pdf-sel-translate-{i}")))
+                                    .px(px(6.0))
+                                    .py(px(2.0))
+                                    .rounded(px(4.0))
+                                    .text_size(px(11.0))
+                                    .text_color(style.header_fg)
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(style.placeholder_bg))
+                                    .child("翻译")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if let Some(text) =
+                                            this.extract_selected_text(pg, a, b, is_box)
+                                            && !text.trim().is_empty()
+                                        {
+                                            translate(text, window, cx);
+                                        }
+                                        this.text_sel = None;
+                                        cx.notify();
+                                    })),
+                            );
+                        }
                         slot = slot.child(pill);
                     }
                 }
