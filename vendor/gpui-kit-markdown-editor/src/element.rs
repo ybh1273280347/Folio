@@ -549,6 +549,7 @@ impl IntoElement for EditorRoot {
 
 pub(crate) struct Prepaint {
     hitbox: Hitbox,
+    grip_hitbox: Hitbox,
 }
 
 impl EditorRoot {
@@ -686,8 +687,15 @@ impl Element for EditorRoot {
         } else {
             child.prepaint(window, cx);
         }
+        // Table row/column grips and whole-table corner handles sit just outside
+        // the editor bounds in the host gutter; give them a matching hitbox.
+        let grip_bounds = Bounds::from_corners(
+            point(bounds.left() - px(24.), bounds.top() - px(20.)),
+            point(bounds.right() + px(12.), bounds.bottom() + px(12.)),
+        );
         Prepaint {
             hitbox: window.insert_hitbox(bounds, HitboxBehavior::Normal),
+            grip_hitbox: window.insert_hitbox(grip_bounds, HitboxBehavior::Normal),
         }
     }
 
@@ -877,12 +885,15 @@ impl Element for EditorRoot {
 
         // Mouse: handlers update the entity at event time, never in paint.
         let hitbox = prepaint.hitbox.clone();
+        let grip_hitbox = prepaint.grip_hitbox.clone();
         let entity = self.state.clone();
         window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-            if phase != DispatchPhase::Bubble
-                || event.button != MouseButton::Left
-                || !hitbox.is_hovered(window)
-            {
+            if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
+                return;
+            }
+            let in_editor = hitbox.is_hovered(window);
+            let in_grip_gutter = grip_hitbox.is_hovered(window);
+            if !in_editor && !in_grip_gutter {
                 return;
             }
             // A table grip selects its row / column and opens the menu;
@@ -899,6 +910,9 @@ impl Element for EditorRoot {
                 let focus = entity.read(cx).focus_handle.clone();
                 window.focus(&focus, cx);
                 cx.stop_propagation();
+                return;
+            }
+            if !in_editor && entity.read(cx).block_handle_at(event.position).is_none() {
                 return;
             }
             // A task checkbox toggles without moving the caret or starting
