@@ -10,12 +10,16 @@ use std::{path::PathBuf, sync::{Arc, Mutex, mpsc::TryRecvError}, time::Duration}
 #[derive(Clone)]
 pub struct DraggedPaths(pub Vec<PathBuf>, pub String);
 
+#[derive(Clone)]
+pub struct DraggedFolder(pub String, pub String);
+
 pub struct PathsPreview {
     pub paths: Vec<PathBuf>,
     pub offset: Point<Pixels>,
     pub font: SharedString,
     pub font_size: u8,
     pub trash_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
+    pub is_folder: bool,
 }
 
 impl Render for PathsPreview {
@@ -34,7 +38,7 @@ impl Render for PathsPreview {
                     .children(self.paths.iter().take(4).map(|path| {
                         let name = path.file_name().expect("file has name").to_string_lossy().into_owned();
                         div().flex().items_center().gap_2().min_w_0()
-                            .child(crate::ui::file_icon(&name, false, false))
+                            .child(if self.is_folder { div().child(crate::ui::icon(IconName::Folder)).into_any_element() } else { crate::ui::file_icon(&name, false, false) })
                             .child(div().min_w_0().text_ellipsis().child(name))
                     }))
                     .when(count > 4, |preview| preview.child(div().text_color(gpui_kit::rgb(0x787774)).child(format!("还有 {} 项", count - 4)))),

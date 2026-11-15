@@ -243,6 +243,7 @@ pub struct Workspace {
     tree_row_bounds: Arc<Mutex<BTreeMap<String, (bool, Bounds<Pixels>)>>>,
     tree_drag: Option<TreeSelectionDrag>,
     trash_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
+    dragging_tree_item: Arc<AtomicBool>,
     trash_entries: Vec<crate::trash::TrashEntry>,
     show_trash: bool,
     next_trash_cleanup: Instant,
@@ -496,6 +497,7 @@ impl Workspace {
             tree_row_bounds: Arc::new(Mutex::new(BTreeMap::new())),
             tree_drag: None,
             trash_bounds: Arc::new(Mutex::new(None)),
+            dragging_tree_item: Arc::new(AtomicBool::new(false)),
             trash_entries: Vec::new(),
             show_trash: false,
             next_trash_cleanup: Instant::now(),
@@ -2250,6 +2252,18 @@ impl Workspace {
         self.new_markdown_in(folder.as_deref(), window, cx)
     }
 
+    fn new_default_markdown(&mut self, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
+        if self.config.active_workspace != Some(WorkspaceLocation::Default) {
+            if self.cancellation.is_some() || self.batch_running { return Ok(()); }
+            if !self.confirm_drafts(window, cx, |app, window, cx| {
+                if let Err(error) = app.new_default_markdown(window, cx) { app.report(error, cx); }
+            }) { return Ok(()); }
+            self.select_project("__folio_default", window, cx)?;
+        }
+        self.show_trash = false;
+        self.new_markdown_in(None, window, cx)
+    }
+
     fn new_markdown_in(
         &mut self,
         folder: Option<&str>,
@@ -3108,6 +3122,8 @@ impl Workspace {
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
+        if !cx.has_active_drag() { self.dragging_tree_item.store(false, Ordering::Relaxed); }
+        let dragging_tree_item = cx.has_active_drag() && self.dragging_tree_item.load(Ordering::Relaxed);
         let user_project = self.config.active_id.is_some();
         let projects = self.config.projects.iter().map(|project| {
             let id = project.id.clone();
@@ -3127,9 +3143,10 @@ impl Workspace {
                 .mx_2()
                 .px_2()
                 .h(px(32.))
+                .flex_shrink_0()
                 .rounded(px(4.))
                 .cursor_pointer()
-                .when(Some(&project.id) == self.config.active_id.as_ref(), |row| {
+                .when(!self.show_trash && Some(&project.id) == self.config.active_id.as_ref(), |row| {
                     row.bg(rgb(0xe8e7e4))
                 })
                 .hover(|style| style.bg(rgb(0xefefed)))
@@ -3376,8 +3393,18 @@ impl Workspace {
                     let deleted = path.clone();
                     let row_deleted = path.clone();
                     let app = cx.entity();
+                    let folder_drag = crate::terminal::DraggedFolder(path.clone(), self.directory_workspace().expect("folder has project").id.clone());
+                    let folder_path = full.clone();
+                    let folder_font: SharedString = if self.settings.interface_font.is_empty() { "Segoe UI".into() } else { self.settings.interface_font.clone().into() };
+                    let folder_font_size = self.settings.interface_font_size;
+                    let trash_bounds = self.trash_bounds.clone();
+                    let dragging = self.dragging_tree_item.clone();
                     return div()
                         .id(SharedString::from(format!("folder-{path}")))
+                        .on_drag(folder_drag, move |_, offset, _, cx| {
+                            dragging.store(true, Ordering::Relaxed);
+                            cx.new(|_| crate::terminal::PathsPreview { paths: vec![folder_path.clone()], offset, font: folder_font.clone(), font_size: folder_font_size, trash_bounds: trash_bounds.clone(), is_folder: true })
+                        })
                         .flex()
                         .h(px(29.))
                         .items_center()
@@ -3554,10 +3581,12 @@ impl Workspace {
                 let preview_font_size = self.settings.interface_font_size;
                 let drag_project = self.directory_workspace().expect("file has project").id.clone();
                 let trash_bounds = self.trash_bounds.clone();
+                let dragging = self.dragging_tree_item.clone();
                 div()
                     .id(SharedString::from(format!("file-{}", file.path)))
                     .on_drag(crate::terminal::DraggedPaths(dragged_paths, drag_project), move |paths, offset, _, cx| {
-                        cx.new(|_| crate::terminal::PathsPreview { paths: paths.0.clone(), offset, font: preview_font.clone(), font_size: preview_font_size, trash_bounds: trash_bounds.clone() })
+                        dragging.store(true, Ordering::Relaxed);
+                        cx.new(|_| crate::terminal::PathsPreview { paths: paths.0.clone(), offset, font: preview_font.clone(), font_size: preview_font_size, trash_bounds: trash_bounds.clone(), is_folder: false })
                     })
                     .flex()
                     .items_center()
@@ -3794,11 +3823,19 @@ impl Workspace {
             .h(px(32.))
             .rounded(px(4.))
             .cursor_pointer()
-            .when(self.config.active_workspace == Some(WorkspaceLocation::Default), |row| row.bg(rgb(0xe8e7e4)))
+            .when(!self.show_trash && self.config.active_workspace == Some(WorkspaceLocation::Default), |row| row.bg(rgb(0xe8e7e4)))
             .hover(|style| style.bg(rgb(0xefefed)))
-            .child(crate::ui::icon(IconName::FileText))
+            .child(crate::ui::icon(IconName::NotebookPen))
             .child(div().flex_1().child("默认空间"))
+            .child(crate::ui::control("default-new-markdown", IconName::Plus)
+                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("在默认空间新建 Markdown").build(window, cx))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|app, _, window, cx| {
+                    cx.stop_propagation();
+                    if let Err(error) = app.new_default_markdown(window, cx) { app.report(error, cx); }
+                })))
             .on_click(cx.listener(|app, _, window, cx| { app.show_trash = false; app.switch_to_default(window, cx); cx.notify(); }));
+        let loose_count = if self.directory_workspace().is_none() { self.tabs.len() } else { self.workspace_sessions.get("loose").map_or(0, |session| session.tabs.len()) };
         div()
             .w_full()
             .min_w_0()
@@ -3811,48 +3848,14 @@ impl Workspace {
             .bg(rgb(0xfbfbfa))
             .border_r_1()
             .border_color(rgb(BORDER))
-            .child({
-                let bounds = self.trash_bounds.clone();
-                div().id("trash-entry").relative().flex().items_center().gap_2()
-                    .mx_2().mt_2().px_2().h(px(32.)).rounded(px(4.)).cursor_pointer()
-                    .when(self.show_trash, |row| row.bg(rgb(0xe8e7e4)))
-                    .hover(|style| style.bg(rgb(0xefefed)))
-                    .drag_over::<crate::terminal::DraggedPaths>(|style, _, _, _| style.bg(rgb(0xdde9f6)))
-                    .child(crate::ui::icon(IconName::Trash))
-                    .child("废纸篓")
-                    .child(canvas(move |area, _, _| { *bounds.lock().expect("trash bounds") = Some(area); }, |_, _, _, _| {}).absolute().size_full())
-                    .on_click(cx.listener(|app, _, _, cx| { app.show_trash = true; cx.notify(); }))
-                    .on_drop(cx.listener(|app, dragged: &crate::terminal::DraggedPaths, window, cx| {
-                        let Some(project) = app.directory_workspace() else { return; };
-                        if project.id != dragged.1 { app.report("来源项目已切换，请重新拖动。", cx); return; }
-                        let root = PathBuf::from(&project.folder);
-                        let paths: Vec<String> = dragged.0.iter().filter_map(|path| path.strip_prefix(&root).ok().map(|path| path.to_string_lossy().replace('\\', "/"))).collect();
-                        if paths.len() == dragged.0.len() { app.confirm_trash(paths, window, cx); }
-                    }))
-            })
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .px_4()
-                    .pt_4()
-                    .pb_2()
-                    .text_xs()
-                    .text_color(rgb(MUTED))
-                    .child("项目")
-                    .child(button("add-project-icon", "+").on_click(
-                        cx.listener(|app, _, window, cx| app.add_project(&OpenProject, window, cx)),
-                    )),
-            )
-            .child(default_space)
+            .child(div().pt_2().child(default_space))
             .child(div().id("loose-files").flex().items_center().gap_2()
                 .mx_2().px_2().h(px(32.)).rounded(px(4.)).cursor_pointer()
-                .text_sm()
-                .when(self.directory_workspace().is_none(), |row| row.bg(rgb(0xe8e7e4)))
+                .when(!self.show_trash && self.directory_workspace().is_none(), |row| row.bg(rgb(0xe8e7e4)))
                 .hover(|style| style.bg(rgb(0xefefed)))
                 .child(crate::ui::icon(IconName::Files))
-                .child("独立文件")
+                .child(div().flex_1().child("独立文件"))
+                .when(loose_count > 0, |row| row.pr_1().child(div().text_xs().text_color(rgb(MUTED)).child(loose_count.to_string())))
                 .on_click(cx.listener(|app, _, window, cx| {
                 app.show_trash = false;
                 if app.directory_workspace().is_none() { return; }
@@ -3861,16 +3864,14 @@ impl Workspace {
                 }) { return; }
                 if let Err(error) = app.select_loose_files(window, cx) { app.report(error, cx); }
             })))
-            .children(projects)
-            .child(
-                button("add-project", "+  添加本地项目")
-                    .mx_2()
-                    .mt_1()
-                    .text_color(rgb(MUTED))
-                    .on_click(
-                        cx.listener(|app, _, window, cx| app.add_project(&OpenProject, window, cx)),
-                    ),
-            )
+            .child(div().pt_5().pb_2().px_4().text_xs().text_color(rgb(MUTED)).child("项目"))
+            .child(div().id("project-list-scroll").flex().flex_col().flex_1().min_h_0().overflow_y_scroll()
+                .children(projects)
+                .child(div().id("add-project").flex().flex_shrink_0().items_center().gap_2().mx_2().px_2().h(px(32.))
+                    .rounded(px(4.)).cursor_pointer().text_color(rgb(MUTED))
+                    .hover(|style| style.bg(rgb(0xefefed)))
+                    .child(crate::ui::icon(IconName::Plus)).child("添加本地项目")
+                    .on_click(cx.listener(|app, _, window, cx| app.add_project(&OpenProject, window, cx)))))
             .child(
                 div()
                     .flex()
@@ -4085,6 +4086,35 @@ impl Workspace {
                         cx.notify();
                     })),
             )
+            .child(div().mx_4().h(px(1.)).bg(rgb(0xeae9e6)))
+            .child({
+                let bounds = self.trash_bounds.clone();
+                div().id("trash-entry").relative().flex().items_center().gap_2()
+                    .mx_2().my_2().px_2().h(px(32.)).rounded(px(4.)).cursor_pointer()
+                    .when(self.show_trash, |row| row.bg(rgb(0xe8e7e4)))
+                    .when(dragging_tree_item, |row| row.bg(rgb(0xf0f4fa)))
+                    .drag_over::<crate::terminal::DraggedPaths>(|style, _, _, _| style.bg(rgb(0xdde9f6)))
+                    .drag_over::<crate::terminal::DraggedFolder>(|style, _, _, _| style.bg(rgb(0xdde9f6)))
+                    .child(crate::ui::icon(IconName::Trash))
+                    .child("废纸篓")
+                    .child(canvas(move |area, _, _| { *bounds.lock().expect("trash bounds") = Some(area); }, |_, _, _, _| {}).absolute().size_full())
+                    .on_click(cx.listener(|app, _, _, cx| { app.show_trash = true; cx.notify(); }))
+                    .on_drop(cx.listener(|app, dragged: &crate::terminal::DraggedPaths, window, cx| {
+                        let Some(project) = app.directory_workspace() else { return; };
+                        if project.id != dragged.1 { app.report("来源项目已切换，请重新拖动。", cx); return; }
+                        let root = PathBuf::from(&project.folder);
+                        let paths: Vec<String> = dragged.0.iter().filter_map(|path| path.strip_prefix(&root).ok().map(|path| path.to_string_lossy().replace('\\', "/"))).collect();
+                        if paths.len() == dragged.0.len() { app.confirm_trash(paths, window, cx); }
+                    }))
+                    .on_drop(cx.listener(|app, dragged: &crate::terminal::DraggedFolder, window, cx| {
+                        if app.directory_workspace().is_none_or(|project| project.id != dragged.1) {
+                            app.report("来源项目已切换，请重新拖动。", cx);
+                            return;
+                        }
+                        // A folder is a projection of supported files; its other contents remain in place.
+                        app.delete_folder(&dragged.0, window, cx);
+                    }))
+            })
             .into_any_element()
     }
 
