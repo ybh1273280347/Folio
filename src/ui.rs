@@ -286,7 +286,26 @@ icon_assets!(
         Globe,
         ExternalLink,
         ChevronLeft,
-        ChevronRight
+        ChevronRight,
+        ChevronUp,
+        ChevronDown,
+        Plus,
+        Close,
+        Eye,
+        EyeOff,
+        Terminal,
+        SquareTerminal,
+        Bot,
+        Brain,
+        Cpu,
+        Wrench,
+        FileText,
+        FileDiff,
+        SendHorizontal,
+        Square,
+        Clock,
+        RefreshCw,
+        ShieldAlert
     ]
 );
 

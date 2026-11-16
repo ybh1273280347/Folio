@@ -14,6 +14,11 @@ use gpui_kit::*;
 use gpui_pdf::{Highlight, NormRect, PdfStyle, PdfView};
 use std::{path::PathBuf, rc::Rc};
 
+pub enum PdfPaneEvent {
+    AskAi { path: PathBuf, text: String },
+}
+impl EventEmitter<PdfPaneEvent> for PdfPane {}
+
 pub struct PdfPane {
     path: PathBuf,
     view: Option<Entity<PdfView>>,
@@ -134,6 +139,7 @@ impl PdfPane {
         let weak_click = weak.clone();
         let weak_drawer = weak.clone();
         let weak_translate = weak.clone();
+        let weak_ask_ai = weak.clone();
         let highlights = self.build_highlights();
         view.update(cx, |v, cx| {
             v.fit_width(cx);
@@ -195,6 +201,17 @@ impl PdfPane {
                                 cx,
                                 |this| &mut this.translate,
                             );
+                        });
+                    }
+                });
+            }));
+            v.set_on_ask_ai(Rc::new(move |text, window, cx| {
+                let weak_ask_ai = weak_ask_ai.clone();
+                window.defer(cx, move |_, cx| {
+                    if let Some(pane) = weak_ask_ai.upgrade() {
+                        pane.update(cx, |pane, cx| {
+                            let path = pane.path.clone();
+                            cx.emit(PdfPaneEvent::AskAi { path, text });
                         });
                     }
                 });

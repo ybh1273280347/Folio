@@ -1,12 +1,13 @@
 //! Workspace orchestration: disk-backed drafts, project actions and asynchronous builds.
 //! Disk revisions arbitrate external edits; conflicted drafts never autosave over them.
+use crate::ai::{AiPane, AiPaneEvent, AttachedFile};
 use crate::theme::color as rgb;
 use crate::html::{HtmlPane, HtmlPaneEvent};
 use crate::markdown::{MarkdownEvent, MarkdownPane};
 use crate::math::MathRenderer;
-use crate::pdf::PdfPane;
+use crate::pdf::{PdfPane, PdfPaneEvent};
 use crate::preferences::{Preferences, SettingsChanged};
-use crate::terminal::{TerminalPane, TerminalPaneEvent};
+use crate::terminal::TerminalPane;
 use crate::{
     compiler, files,
     model::{
@@ -196,6 +197,12 @@ pub fn bind_shortcuts(settings: &AppSettings, cx: &mut App) {
     );
     cx.bind_keys(bindings);
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RightDrawerTab {
+    Terminal,
+    Ai,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Dialog {
     Drafts,
@@ -276,8 +283,10 @@ pub struct Workspace {
     logs: String,
     show_logs: bool,
     terminal: Entity<TerminalPane>,
+    ai: Entity<AiPane>,
     show_terminal: bool,
     terminal_maximized: bool,
+    right_drawer_tab: RightDrawerTab,
     preview: Option<PathBuf>,
     build_pdf: Option<Entity<PdfPane>>,
     pdf_panes: BTreeMap<String, Entity<PdfPane>>,
@@ -415,20 +424,18 @@ impl Workspace {
         math.update(cx, |renderer, cx| renderer.set_appearance(&settings, cx));
         let preferences = cx.new(|cx| Preferences::new(settings.clone(), window, cx));
         let terminal = cx.new(|cx| TerminalPane::new(settings.terminal.clone(), settings.theme.palette, cx));
-        cx.subscribe_in(&terminal, window, |app, _, event: &TerminalPaneEvent, window, cx| {
-            match event {
-                TerminalPaneEvent::Hide => {
-                    app.show_terminal = false; app.terminal_maximized = false;
-                    app.terminal.update(cx, |pane, _| pane.hide());
-                    app.focus.focus(window, cx);
-                }
-                TerminalPaneEvent::ToggleMaximize => app.terminal_maximized = !app.terminal_maximized,
+        let initial_dir = dirs::home_dir().expect("user home");
+        let ai = cx.new(|cx| AiPane::new(initial_dir, settings.clone(), window, cx));
+        cx.subscribe_in(&ai, window, |app, _, event: &AiPaneEvent, window, cx| match event {
+            AiPaneEvent::OpenFile(path) => {
+                app.open_path_from_ai(path, window, cx);
             }
-            cx.notify();
-        }).detach();
+        })
+        .detach();
         cx.subscribe_in(&preferences, window, |app, _, event: &SettingsChanged, window, cx| {
             app.settings = event.0.clone();
             app.terminal.update(cx, |pane, cx| pane.sync(&app.settings.terminal, app.settings.theme.palette, cx));
+            app.ai.update(cx, |pane, cx| pane.sync_settings(&app.settings, cx));
             for document in app.documents.values() {
                 document.editor.update(cx, |editor, cx| {
                     editor.set_line_number(app.settings.show_line_numbers, window, cx);
@@ -531,8 +538,10 @@ impl Workspace {
             logs: String::new(),
             show_logs: false,
             terminal,
+            ai,
             show_terminal: false,
             terminal_maximized: false,
+            right_drawer_tab: RightDrawerTab::Terminal,
             preview: None,
             build_pdf: None,
             pdf_panes: BTreeMap::new(),
@@ -584,17 +593,121 @@ impl Workspace {
             .unwrap_or_else(|| dirs::home_dir().expect("user home"))
     }
 
-    fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_terminal = !self.show_terminal;
-        self.terminal_maximized = false;
-        if self.show_terminal {
-            let directory = self.terminal_directory();
-            self.terminal.update(cx, |pane, cx| pane.open(directory, window, cx));
-        } else {
+    fn toggle_right_drawer(&mut self, tab: RightDrawerTab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.show_terminal && self.right_drawer_tab == tab {
+            self.show_terminal = false;
+            self.terminal_maximized = false;
             self.terminal.update(cx, |pane, _| pane.hide());
             self.focus.focus(window, cx);
+        } else {
+            self.show_terminal = true;
+            self.terminal_maximized = false;
+            self.right_drawer_tab = tab;
+            let directory = self.terminal_directory();
+            match tab {
+                RightDrawerTab::Terminal => {
+                    self.terminal.update(cx, |pane, cx| pane.open(directory, window, cx));
+                }
+                RightDrawerTab::Ai => {
+                    self.terminal.update(cx, |pane, _| pane.hide());
+                    self.ai.update(cx, |pane, cx| {
+                        pane.set_directory(directory, cx);
+                        pane.open(window, cx);
+                    });
+                }
+            }
         }
         cx.notify();
+    }
+
+    fn focused_attached_file(&self) -> Option<AttachedFile> {
+        let key = self.focused_markdown.as_deref().unwrap_or(&self.active);
+        let clean_key = key.strip_prefix("reading:").unwrap_or(key);
+        if clean_key.is_empty() {
+            return None;
+        }
+        let path = self.document_path(clean_key);
+        let display = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| clean_key.to_owned());
+        Some(AttachedFile { display, path })
+    }
+
+    fn open_ai_with_selection(
+        &mut self,
+        source: String,
+        file_path: Option<PathBuf>,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_terminal = true;
+        self.right_drawer_tab = RightDrawerTab::Ai;
+        self.terminal.update(cx, |pane, _| pane.hide());
+        let directory = self.terminal_directory();
+        let attached = file_path.map(|path| AttachedFile {
+            display: path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| source.clone()),
+            path,
+        });
+        self.ai.update(cx, |pane, cx| {
+            pane.set_directory(directory, cx);
+            pane.attach_selection(source, attached, text, window, cx);
+        });
+        cx.notify();
+    }
+
+    fn open_path_from_ai(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let Ok(resolved) = dunce::canonicalize(path) else {
+            self.report(format!("找不到文件：{}", path.display()), cx);
+            return;
+        };
+        if let Some(project) = self.directory_workspace()
+            && let Ok(canonical_root) = dunce::canonicalize(&project.folder)
+            && let Ok(relative) = resolved.strip_prefix(&canonical_root)
+            && files::is_relevant(&resolved)
+        {
+            let key = relative.to_string_lossy().replace('\\', "/");
+            let file = ProjectFile {
+                kind: Self::file_kind(&resolved),
+                path: key,
+            };
+            if let Err(error) = self.open_file(&file, window, cx) {
+                self.report(error, cx);
+            }
+            return;
+        }
+        if files::is_relevant(&resolved) {
+            match self
+                .prepare_standalone_file(&resolved)
+                .and_then(|file| self.open_file(&file, window, cx))
+            {
+                Ok(()) => {}
+                Err(error) => self.report(error, cx),
+            }
+        }
+    }
+
+    fn new_pdf_pane(
+        &self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<PdfPane> {
+        let pane = cx.new(|cx| PdfPane::new(path, window, cx));
+        cx.subscribe_in(&pane, window, |app, _, event: &PdfPaneEvent, window, cx| {
+            let PdfPaneEvent::AskAi { path, text } = event;
+            let source = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "PDF".to_owned());
+            app.open_ai_with_selection(source, Some(path.clone()), text.clone(), window, cx);
+        })
+        .detach();
+        pane
     }
 
     // Save only navigation state; documents themselves remain authoritative on disk.
@@ -769,7 +882,7 @@ impl Workspace {
             .join(&project.id)
             .join("preview.pdf");
         if previous_pdf.exists() {
-            self.build_pdf = Some(cx.new(|cx| PdfPane::new(previous_pdf.clone(), window, cx)));
+            self.build_pdf = Some(self.new_pdf_pane(previous_pdf.clone(), window, cx));
             self.preview = Some(previous_pdf);
         }
         let session = self.workspace_sessions.get(id).cloned().unwrap_or_default();
@@ -1235,7 +1348,7 @@ impl Workspace {
         if file.path.to_lowercase().ends_with(".pdf") && !self.pdf_panes.contains_key(&file.path) {
             self.pdf_panes.insert(
                 file.path.clone(),
-                cx.new(|cx| PdfPane::new(full.clone(), window, cx)),
+                self.new_pdf_pane(full.clone(), window, cx),
             );
         }
         if Self::is_html_path(&file.path) && !self.html_panes.contains_key(&file.path) {
@@ -1362,6 +1475,13 @@ impl Workspace {
                 }
                 MarkdownEvent::OpenLink(url) => {
                     app.open_markdown_link(&full, url, window, cx);
+                }
+                MarkdownEvent::AskAi(text) => {
+                    let source = full
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| file.clone());
+                    app.open_ai_with_selection(source, Some(full.clone()), text.clone(), window, cx);
                 }
             }
             cx.notify();
@@ -1748,7 +1868,7 @@ impl Workspace {
                 .map(|root| root.join(file))
                 .unwrap_or_else(|| PathBuf::from(file));
             self.pdf_panes
-                .insert(key, cx.new(|cx| PdfPane::new(full, window, cx)));
+                .insert(key, self.new_pdf_pane(full, window, cx));
         }
         if !changed.is_empty() {
             for pane in self.html_panes.values() {
@@ -1919,7 +2039,7 @@ impl Workspace {
                             if let Some(path) = result.preview {
                                 self.release_build_pdf(window, cx);
                                 self.build_pdf =
-                                    Some(cx.new(|cx| PdfPane::new(path.clone(), window, cx)));
+                                    Some(self.new_pdf_pane(path.clone(), window, cx));
                                 self.preview = Some(path);
                             }
                             self.show_logs = result.status == BuildStatus::Failed;
@@ -2240,7 +2360,7 @@ impl Workspace {
             let new_key = if reading { format!("reading:{renamed}") } else { renamed.clone() };
             if self.pdf_panes.contains_key(&old_key) {
                 self.release_pdf_pane(&old_key, window, cx);
-                self.pdf_panes.insert(new_key.clone(), cx.new(|cx| PdfPane::new(full.clone(), window, cx)));
+                self.pdf_panes.insert(new_key.clone(), self.new_pdf_pane(full.clone(), window, cx));
             }
             if self.html_panes.contains_key(&old_key) {
                 self.release_html_pane(&old_key, window, cx);
@@ -2447,13 +2567,13 @@ impl Workspace {
                     if self.tabs.contains(&renamed) {
                         self.pdf_panes.insert(
                             renamed.clone(),
-                            cx.new(|cx| PdfPane::new(root.join(&renamed), window, cx)),
+                            self.new_pdf_pane(root.join(&renamed), window, cx),
                         );
                     }
                     if self.reading_panes.contains(&renamed) {
                         self.pdf_panes.insert(
                             format!("reading:{renamed}"),
-                            cx.new(|cx| PdfPane::new(root.join(&renamed), window, cx)),
+                            self.new_pdf_pane(root.join(&renamed), window, cx),
                         );
                     }
                 }
@@ -2592,7 +2712,7 @@ impl Workspace {
                         };
                         self.pdf_panes.insert(
                             new_key,
-                            cx.new(|cx| PdfPane::new(root.join(&new_rel), window, cx)),
+                            self.new_pdf_pane(root.join(&new_rel), window, cx),
                         );
                     }
                     let html_keys: Vec<String> = self
@@ -3001,7 +3121,7 @@ impl Workspace {
             let full = self.document_path(&file.path);
             self.pdf_panes.insert(
                 format!("reading:{}", file.path),
-                cx.new(|cx| PdfPane::new(full, window, cx)),
+                self.new_pdf_pane(full, window, cx),
             );
         }
         if Self::is_html_path(&file.path) {
@@ -4312,7 +4432,32 @@ impl Workspace {
                 area = area.child(div().flex_1().min_h_0().child(markdown.clone()));
             } else {
                 let editor = document.editor.clone();
-                area = area.child(div().h(px(32.)).px_3().flex().items_center().justify_end()
+                let ask_editor = document.editor.clone();
+                let ask_path = document.path.clone();
+                let ask_source = document
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "源码".to_owned());
+                area = area.child(div().h(px(32.)).px_3().flex().items_center().justify_end().gap_1()
+                    .child(
+                        Button::new("ask-ai-source")
+                            .ghost()
+                            .compact()
+                            .icon(crate::ui::icon(IconName::Sparkles))
+                            .label("问 AI")
+                            .tooltip("将当前选中内容（或当前文件）发送到 AI 助手")
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                let selected = ask_editor.read(cx).selected_text().to_string();
+                                app.open_ai_with_selection(
+                                    ask_source.clone(),
+                                    Some(ask_path.clone()),
+                                    selected,
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
                     .child(crate::ui::copy_document_button(
                         SharedString::from(format!("copy-document:{}", document.path.display())),
                         move |cx| editor.read(cx).value().to_string(),
@@ -4534,7 +4679,12 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // New sessions follow the active workspace; live shells retain their cwd.
         let directory = self.terminal_directory();
-        self.terminal.update(cx, |pane, _| pane.set_directory(directory));
+        self.terminal.update(cx, |pane, _| pane.set_directory(directory.clone()));
+        let active_file = self.focused_attached_file();
+        self.ai.update(cx, |pane, cx| {
+            pane.set_directory(directory, cx);
+            pane.set_active_file(active_file, cx);
+        });
         let exports: Vec<_> = self
             .markdown_export
             .iter()
@@ -4720,10 +4870,147 @@ impl Render for Workspace {
                     .p_2().gap_2().child(vertical_work_area)))
             })
             .when(self.show_terminal, |body| {
+                let drawer_palette = crate::terminal::theme::terminal_palette(self.settings.theme.palette);
+                let is_term = self.right_drawer_tab == RightDrawerTab::Terminal;
+                let is_ai = self.right_drawer_tab == RightDrawerTab::Ai;
+                let drawer = div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .min_h_0()
+                    .bg(gpui_kit::rgb(drawer_palette.surface))
+                    .text_color(gpui_kit::rgb(drawer_palette.text))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .h(px(38.))
+                            .flex_shrink_0()
+                            .px_2()
+                            .gap_1()
+                            .border_b_1()
+                            .border_color(gpui_kit::rgb(drawer_palette.border))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .id("drawer-tab-terminal")
+                                            .flex()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .px_2p5()
+                                            .h(px(26.))
+                                            .rounded(px(5.))
+                                            .cursor_pointer()
+                                            .text_xs()
+                                            .when(is_term, |s| {
+                                                s.bg(gpui_kit::rgb(drawer_palette.hover))
+                                                    .font_semibold()
+                                                    .text_color(gpui_kit::rgb(drawer_palette.text))
+                                            })
+                                            .when(!is_term, |s| {
+                                                s.text_color(gpui_kit::rgb(drawer_palette.muted))
+                                                    .hover(move |h| h.bg(gpui_kit::rgb(drawer_palette.hover)))
+                                            })
+                                            .on_click(cx.listener(|app, _, window, cx| {
+                                                app.right_drawer_tab = RightDrawerTab::Terminal;
+                                                let dir = app.terminal_directory();
+                                                app.terminal.update(cx, |pane, cx| pane.open(dir, window, cx));
+                                                cx.notify();
+                                            }))
+                                            .child(crate::ui::icon(IconName::Terminal).w(px(13.)).h(px(13.)))
+                                            .child("终端"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("drawer-tab-ai")
+                                            .flex()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .px_2p5()
+                                            .h(px(26.))
+                                            .rounded(px(5.))
+                                            .cursor_pointer()
+                                            .text_xs()
+                                            .when(is_ai, |s| {
+                                                s.bg(gpui_kit::rgb(drawer_palette.hover))
+                                                    .font_semibold()
+                                                    .text_color(gpui_kit::rgb(drawer_palette.text))
+                                            })
+                                            .when(!is_ai, |s| {
+                                                s.text_color(gpui_kit::rgb(drawer_palette.muted))
+                                                    .hover(move |h| h.bg(gpui_kit::rgb(drawer_palette.hover)))
+                                            })
+                                            .on_click(cx.listener(|app, _, window, cx| {
+                                                app.right_drawer_tab = RightDrawerTab::Ai;
+                                                app.terminal.update(cx, |pane, _| pane.hide());
+                                                let dir = app.terminal_directory();
+                                                app.ai.update(cx, |pane, cx| {
+                                                    pane.set_directory(dir, cx);
+                                                    pane.open(window, cx);
+                                                });
+                                                cx.notify();
+                                            }))
+                                            .child(crate::ui::icon(IconName::Sparkles).w(px(13.)).h(px(13.)))
+                                            .child("AI 助手"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        Button::new("drawer-maximize")
+                                            .ghost()
+                                            .compact()
+                                            .w(px(27.))
+                                            .h(px(27.))
+                                            .icon(crate::ui::icon(IconName::Maximize2))
+                                            .tooltip("最大化 / 还原面板")
+                                            .on_click(cx.listener(|app, _, _, cx| {
+                                                app.terminal_maximized = !app.terminal_maximized;
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("drawer-hide")
+                                            .ghost()
+                                            .compact()
+                                            .w(px(27.))
+                                            .h(px(27.))
+                                            .icon(crate::ui::icon(IconName::PanelRightOpen))
+                                            .tooltip("收起右侧面板")
+                                            .on_click(cx.listener(|app, _, window, cx| {
+                                                app.show_terminal = false;
+                                                app.terminal_maximized = false;
+                                                app.terminal.update(cx, |pane, _| pane.hide());
+                                                app.focus.focus(window, cx);
+                                                cx.notify();
+                                            })),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .min_w_0()
+                            .child(if is_ai {
+                                self.ai.clone().into_any_element()
+                            } else {
+                                self.terminal.clone().into_any_element()
+                            }),
+                    );
                 body.child(resizable_panel()
                     .when(!self.terminal_maximized, |panel| panel
                         .size(px(self.settings.terminal.panel_width)).size_range(px(280.)..px(1600.)).fixed())
-                    .child(self.terminal.clone()))
+                    .child(drawer))
             });
         let mut app = div()
             .children(exports)
@@ -4943,8 +5230,11 @@ impl Render for Workspace {
                             cx.notify();
                         })),
                     )
+                    .child(button("toggle-ai", "AI").on_click(cx.listener(|app, _, window, cx| {
+                        app.toggle_right_drawer(RightDrawerTab::Ai, window, cx);
+                    })))
                     .child(button("toggle-terminal", "终端").on_click(cx.listener(|app, _, window, cx| {
-                        app.toggle_terminal(window, cx);
+                        app.toggle_right_drawer(RightDrawerTab::Terminal, window, cx);
                     })))
                     .when(!self.show_build_preview, |header| {
                         header.child(button("show-build-preview", "◫").on_click(cx.listener(

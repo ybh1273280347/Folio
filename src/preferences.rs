@@ -53,6 +53,9 @@ pub struct Preferences {
     terminal_panel_width: Entity<SliderState>,
     baidu_app_id: Entity<InputState>,
     baidu_api_key: Entity<InputState>,
+    ai_base_url: Entity<InputState>,
+    copied_api_field: Option<&'static str>,
+    copied_api_task: Task<()>,
     editing_theme: bool,
     error: Option<String>,
 }
@@ -363,7 +366,7 @@ impl Preferences {
             },
         )
         .detach();
-        let baidu_app_id = cx.new(|cx| InputState::new(window, cx).placeholder("填写百度翻译 APP ID"));
+        let baidu_app_id = cx.new(|cx| InputState::new(window, cx).placeholder("填写百度翻译 APP ID").masked(true));
         if !settings.translate.baidu_app_id.is_empty() {
             baidu_app_id.update(cx, |input, cx| {
                 input.set_value(settings.translate.baidu_app_id.clone(), window, cx);
@@ -376,7 +379,7 @@ impl Preferences {
             }
         })
         .detach();
-        let baidu_api_key = cx.new(|cx| InputState::new(window, cx).placeholder("填写百度翻译密钥（API Key）"));
+        let baidu_api_key = cx.new(|cx| InputState::new(window, cx).placeholder("填写百度翻译密钥（API Key）").masked(true));
         if !settings.translate.baidu_api_key.is_empty() {
             baidu_api_key.update(cx, |input, cx| {
                 input.set_value(settings.translate.baidu_api_key.clone(), window, cx);
@@ -385,6 +388,19 @@ impl Preferences {
         cx.subscribe(&baidu_api_key, |panel, state, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 panel.settings.translate.baidu_api_key = state.read(cx).value().trim().to_owned();
+                panel.changed(cx);
+            }
+        })
+        .detach();
+        let ai_base_url = cx.new(|cx| InputState::new(window, cx).placeholder("http://127.0.0.1:3425"));
+        if !settings.ai.base_url.is_empty() {
+            ai_base_url.update(cx, |input, cx| {
+                input.set_value(settings.ai.base_url.clone(), window, cx);
+            });
+        }
+        cx.subscribe(&ai_base_url, |panel, state, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                panel.settings.ai.base_url = state.read(cx).value().trim().to_owned();
                 panel.changed(cx);
             }
         })
@@ -413,6 +429,9 @@ impl Preferences {
             terminal_panel_width,
             baidu_app_id,
             baidu_api_key,
+            ai_base_url,
+            copied_api_field: None,
+            copied_api_task: Task::ready(()),
             editing_theme: false,
             error: None,
         }
@@ -486,6 +505,9 @@ impl Preferences {
         });
         self.baidu_api_key.update(cx, |input, cx| {
             input.set_value(settings.translate.baidu_api_key.clone(), window, cx);
+        });
+        self.ai_base_url.update(cx, |input, cx| {
+            input.set_value(settings.ai.base_url.clone(), window, cx);
         });
     }
     fn changed(&mut self, cx: &mut Context<Self>) {
@@ -955,15 +977,151 @@ impl Preferences {
             .into_any_element()
     }
 
-    fn render_api(&self, _cx: &mut Context<Self>) -> AnyElement {
+    fn copy_api_value(&mut self, field: &'static str, value: String, cx: &mut Context<Self>) {
+        if value.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(value));
+        self.copied_api_field = Some(field);
+        cx.notify();
+        self.copied_api_task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1500))
+                .await;
+            let _ = this.update(cx, |panel, cx| {
+                if panel.copied_api_field == Some(field) {
+                    panel.copied_api_field = None;
+                    cx.notify();
+                }
+            });
+        });
+    }
+
+    fn render_api(&self, cx: &mut Context<Self>) -> AnyElement {
         let baidu_ready = !self.settings.translate.baidu_app_id.trim().is_empty()
             && !self.settings.translate.baidu_api_key.trim().is_empty();
+        let ai_ready = !self.settings.ai.base_url.trim().is_empty();
+
+        let copy_btn = |id: &'static str, value: String, copied: bool| {
+            div()
+                .id(id)
+                .h(px(28.))
+                .px_2()
+                .rounded(px(5.))
+                .border_1()
+                .border_color(rgb(0xe2e1dd))
+                .bg(rgb(0xffffff))
+                .flex()
+                .items_center()
+                .gap_1()
+                .flex_shrink_0()
+                .cursor_pointer()
+                .text_xs()
+                .text_color(if copied { rgb(0x237844) } else { rgb(0x5b5b58) })
+                .hover(|s| s.bg(rgb(0xf2f3f5)))
+                .active(|s| s.bg(rgb(crate::ui::PRESSED_BG)))
+                .child(
+                    crate::ui::icon(if copied { IconName::Check } else { IconName::Copy })
+                        .w(px(12.))
+                        .h(px(12.)),
+                )
+                .child(if copied { "已复制" } else { "复制" })
+                .on_click(cx.listener(move |panel, _, _, cx| {
+                    panel.copy_api_value(id, value.clone(), cx);
+                }))
+        };
 
         div()
             .flex()
             .flex_col()
             .gap_5()
             .child(div().text_lg().font_semibold().child("API 服务"))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .p_4()
+                    .rounded(px(8.))
+                    .bg(rgb(0xfafaf8))
+                    .border_1()
+                    .border_color(rgb(0xe8e7e3))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0p5()
+                                    .min_w_0()
+                                    .child(div().font_semibold().child("AI 服务（Magpie 网关）"))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0x787774))
+                                            .child("原生 AI 界面经由 pi RPC 调用本地 Magpie 统一网关（免密钥）"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .px_2()
+                                    .py(px(2.))
+                                    .rounded(px(4.))
+                                    .when(ai_ready, |b| {
+                                        b.bg(rgb(0xeaf5ee))
+                                            .border_1()
+                                            .border_color(rgb(0xc6e5d0))
+                                            .text_color(rgb(0x237844))
+                                    })
+                                    .when(!ai_ready, |b| {
+                                        b.bg(rgb(0xfff4e5))
+                                            .border_1()
+                                            .border_color(rgb(0xf2d3a6))
+                                            .text_color(rgb(0x9a5b13))
+                                    })
+                                    .text_xs()
+                                    .child(if ai_ready { "已配置" } else { "请填写地址" }),
+                            ),
+                    )
+                    .child(div().h(px(1.)).bg(rgb(0xebebe6)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .w(px(96.))
+                                    .flex_shrink_0()
+                                    .text_xs()
+                                    .text_color(rgb(0x5b5b58))
+                                    .child("Base URL"),
+                            )
+                            .child(div().flex_1().min_w_0().child(Input::new(&self.ai_base_url)))
+                            .child(copy_btn(
+                                "copy-ai-base-url",
+                                self.settings.ai.base_url.clone(),
+                                self.copied_api_field == Some("copy-ai-base-url"),
+                            ))
+                            .child(
+                                crate::ui::button_secondary("reset-ai-base-url", "默认")
+                                    .px_2()
+                                    .on_click(cx.listener(|panel, _, window, cx| {
+                                        let default_url = crate::model::AiSettings::default().base_url;
+                                        panel.settings.ai.base_url = default_url.clone();
+                                        panel.ai_base_url.update(cx, |input, cx| {
+                                            input.set_value(default_url, window, cx);
+                                        });
+                                        panel.changed(cx);
+                                    })),
+                            ),
+                    ),
+            )
             .child(
                 div()
                     .flex()
@@ -1089,7 +1247,12 @@ impl Preferences {
                                                     .text_color(rgb(0x5b5b58))
                                                     .child("APP ID"),
                                             )
-                                            .child(div().flex_1().min_w_0().child(Input::new(&self.baidu_app_id))),
+                                            .child(div().flex_1().min_w_0().child(Input::new(&self.baidu_app_id).mask_toggle()))
+                                            .child(copy_btn(
+                                                "copy-baidu-app-id",
+                                                self.settings.translate.baidu_app_id.clone(),
+                                                self.copied_api_field == Some("copy-baidu-app-id"),
+                                            )),
                                     )
                                     .child(
                                         div()
@@ -1104,7 +1267,12 @@ impl Preferences {
                                                     .text_color(rgb(0x5b5b58))
                                                     .child("API Key（密钥）"),
                                             )
-                                            .child(div().flex_1().min_w_0().child(Input::new(&self.baidu_api_key))),
+                                            .child(div().flex_1().min_w_0().child(Input::new(&self.baidu_api_key).mask_toggle()))
+                                            .child(copy_btn(
+                                                "copy-baidu-api-key",
+                                                self.settings.translate.baidu_api_key.clone(),
+                                                self.copied_api_field == Some("copy-baidu-api-key"),
+                                            )),
                                     ),
                             ),
                     ),
