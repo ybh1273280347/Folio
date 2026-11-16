@@ -1,6 +1,27 @@
-use gpui::{Hsla, Pixels};
+use gpui::{Div, FontWeight, Hsla, ParentElement as _, Pixels, SharedString, Styled as _, div, px};
 
 use gpui_kit::base::SemanticThemeTokens;
+
+/// Presentation for a `[!name]` / `[!name]-` / `[!name]+` callout block.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CalloutStyle {
+    pub name: SharedString,
+    pub title: SharedString,
+    pub color: Hsla,
+}
+
+/// Shared callout outer frame used by both `[!name]` and foldable `[!name]-`/`[!name]+`.
+pub fn callout_container(color: Hsla) -> Div {
+    div().border_l_2().border_color(color).pl(px(16.))
+}
+
+/// Shared callout badge header used by both `[!name]` and foldable `[!name]-`/`[!name]+`.
+pub fn callout_header(title: SharedString, color: Hsla) -> Div {
+    div()
+        .text_color(color)
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(title)
+}
 
 /// Presentation seam for [`super::BlockEditor`]. Private fields, `with_*`
 /// setters and readers (ARCHITECTURE.md invariant 12). Unset colours are

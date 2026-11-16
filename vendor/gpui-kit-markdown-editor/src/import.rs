@@ -497,23 +497,35 @@ fn import_block_with_folds(node: &BlockNode, defs: &Defs, out: &mut Vec<Detached
                         .is_some_and(|raw| raw.starts_with(&text[..2 + end + 2]))
                     && rest.get(end + 2..).is_some_and(|s| s.chars().next().is_none_or(|ch| matches!(ch, ' ' | '\t' | '\n')))
                 {
-                    let name = rest[..end].into();
+                    let name = rest[..end].to_ascii_lowercase().into();
                     let start = 2 + end + 2;
-                    let title_start = start + text[start..].len() - text[start..].trim_start_matches([' ', '\t']).len();
                     let raw = source.and_then(|s| children.first().and_then(BlockNode::span).and_then(|span| s.get(span.start..span.end))).unwrap();
                     let title_end = if let Some((first_line, _)) = raw.split_once('\n') {
+                        let first_line = first_line.strip_suffix('\r').unwrap_or(first_line);
                         parse_markdown(first_line, extensions.unwrap().clone())
-                            .expect("fold title must parse")
-                            .into_iter().find_map(|node| match node {
-                                BlockNode::Paragraph(p) => Some(import_inline(&p, defs).len()),
-                                _ => None,
-                            }).expect("fold title must be a paragraph")
+                            .ok()
+                            .and_then(|nodes| {
+                                nodes.into_iter().find_map(|node| match node {
+                                    BlockNode::Paragraph(p) => Some(import_inline(&p, defs).len()),
+                                    _ => None,
+                                })
+                            })
+                            .unwrap_or_else(|| text.find('\n').unwrap_or(text.len()))
+                            .clamp(start, text.len())
                     } else {
                         text.len()
                     };
+                    let title_start = start + text[start..title_end].len() - text[start..title_end].trim_start_matches([' ', '\t']).len();
                     let mut blocks = vec![DetachedBlock::paragraph(inline.slice(title_start..title_end))];
                     if title_end < text.len() {
-                        blocks.push(DetachedBlock::paragraph(inline.slice(title_end + 1..text.len())));
+                        let rest_start = if matches!(text.as_bytes().get(title_end), Some(b'\n' | b' ')) {
+                            title_end + 1
+                        } else {
+                            title_end
+                        };
+                        if rest_start < text.len() {
+                            blocks.push(DetachedBlock::paragraph(inline.slice(rest_start..text.len())));
+                        }
                     }
                     blocks.extend(import_children(&children[1..], defs, source, folds, extensions));
                     DetachedBlock::container(BlockKindData::Fold {

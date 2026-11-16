@@ -35,6 +35,7 @@ pub struct BlockEditorModel {
     /// Toolbar marks at a collapsed caret; cleared when the caret moves.
     pub(crate) stored_marks: Option<TextMark>,
     pub(crate) history: BlockUndoManager,
+    pub(crate) callout_names: Vec<SharedString>,
 }
 
 impl BlockEditorModel {
@@ -55,6 +56,10 @@ impl BlockEditorModel {
             selection,
             stored_marks: None,
             history: BlockUndoManager::default(),
+            callout_names: ["note", "tip", "important", "warning", "caution"]
+                .into_iter()
+                .map(SharedString::from)
+                .collect(),
         })
     }
 

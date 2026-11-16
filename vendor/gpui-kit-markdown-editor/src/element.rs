@@ -14,26 +14,70 @@ use std::sync::{Arc, Mutex};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Bounds, CursorStyle, DefiniteLength, DispatchPhase, Edges, Element, ElementId,
-    ElementInputHandler, Entity, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
-    InteractiveElement, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Refineable, RenderOnce, Role, StatefulInteractiveElement,
-    Style, StyleRefinement, Styled, TextStyle, Window, canvas, div, fill, point, px, size,
+    ElementInputHandler, Entity, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
+    InspectorElementId, InteractiveElement, IntoElement, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Refineable, RenderOnce, Role,
+    SharedString, StatefulInteractiveElement, Style, StyleRefinement, Styled, TextStyle, Window,
+    canvas, div, fill, point, px, size,
 };
 
 use super::{cull::Measured, id::BlockId, projection::Snapshot, state::*, style::BlockEditorStyle};
 use crate::support::secondary_modifier;
-use gpui_kit::base::StyledExt as _;
-use gpui_kit::base::text::editor_host::{
-    BlockNode, FlowPosition, collect_leaf_geometry,
+use gpui_kit::{
+    base::{
+        StyledExt as _,
+        text::{
+            MarkdownExtensions,
+            editor_host::{BlockNode, FlowPosition, collect_leaf_geometry},
+        },
+    },
+    component::{Icon, IconName},
 };
 
 type AtomBounds = Arc<Mutex<HashMap<BlockId, Bounds<Pixels>>>>;
 
-/// Add measuring surfaces only to the live view, leaving the source and PDF projection intact.
-/// Recursing with model IDs also covers formulas and rules inside lists and quotes.
-fn with_atom_surfaces(node: &BlockNode, id: BlockId, state: &BlockEditorState) -> BlockNode {
+fn noop_surface() -> BlockNode {
+    BlockNode::Surface {
+        name: "".into(),
+        children: Vec::new(),
+        span: None,
+    }
+}
+
+fn capitalize_alert_name(name: &str) -> SharedString {
+    name.split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut out = String::with_capacity(part.len());
+                    out.extend(first.to_uppercase());
+                    out.push_str(&chars.as_str().to_ascii_lowercase());
+                    out
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .into()
+}
+
+/// Add measuring / fold surfaces to the view without mutating the document model.
+fn with_live_surfaces(
+    node: &BlockNode,
+    id: BlockId,
+    state: &BlockEditorState,
+    include_atoms: bool,
+) -> BlockNode {
     let doc = &state.model.doc;
-    if matches!(doc.get(id).map(|entry| &entry.content), Some(super::document::BlockContent::Atom(_))) {
+    if include_atoms
+        && matches!(
+            doc.get(id).map(|entry| &entry.content),
+            Some(super::document::BlockContent::Atom(_))
+        )
+    {
         return BlockNode::Surface {
             name: format!("editor-atom-{}", id.as_u64()).into(),
             children: vec![node.clone()],
@@ -42,19 +86,38 @@ fn with_atom_surfaces(node: &BlockNode, id: BlockId, state: &BlockEditorState) -
     }
     if matches!(doc.kind(id), Some(super::kind::BlockKindData::Fold { .. })) {
         if let BlockNode::Root { children, .. } = node {
-            let mut children: Vec<_> = children.iter().zip(doc.children(id)).enumerate()
-                .filter(|(ix, _)| *ix == 0 || state.is_fold_open(id))
-                .map(|(_, (child, child_id))| with_atom_surfaces(child, *child_id, state))
-                .collect();
-            if children.len() == 1 && doc.inline(doc.children(id)[0]).is_some_and(|text| text.is_empty()) {
-                // The surface renderer otherwise elides an empty editable title.
-                children.push(BlockNode::List { children: Vec::new(), ordered: false, start: None, span: None });
+            let doc_children = doc.children(id);
+            if let (Some(title_node), Some(&title_id)) = (children.first(), doc_children.first()) {
+                let title_is_empty = doc.inline(title_id).is_some_and(|text| text.is_empty());
+                let mut title_children = Vec::with_capacity(2);
+                if title_is_empty {
+                    // Surface elides children when all of them draw nothing; an empty
+                    // surface sentinel preserves the empty editable title leaf without height.
+                    title_children.push(noop_surface());
+                }
+                title_children.push(with_live_surfaces(title_node, title_id, state, include_atoms));
+                let title_surface = BlockNode::Surface {
+                    name: format!("editor-fold-title-{}", id.as_u64()).into(),
+                    children: title_children,
+                    span: None,
+                };
+                let header_surface = BlockNode::Surface {
+                    name: format!("editor-fold-header-{}", id.as_u64()).into(),
+                    children: vec![title_surface],
+                    span: None,
+                };
+                let mut fold_children = vec![header_surface];
+                if state.is_fold_open(id) {
+                    for (child, child_id) in children[1..].iter().zip(&doc_children[1..]) {
+                        fold_children.push(with_live_surfaces(child, *child_id, state, include_atoms));
+                    }
+                }
+                return BlockNode::Surface {
+                    name: format!("editor-fold-{}", id.as_u64()).into(),
+                    children: fold_children,
+                    span: None,
+                };
             }
-            return BlockNode::Surface {
-                name: format!("editor-fold-{}", id.as_u64()).into(),
-                children,
-                span: None,
-            };
         }
     }
     let mut node = node.clone();
@@ -65,12 +128,168 @@ fn with_atom_surfaces(node: &BlockNode, id: BlockId, state: &BlockEditorState) -
         | BlockNode::List { children, .. }
         | BlockNode::ListItem { children, .. } => {
             for (child, id) in children.iter_mut().zip(doc.children(id)) {
-                *child = with_atom_surfaces(child, *id, state);
+                *child = with_live_surfaces(child, *id, state, include_atoms);
             }
         }
         _ => {}
     }
     node
+}
+
+fn register_fold_surfaces(
+    extensions: &mut MarkdownExtensions,
+    state: &BlockEditorState,
+    fold_bounds: Option<&AtomBounds>,
+    theme: &gpui_kit::base::Theme,
+) {
+    let accent = theme.tokens.colors.primary;
+    let border = theme.tokens.colors.border;
+    let muted = theme.tokens.colors.muted;
+    let is_dark = theme.tokens.colors.background.l < 0.5;
+
+    for (&id, entry) in &state.model.doc.blocks {
+        let super::kind::BlockKindData::Fold { syntax, .. } = &entry.kind else {
+            continue;
+        };
+        let open = state.is_fold_open(id);
+        let has_body = state.model.doc.children(id).len() > 1;
+        let fold_bounds = fold_bounds.cloned();
+
+        match syntax {
+            super::kind::FoldSyntax::Details { .. } => {
+                let card_bg = muted.opacity(if is_dark { 0.45 } else { 0.55 });
+                *extensions = std::mem::take(extensions)
+                    .block_surface(format!("editor-fold-{}", id.as_u64()), move |_, _| {
+                        div()
+                            .relative()
+                            .overflow_hidden()
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(border)
+                            .bg(card_bg)
+                            .pl(px(16.))
+                            .pr(px(14.))
+                            .py(px(10.))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .top_0()
+                                    .bottom_0()
+                                    .w(px(3.))
+                                    .bg(accent),
+                            )
+                    })
+                    .block_surface(format!("editor-fold-header-{}", id.as_u64()), move |_, _| {
+                        let toggle = div()
+                            .relative()
+                            .w(px(20.))
+                            .h(px(22.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(5.))
+                            .bg(accent.opacity(0.10))
+                            .hover(|s| s.bg(accent.opacity(0.20)))
+                            .cursor_pointer()
+                            .child(
+                                Icon::new(if open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .size(px(13.))
+                                .text_color(accent),
+                            )
+                            .when_some(fold_bounds.clone(), |this, bounds| {
+                                this.child(
+                                    canvas(
+                                        move |area, _, _| {
+                                            bounds.lock().expect("fold bounds").insert(id, area);
+                                        },
+                                        |_, _, _, _| {},
+                                    )
+                                    .absolute()
+                                    .inset_0(),
+                                )
+                            });
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_start()
+                            .gap(px(8.))
+                            .when(open && has_body, |this| {
+                                this.pb(px(8.))
+                                    .border_b_1()
+                                    .border_color(border.opacity(0.55))
+                            })
+                            .child(toggle)
+                    })
+                    .block_surface(format!("editor-fold-title-{}", id.as_u64()), move |_, _| {
+                        div().flex_1().min_w_0().font_weight(FontWeight::MEDIUM)
+                    });
+            }
+            super::kind::FoldSyntax::Alert { name } => {
+                let key = name.to_ascii_lowercase();
+                let (badge_title, color) = state
+                    .callout_styles
+                    .get(key.as_str())
+                    .map(|style| (style.title.clone(), style.color))
+                    .unwrap_or_else(|| (capitalize_alert_name(name), accent));
+                *extensions = std::mem::take(extensions)
+                    .block_surface(format!("editor-fold-{}", id.as_u64()), move |_, _| {
+                        super::style::callout_container(color)
+                    })
+                    .block_surface(format!("editor-fold-header-{}", id.as_u64()), move |_, _| {
+                        let trigger = div()
+                            .relative()
+                            .flex_shrink_0()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.))
+                            .rounded(px(4.))
+                            .px(px(4.))
+                            .ml(px(-4.))
+                            .py(px(1.))
+                            .hover(|s| s.bg(color.opacity(0.10)))
+                            .cursor_pointer()
+                            .child(
+                                Icon::new(if open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .size(px(13.))
+                                .text_color(color),
+                            )
+                            .child(super::style::callout_header(badge_title.clone(), color))
+                            .when_some(fold_bounds.clone(), |this, bounds| {
+                                this.child(
+                                    canvas(
+                                        move |area, _, _| {
+                                            bounds.lock().expect("fold bounds").insert(id, area);
+                                        },
+                                        |_, _, _, _| {},
+                                    )
+                                    .absolute()
+                                    .inset_0(),
+                                )
+                            });
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(trigger)
+                    })
+                    .block_surface(format!("editor-fold-title-{}", id.as_u64()), move |_, _| {
+                        div().flex_1().min_w_0()
+                    });
+            }
+        }
+    }
 }
 
 /// Items per cull unit of a long top-level list.
@@ -89,13 +308,27 @@ impl BlockEditor {
     /// Use the editor's snapshot and node renderer without selection, caret or viewport culling.
     pub fn document(state: &Entity<BlockEditorState>, window: &mut Window, cx: &mut App) -> AnyElement {
         let (snapshot, extensions) = state.update(cx, |state, _| (state.snapshot(), state.model.doc.extensions.clone()));
-        let context = state.read(cx).render_context(cx)
-            .with_markdown_extensions(extensions)
+        let mut extensions = (*extensions).clone();
+        let theme = gpui_kit::base::Theme::global(cx);
+        let editor_state = state.read(cx);
+        register_fold_surfaces(&mut extensions, editor_state, None, &theme);
+        let context = editor_state.render_context(cx)
+            .with_markdown_extensions(Arc::new(extensions))
             .with_body_font_size(window.text_style().font_size.to_pixels(window.rem_size()));
-        let nodes: Vec<&BlockNode> = snapshot.blocks.iter().flat_map(|block| block.nodes.iter()).collect();
-        let mut children = Vec::with_capacity(nodes.len());
-        for (ix, node) in nodes.iter().enumerate() {
-            let node = node.render(ix, FlowPosition::at(&nodes, ix, false).last(ix+1 == nodes.len()), &context, window, cx);
+        let nodes: Vec<BlockNode> = snapshot
+            .blocks
+            .iter()
+            .flat_map(|block| {
+                block
+                    .nodes
+                    .iter()
+                    .map(|node| with_live_surfaces(node, block.id, editor_state, false))
+            })
+            .collect();
+        let node_refs: Vec<&BlockNode> = nodes.iter().collect();
+        let mut children = Vec::with_capacity(node_refs.len());
+        for (ix, node) in node_refs.iter().enumerate() {
+            let node = node.render(ix, FlowPosition::at(&node_refs, ix, false).last(ix + 1 == node_refs.len()), &context, window, cx);
             children.push(div().relative().child(node).child(canvas(|_,_,_| (), |bounds,_,window,_| window.vector_block(bounds)).absolute().size_full()).into_any_element());
         }
         div().w_full().children(children).into_any_element()
@@ -212,6 +445,7 @@ impl RenderOnce for BlockEditor {
         let mut typography = window.text_style();
         typography.refine(&self.style.text);
         let atom_bounds: AtomBounds = Arc::default();
+        let fold_bounds: AtomBounds = Arc::default();
         let mut extensions = (*extensions).clone();
         for leaf in snapshot.leaves.iter().filter(|leaf| leaf.atomic) {
             let id = leaf.block;
@@ -224,23 +458,7 @@ impl RenderOnce for BlockEditor {
                 )
             });
         }
-        for (id, entry) in &self.state.read(cx).model.doc.blocks {
-            if let super::kind::BlockKindData::Fold { syntax, .. } = &entry.kind {
-                let label = match syntax {
-                    super::kind::FoldSyntax::Alert { name }
-                        if self.state.read(cx).model.doc.children(*id).first()
-                            .and_then(|child| self.state.read(cx).model.doc.inline(*child))
-                            .is_some_and(|text| text.is_empty()) => Some(name.clone()),
-                    _ => None,
-                };
-                extensions = extensions.block_surface(format!("editor-fold-{}", id.as_u64()), move |_, _| {
-                    div().relative().pl(px(32.))
-                        .when_some(label.clone(), |this, label| {
-                            this.child(div().absolute().left(px(32.)).top_0().child(label))
-                        })
-                });
-            }
-        }
+        register_fold_surfaces(&mut extensions, self.state.read(cx), Some(&fold_bounds), &theme);
         let node_cx = render_cx
             .with_markdown_extensions(Arc::new(extensions))
             .with_body_font_size(typography.font_size.to_pixels(window.rem_size()));
@@ -352,7 +570,7 @@ impl RenderOnce for BlockEditor {
                 let is_last_node = node_ix + 1 == count;
                 let node = &snapshot.blocks[unit.block].nodes[unit.node];
                 let live_node = if unit.items.is_none() {
-                    with_atom_surfaces(node, unit.id, self.state.read(cx))
+                    with_live_surfaces(node, unit.id, self.state.read(cx), true)
                 } else {
                     node.clone()
                 };
@@ -369,7 +587,7 @@ impl RenderOnce for BlockEditor {
                         let last_chunk = range.end == ids.len();
                         let chunk = BlockNode::List {
                             children: items[range.clone()].iter().zip(&ids[range.clone()])
-                                .map(|(node, id)| with_atom_surfaces(node, *id, self.state.read(cx))).collect(),
+                                .map(|(node, id)| with_live_surfaces(node, *id, self.state.read(cx), true)).collect(),
                             ordered: *ordered,
                             start: if *ordered {
                                 Some(start.unwrap_or(1) + range.start as u32)
@@ -552,6 +770,7 @@ impl RenderOnce for BlockEditor {
                 ),
                 content_bounds,
                 atom_bounds,
+                fold_bounds,
                 padding: root_style.padding,
                 typography,
                 caret_was_visible,
@@ -569,6 +788,7 @@ struct EditorRoot {
     child: Option<AnyElement>,
     backgrounds: Option<LeafBackgrounds>,
     atom_bounds: AtomBounds,
+    fold_bounds: AtomBounds,
     snapshot: Rc<Snapshot>,
     style: BlockEditorStyle,
     content_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -820,26 +1040,14 @@ impl Element for EditorRoot {
             ElementInputHandler::new(bounds, self.state.clone()),
             cx,
         );
-        // Fold buttons share the title leaf's first line and leave the text editable.
-        let fold_buttons: Vec<_> = {
-            let frame = frame.borrow();
-            state.model.doc.blocks.iter().filter_map(|(id, entry)| {
-                if !matches!(entry.kind, super::kind::BlockKindData::Fold { .. }) { return None; }
-                let title = *state.model.doc.children(*id).first()?;
-                let leaf = frame.leaf(title)?;
-                let p = leaf.caret_point(0);
-                let bounds = Bounds::new(point(p.x - px(30.), p.y), size(px(26.), leaf.line_height()));
-                Some((*id, bounds, state.is_fold_open(*id)))
-            }).collect()
-        };
+        let fold_buttons: Vec<(BlockId, Bounds<Pixels>)> = self
+            .fold_bounds
+            .lock()
+            .expect("fold bounds")
+            .iter()
+            .map(|(id, bounds)| (*id, *bounds))
+            .collect();
         child.paint(window, cx);
-        for (_, bounds, open) in &fold_buttons {
-            let center = bounds.center();
-            window.paint_quad(fill(Bounds::new(point(center.x - px(6.), center.y - px(1.5)), size(px(12.), px(3.))), self.style.caret()));
-            if !open {
-                window.paint_quad(fill(Bounds::new(point(center.x - px(1.5), center.y - px(6.)), size(px(3.), px(12.))), self.style.caret()));
-            }
-        }
 
         let frame = frame.borrow();
         let style = &self.style;
@@ -952,7 +1160,7 @@ impl Element for EditorRoot {
             if !in_editor && !in_grip_gutter {
                 return;
             }
-            if let Some((fold, _, _)) = fold_buttons.iter().find(|(_, bounds, _)| bounds.contains(&event.position)) {
+            if let Some((fold, _)) = fold_buttons.iter().find(|(_, bounds)| bounds.contains(&event.position)) {
                 entity.update(cx, |state, cx| state.toggle_fold(*fold, cx));
                 cx.stop_propagation();
                 return;
