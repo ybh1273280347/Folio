@@ -93,7 +93,7 @@ fn block(doc: &EditorDocument, id: BlockId) -> String {
                 }
                 FoldSyntax::Alert { name } => {
                     let marker = if *initially_open { '+' } else { '-' };
-                    let mut result = format!("> [!{name}]{marker}");
+                    let mut result = format!("> [!{}]{marker}", name.to_ascii_uppercase());
                     if !title.is_empty() {
                         result.push(' ');
                         result.push_str(&title.replace('\n', " "));

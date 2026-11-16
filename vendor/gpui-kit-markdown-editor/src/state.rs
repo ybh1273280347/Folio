@@ -373,6 +373,7 @@ pub struct BlockEditorState {
     pub(crate) style: BlockEditorStyle,
     inline_code_style: gpui::StyleRefinement,
     block_code_style: gpui::StyleRefinement,
+    pub(crate) callout_styles: std::collections::HashMap<SharedString, super::style::CalloutStyle>,
     pub(crate) projection: ProjectionCache,
     /// Last complete frame, written by the element after prepaint.
     pub(crate) frame: Rc<RefCell<FrameLayout>>,
@@ -455,6 +456,7 @@ impl BlockEditorState {
             style: BlockEditorStyle::default(),
             inline_code_style: gpui::StyleRefinement::default(),
             block_code_style: gpui::StyleRefinement::default(),
+            callout_styles: Default::default(),
             projection: ProjectionCache::default(),
             frame: Rc::default(),
             cull: Rc::default(),
@@ -605,7 +607,9 @@ impl BlockEditorState {
         extensions: MarkdownExtensions,
         cx: &mut Context<Self>,
     ) -> Result<(), SharedString> {
+        let callout_names = std::mem::take(&mut self.model.callout_names);
         self.model = BlockEditorModel::from_markdown(&self.model.source(), extensions)?;
+        self.model.callout_names = callout_names;
         self.fold_open.clear();
         self.reveal_selection_folds();
         self.projection.invalidate();
@@ -635,6 +639,7 @@ impl BlockEditorState {
     /// Advance the local revision so geometry from the previous model expires.
     pub fn set_model(&mut self, mut model: BlockEditorModel, cx: &mut Context<Self>) {
         model.doc.revision = self.model.revision() + 1;
+        model.callout_names = std::mem::take(&mut self.model.callout_names);
         self.model = model;
         self.fold_open.clear();
         self.reveal_selection_folds();
@@ -1094,6 +1099,26 @@ impl BlockEditorState {
         self.inline_code_style = inline;
         self.block_code_style = block;
         // Font changes can rewrap off-screen blocks; their measured heights are stale.
+        *self.cull.borrow_mut() = Default::default();
+        cx.notify();
+    }
+
+    /// Register callout badge titles and colors reused by foldable `[!name]-`/`[!name]+` blocks.
+    pub fn set_callout_styles(
+        &mut self,
+        styles: impl IntoIterator<Item = super::style::CalloutStyle>,
+        cx: &mut Context<Self>,
+    ) {
+        self.callout_styles.clear();
+        self.model.callout_names.clear();
+        for mut style in styles {
+            let key: SharedString = style.name.to_ascii_lowercase().into();
+            style.name = key.clone();
+            if !self.model.callout_names.contains(&key) {
+                self.model.callout_names.push(key.clone());
+            }
+            self.callout_styles.insert(key, style);
+        }
         *self.cull.borrow_mut() = Default::default();
         cx.notify();
     }

@@ -95,7 +95,7 @@ pub use state::{
     ToggleBold, ToggleCode, ToggleHighlight, ToggleItalic, ToggleStrikethrough, ToggleToolbar,
     ToggleUnderline,
 };
-pub use style::BlockEditorStyle;
+pub use style::{BlockEditorStyle, CalloutStyle, callout_container, callout_header};
 pub use table::{TableEdit, TableLine};
 pub use toolbar::EditorToolbar;
 

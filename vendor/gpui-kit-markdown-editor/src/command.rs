@@ -646,7 +646,8 @@ impl BlockEditorModel {
             && range.is_collapsed()
             && range.start.offset == 0
             && (self.lift_first_in_quote(range.start)?
-                || self.lift_item_trailing(range.start, false)?)
+                || self.lift_item_trailing(range.start, false)?
+                || self.backspace_empty_first_fold_body(range.start)?)
         {
             return Ok(());
         }
@@ -819,18 +820,24 @@ impl BlockEditorModel {
             && (*sign == b'+' || *sign == b'-')
             && rest[end + 2..].chars().next().is_none_or(|ch| ch == ' ' || ch == '\t')
         {
-            let name = SharedString::from(&rest[..end]);
+            let name = SharedString::from(rest[..end].to_ascii_lowercase());
             let initially_open = *sign == b'+';
             let start = 2 + end + 2;
             let title_start = start + inline.text()[start..].len() - inline.text()[start..].trim_start_matches([' ', '\t']).len();
+            let title_len = inline.len().saturating_sub(title_start);
             let block = range.start.block;
             self.transact(EditOrigin::InputRule("fold"), |tx| {
                 tx.replace_text(block, 0..title_start, InlineText::new())?;
                 tx.set_kind(quote, BlockKindData::Fold { syntax: FoldSyntax::Alert { name }, initially_open })?;
                 let body = DetachedBlock::paragraph(InlineText::new());
-                let id = body.id;
+                let body_id = body.id;
                 tx.insert(quote, 1, vec![body])?;
-                Ok(caret(BlockPosition::new(id, 0)))
+                let target = if initially_open {
+                    BlockPosition::new(body_id, 0)
+                } else {
+                    BlockPosition::new(block, title_len)
+                };
+                Ok(caret(target))
             })?;
             return Ok(());
         }
@@ -841,7 +848,7 @@ impl BlockEditorModel {
             && let Some(inline) = self.doc.inline(range.start.block)
             && range.start.offset == inline.len()
             && let Some(name) = inline.text().strip_prefix("[!").and_then(|s| s.strip_suffix(']'))
-            && ["note", "tip", "important", "warning", "caution"].iter().any(|kind| name.eq_ignore_ascii_case(kind))
+            && self.callout_names.iter().any(|kind| name.eq_ignore_ascii_case(kind.as_str()))
         {
             let name = name.to_ascii_lowercase().into();
             let len = inline.len();
@@ -1177,6 +1184,28 @@ impl BlockEditorModel {
             }
             tx.insert(outer, quote_index, vec![para])?;
             Ok(caret(BlockPosition::new(leaf, 0)))
+        })?;
+        Ok(true)
+    }
+
+    fn backspace_empty_first_fold_body(&mut self, pos: BlockPosition) -> Result<bool, CommandError> {
+        if !self.empty_paragraph_at(pos) {
+            return Ok(false);
+        }
+        let Some((fold, 1)) = self.doc.index_in_parent(pos.block) else {
+            return Ok(false);
+        };
+        if !matches!(self.doc.kind(fold), Some(BlockKindData::Fold { .. })) {
+            return Ok(false);
+        }
+        let Some(title) = self.doc.children(fold).first().copied() else {
+            return Ok(false);
+        };
+        let title_len = self.doc.leaf_len(title).unwrap_or(0);
+        let leaf = pos.block;
+        self.transact(EditOrigin::Command("fold_backspace"), |tx| {
+            tx.remove_block(leaf)?;
+            Ok(caret(BlockPosition::new(title, title_len)))
         })?;
         Ok(true)
     }
@@ -1890,8 +1919,9 @@ impl BlockEditorModel {
     fn toggle_blockquote(&mut self) -> Result<bool, CommandError> {
         let resolved = self.caret_resolved()?;
         let pos = resolved.pos;
-        if let Some(quote) = resolved.nearest(&self.doc, |k| matches!(k, BlockKindData::Blockquote | BlockKindData::Alert { .. }))
-        {
+        if let Some(quote) = resolved.nearest(&self.doc, |k| {
+            matches!(k, BlockKindData::Blockquote | BlockKindData::Alert { .. } | BlockKindData::Fold { .. })
+        }) {
             let (outer, index) = self
                 .doc
                 .index_in_parent(quote)
