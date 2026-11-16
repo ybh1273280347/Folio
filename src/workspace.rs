@@ -7,7 +7,7 @@ use crate::markdown::{MarkdownEvent, MarkdownPane};
 use crate::math::MathRenderer;
 use crate::pdf::{PdfPane, PdfPaneEvent};
 use crate::preferences::{Preferences, SettingsChanged};
-use crate::terminal::TerminalPane;
+use crate::terminal::{TerminalPane, TerminalPaneEvent};
 use crate::{
     compiler, files,
     model::{
@@ -424,11 +424,36 @@ impl Workspace {
         math.update(cx, |renderer, cx| renderer.set_appearance(&settings, cx));
         let preferences = cx.new(|cx| Preferences::new(settings.clone(), window, cx));
         let terminal = cx.new(|cx| TerminalPane::new(settings.terminal.clone(), settings.theme.palette, cx));
+        cx.subscribe_in(&terminal, window, |app, _, event: &TerminalPaneEvent, window, cx| {
+            match event {
+                TerminalPaneEvent::Hide => {
+                    app.show_terminal = false;
+                    app.terminal_maximized = false;
+                    app.terminal.update(cx, |pane, _| pane.hide());
+                    app.focus.focus(window, cx);
+                }
+                TerminalPaneEvent::ToggleMaximize => {
+                    app.terminal_maximized = !app.terminal_maximized;
+                }
+            }
+            cx.notify();
+        })
+        .detach();
         let initial_dir = dirs::home_dir().expect("user home");
         let ai = cx.new(|cx| AiPane::new(initial_dir, settings.clone(), window, cx));
         cx.subscribe_in(&ai, window, |app, _, event: &AiPaneEvent, window, cx| match event {
             AiPaneEvent::OpenFile(path) => {
                 app.open_path_from_ai(path, window, cx);
+            }
+            AiPaneEvent::ToggleMaximize => {
+                app.terminal_maximized = !app.terminal_maximized;
+                cx.notify();
+            }
+            AiPaneEvent::Hide => {
+                app.show_terminal = false;
+                app.terminal_maximized = false;
+                app.focus.focus(window, cx);
+                cx.notify();
             }
         })
         .detach();
@@ -4870,147 +4895,21 @@ impl Render for Workspace {
                     .p_2().gap_2().child(vertical_work_area)))
             })
             .when(self.show_terminal, |body| {
-                let drawer_palette = crate::terminal::theme::terminal_palette(self.settings.theme.palette);
-                let is_term = self.right_drawer_tab == RightDrawerTab::Terminal;
-                let is_ai = self.right_drawer_tab == RightDrawerTab::Ai;
-                let drawer = div()
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .min_w_0()
-                    .min_h_0()
-                    .bg(gpui_kit::rgb(drawer_palette.surface))
-                    .text_color(gpui_kit::rgb(drawer_palette.text))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .h(px(38.))
-                            .flex_shrink_0()
-                            .px_2()
-                            .gap_1()
-                            .border_b_1()
-                            .border_color(gpui_kit::rgb(drawer_palette.border))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .id("drawer-tab-terminal")
-                                            .flex()
-                                            .items_center()
-                                            .gap_1p5()
-                                            .px_2p5()
-                                            .h(px(26.))
-                                            .rounded(px(5.))
-                                            .cursor_pointer()
-                                            .text_xs()
-                                            .when(is_term, |s| {
-                                                s.bg(gpui_kit::rgb(drawer_palette.hover))
-                                                    .font_semibold()
-                                                    .text_color(gpui_kit::rgb(drawer_palette.text))
-                                            })
-                                            .when(!is_term, |s| {
-                                                s.text_color(gpui_kit::rgb(drawer_palette.muted))
-                                                    .hover(move |h| h.bg(gpui_kit::rgb(drawer_palette.hover)))
-                                            })
-                                            .on_click(cx.listener(|app, _, window, cx| {
-                                                app.right_drawer_tab = RightDrawerTab::Terminal;
-                                                let dir = app.terminal_directory();
-                                                app.terminal.update(cx, |pane, cx| pane.open(dir, window, cx));
-                                                cx.notify();
-                                            }))
-                                            .child(crate::ui::icon(IconName::Terminal).w(px(13.)).h(px(13.)))
-                                            .child("终端"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("drawer-tab-ai")
-                                            .flex()
-                                            .items_center()
-                                            .gap_1p5()
-                                            .px_2p5()
-                                            .h(px(26.))
-                                            .rounded(px(5.))
-                                            .cursor_pointer()
-                                            .text_xs()
-                                            .when(is_ai, |s| {
-                                                s.bg(gpui_kit::rgb(drawer_palette.hover))
-                                                    .font_semibold()
-                                                    .text_color(gpui_kit::rgb(drawer_palette.text))
-                                            })
-                                            .when(!is_ai, |s| {
-                                                s.text_color(gpui_kit::rgb(drawer_palette.muted))
-                                                    .hover(move |h| h.bg(gpui_kit::rgb(drawer_palette.hover)))
-                                            })
-                                            .on_click(cx.listener(|app, _, window, cx| {
-                                                app.right_drawer_tab = RightDrawerTab::Ai;
-                                                app.terminal.update(cx, |pane, _| pane.hide());
-                                                let dir = app.terminal_directory();
-                                                app.ai.update(cx, |pane, cx| {
-                                                    pane.set_directory(dir, cx);
-                                                    pane.open(window, cx);
-                                                });
-                                                cx.notify();
-                                            }))
-                                            .child(crate::ui::icon(IconName::Sparkles).w(px(13.)).h(px(13.)))
-                                            .child("AI 助手"),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(
-                                        Button::new("drawer-maximize")
-                                            .ghost()
-                                            .compact()
-                                            .w(px(27.))
-                                            .h(px(27.))
-                                            .icon(crate::ui::icon(IconName::Maximize2))
-                                            .tooltip("最大化 / 还原面板")
-                                            .on_click(cx.listener(|app, _, _, cx| {
-                                                app.terminal_maximized = !app.terminal_maximized;
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("drawer-hide")
-                                            .ghost()
-                                            .compact()
-                                            .w(px(27.))
-                                            .h(px(27.))
-                                            .icon(crate::ui::icon(IconName::PanelRightOpen))
-                                            .tooltip("收起右侧面板")
-                                            .on_click(cx.listener(|app, _, window, cx| {
-                                                app.show_terminal = false;
-                                                app.terminal_maximized = false;
-                                                app.terminal.update(cx, |pane, _| pane.hide());
-                                                app.focus.focus(window, cx);
-                                                cx.notify();
-                                            })),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .min_w_0()
-                            .child(if is_ai {
-                                self.ai.clone().into_any_element()
-                            } else {
-                                self.terminal.clone().into_any_element()
-                            }),
-                    );
-                body.child(resizable_panel()
-                    .when(!self.terminal_maximized, |panel| panel
-                        .size(px(self.settings.terminal.panel_width)).size_range(px(280.)..px(1600.)).fixed())
-                    .child(drawer))
+                let drawer_child = if self.right_drawer_tab == RightDrawerTab::Ai {
+                    self.ai.clone().into_any_element()
+                } else {
+                    self.terminal.clone().into_any_element()
+                };
+                body.child(
+                    resizable_panel()
+                        .when(!self.terminal_maximized, |panel| {
+                            panel
+                                .size(px(self.settings.terminal.panel_width))
+                                .size_range(px(280.)..px(1600.))
+                                .fixed()
+                        })
+                        .child(drawer_child),
+                )
             });
         let mut app = div()
             .children(exports)
@@ -5230,12 +5129,32 @@ impl Render for Workspace {
                             cx.notify();
                         })),
                     )
-                    .child(button("toggle-ai", "AI").on_click(cx.listener(|app, _, window, cx| {
-                        app.toggle_right_drawer(RightDrawerTab::Ai, window, cx);
-                    })))
-                    .child(button("toggle-terminal", "终端").on_click(cx.listener(|app, _, window, cx| {
-                        app.toggle_right_drawer(RightDrawerTab::Terminal, window, cx);
-                    })))
+                    .child(
+                        crate::ui::control("toggle-ai", IconName::Sparkles)
+                            .when(self.show_terminal && self.right_drawer_tab == RightDrawerTab::Ai, |c| {
+                                c.bg(rgb(0xe8e7e4)).text_color(rgb(0x1f2328))
+                            })
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new("AI 助手")
+                                    .build(window, cx)
+                            })
+                            .on_click(cx.listener(|app, _, window, cx| {
+                                app.toggle_right_drawer(RightDrawerTab::Ai, window, cx);
+                            })),
+                    )
+                    .child(
+                        crate::ui::control("toggle-terminal", IconName::Terminal)
+                            .when(self.show_terminal && self.right_drawer_tab == RightDrawerTab::Terminal, |c| {
+                                c.bg(rgb(0xe8e7e4)).text_color(rgb(0x1f2328))
+                            })
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new("终端")
+                                    .build(window, cx)
+                            })
+                            .on_click(cx.listener(|app, _, window, cx| {
+                                app.toggle_right_drawer(RightDrawerTab::Terminal, window, cx);
+                            })),
+                    )
                     .when(!self.show_build_preview, |header| {
                         header.child(button("show-build-preview", "◫").on_click(cx.listener(
                             |app, _, _, cx| {

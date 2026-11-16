@@ -5,7 +5,6 @@ pub mod theme;
 use crate::{model::TerminalSettings, theme::Palette};
 use gpui_kit::{
     assets::IconName,
-    base::StyledExt,
     component::{
         button::{Button, ButtonVariants},
         menu::{DropdownMenu, PopupMenuItem},
@@ -45,21 +44,12 @@ impl AiHarness {
         }
     }
 
-    pub fn badge(self) -> &'static str {
+    pub fn icon_path(self) -> &'static str {
         match self {
-            Self::ClaudeCode => "CC",
-            Self::Codex => "CX",
-            Self::OhMyPi => "π",
-            Self::Antigravity => "AG",
-        }
-    }
-
-    pub fn accent(self) -> u32 {
-        match self {
-            Self::ClaudeCode => 0xd97757,
-            Self::Codex => 0x5b7cfa,
-            Self::OhMyPi => 0x4b5563,
-            Self::Antigravity => 0x16a34a,
+            Self::ClaudeCode => "brand/claude.svg",
+            Self::Codex => "brand/codex.svg",
+            Self::OhMyPi => "brand/pi.svg",
+            Self::Antigravity => "brand/antigravity.svg",
         }
     }
 }
@@ -130,6 +120,12 @@ fn terminal_control(id: impl Into<ElementId>, name: IconName, palette: Palette) 
         })
         .child(crate::ui::icon(name))
 }
+
+pub enum TerminalPaneEvent {
+    Hide,
+    ToggleMaximize,
+}
+impl EventEmitter<TerminalPaneEvent> for TerminalPane {}
 
 struct SessionTab {
     id: u64,
@@ -429,22 +425,24 @@ impl Render for TerminalPane {
         let new_menu_btn = Button::new("new-terminal")
             .ghost()
             .compact()
-            .w(px(27.))
-            .h(px(27.))
+            .w(px(26.))
+            .h(px(26.))
             .icon(crate::ui::icon(IconName::Plus))
-            .tooltip("新建终端或启动 AI Harness")
+            .tooltip("新建终端或启动 Agent")
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                 let pane_term = pane_entity.clone();
                 let mut menu = menu
-                    .min_w(px(220.))
+                    .min_w(px(188.))
                     .item(
                         PopupMenuItem::element(move |_, _| {
                             div()
                                 .w_full()
+                                .py(px(1.))
                                 .flex()
                                 .items_center()
                                 .justify_between()
-                                .gap_4()
+                                .gap_3()
+                                .text_xs()
                                 .child(
                                     div()
                                         .flex()
@@ -453,7 +451,7 @@ impl Render for TerminalPane {
                                         .child(crate::ui::icon(IconName::Terminal).w(px(14.)).h(px(14.)))
                                         .child("Terminal"),
                                 )
-                                .child(div().text_xs().opacity(0.6).child("Shell"))
+                                .child(div().text_size(px(11.)).opacity(0.55).child("Shell"))
                         })
                         .on_click(move |_, window, cx| {
                             pane_term.update(cx, |pane, cx| pane.new_session(window, cx));
@@ -468,32 +466,21 @@ impl Render for TerminalPane {
                         PopupMenuItem::element(move |_, _| {
                             div()
                                 .w_full()
+                                .py(px(1.))
                                 .flex()
                                 .items_center()
                                 .justify_between()
-                                .gap_4()
+                                .gap_3()
+                                .text_xs()
                                 .child(
                                     div()
                                         .flex()
                                         .items_center()
                                         .gap_2()
-                                        .child(
-                                            div()
-                                                .w(px(18.))
-                                                .h(px(18.))
-                                                .rounded(px(4.))
-                                                .bg(gpui_kit::rgb(harness.accent()))
-                                                .text_color(gpui_kit::rgb(0xffffff))
-                                                .text_xs()
-                                                .font_semibold()
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .child(harness.badge()),
-                                        )
+                                        .child(img(harness.icon_path()).w(px(14.)).h(px(14.)))
                                         .child(harness.label()),
                                 )
-                                .child(div().text_xs().opacity(0.55).child(index_label.clone()))
+                                .child(div().text_size(px(11.)).opacity(0.5).child(index_label.clone()))
                         })
                         .on_click(move |_, window, cx| {
                             pane_h.update(cx, |pane, cx| pane.new_harness_session(harness, window, cx));
@@ -517,7 +504,7 @@ impl Render for TerminalPane {
                 div()
                     .flex()
                     .items_center()
-                    .h(px(36.))
+                    .h(px(34.))
                     .flex_shrink_0()
                     .px_2()
                     .gap_1()
@@ -534,7 +521,17 @@ impl Render for TerminalPane {
                             .overflow_x_scroll()
                             .children(tabs),
                     )
-                    .child(new_menu_btn),
+                    .child(new_menu_btn)
+                    .child(
+                        terminal_control("maximize-terminal", IconName::Maximize2, palette)
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(TerminalPaneEvent::ToggleMaximize)
+                            })),
+                    )
+                    .child(
+                        terminal_control("hide-terminal", IconName::PanelRightOpen, palette)
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(TerminalPaneEvent::Hide))),
+                    ),
             )
             .child(
                 div()
