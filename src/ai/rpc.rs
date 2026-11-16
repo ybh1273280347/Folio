@@ -340,6 +340,14 @@ impl RpcClient {
         self.send(json!({ "type": "compact" }))
     }
 
+    pub fn get_commands(&self) -> Result<String, String> {
+        self.send(json!({ "type": "get_commands" }))
+    }
+
+    pub fn clone_session(&self) -> Result<String, String> {
+        self.send(json!({ "type": "clone" }))
+    }
+
     pub fn respond_extension_confirm(&self, id: &str, confirmed: bool) -> Result<(), String> {
         self.send_raw(json!({
             "type": "extension_ui_response",
