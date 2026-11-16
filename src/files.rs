@@ -233,11 +233,6 @@ pub fn create_file(root: &Path, relative: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Create a persistent quick note without replacing an existing numbered note.
-pub fn create_markdown(root: &Path) -> io::Result<ProjectFile> {
-    create_markdown_in(root, None)
-}
-
 pub fn create_markdown_in(root: &Path, folder: Option<&str>) -> io::Result<ProjectFile> {
     let prefix = folder
         .map(|folder| folder.trim().trim_matches(['/', '\\']))
@@ -291,10 +286,6 @@ pub fn rename_file(root: &Path, relative: &str, name: &str) -> io::Result<String
         || name.to_owned(),
         |parent| format!("{}/{}", parent.to_string_lossy().replace('\\', "/"), name),
     ))
-}
-
-pub fn delete_file(root: &Path, relative: &str) -> io::Result<()> {
-    fs::remove_file(project_path(root, relative)?)
 }
 
 pub fn list_folders(root: &Path) -> io::Result<Vec<String>> {
@@ -413,21 +404,6 @@ pub fn rename_folder(root: &Path, relative: &str, name: &str) -> io::Result<Stri
     Ok(renamed)
 }
 
-pub fn delete_folder_files(root: &Path, relative: &str) -> io::Result<()> {
-    let folder = project_path(root, relative)?;
-    if !folder.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "请选择项目内的文件夹。",
-        ));
-    }
-    for file in list_files(&folder)? {
-        fs::remove_file(project_path(&folder, &file.path)?)?;
-    }
-    let _ = fs::remove_dir(&folder);
-    Ok(())
-}
-
 #[cfg(target_os = "windows")]
 fn files_app_executable() -> Option<PathBuf> {
     use std::os::windows::process::CommandExt;
@@ -530,15 +506,15 @@ mod tests {
         let temp = tempdir().unwrap();
         fs::write(temp.path().join("未命名.md"), "existing").unwrap();
         fs::write(temp.path().join("未命名3.md"), "third").unwrap();
-        assert_eq!(create_markdown(temp.path()).unwrap().path, "未命名2.md");
-        assert_eq!(create_markdown(temp.path()).unwrap().path, "未命名4.md");
+        assert_eq!(create_markdown_in(temp.path(), None).unwrap().path, "未命名2.md");
+        assert_eq!(create_markdown_in(temp.path(), None).unwrap().path, "未命名4.md");
         assert_eq!(fs::read_to_string(temp.path().join("未命名.md")).unwrap(), "existing");
     }
 
     #[test]
     fn renamed_markdown_keeps_body_and_accepts_unsaved_draft() {
         let temp = tempdir().unwrap();
-        let note = create_markdown(temp.path()).unwrap();
+        let note = create_markdown_in(temp.path(), None).unwrap();
         fs::write(temp.path().join(&note.path), "# Independent heading\n\nbody").unwrap();
         let disk = read_document(temp.path(), &note.path).unwrap();
         let renamed = rename_file(temp.path(), &note.path, "读书笔记.md").unwrap();
@@ -611,21 +587,6 @@ mod tests {
             io::ErrorKind::PermissionDenied
         );
         assert!(project_path(&project, "outside.tex").is_err());
-    }
-
-    #[test]
-    fn folder_delete_removes_only_supported_files() {
-        let temp = tempdir().unwrap();
-        fs::create_dir_all(temp.path().join("nested")).unwrap();
-        fs::write(temp.path().join("nested/source.md"), "text").unwrap();
-        fs::write(temp.path().join("nested/keep.bin"), "keep").unwrap();
-
-        delete_folder_files(temp.path(), "nested").unwrap();
-        assert!(!Path::new(&temp.path().join("nested/source.md")).exists());
-        assert_eq!(
-            fs::read_to_string(temp.path().join("nested/keep.bin")).unwrap(),
-            "keep"
-        );
     }
 
     #[test]

@@ -4557,10 +4557,6 @@ impl Render for Workspace {
                 pane.set_visible(self.show_build_preview && !self.show_trash, window, cx)
             });
         }
-        let title = self
-            .directory_workspace()
-            .map(|project| format!("工作空间  ›  {}", project.name))
-            .unwrap_or_else(|| "独立文件".to_owned());
         let engine = self.directory_workspace().map(|project| project.engine);
         let engine_app = cx.entity();
         let main_app = cx.entity();
@@ -4825,20 +4821,6 @@ impl Render for Workspace {
                             .gap_2()
                             .text_color(rgb(MUTED))
                             .text_xs()
-                            .child(div().min_w_0().text_ellipsis().child(title))
-                            .when(self.config.active_id.is_some(), |title| {
-                                title.child(
-                                    div()
-                                        .max_w(px(140.))
-                                        .min_w_0()
-                                        .text_ellipsis()
-                                        .rounded(px(10.))
-                                        .px_2()
-                                        .bg(rgb(0xe8eff5))
-                                        .text_color(rgb(crate::ui::MAIN_TEX_COLOR))
-                                        .child(main_label.clone()),
-                                )
-                            })
                             .window_control_area(WindowControlArea::Drag),
                     )
                     .when(self.compile_target().is_some(), |header| {

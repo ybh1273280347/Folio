@@ -1293,6 +1293,7 @@ fn choice_button(id: impl Into<ElementId>, label: &'static str, selected: bool) 
 }
 impl Render for Preferences {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let ui_font_size = px(self.settings.interface_font_size as f32);
         let nav_item = |id: &'static str,
                         tab: PreferencesTab,
                         icon_name: IconName,
@@ -1304,11 +1305,11 @@ impl Render for Preferences {
                 .flex()
                 .items_center()
                 .gap_2()
-                .px_3()
+                .px_2()
                 .py_2()
                 .rounded(px(6.))
                 .cursor_pointer()
-                .text_sm()
+                .text_size(ui_font_size)
                 .when(active, |s| {
                     s.bg(rgb(0xe8e7e4))
                         .font_semibold()
@@ -1385,7 +1386,7 @@ impl Render for Preferences {
             .text_color(rgb(0x37352f))
             .child(
                 div()
-                    .w(px(172.))
+                    .w(px(152.))
                     .flex_shrink_0()
                     .flex()
                     .flex_col()
@@ -1395,16 +1396,16 @@ impl Render for Preferences {
                     .border_color(rgb(0xe8e7e3))
                     .child(
                         div()
-                            .px_3()
+                            .px_2()
                             .pb_2()
-                            .text_base()
+                            .text_size(ui_font_size)
                             .font_semibold()
                             .child("设置"),
                     )
                     .child(
                         div().id("pref-appearance-group")
-                            .flex().items_center().gap_2().px_3().py_2()
-                            .rounded(px(6.)).cursor_pointer().text_sm()
+                            .flex().items_center().gap_2().px_2().py_2()
+                            .rounded(px(6.)).cursor_pointer().text_size(ui_font_size)
                             .hover(|s| s.bg(rgb(0xefefed)))
                             .child(crate::ui::icon(if self.appearance_expanded {
                                 IconName::ChevronDown
@@ -1418,7 +1419,7 @@ impl Render for Preferences {
                             })),
                     )
                     .when(self.appearance_expanded, |nav| nav.child(
-                        div().ml_3().pl_2().border_l_1().border_color(rgb(0xe8e7e3))
+                            div().ml_2().pl_2().border_l_1().border_color(rgb(0xe8e7e3))
                             .flex().flex_col().gap_1()
                             .child(nav_item("pref-tab-fonts", PreferencesTab::Fonts,
                                 IconName::Type, "字体", self.tab == PreferencesTab::Fonts, cx))

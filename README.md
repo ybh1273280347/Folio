@@ -19,7 +19,8 @@
 
 ## ✨ 功能特性
 
-### 1. 工作区与文件管理
+### 1\. 工作区与文件管理
+
 - 三种空间各自记住标签页与阅读分栏：**默认空间**（用户目录下的 `.Folio` 文件夹）、**项目工作区**（添加文件夹后进入）、**独立文件**（`Ctrl+Shift+O` 打开的外部文件，始终从原路径读写）。
 - 文件树支持新建 Markdown/文件/文件夹、重命名（文件/文件夹/项目）、删除、单击文件夹聚焦（影响新建落点与快捷操作）、`Ctrl+` 点击多选与空白处拖拽框选。
 - **应用内拖拽**：把文件/文件夹拖到终端面板会把路径加引号后粘贴进终端；拖到废纸篓图标直接移入废纸篓。
@@ -27,11 +28,13 @@
 - **废纸篓**：删除的文件先落盘到废纸篓（保留 7 天，启动时清理过期项），侧栏“废纸篓”面板可单项恢复、彻底删除或清空，误删可用 `Ctrl+Z` 整批撤销。
 - 所有 Markdown 顶部有独立标题输入区：Enter 重命名同目录文件，Escape 取消；标题不写入正文，也不与正文一级标题联动。Windows 打包会将 Folio 加入 PDF / Markdown / LaTeX 的“打开方式”，设为默认应用需在系统“默认应用”设置中选择。
 
-### 2. LaTeX 编辑与编译
+### 2\. LaTeX 编辑与编译
+
 - 多标签页、语法高亮、行号开关、文本查找与替换、自动保存及外部修改冲突检测。
 - 调用本机 TeX Live 的 `latexmk`，支持 XeLaTeX / pdfLaTeX / LuaLaTeX 三种引擎；顶栏选择主文件与引擎，`Ctrl+Enter` 触发或中止编译，完整构建日志单独成栏，失败时保留上一次的 PDF 预览。
 
-### 3. Markdown 混合编辑
+### 3\. Markdown 混合编辑
+
 - 所见即所得（块编辑器）与源码双模式，`Ctrl+/` 即时切换；斜杠菜单、选中工具条、文档大纲导航、可编辑表格、本地图片引用与独立编辑分屏。
 - **GitHub Alerts**：引用块首行写 `[!NOTE]`、`[!TIP]`、`[!IMPORTANT]`、`[!WARNING]`、`[!CAUTION]`；可折叠变体 `[!NOTE]-` / `[!NOTE]+` 与 `<details><summary>标题</summary>正文</details>` 均可点击展开/收起，输入 `/` 可插入详情块。折叠状态是视图状态，PDF 导出始终显示完整正文。
 - **表格操作**：单元格编辑、左/中/右对齐、增删行列、`Ctrl+Alt+↑/↓` 插入行、整表复制；`Ctrl+F` 在 WYSIWYG 文档内查找（自动填入选中文本，带匹配计数与上一个/下一个）。
@@ -41,23 +44,29 @@
 - **划词翻译**：WYSIWYG 选中文字后点工具条“译”按钮（PDF 内选中走同一浮层），先请求 Google、失败后回退百度；自动检测语言（中文→英，其余→中），带词典与复制反馈，凭据在“设置 → API 服务”配置。
 - **链接跳转**：`Ctrl+左键`点击 Markdown 链接，外部链接用系统浏览器打开，工作区内的文件/目录/锚点在应用内打开；打开位置（主编辑区或右侧分屏）可在“设置 → 视图”里选择。
 
-### 4. PDF 预览与批注
+### 4\. PDF 预览与批注
+
 - 连续滚动、页面跳转、多级缩放、目录树与侧边缩略图；每个分屏独立维护视图与滚动状态。
 - 文本选择与复制、全文搜索、5 色荧光高亮与本地批注管理、划词翻译。
 
-### 5. HTML 交互预览
+### 5\. HTML 交互预览
+
 - 打开 `.html/.htm` 文件进入 WebView2 面板，用虚拟主机名把项目根映射为本地源，可加载同目录的 CSS / JS / 图片；工具栏提供后退、前进、刷新、在默认浏览器打开与关闭。仅预览时使用 WebView，数学、PDF 与导出均不经它。
 
-### 6. Markdown 导出 PDF
+### 6\. Markdown 导出 PDF
+
 - 按当前编辑器正文宽度、字体设置和换行布局自动 A4 分页；矢量字形内嵌，正文与公式文字均可选可复制，导出不含光标与编辑态元素。
 
-### 7. 原生终端与编译日志
+### 7\. 原生终端与编译日志
+
 - 右上角日志图标显示构建输出（可复制全部）；“终端”按钮打开 Windows ConPTY 原生终端，默认启动加载 profile 的 PowerShell，可运行 `codex`、`agy` 等本机命令。
 - 多会话标签、面板宽度拖动、最大化、隐藏（进程继续运行）；关闭会话或退出 Folio 时按进程树结束；终端使用 Folio 配色，切换明暗主题不重启 shell；复制/粘贴为 `Ctrl+Shift+C/V`，`Ctrl+C` 交给前台程序。
 - 在“设置 → 终端”调整 shell、逐行启动参数与面板宽度；终端字体与字号在“设置 → 外观 → 字体”，即时应用到已有会话。
 
-### 8. 个性化设置
+### 8\. 个性化设置
+
 设置分为“外观（字体 / 主题 / 视图）”“快捷键”“终端”“API 服务”，改动即时应用并落盘：
+
 - **主题**：浅色 / 深色 / 自定义，按颜色角色调整并命名保存、随时重置；深色参考暖黑、米白与陶土橙，切换主题保留字体与排版设置。
 - **字体**：统一调整界面、编辑器、代码、数学与终端的字体和字号，均可搜索本机字体；行内代码默认为正文的 87.5%（可调 50%–150%），块级代码、数学字体独立设置，选择同时用于 PDF 导出。
 - **视图**：源码行号、编辑器行宽限制、内部链接打开位置；`Ctrl+滚轮` 调整字号（限制 11–26 px，右下角显示当前值）。
@@ -100,6 +109,7 @@
 ### 桌面版（Windows）
 
 前置环境：
+
 1. **操作系统**：Windows 10 / 11（x86_64）。
 2. **Rust 工具链**：`edition = 2024` 需 Rust 1.85+；构建脚本把链接器设为 `gcc`，因此必须安装 **GNU 工具链（`stable-x86_64-pc-windows-gnu`）与 MinGW-w64**（`gcc` 在 `PATH` 中），MSVC 工具链不适用。
 3. **WebView2 Runtime**：HTML 预览面板依赖系统 WebView2（Win11 通常已内置），打包脚本会一并带上 `WebView2Loader.dll`。
@@ -122,6 +132,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package.ps1
 `scripts/package.ps1` 会把可执行文件、`WebView2Loader.dll`、图标、字体与许可证打包到带时间戳的 `dist\releases\Folio-<时间>\`，同时更新稳定目录 `dist\Folio\`，并在桌面创建“Folio GPUI”快捷方式。文件关联只注册当前用户，可用 `scripts/register-file-associations.ps1 -Unregister` 撤销。仓库内的 `runtime/` 与 PDFium 解包脚本是旧版遗留，当前 PDF 渲染不依赖 PDFium。
 
 ### Android 版
+
 独立于桌面 Rust 工程，详见 [android/README.md](android/README.md) 与 [android/README-native.md](android/README-native.md)。构建需 JDK 17、Gradle 8.11.1、Android SDK 35、Node.js：
 
 ```powershell
@@ -131,10 +142,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package.ps1
 产物为 `dist\android\Folio-Android-0.1.0.apk`（最低 Android 8.0 / API 26）。Android 版只做 Markdown 阅读与编辑（ProseMirror + KaTeX），不含桌面版的 LaTeX 编译、PDF 批注、原生终端和多分屏。
 
 ### 测试
+
 ```powershell
 cargo test                       # Rust：tests/fold_callouts.rs、tests/appearance.rs
 cd android/web; npm ci; npm test; npm run test:ui; npm run build   # Android 前端
 ```
+
 Rust 集成测试覆盖折叠标注的 Markdown 往返与输入规则、主题/自定义配色持久化及块级代码随正文缩放；Android 前端测试覆盖公式分隔符、转义与浏览器端交互。打包脚本本身不运行测试。
 
 ---
@@ -165,3 +178,4 @@ Rust 集成测试覆盖折叠标注的 Markdown 往返与输入规则、主题/�
 - **自用分享**：按个人写作与排版习惯搭建，主要满足日常 LaTeX 编译与 Markdown 记笔记需求。
 - **数据存储**：配置保存在 `%APPDATA%\folio-gpui`（可用 `FOLIO_USER_DATA` 覆盖），含 `preferences.json`、`projects.json`、`workspace-sessions.json`、废纸篓与 WebView2 缓存；PDF 批注在目标目录下的 `.folio/annotations.json`；文档源文件与编译 PDF 均留在项目本地目录，不改动用户文件结构。
 - **隐私**：划词翻译会把选中文本发送给 Google（或其百度回退）服务；启用前请确认这符合你对相关内容的处理要求。
+
