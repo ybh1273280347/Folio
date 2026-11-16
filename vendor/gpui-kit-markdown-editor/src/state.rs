@@ -2499,6 +2499,17 @@ impl BlockEditorState {
     }
     fn newline(&mut self, cx: &mut Context<Self>) {
         self.end_composition();
+        if !self.readonly
+            && matches!(self.model.selection(), BlockSelection::Text { anchor, head } if anchor == head)
+            && let Some(caret) = self.model.caret()
+            && let Some((fold, 0)) = self.model.doc.index_in_parent(caret.block)
+            && matches!(self.model.doc.kind(fold), Some(super::kind::BlockKindData::Fold { .. }))
+            && !self.is_fold_open(fold)
+            && self.model.doc.leaf_len(caret.block) == Some(caret.offset)
+        {
+            self.edit(EditOrigin::Command("exit_fold"), |model| model.insert_after_fold(fold), cx);
+            return;
+        }
         // "```lang" then Enter: a code block.
         if !self.readonly
             && self.rule_on(RuleKind::CodeFence)

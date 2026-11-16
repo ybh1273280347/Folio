@@ -863,6 +863,21 @@ impl BlockEditorModel {
         {
             return self.heading_to_paragraph(range.start.block, "heading_enter");
         }
+        if range.is_collapsed()
+            && self.empty_paragraph_at(range.start)
+            && let Some((fold, index)) = self.doc.index_in_parent(range.start.block)
+            && index > 0 && index + 1 == self.doc.children(fold).len()
+            && matches!(self.doc.kind(fold), Some(BlockKindData::Fold { .. }))
+            && let Some((outer, fold_index)) = self.doc.index_in_parent(fold)
+        {
+            let leaf = range.start.block;
+            self.transact(EditOrigin::Command("exit_fold"), |tx| {
+                let paragraph = tx.remove_block(leaf)?;
+                tx.insert(outer, fold_index + 1, vec![paragraph])?;
+                Ok(caret(BlockPosition::new(leaf, 0)))
+            })?;
+            return Ok(());
+        }
         if range.is_collapsed() && self.exit_empty_item(range.start)? {
             return Ok(());
         }
@@ -882,6 +897,12 @@ impl BlockEditorModel {
         })?;
         Ok(())
     }
+    pub(crate) fn insert_after_fold(&mut self, fold: BlockId) -> Result<(), CommandError> {
+        self.transact(EditOrigin::Command("exit_fold"), |tx| {
+            Ok(caret(exit_below(tx, fold)?))
+        }).map(|_| ())
+    }
+
 
     /// A heading becomes a paragraph in one transaction; text, marks and
     /// the caret stay.
