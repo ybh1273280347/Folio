@@ -410,8 +410,6 @@ pub struct BlockEditorState {
     pub(crate) table_hover: Vec<(BlockId, crate::TableLine)>,
     /// The pointer is on a table grip (grab cursor).
     pub(crate) grip_hover: bool,
-    /// The code block under the pointer (copy control visibility).
-    pub(crate) code_hover: Option<BlockId>,
     pub(crate) slash_key_handler:
         Option<Rc<dyn Fn(&mut Self, &str, &mut Window, &mut Context<Self>) -> bool>>,
     _subscriptions: Vec<Subscription>,
@@ -485,7 +483,6 @@ impl BlockEditorState {
             table_menu: None,
             table_hover: Vec::new(),
             grip_hover: false,
-            code_hover: None,
             slash_key_handler: None,
             _subscriptions: subscriptions,
         }
@@ -2002,13 +1999,6 @@ impl BlockEditorState {
 
     pub(crate) fn hover_at(&mut self, at: Point<Pixels>, secondary: bool, cx: &mut Context<Self>) {
         self.hover_table(at, cx);
-        let code = self.top_level_bounds().into_iter()
-            .find(|(_, _, bounds)| bounds.contains(&at))
-            .map(|(_, id, _)| id);
-        if code != self.code_hover {
-            self.code_hover = code;
-            cx.notify();
-        }
         let url = self.link_at(at).map(|(_, _, url)| url);
         let hand = self.task_checkbox_at(at).is_some() || (secondary && url.is_some());
         if hand != self.pointer_hand {
