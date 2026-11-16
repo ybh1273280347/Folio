@@ -165,6 +165,10 @@ impl NodeCache {
                 }
                 BlockNode::Surface { name: name.clone(), children: blocks, span: None }
             },
+            BlockKindData::Fold { .. } => BlockNode::Root {
+                children: children(self),
+                span: None,
+            },
             BlockKindData::List { ordered, start } => BlockNode::List {
                 children: children(self),
                 ordered: *ordered,

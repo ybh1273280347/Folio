@@ -31,13 +31,31 @@ type AtomBounds = Arc<Mutex<HashMap<BlockId, Bounds<Pixels>>>>;
 
 /// Add measuring surfaces only to the live view, leaving the source and PDF projection intact.
 /// Recursing with model IDs also covers formulas and rules inside lists and quotes.
-fn with_atom_surfaces(node: &BlockNode, id: BlockId, doc: &super::document::EditorDocument) -> BlockNode {
+fn with_atom_surfaces(node: &BlockNode, id: BlockId, state: &BlockEditorState) -> BlockNode {
+    let doc = &state.model.doc;
     if matches!(doc.get(id).map(|entry| &entry.content), Some(super::document::BlockContent::Atom(_))) {
         return BlockNode::Surface {
             name: format!("editor-atom-{}", id.as_u64()).into(),
             children: vec![node.clone()],
             span: None,
         };
+    }
+    if matches!(doc.kind(id), Some(super::kind::BlockKindData::Fold { .. })) {
+        if let BlockNode::Root { children, .. } = node {
+            let mut children: Vec<_> = children.iter().zip(doc.children(id)).enumerate()
+                .filter(|(ix, _)| *ix == 0 || state.is_fold_open(id))
+                .map(|(_, (child, child_id))| with_atom_surfaces(child, *child_id, state))
+                .collect();
+            if children.len() == 1 && doc.inline(doc.children(id)[0]).is_some_and(|text| text.is_empty()) {
+                // The surface renderer otherwise elides an empty editable title.
+                children.push(BlockNode::List { children: Vec::new(), ordered: false, start: None, span: None });
+            }
+            return BlockNode::Surface {
+                name: format!("editor-fold-{}", id.as_u64()).into(),
+                children,
+                span: None,
+            };
+        }
     }
     let mut node = node.clone();
     match &mut node {
@@ -47,7 +65,7 @@ fn with_atom_surfaces(node: &BlockNode, id: BlockId, doc: &super::document::Edit
         | BlockNode::List { children, .. }
         | BlockNode::ListItem { children, .. } => {
             for (child, id) in children.iter_mut().zip(doc.children(id)) {
-                *child = with_atom_surfaces(child, *id, doc);
+                *child = with_atom_surfaces(child, *id, state);
             }
         }
         _ => {}
@@ -206,6 +224,23 @@ impl RenderOnce for BlockEditor {
                 )
             });
         }
+        for (id, entry) in &self.state.read(cx).model.doc.blocks {
+            if let super::kind::BlockKindData::Fold { syntax, .. } = &entry.kind {
+                let label = match syntax {
+                    super::kind::FoldSyntax::Alert { name }
+                        if self.state.read(cx).model.doc.children(*id).first()
+                            .and_then(|child| self.state.read(cx).model.doc.inline(*child))
+                            .is_some_and(|text| text.is_empty()) => Some(name.clone()),
+                    _ => None,
+                };
+                extensions = extensions.block_surface(format!("editor-fold-{}", id.as_u64()), move |_, _| {
+                    div().relative().pl(px(32.))
+                        .when_some(label.clone(), |this, label| {
+                            this.child(div().absolute().left(px(32.)).top_0().child(label))
+                        })
+                });
+            }
+        }
         let node_cx = render_cx
             .with_markdown_extensions(Arc::new(extensions))
             .with_body_font_size(typography.font_size.to_pixels(window.rem_size()));
@@ -317,7 +352,7 @@ impl RenderOnce for BlockEditor {
                 let is_last_node = node_ix + 1 == count;
                 let node = &snapshot.blocks[unit.block].nodes[unit.node];
                 let live_node = if unit.items.is_none() {
-                    with_atom_surfaces(node, unit.id, &self.state.read(cx).model.doc)
+                    with_atom_surfaces(node, unit.id, self.state.read(cx))
                 } else {
                     node.clone()
                 };
@@ -334,7 +369,7 @@ impl RenderOnce for BlockEditor {
                         let last_chunk = range.end == ids.len();
                         let chunk = BlockNode::List {
                             children: items[range.clone()].iter().zip(&ids[range.clone()])
-                                .map(|(node, id)| with_atom_surfaces(node, *id, &self.state.read(cx).model.doc)).collect(),
+                                .map(|(node, id)| with_atom_surfaces(node, *id, self.state.read(cx))).collect(),
                             ordered: *ordered,
                             start: if *ordered {
                                 Some(start.unwrap_or(1) + range.start as u32)
@@ -785,7 +820,26 @@ impl Element for EditorRoot {
             ElementInputHandler::new(bounds, self.state.clone()),
             cx,
         );
+        // Fold buttons share the title leaf's first line and leave the text editable.
+        let fold_buttons: Vec<_> = {
+            let frame = frame.borrow();
+            state.model.doc.blocks.iter().filter_map(|(id, entry)| {
+                if !matches!(entry.kind, super::kind::BlockKindData::Fold { .. }) { return None; }
+                let title = *state.model.doc.children(*id).first()?;
+                let leaf = frame.leaf(title)?;
+                let p = leaf.caret_point(0);
+                let bounds = Bounds::new(point(p.x - px(30.), p.y), size(px(26.), leaf.line_height()));
+                Some((*id, bounds, state.is_fold_open(*id)))
+            }).collect()
+        };
         child.paint(window, cx);
+        for (_, bounds, open) in &fold_buttons {
+            let center = bounds.center();
+            window.paint_quad(fill(Bounds::new(point(center.x - px(6.), center.y - px(1.5)), size(px(12.), px(3.))), self.style.caret()));
+            if !open {
+                window.paint_quad(fill(Bounds::new(point(center.x - px(1.5), center.y - px(6.)), size(px(3.), px(12.))), self.style.caret()));
+            }
+        }
 
         let frame = frame.borrow();
         let style = &self.style;
@@ -896,6 +950,11 @@ impl Element for EditorRoot {
             let in_editor = hitbox.is_hovered(window);
             let in_grip_gutter = grip_hitbox.is_hovered(window);
             if !in_editor && !in_grip_gutter {
+                return;
+            }
+            if let Some((fold, _, _)) = fold_buttons.iter().find(|(_, bounds, _)| bounds.contains(&event.position)) {
+                entity.update(cx, |state, cx| state.toggle_fold(*fold, cx));
+                cx.stop_propagation();
                 return;
             }
             // A table grip selects its row / column and opens the menu;

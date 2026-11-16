@@ -208,6 +208,7 @@ impl<'a> TransactionBuilder<'a> {
     /// undo stays exact:
     /// - a `List` holds only `ListItem`s,
     /// - a `ListItem` starts with a leaf,
+    /// - a fold starts with an editable title paragraph,
     /// - no container other than `Root` is empty,
     /// - adjacent sibling lists of the same type are merged (Markdown cannot
     ///   write them apart),
@@ -261,6 +262,11 @@ impl<'a> TransactionBuilder<'a> {
         while let Some(id) = stack.pop() {
             let entry = doc.get(id)?;
             if let BlockContent::Children(children) = &entry.content {
+                if matches!(entry.kind, BlockKindData::Fold { .. })
+                    && !children.first().is_some_and(|child| matches!(doc.kind(*child), Some(BlockKindData::Paragraph)))
+                {
+                    return Some(Fix::LeadingParagraph(id));
+                }
                 if children.is_empty() && entry.kind != BlockKindData::Root {
                     return Some(Fix::RemoveEmpty(id));
                 }
