@@ -662,6 +662,8 @@ pub struct PdfView {
     /// Host action for translating the selected text from the floating selection pill.
     #[cfg(feature = "markup")]
     on_translate: Option<TranslateSelectionFn>,
+    #[cfg(feature = "markup")]
+    on_ask_ai: Option<TranslateSelectionFn>,
     /// Host-supplied highlight colors `(label, fill)`; the picker shows these and the
     /// label is echoed back on create. Empty → a single default yellow.
     #[cfg(feature = "markup")]
@@ -832,6 +834,8 @@ impl PdfView {
             on_toggle_annotations: None,
             #[cfg(feature = "markup")]
             on_translate: None,
+            #[cfg(feature = "markup")]
+            on_ask_ai: None,
             #[cfg(feature = "markup")]
             palette: Vec::new(),
             #[cfg(feature = "markup")]
@@ -1113,6 +1117,12 @@ impl PdfView {
     #[cfg(feature = "markup")]
     pub fn set_on_translate(&mut self, handler: TranslateSelectionFn) {
         self.on_translate = Some(handler);
+    }
+
+    /// Add the host's Ask-AI action to the floating selection pill.
+    #[cfg(feature = "markup")]
+    pub fn set_on_ask_ai(&mut self, handler: TranslateSelectionFn) {
+        self.on_ask_ai = Some(handler);
     }
 
     #[cfg(feature = "markup")]
@@ -2335,6 +2345,30 @@ impl Render for PdfView {
                                             && !text.trim().is_empty()
                                         {
                                             translate(text, window, cx);
+                                        }
+                                        this.text_sel = None;
+                                        cx.notify();
+                                    })),
+                            );
+                        }
+                        if let Some(ask_ai) = self.on_ask_ai.clone() {
+                            pill = pill.child(
+                                div()
+                                    .id(SharedString::from(format!("pdf-sel-ask-ai-{i}")))
+                                    .px(px(6.0))
+                                    .py(px(2.0))
+                                    .rounded(px(4.0))
+                                    .text_size(px(11.0))
+                                    .text_color(style.header_fg)
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(style.placeholder_bg))
+                                    .child("问 AI")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if let Some(text) =
+                                            this.extract_selected_text(pg, a, b, is_box)
+                                            && !text.trim().is_empty()
+                                        {
+                                            ask_ai(text, window, cx);
                                         }
                                         this.text_sel = None;
                                         cx.notify();

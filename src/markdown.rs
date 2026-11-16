@@ -31,6 +31,7 @@ pub enum MarkdownEvent {
     Focus,
     Zoom(u8),
     OpenLink(String),
+    AskAi(String),
 }
 
 actions!(
@@ -1688,6 +1689,20 @@ impl MarkdownPane {
                             cx,
                             |this| &mut this.translate,
                         );
+                    }
+                    pane.defer_focus_visual(window, cx);
+                })),
+            ))
+            // 10. Ask AI (问 AI)
+            .child(tool_btn(
+                "ft-ask-ai",
+                false,
+                crate::ui::icon(IconName::Sparkles).into_any_element(),
+                Box::new(cx.listener(move |pane, _, window, cx| {
+                    if let Some(text) = pane.visual_editor.read(cx).selected_plain_text()
+                        && !text.trim().is_empty()
+                    {
+                        cx.emit(MarkdownEvent::AskAi(text));
                     }
                     pane.defer_focus_visual(window, cx);
                 })),

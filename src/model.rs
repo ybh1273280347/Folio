@@ -361,6 +361,20 @@ impl Default for TranslateSettings {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AiSettings {
+    pub base_url: String,
+}
+
+impl Default for AiSettings {
+    fn default() -> Self {
+        Self {
+            base_url: "http://127.0.0.1:3425".into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
@@ -391,6 +405,7 @@ pub struct AppSettings {
     /// User-configurable terminal launch and display settings.
     pub terminal: TerminalSettings,
     pub translate: TranslateSettings,
+    pub ai: AiSettings,
     pub keybindings: BTreeMap<String, String>,
 }
 
@@ -452,6 +467,7 @@ impl Default for AppSettings {
             log_height: 220.,
             terminal: TerminalSettings::default(),
             translate: TranslateSettings::default(),
+            ai: AiSettings::default(),
             keybindings: BTreeMap::new(),
         }
     }

@@ -1,11 +1,68 @@
 //! Persistent terminal sessions hosted by a disposable, hideable workspace panel.
 mod session;
-mod theme;
+pub mod theme;
 
 use crate::{model::TerminalSettings, theme::Palette};
-use gpui_kit::{assets::IconName, prelude::FluentBuilder, *};
+use gpui_kit::{
+    assets::IconName,
+    base::StyledExt,
+    component::{
+        button::{Button, ButtonVariants},
+        menu::{DropdownMenu, PopupMenuItem},
+    },
+    prelude::FluentBuilder,
+    *,
+};
 use gpui_xterm::TerminalView;
 use std::{collections::BTreeMap, path::PathBuf, sync::{Arc, Mutex, mpsc::TryRecvError}, time::Duration};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AiHarness {
+    ClaudeCode,
+    Codex,
+    OhMyPi,
+    Antigravity,
+}
+
+impl AiHarness {
+    pub const ALL: [Self; 4] = [Self::ClaudeCode, Self::Codex, Self::OhMyPi, Self::Antigravity];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex",
+            Self::OhMyPi => "oh-my-pi",
+            Self::Antigravity => "Antigravity",
+        }
+    }
+
+    pub fn command(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude",
+            Self::Codex => "codex",
+            Self::OhMyPi => "omp",
+            Self::Antigravity => "agy",
+        }
+    }
+
+    pub fn badge(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "CC",
+            Self::Codex => "CX",
+            Self::OhMyPi => "π",
+            Self::Antigravity => "AG",
+        }
+    }
+
+    pub fn accent(self) -> u32 {
+        match self {
+            Self::ClaudeCode => 0xd97757,
+            Self::Codex => 0x5b7cfa,
+            Self::OhMyPi => 0x4b5563,
+            Self::Antigravity => 0x16a34a,
+        }
+    }
+}
 
 #[derive(Clone)]
 // None identifies standalone files, which can supply paths but cannot be moved or trashed.
@@ -73,12 +130,6 @@ fn terminal_control(id: impl Into<ElementId>, name: IconName, palette: Palette) 
         })
         .child(crate::ui::icon(name))
 }
-
-pub enum TerminalPaneEvent {
-    Hide,
-    ToggleMaximize,
-}
-impl EventEmitter<TerminalPaneEvent> for TerminalPane {}
 
 struct SessionTab {
     id: u64,
@@ -217,13 +268,25 @@ impl TerminalPane {
     }
 
     fn new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.spawn_session(None, window, cx);
+    }
+
+    pub fn new_harness_session(&mut self, harness: AiHarness, window: &mut Window, cx: &mut Context<Self>) {
+        self.spawn_session(Some(harness), window, cx);
+    }
+
+    fn spawn_session(&mut self, harness: Option<AiHarness>, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.next_id;
         self.next_id += 1;
         let directory = self.directory.clone();
         let settings = self.settings.clone();
+        let initial_title = match harness {
+            Some(h) => format!("{} {id}", h.label()),
+            None => format!("终端 {id}"),
+        };
         self.sessions.push(SessionTab {
             id,
-            title: format!("终端 {id}"),
+            title: initial_title,
             cwd: directory.clone(),
             status: "正在启动…".into(),
             view: None,
@@ -232,9 +295,10 @@ impl TerminalPane {
         });
         self.active = Some(id);
         let task = cx.spawn_in(window, async move |this, cx| {
+            let cmd = harness.map(|h| h.command());
             let result = cx
                 .background_executor()
-                .spawn(async move { session::start(&settings, &directory) })
+                .spawn(async move { session::start_command(&settings, &directory, cmd) })
                 .await;
             let _ = this.update_in(cx, |pane, window, cx| {
                 let Some(index) = pane.sessions.iter().position(|tab| tab.id == id) else {
@@ -278,7 +342,10 @@ impl TerminalPane {
                                 })
                         });
                         let tab = &mut pane.sessions[index];
-                        tab.title = format!("{} {id}", started.shell);
+                        tab.title = match harness {
+                            Some(h) => format!("{} {id}", h.label()),
+                            None => format!("{} {id}", started.shell),
+                        };
                         tab.status.clear();
                         tab.view = Some(view);
                         tab.process = Some(started.process);
@@ -358,6 +425,83 @@ impl Render for TerminalPane {
                 }))
         });
         let current = self.sessions.iter().find(|tab| Some(tab.id) == self.active);
+        let pane_entity = cx.entity();
+        let new_menu_btn = Button::new("new-terminal")
+            .ghost()
+            .compact()
+            .w(px(27.))
+            .h(px(27.))
+            .icon(crate::ui::icon(IconName::Plus))
+            .tooltip("新建终端或启动 AI Harness")
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                let pane_term = pane_entity.clone();
+                let mut menu = menu
+                    .min_w(px(220.))
+                    .item(
+                        PopupMenuItem::element(move |_, _| {
+                            div()
+                                .w_full()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_4()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(crate::ui::icon(IconName::Terminal).w(px(14.)).h(px(14.)))
+                                        .child("Terminal"),
+                                )
+                                .child(div().text_xs().opacity(0.6).child("Shell"))
+                        })
+                        .on_click(move |_, window, cx| {
+                            pane_term.update(cx, |pane, cx| pane.new_session(window, cx));
+                        }),
+                    )
+                    .separator()
+                    .item(PopupMenuItem::label("Start an agent"));
+                for (idx, harness) in AiHarness::ALL.into_iter().enumerate() {
+                    let pane_h = pane_entity.clone();
+                    let index_label = (idx + 1).to_string();
+                    menu = menu.item(
+                        PopupMenuItem::element(move |_, _| {
+                            div()
+                                .w_full()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_4()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .w(px(18.))
+                                                .h(px(18.))
+                                                .rounded(px(4.))
+                                                .bg(gpui_kit::rgb(harness.accent()))
+                                                .text_color(gpui_kit::rgb(0xffffff))
+                                                .text_xs()
+                                                .font_semibold()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .child(harness.badge()),
+                                        )
+                                        .child(harness.label()),
+                                )
+                                .child(div().text_xs().opacity(0.55).child(index_label.clone()))
+                        })
+                        .on_click(move |_, window, cx| {
+                            pane_h.update(cx, |pane, cx| pane.new_harness_session(harness, window, cx));
+                        }),
+                    );
+                }
+                menu
+            });
         div()
             .id("folio-terminal")
             .on_drop(cx.listener(|pane, paths: &DraggedPaths, window, cx| pane.drop_paths(&paths.0, window, cx)))
@@ -373,37 +517,24 @@ impl Render for TerminalPane {
                 div()
                     .flex()
                     .items_center()
-                    .h(px(38.))
+                    .h(px(36.))
                     .flex_shrink_0()
                     .px_2()
                     .gap_1()
                     .border_b_1()
                     .border_color(gpui_kit::rgb(palette.border))
-                    .child(div().flex_1().min_w_0().child("终端"))
                     .child(
-                        terminal_control("new-terminal", IconName::Plus, palette).on_click(
-                            cx.listener(|pane, _, window, cx| pane.new_session(window, cx)),
-                        ),
+                        div()
+                            .id("terminal-tabs")
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .min_w_0()
+                            .overflow_x_scroll()
+                            .children(tabs),
                     )
-                    .child(
-                        terminal_control("maximize-terminal", IconName::Maximize2, palette)
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.emit(TerminalPaneEvent::ToggleMaximize)
-                            })),
-                    )
-                    .child(
-                        terminal_control("hide-terminal", IconName::PanelRightOpen, palette)
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(TerminalPaneEvent::Hide))),
-                    ),
-            )
-            .child(
-                div()
-                    .id("terminal-tabs")
-                    .flex()
-                    .flex_shrink_0()
-                    .min_w_0()
-                    .overflow_x_scroll()
-                    .children(tabs),
+                    .child(new_menu_btn),
             )
             .child(
                 div()

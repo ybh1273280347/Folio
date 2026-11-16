@@ -1,5 +1,6 @@
 //! Isolated native desktop entry point; Electron sources and data stay untouched.
 #![cfg_attr(windows, windows_subsystem = "windows")]
+mod ai;
 mod compiler;
 mod build_log;
 mod files;

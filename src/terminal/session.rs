@@ -24,7 +24,11 @@ pub struct TerminalProcess {
     job: Option<ProcessJob>,
 }
 
-pub fn start(settings: &TerminalSettings, cwd: &Path) -> Result<StartedSession, String> {
+pub fn start_command(
+    settings: &TerminalSettings,
+    cwd: &Path,
+    command_line: Option<&str>,
+) -> Result<StartedSession, String> {
     let shell = if settings.shell.trim().is_empty() {
         find_on_path("pwsh.exe").unwrap_or_else(|| {
             PathBuf::from(std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into()))
@@ -47,6 +51,17 @@ pub fn start(settings: &TerminalSettings, cwd: &Path) -> Result<StartedSession, 
     // Arguments are already separate values. Loading the normal shell profile
     // preserves user functions such as agy and npm's Codex command entry point.
     command.args(&settings.args);
+    if let Some(cmd) = command_line {
+        if !settings
+            .args
+            .iter()
+            .any(|arg| arg.eq_ignore_ascii_case("-noexit"))
+        {
+            command.arg("-NoExit");
+        }
+        command.arg("-Command");
+        command.arg(cmd);
+    }
     command.cwd(cwd);
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
