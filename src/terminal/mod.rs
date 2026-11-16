@@ -5,10 +5,11 @@ mod theme;
 use crate::{model::TerminalSettings, theme::Palette};
 use gpui_kit::{assets::IconName, prelude::FluentBuilder, *};
 use gpui_xterm::TerminalView;
-use std::{path::PathBuf, sync::{Arc, Mutex, mpsc::TryRecvError}, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, sync::{Arc, Mutex, mpsc::TryRecvError}, time::Duration};
 
 #[derive(Clone)]
-pub struct DraggedPaths(pub Vec<PathBuf>, pub String);
+// None identifies standalone files, which can supply paths but cannot be moved or trashed.
+pub struct DraggedPaths(pub Vec<PathBuf>, pub Option<String>);
 
 #[derive(Clone)]
 pub struct DraggedFolder(pub String, pub String);
@@ -20,12 +21,17 @@ pub struct PathsPreview {
     pub font_size: u8,
     pub trash_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     pub is_folder: bool,
+    pub can_trash: bool,
+    pub folder_bounds: Arc<Mutex<BTreeMap<String, (bool, Bounds<Pixels>)>>>,
 }
 
 impl Render for PathsPreview {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let count = self.paths.len();
         let over_trash = self.trash_bounds.lock().expect("trash bounds").is_some_and(|bounds| bounds.contains(&window.mouse_position()));
+        let folders = self.folder_bounds.lock().expect("tree bounds");
+        let over_root = self.can_trash && !self.is_folder && folders.get("").is_some_and(|(_, bounds)| bounds.contains(&window.mouse_position()));
+        let over_folder = self.can_trash && !self.is_folder && folders.iter().any(|(path, (is_file, bounds))| !path.is_empty() && !is_file && bounds.contains(&window.mouse_position()));
         div().pl(self.offset.x + px(12.)).pt(self.offset.y + px(12.))
             .child(
                 div().flex().flex_col().gap_1().p_2().min_w(px(160.)).max_w(px(300.))
@@ -34,7 +40,7 @@ impl Render for PathsPreview {
                     .font_family(self.font.clone()).text_size(px(self.font_size as f32)).shadow_sm()
                     .child(div().flex().items_center().gap_1()
                         .child(crate::ui::icon(IconName::Copy).w(px(14.)).h(px(14.)))
-                        .child(if over_trash { format!("移入废纸篓 {count} 项") } else if count == 1 { "复制".into() } else { format!("复制 {count} 项") }))
+                        .child(if over_trash && !self.can_trash { "禁止删除：独立文件不支持删除".into() } else if over_trash { format!("移入废纸篓 {count} 项") } else if over_root { format!("移动到项目根目录 {count} 项") } else if over_folder { format!("移动到文件夹 {count} 项") } else if count == 1 { "复制路径".into() } else { format!("复制 {count} 个路径") }))
                     .children(self.paths.iter().take(4).map(|path| {
                         let name = path.file_name().expect("file has name").to_string_lossy().into_owned();
                         div().flex().items_center().gap_2().min_w_0()

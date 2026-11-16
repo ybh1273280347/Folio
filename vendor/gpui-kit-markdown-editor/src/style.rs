@@ -12,7 +12,25 @@ pub struct CalloutStyle {
 
 /// Shared callout outer frame used by both `[!name]` and foldable `[!name]-`/`[!name]+`.
 pub fn callout_container(color: Hsla) -> Div {
-    div().border_l_2().border_color(color).pl(px(16.))
+    div()
+        .relative()
+        .overflow_hidden()
+        .rounded(px(8.))
+        .border_1()
+        .border_color(color.opacity(0.22))
+        .bg(color.opacity(0.06))
+        .pl(px(16.))
+        .pr(px(14.))
+        .py(px(10.))
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .top_0()
+                .bottom_0()
+                .w(px(3.))
+                .bg(color),
+        )
 }
 
 /// Shared callout badge header used by both `[!name]` and foldable `[!name]-`/`[!name]+`.
