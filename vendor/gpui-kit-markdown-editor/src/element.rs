@@ -21,14 +21,21 @@ use gpui::{
     canvas, div, fill, point, px, size,
 };
 
-use super::{cull::Measured, id::BlockId, projection::Snapshot, state::*, style::BlockEditorStyle};
+use super::{
+    code_preview::{self, BoundsMap},
+    cull::Measured,
+    id::BlockId,
+    projection::Snapshot,
+    state::*,
+    style::BlockEditorStyle,
+};
 use crate::support::secondary_modifier;
 use gpui_kit::{
     base::{
         StyledExt as _,
         text::{
             MarkdownExtensions,
-            editor_host::{BlockNode, FlowPosition, collect_leaf_geometry},
+            editor_host::{BlockNode, FlowPosition, collect_leaf_geometry, RenderContext},
         },
     },
     component::{Icon, IconName},
@@ -64,12 +71,16 @@ fn capitalize_alert_name(name: &str) -> SharedString {
         .into()
 }
 
-/// Add measuring / fold surfaces to the view without mutating the document model.
+/// Add measuring / fold / code-preview surfaces to the view without mutating
+/// the document model.
 fn with_live_surfaces(
     node: &BlockNode,
     id: BlockId,
     state: &BlockEditorState,
+    editor: &Entity<BlockEditorState>,
     include_atoms: bool,
+    force_preview: bool,
+    preview_bounds: Option<&BoundsMap>,
 ) -> BlockNode {
     let doc = &state.model.doc;
     if include_atoms
@@ -84,6 +95,37 @@ fn with_live_surfaces(
             span: None,
         };
     }
+    if let BlockNode::CodeBlock(code) = node {
+        let preview = state
+            .code_preview_registration()
+            .filter(|registration| {
+                code.lang()
+                    .is_some_and(|language| language.eq_ignore_ascii_case(&registration.language))
+            });
+        if force_preview || state.code_preview_source() != Some(id) {
+            if let Some(registration) = preview {
+                return BlockNode::Custom {
+                    node: code_preview::node(
+                        editor.clone(),
+                        id,
+                        doc.block_revision(id),
+                        code.clone(),
+                        registration.renderer,
+                        preview_bounds.cloned(),
+                        !force_preview,
+                    ),
+                    state: BlockState::default(),
+                };
+            }
+        }
+        if !force_preview {
+            return BlockNode::Surface {
+                name: format!("editor-code-source-{}", id.as_u64()).into(),
+                children: vec![node.clone()],
+                span: None,
+            };
+        }
+    }
     if matches!(doc.kind(id), Some(super::kind::BlockKindData::Fold { .. })) {
         if let BlockNode::Root { children, .. } = node {
             let doc_children = doc.children(id);
@@ -91,11 +133,17 @@ fn with_live_surfaces(
                 let title_is_empty = doc.inline(title_id).is_some_and(|text| text.is_empty());
                 let mut title_children = Vec::with_capacity(2);
                 if title_is_empty {
-                    // Surface elides children when all of them draw nothing; an empty
-                    // surface sentinel preserves the empty editable title leaf without height.
                     title_children.push(noop_surface());
                 }
-                title_children.push(with_live_surfaces(title_node, title_id, state, include_atoms));
+                title_children.push(with_live_surfaces(
+                    title_node,
+                    title_id,
+                    state,
+                    editor,
+                    include_atoms,
+                    force_preview,
+                    preview_bounds,
+                ));
                 let title_surface = BlockNode::Surface {
                     name: format!("editor-fold-title-{}", id.as_u64()).into(),
                     children: title_children,
@@ -107,9 +155,17 @@ fn with_live_surfaces(
                     span: None,
                 };
                 let mut fold_children = vec![header_surface];
-                if state.is_fold_open(id) {
+                if force_preview || state.is_fold_open(id) {
                     for (child, child_id) in children[1..].iter().zip(&doc_children[1..]) {
-                        fold_children.push(with_live_surfaces(child, *child_id, state, include_atoms));
+                        fold_children.push(with_live_surfaces(
+                            child,
+                            *child_id,
+                            state,
+                            editor,
+                            include_atoms,
+                            force_preview,
+                            preview_bounds,
+                        ));
                     }
                 }
                 return BlockNode::Surface {
@@ -128,7 +184,15 @@ fn with_live_surfaces(
         | BlockNode::List { children, .. }
         | BlockNode::ListItem { children, .. } => {
             for (child, id) in children.iter_mut().zip(doc.children(id)) {
-                *child = with_live_surfaces(child, *id, state, include_atoms);
+                *child = with_live_surfaces(
+                    child,
+                    *id,
+                    state,
+                    editor,
+                    include_atoms,
+                    force_preview,
+                    preview_bounds,
+                );
             }
         }
         _ => {}
@@ -292,6 +356,38 @@ fn register_fold_surfaces(
         }
     }
 }
+fn register_code_surfaces(
+    extensions: &mut MarkdownExtensions,
+    editor: &Entity<BlockEditorState>,
+    context: &RenderContext,
+    cx: &App,
+) {
+    let ids: Vec<BlockId> = editor
+        .read(cx)
+        .model
+        .doc
+        .blocks
+        .iter()
+        .filter_map(|(&id, entry)| {
+            matches!(&entry.kind, super::kind::BlockKindData::CodeBlock { .. }).then_some(id)
+        })
+        .collect();
+    for id in ids {
+        let editor = editor.clone();
+        let context = context.clone();
+        *extensions = std::mem::take(extensions).block_surface(
+            format!("editor-code-source-{}", id.as_u64()),
+            move |window, cx| {
+                div()
+                    .relative()
+                    .pt(px(42.))
+                    .child(super::code_ui::header(&editor, id, &context, window, cx))
+            },
+        );
+    }
+}
+
+
 
 /// Items per cull unit of a long top-level list.
 const LIST_CHUNK: usize = 32;
@@ -299,13 +395,14 @@ const LIST_CHUNK: usize = 32;
 const CONTAINER_EXTRA_GAP: Pixels = px(6.);
 
 fn is_container_node(node: &BlockNode) -> bool {
-    matches!(
-        node,
+    match node {
         BlockNode::Surface { .. }
-            | BlockNode::Table(_)
-            | BlockNode::CodeBlock(_)
-            | BlockNode::Blockquote { .. }
-    )
+        | BlockNode::Table(_)
+        | BlockNode::CodeBlock(_)
+        | BlockNode::Blockquote { .. } => true,
+        BlockNode::Custom { node, .. } => node.name() == code_preview::NAME,
+        _ => false,
+    }
 }
 
 fn is_invisible_node(node: &BlockNode) -> bool {
@@ -337,8 +434,11 @@ pub struct BlockEditor {
 impl BlockEditor {
     /// Use the editor's snapshot and node renderer without selection, caret or viewport culling.
     pub fn document(state: &Entity<BlockEditorState>, window: &mut Window, cx: &mut App) -> AnyElement {
-        let (snapshot, extensions) = state.update(cx, |state, _| (state.snapshot(), state.model.doc.extensions.clone()));
+        let (snapshot, extensions) = state.update(cx, |state, _| {
+            (state.snapshot(), state.model.doc.extensions.clone())
+        });
         let mut extensions = (*extensions).clone();
+        code_preview::register_renderer(&mut extensions);
         let theme = gpui_kit::base::Theme::global(cx);
         let editor_state = state.read(cx);
         register_fold_surfaces(&mut extensions, editor_state, None, &theme);
@@ -352,7 +452,15 @@ impl BlockEditor {
                 block
                     .nodes
                     .iter()
-                    .map(|node| with_live_surfaces(node, block.id, editor_state, false))
+                    .map(|node| with_live_surfaces(
+                        node,
+                        block.id,
+                        editor_state,
+                        state,
+                        false,
+                        true,
+                        None,
+                    ))
             })
             .collect();
         let node_refs: Vec<&BlockNode> = nodes.iter().collect();
@@ -497,7 +605,10 @@ impl RenderOnce for BlockEditor {
         typography.refine(&self.style.text);
         let atom_bounds: AtomBounds = Arc::default();
         let fold_bounds: AtomBounds = Arc::default();
+        let code_preview_bounds: BoundsMap = Arc::default();
         let mut extensions = (*extensions).clone();
+        code_preview::register_renderer(&mut extensions);
+        register_code_surfaces(&mut extensions, &self.state, &render_cx, cx);
         for leaf in snapshot.leaves.iter().filter(|leaf| leaf.atomic) {
             let id = leaf.block;
             let bounds = atom_bounds.clone();
@@ -621,7 +732,15 @@ impl RenderOnce for BlockEditor {
                 let is_last_node = node_ix + 1 == count;
                 let node = &snapshot.blocks[unit.block].nodes[unit.node];
                 let live_node = if unit.items.is_none() {
-                    with_live_surfaces(node, unit.id, self.state.read(cx), true)
+                    with_live_surfaces(
+                        node,
+                        unit.id,
+                        self.state.read(cx),
+                        &self.state,
+                        true,
+                        false,
+                        Some(&code_preview_bounds),
+                    )
                 } else {
                     node.clone()
                 };
@@ -638,7 +757,16 @@ impl RenderOnce for BlockEditor {
                         let last_chunk = range.end == ids.len();
                         let chunk = BlockNode::List {
                             children: items[range.clone()].iter().zip(&ids[range.clone()])
-                                .map(|(node, id)| with_live_surfaces(node, *id, self.state.read(cx), true)).collect(),
+                                .map(|(node, id)| with_live_surfaces(
+                                    node,
+                                    *id,
+                                    self.state.read(cx),
+                                    &self.state,
+                                    true,
+                                    false,
+                                    Some(&code_preview_bounds),
+                                ))
+                                .collect(),
                             ordered: *ordered,
                             start: if *ordered {
                                 Some(start.unwrap_or(1) + range.start as u32)
@@ -782,7 +910,7 @@ impl RenderOnce for BlockEditor {
             .on_action(window.listener_for(s, BlockEditorState::on_structural_enter))
             .on_action(window.listener_for(s, BlockEditorState::on_soft_break))
             .on_action(window.listener_for(s, BlockEditorState::on_exit_block))
-            .on_action(window.listener_for(s, BlockEditorState::on_move_left))
+            .on_action(window.listener_for(s, BlockEditorState::on_exit_code_block_source))
             .on_action(window.listener_for(s, BlockEditorState::on_move_right))
             .on_action(window.listener_for(s, BlockEditorState::on_move_up))
             .on_action(window.listener_for(s, BlockEditorState::on_move_down))
@@ -850,7 +978,7 @@ impl RenderOnce for BlockEditor {
                 ),
                 content_bounds,
                 atom_bounds,
-                fold_bounds,
+                code_preview_bounds,
                 padding: root_style.padding,
                 typography,
                 caret_was_visible,
@@ -868,7 +996,7 @@ struct EditorRoot {
     child: Option<AnyElement>,
     backgrounds: Option<LeafBackgrounds>,
     atom_bounds: AtomBounds,
-    fold_bounds: AtomBounds,
+    code_preview_bounds: BoundsMap,
     snapshot: Rc<Snapshot>,
     style: BlockEditorStyle,
     content_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -976,7 +1104,10 @@ impl Element for EditorRoot {
                 &self.snapshot.tables,
             );
             frame.insert_atoms(&self.snapshot.leaves, &self.atom_bounds.lock().expect("atom bounds"));
-            frame.content = Some(self.content_bounds.get());
+            frame.insert_code_previews(
+                &self.snapshot.leaves,
+                &self.code_preview_bounds.lock().expect("code preview bounds"),
+            );
             {
                 let state = self.state.read(cx);
                 let doc = &state.model.doc;

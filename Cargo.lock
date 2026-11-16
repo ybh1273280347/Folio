@@ -2253,6 +2253,9 @@ dependencies = [
  "portable-pty",
  "raw-window-handle",
  "rfd",
+ "rusty-mermaid",
+ "rusty-mermaid-core",
+ "rusty-mermaid-gpui",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -7310,6 +7313,62 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "rusty-mermaid"
+version = "0.2.0"
+source = "git+https://github.com/base58ed/rusty-mermaid?rev=6907e0747822cc2ee7044250a065497ce7d8f3c0#6907e0747822cc2ee7044250a065497ce7d8f3c0"
+dependencies = [
+ "rusty-mermaid-core",
+ "rusty-mermaid-diagrams",
+]
+
+[[package]]
+name = "rusty-mermaid-core"
+version = "0.2.0"
+source = "git+https://github.com/base58ed/rusty-mermaid?rev=6907e0747822cc2ee7044250a065497ce7d8f3c0#6907e0747822cc2ee7044250a065497ce7d8f3c0"
+
+[[package]]
+name = "rusty-mermaid-dagre"
+version = "0.2.0"
+source = "git+https://github.com/base58ed/rusty-mermaid?rev=6907e0747822cc2ee7044250a065497ce7d8f3c0#6907e0747822cc2ee7044250a065497ce7d8f3c0"
+dependencies = [
+ "rusty-mermaid-core",
+ "rusty-mermaid-graph",
+]
+
+[[package]]
+name = "rusty-mermaid-diagrams"
+version = "0.2.0"
+source = "git+https://github.com/base58ed/rusty-mermaid?rev=6907e0747822cc2ee7044250a065497ce7d8f3c0#6907e0747822cc2ee7044250a065497ce7d8f3c0"
+dependencies = [
+ "rusty-mermaid-core",
+ "rusty-mermaid-dagre",
+ "rusty-mermaid-graph",
+ "winnow 1.0.5",
+]
+
+[[package]]
+name = "rusty-mermaid-gpui"
+version = "0.2.0"
+dependencies = [
+ "gpui-kit",
+ "rusty-mermaid-core",
+ "rusty-mermaid-viewport",
+]
+
+[[package]]
+name = "rusty-mermaid-graph"
+version = "0.2.0"
+source = "git+https://github.com/base58ed/rusty-mermaid?rev=6907e0747822cc2ee7044250a065497ce7d8f3c0#6907e0747822cc2ee7044250a065497ce7d8f3c0"
+
+[[package]]
+name = "rusty-mermaid-viewport"
+version = "0.2.0"
+source = "git+https://github.com/base58ed/rusty-mermaid?rev=6907e0747822cc2ee7044250a065497ce7d8f3c0#6907e0747822cc2ee7044250a065497ce7d8f3c0"
+dependencies = [
+ "rusty-mermaid-core",
+]
 
 [[package]]
 name = "rustybuzz"

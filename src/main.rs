@@ -9,6 +9,7 @@ mod markdown;
 mod markdown_pdf;
 mod math;
 mod math_layout;
+mod mermaid;
 mod model;
 mod pdf;
 mod preferences;

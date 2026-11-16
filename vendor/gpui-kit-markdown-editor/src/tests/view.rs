@@ -4434,3 +4434,117 @@ fn closing_first_rules_leave_literal_punctuation(cx: &mut TestAppContext) {
     type_chars(cx, "*");
     assert_eq!(source(&editor, cx), "`a *b*`", "inside inline code");
 }
+
+#[gpui::test]
+fn code_block_preview_uses_full_leaf_bounds(cx: &mut TestAppContext) {
+    let (editor, cx) = open(cx, "```mermaid\ngraph TD\n  A --> B\n```");
+    editor.update(cx, |editor, cx| {
+        editor.set_code_block_preview(
+            "MERMAID".into(),
+            |_, _, _, _, _| div().h(px(96.)).into_any_element(),
+            cx,
+        );
+    });
+    draw(cx);
+    let (id, len, bounds, left, right) = editor.read_with(cx, |editor, _| {
+        let id = editor.model().document().leaves().next().unwrap().id();
+        let len = editor.model().document().block(id).unwrap().text().unwrap().len();
+        let leaf = editor.frame.borrow().leaf(id).unwrap();
+        (id, len, leaf.bounds(), leaf.caret_point(0), leaf.caret_point(len))
+    });
+    assert_eq!(left.x, bounds.left());
+    assert_eq!(right.x, bounds.right());
+    assert_eq!(
+        editor.read_with(cx, |editor, _| editor.model().caret().map(|p| p.block)),
+        Some(id)
+    );
+}
+
+#[gpui::test]
+fn code_block_preview_enters_and_exits_source_mode(cx: &mut TestAppContext) {
+    let (editor, cx) = open(cx, "```mermaid\ngraph TD\n  A --> B\n```");
+    editor.update(cx, |editor, cx| {
+        editor.set_code_block_preview(
+            "mermaid".into(),
+            |_, _, _, _, _| div().h(px(96.)).into_any_element(),
+            cx,
+        );
+    });
+    draw(cx);
+    let at = editor.read_with(cx, |editor, _| {
+        editor.frame.borrow().leaves.first().unwrap().bounds().center()
+    });
+    cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    draw(cx);
+    assert!(editor.read_with(cx, |editor, _| matches!(
+        editor.model().selection(),
+        BlockSelection::Blocks { .. }
+    )));
+    keys(cx, "enter");
+    assert!(editor.read_with(cx, |editor, _| editor.code_preview_source.is_some()));
+    keys(cx, "escape");
+    assert!(editor.read_with(cx, |editor, _| {
+        editor.code_preview_source.is_none()
+            && matches!(editor.model().selection(), BlockSelection::Blocks { .. })
+    }));
+}
+
+#[gpui::test]
+fn code_preview_registration_and_shift_selection_keep_preview_state(cx: &mut TestAppContext) {
+    let (editor, cx) = open(
+        cx,
+        "```mermaid\nfirst\n```\n\n```mermaid\nsecond\n```",
+    );
+    editor.update(cx, |editor, cx| {
+        editor.set_code_block_preview(
+            "MERMAID".into(),
+            |_, _, _, _, _| div().h(px(96.)).into_any_element(),
+            cx,
+        );
+    });
+    let ids = editor.read_with(cx, |editor, _| {
+        editor.model().document().leaves().map(|leaf| leaf.id()).collect::<Vec<_>>()
+    });
+    assert!(editor.read_with(cx, |editor, _| matches!(
+        editor.model().selection(),
+        BlockSelection::Blocks { .. }
+    )));
+    editor.update(cx, |editor, cx| {
+        editor.select_code_preview(ids[1], false, cx);
+        editor.select_code_preview(ids[0], true, cx);
+    });
+    assert!(editor.read_with(cx, |editor, _| matches!(
+        editor.model().selection(),
+        BlockSelection::Blocks { anchor, head } if anchor == ids[1] && head == ids[0]
+    )));
+    editor.update(cx, |editor, cx| {
+        editor
+            .set_selection(
+                BlockSelection::caret(BlockPosition::new(ids[0], 0)),
+                cx,
+            )
+            .unwrap();
+    });
+    assert_eq!(
+        editor.read_with(cx, |editor, _| editor.code_preview_source),
+        Some(ids[0])
+    );
+    editor.update(cx, |editor, cx| {
+        editor
+            .set_selection(
+                BlockSelection::caret(BlockPosition::new(ids[1], 0)),
+                cx,
+            )
+            .unwrap();
+    });
+    assert_eq!(
+        editor.read_with(cx, |editor, _| editor.code_preview_source),
+        Some(ids[1])
+    );
+    editor.update(cx, |editor, cx| editor.set_readonly(true, cx));
+    assert!(editor.read_with(cx, |editor, _| {
+        editor.code_preview_source.is_none()
+            && matches!(editor.model().selection(), BlockSelection::Blocks { .. })
+    }));
+}
