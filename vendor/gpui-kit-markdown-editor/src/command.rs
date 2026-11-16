@@ -779,6 +779,25 @@ impl BlockEditorModel {
                 Ok(caret(BlockPosition::new(id, 0)))
             }).map(|_| ());
         }
+        if range.is_collapsed()
+            && let Some((quote, 0)) = self.doc.index_in_parent(range.start.block)
+            && self.doc.kind(quote) == Some(&BlockKindData::Blockquote)
+            && self.doc.parent(quote) == Some(self.doc.root)
+            && let Some(inline) = self.doc.inline(range.start.block)
+            && range.start.offset == inline.len()
+            && let Some(name) = inline.text().strip_prefix("[!").and_then(|s| s.strip_suffix(']'))
+            && ["note", "tip", "important", "warning", "caution"].iter().any(|kind| name.eq_ignore_ascii_case(kind))
+        {
+            let name = name.to_ascii_lowercase().into();
+            let len = inline.len();
+            let block = range.start.block;
+            self.transact(EditOrigin::InputRule("alert"), |tx| {
+                tx.replace_text(block, 0..len, InlineText::new())?;
+                tx.set_kind(quote, BlockKindData::Alert { name })?;
+                Ok(caret(BlockPosition::new(block, 0)))
+            })?;
+            return Ok(());
+        }
         // Enter in an empty heading: a paragraph, not another heading.
         if range.is_collapsed()
             && matches!(
@@ -1030,13 +1049,14 @@ impl BlockEditorModel {
         let Some((quote, index)) = doc.index_in_parent(pos.block) else {
             return Ok(false);
         };
-        if doc.kind(quote) != Some(&BlockKindData::Blockquote) {
+        if !matches!(doc.kind(quote), Some(BlockKindData::Blockquote | BlockKindData::Alert { .. })) {
             return Ok(false);
         }
         let Some((outer, quote_index)) = doc.index_in_parent(quote) else {
             return Ok(false);
         };
         let count = doc.children(quote).len();
+        let quote_kind = doc.kind(quote).unwrap().clone();
         let leaf = pos.block;
         self.transact(EditOrigin::Command("exit_quote"), |tx| {
             let rest = tx.remove(quote, index + 1..count)?;
@@ -1048,7 +1068,7 @@ impl BlockEditorModel {
             }
             tx.insert(outer, at, vec![para])?;
             if !rest.is_empty() {
-                let tail = DetachedBlock::container(BlockKindData::Blockquote, rest);
+                let tail = DetachedBlock::container(quote_kind, rest);
                 tx.insert(outer, at + 1, vec![tail])?;
             }
             Ok(caret(BlockPosition::new(leaf, 0)))
@@ -1066,7 +1086,7 @@ impl BlockEditorModel {
         let Some((quote, 0)) = doc.index_in_parent(pos.block) else {
             return Ok(false);
         };
-        if doc.kind(quote) != Some(&BlockKindData::Blockquote) {
+        if !matches!(doc.kind(quote), Some(BlockKindData::Blockquote | BlockKindData::Alert { .. })) {
             return Ok(false);
         }
         let Some((outer, quote_index)) = doc.index_in_parent(quote) else {
@@ -1766,7 +1786,7 @@ impl BlockEditorModel {
     pub fn in_blockquote(&self) -> bool {
         self.caret_resolved()
             .ok()
-            .and_then(|r| r.nearest(&self.doc, |k| matches!(k, BlockKindData::Blockquote)))
+            .and_then(|r| r.nearest(&self.doc, |k| matches!(k, BlockKindData::Blockquote | BlockKindData::Alert { .. })))
             .is_some()
     }
 
@@ -1798,7 +1818,7 @@ impl BlockEditorModel {
     fn toggle_blockquote(&mut self) -> Result<bool, CommandError> {
         let resolved = self.caret_resolved()?;
         let pos = resolved.pos;
-        if let Some(quote) = resolved.nearest(&self.doc, |k| matches!(k, BlockKindData::Blockquote))
+        if let Some(quote) = resolved.nearest(&self.doc, |k| matches!(k, BlockKindData::Blockquote | BlockKindData::Alert { .. }))
         {
             let (outer, index) = self
                 .doc

@@ -43,6 +43,7 @@ fn with_atom_surfaces(node: &BlockNode, id: BlockId, doc: &super::document::Edit
     match &mut node {
         BlockNode::Root { children, .. }
         | BlockNode::Blockquote { children, .. }
+        | BlockNode::Surface { children, .. }
         | BlockNode::List { children, .. }
         | BlockNode::ListItem { children, .. } => {
             for (child, id) in children.iter_mut().zip(doc.children(id)) {
@@ -106,6 +107,7 @@ pub(crate) fn block_role(node: &BlockNode) -> Option<(Role, Option<usize>)> {
         BlockNode::Paragraph(_) => (Role::Paragraph, None),
         BlockNode::Heading { level, .. } => (Role::Heading, Some(*level as usize)),
         BlockNode::Blockquote { .. } => (Role::Blockquote, None),
+        BlockNode::Surface { .. } => (Role::Blockquote, None),
         BlockNode::List { .. } => (Role::List, None),
         BlockNode::CodeBlock(_) => (Role::Code, None),
         BlockNode::Table(_) => (Role::Table, None),

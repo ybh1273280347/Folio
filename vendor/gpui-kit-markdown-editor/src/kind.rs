@@ -42,6 +42,7 @@ pub enum BlockKind {
 pub(crate) enum BlockKindData {
     Root,
     Blockquote,
+    Alert { name: SharedString },
     List {
         ordered: bool,
         start: Option<u32>,
@@ -80,7 +81,7 @@ impl BlockKindData {
     pub(crate) fn public(&self) -> BlockKind {
         match self {
             Self::Root => BlockKind::Root,
-            Self::Blockquote => BlockKind::Blockquote,
+            Self::Blockquote | Self::Alert { .. } => BlockKind::Blockquote,
             Self::List { ordered, .. } => BlockKind::List { ordered: *ordered },
             Self::ListItem { checked, .. } => BlockKind::ListItem { checked: *checked },
             Self::Table { .. } => BlockKind::Table,
@@ -103,6 +104,7 @@ impl BlockKindData {
             self,
             Self::Root
                 | Self::Blockquote
+                | Self::Alert { .. }
                 | Self::List { .. }
                 | Self::ListItem { .. }
                 | Self::Table { .. }

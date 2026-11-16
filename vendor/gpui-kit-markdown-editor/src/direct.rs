@@ -155,6 +155,16 @@ impl NodeCache {
                 children: children(self),
                 span: None,
             },
+            BlockKindData::Alert { name } => {
+                let mut blocks = children(self);
+                if doc.children(id).len() == 1
+                    && doc.inline(doc.children(id)[0]).is_some_and(|text| text.is_empty())
+                {
+                    // Keep an empty editable paragraph visible inside a surface.
+                    blocks.push(BlockNode::List { children: Vec::new(), ordered: false, start: None, span: None });
+                }
+                BlockNode::Surface { name: name.clone(), children: blocks, span: None }
+            },
             BlockKindData::List { ordered, start } => BlockNode::List {
                 children: children(self),
                 ordered: *ordered,
