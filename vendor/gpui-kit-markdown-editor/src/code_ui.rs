@@ -3,7 +3,7 @@ use std::time::Duration;
 use gpui::{
     AnyElement, App, AppContext, ClipboardItem, Context, Entity, InteractiveElement,
     IntoElement, MouseButton, ParentElement, SharedString, Styled, Subscription, Task,
-    prelude::FluentBuilder, Window, div, px,
+    Window, div, px,
 };
 use gpui_kit::{
     base::text::editor_host::RenderContext,
@@ -100,13 +100,6 @@ impl CodeTools {
     }
 }
 
-impl BlockEditorState {
-    /// The copy control is shown while the pointer is over this code block.
-    fn is_code_active_for_controls(&self, block: BlockId) -> bool {
-        self.code_hover == Some(block)
-    }
-}
-
 pub(crate) fn header(
     state: &Entity<BlockEditorState>, block: BlockId, context: &RenderContext,
     window: &mut Window, cx: &mut App,
@@ -125,7 +118,6 @@ pub(crate) fn header(
         });
     }
     let copied = tools.read(cx).copied;
-    let show_copy = copied || state.read(cx).is_code_active_for_controls(block);
     let copy_editor = state.clone();
     let theme = cx.theme();
     div()
@@ -150,7 +142,7 @@ pub(crate) fn header(
                         .disabled(readonly),
                 ),
         )
-        .when(show_copy, |this| this.child(
+        .child(
             Button::new("copy").ghost().compact().w(px(28.)).h(px(28.))
                 .icon(Icon::new(if copied { IconName::Check } else { IconName::Copy })
                     .w(px(14.)).h(px(14.)))
@@ -163,6 +155,6 @@ pub(crate) fn header(
                         tools.update(cx, |tools, cx| tools.copied(cx));
                     }
                 }),
-        ))
+        )
         .into_any_element()
 }
