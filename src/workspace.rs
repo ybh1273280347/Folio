@@ -2194,6 +2194,26 @@ impl Workspace {
         let renamed = if let Some(workspace) = self.directory_workspace() {
             full.strip_prefix(&workspace.folder).expect("same workspace").to_string_lossy().replace('\\', "/")
         } else { full.to_string_lossy().into_owned() };
+        self.relocate_file_state(key, &renamed, window, cx);
+        if let Some(workspace) = self.directory_workspace() {
+            self.files = files::list_files(Path::new(&workspace.folder))?;
+        }
+        self.remember_session()?;
+        cx.notify();
+        // Annotation storage is keyed by filename, independently of editor state.
+        let mut annotations = storage::load_annotations(&old);
+        for item in &mut annotations { item.file = name.to_owned(); }
+        if !annotations.is_empty() {
+            storage::save_annotations(&old, &[])?;
+            storage::save_annotations(&full, &annotations)?;
+        }
+        Ok(())
+    }
+
+    // Keep live buffers and Markdown panes: moving a file must not reload unsaved edits.
+    fn relocate_file_state(&mut self, key: &str, renamed: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let full = self.document_path(renamed);
+        let renamed = renamed.to_owned();
         if let Some(mut document) = self.documents.remove(key) {
             document.path = full.clone();
             document._subscription = self.subscribe_editor(renamed.clone(), &document.editor, cx);
@@ -2215,19 +2235,74 @@ impl Workspace {
         for paths in [&mut self.selected_files, &mut self.markdown_changed] {
             if paths.remove(key) { paths.insert(renamed.clone()); }
         }
-        if let Some(workspace) = self.directory_workspace() {
-            self.files = files::list_files(Path::new(&workspace.folder))?;
+        for reading in [false, true] {
+            let old_key = if reading { format!("reading:{key}") } else { key.to_owned() };
+            let new_key = if reading { format!("reading:{renamed}") } else { renamed.clone() };
+            if self.pdf_panes.contains_key(&old_key) {
+                self.release_pdf_pane(&old_key, window, cx);
+                self.pdf_panes.insert(new_key.clone(), cx.new(|cx| PdfPane::new(full.clone(), window, cx)));
+            }
+            if self.html_panes.contains_key(&old_key) {
+                self.release_html_pane(&old_key, window, cx);
+                let root = PathBuf::from(&self.directory_workspace().expect("moved HTML has project").folder);
+                self.add_html_pane(new_key, full.clone(), root, reading, window, cx);
+            }
         }
+        if self.default_workspace.main_file == key && self.directory_workspace().is_some_and(|p| p.id == self.default_workspace.id) {
+            self.default_workspace.main_file = renamed.clone();
+        }
+        if let Some(project) = self.config.projects.iter_mut().find(|p| Some(&p.id) == self.config.active_id.as_ref()) {
+            if project.main_file == key { project.main_file = renamed; }
+        }
+    }
+
+    fn move_tree_files(&mut self, dragged: &crate::terminal::DraggedPaths, folder: &str, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
+        let project = self.directory_workspace().ok_or_else(|| io::Error::other("请选择来源项目。"))?;
+        if dragged.1.as_deref() != Some(project.id.as_str()) {
+            return Err(io::Error::other("仅支持移动同项目文件，独立文件只能复制路径。"));
+        }
+        if self.cancellation.is_some() || self.batch_running {
+            return Err(io::Error::other("请等待编译结束后移动文件。"));
+        }
+        let root = PathBuf::from(&project.folder);
+        // The empty relative directory denotes the project root, never an absolute file key.
+        let destination = files::project_path(&root, if folder.is_empty() { "." } else { folder })?;
+        let mut moves = Vec::new();
+        let mut targets = BTreeSet::new();
+        // Preflight the whole selection before touching disk; existing targets are never replaced.
+        for source in &dragged.0 {
+            let relative = source.strip_prefix(&root).map_err(|_| io::Error::other("来源文件不属于当前项目。"))?.to_string_lossy().replace('\\', "/");
+            let source = files::project_path(&root, &relative)?;
+            let target = destination.join(source.file_name().expect("dragged file has name"));
+            if source == target { continue; }
+            if target.exists() || !targets.insert(target.to_string_lossy().to_lowercase()) {
+                return Err(io::Error::other(format!("目标存在同名文件，未移动：{}", target.display())));
+            }
+            let name = source.file_name().unwrap().to_string_lossy();
+            let renamed = if folder.is_empty() { name.into_owned() } else { format!("{folder}/{name}") };
+            moves.push((source, target, relative, renamed));
+        }
+        let mut result = Ok(());
+        for (source, target, relative, renamed) in moves {
+            // Match rename's no-overwrite hard-link operation. On failure, retain earlier successes.
+            result = std::fs::hard_link(&source, &target).and_then(|_| std::fs::remove_file(&source));
+            if result.is_err() { break; }
+            self.relocate_file_state(&relative, &renamed, window, cx);
+            self.expand_ancestors(&renamed);
+            // Annotations live in the source directory's .folio store, not inside the file.
+            let annotations = storage::load_annotations(&source);
+            if !annotations.is_empty() {
+                result = storage::save_annotations(&target, &annotations)
+                    .and_then(|_| storage::save_annotations(&source, &[]));
+                if result.is_err() { break; }
+            }
+        }
+        self.files = files::list_files(&root)?;
+        self.folders = files::list_folders(&root)?;
+        storage::save_projects(&self.config)?;
         self.remember_session()?;
         cx.notify();
-        // Annotation storage is keyed by filename, independently of editor state.
-        let mut annotations = storage::load_annotations(&old);
-        for item in &mut annotations { item.file = name.to_owned(); }
-        if !annotations.is_empty() {
-            storage::save_annotations(&old, &[])?;
-            storage::save_annotations(&full, &annotations)?;
-        }
-        Ok(())
+        result
     }
 
     fn focused_folder_prefix(&self) -> String {
@@ -3329,6 +3404,14 @@ impl Workspace {
                     let rename_key = key.clone();
                     let rename_name = Path::new(path).file_name().unwrap().to_string_lossy().into_owned();
                     let rename_app = cx.entity();
+                    let full = PathBuf::from(path);
+                    let reveal = full.clone();
+                    let copy = full.clone();
+                    let preview_font: SharedString = if self.settings.interface_font.is_empty() { "Segoe UI".into() } else { self.settings.interface_font.clone().into() };
+                    let preview_font_size = self.settings.interface_font_size;
+                    let trash_bounds = self.trash_bounds.clone();
+                    let dragging = self.dragging_tree_item.clone();
+                    let folder_bounds = self.tree_row_bounds.clone();
                     let close_id = SharedString::from(format!("close-default-file-{key}"));
                     let name = Path::new(path)
                         .file_name()
@@ -3337,6 +3420,10 @@ impl Workspace {
                         .into_owned();
                     return div()
                         .id(SharedString::from(format!("default-file-{key}")))
+                        .on_drag(crate::terminal::DraggedPaths(vec![full], None), move |paths, offset, _, cx| {
+                            dragging.store(true, Ordering::Relaxed);
+                            cx.new(|_| crate::terminal::PathsPreview { paths: paths.0.clone(), offset, font: preview_font.clone(), font_size: preview_font_size, trash_bounds: trash_bounds.clone(), is_folder: false, can_trash: false, folder_bounds: folder_bounds.clone() })
+                        })
                         .flex()
                         .items_center()
                         .h(px(32.))
@@ -3379,7 +3466,13 @@ impl Workspace {
                             let app = rename_app.clone();
                             let path = rename_key.clone();
                             let name = rename_name.clone();
-                            menu.when(path.to_lowercase().ends_with(".md"), |menu| {
+                            let reveal = reveal.clone();
+                            let copy = copy.clone();
+                            menu.item(PopupMenuItem::new("在资源管理器中显示").on_click(move |_, _, cx| reveal_path(&reveal, cx)))
+                            .item(PopupMenuItem::new("复制完整路径").on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copy.to_string_lossy().into_owned()));
+                            }))
+                            .when(path.to_lowercase().ends_with(".md"), |menu| {
                                 menu.item(PopupMenuItem::new("重命名…").on_click(move |_, window, cx| {
                                     app.update(cx, |app, cx| app.start_name(NameAction::RenameFile(path.clone()), &name, window, cx));
                                 }))
@@ -3401,12 +3494,22 @@ impl Workspace {
                     let folder_font_size = self.settings.interface_font_size;
                     let trash_bounds = self.trash_bounds.clone();
                     let dragging = self.dragging_tree_item.clone();
+                    let drop_folder = path.clone();
+                    let folder_bounds = self.tree_row_bounds.clone();
+                    let drop_project = self.directory_workspace().expect("folder has project").id.clone();
                     return div()
                         .id(SharedString::from(format!("folder-{path}")))
                         .on_drag(folder_drag, move |_, offset, _, cx| {
                             dragging.store(true, Ordering::Relaxed);
-                            cx.new(|_| crate::terminal::PathsPreview { paths: vec![folder_path.clone()], offset, font: folder_font.clone(), font_size: folder_font_size, trash_bounds: trash_bounds.clone(), is_folder: true })
+                            cx.new(|_| crate::terminal::PathsPreview { paths: vec![folder_path.clone()], offset, font: folder_font.clone(), font_size: folder_font_size, trash_bounds: trash_bounds.clone(), is_folder: true, can_trash: true, folder_bounds: folder_bounds.clone() })
                         })
+                        .drag_over::<crate::terminal::DraggedPaths>(move |style, dragged, _, _| {
+                            if dragged.1.as_deref() == Some(drop_project.as_str()) { style.bg(rgb(0xdde9f6)) } else { style }
+                        })
+                        .on_drop(cx.listener(move |app, dragged: &crate::terminal::DraggedPaths, window, cx| {
+                            cx.stop_propagation();
+                            if let Err(error) = app.move_tree_files(dragged, &drop_folder, window, cx) { app.report(error, cx); }
+                        }))
                         .flex()
                         .h(px(29.))
                         .items_center()
@@ -3584,11 +3687,12 @@ impl Workspace {
                 let drag_project = self.directory_workspace().expect("file has project").id.clone();
                 let trash_bounds = self.trash_bounds.clone();
                 let dragging = self.dragging_tree_item.clone();
+                let folder_bounds = self.tree_row_bounds.clone();
                 div()
                     .id(SharedString::from(format!("file-{}", file.path)))
-                    .on_drag(crate::terminal::DraggedPaths(dragged_paths, drag_project), move |paths, offset, _, cx| {
+                    .on_drag(crate::terminal::DraggedPaths(dragged_paths, Some(drag_project)), move |paths, offset, _, cx| {
                         dragging.store(true, Ordering::Relaxed);
-                        cx.new(|_| crate::terminal::PathsPreview { paths: paths.0.clone(), offset, font: preview_font.clone(), font_size: preview_font_size, trash_bounds: trash_bounds.clone(), is_folder: false })
+                        cx.new(|_| crate::terminal::PathsPreview { paths: paths.0.clone(), offset, font: preview_font.clone(), font_size: preview_font_size, trash_bounds: trash_bounds.clone(), is_folder: false, can_trash: true, folder_bounds: folder_bounds.clone() })
                     })
                     .flex()
                     .items_center()
@@ -3869,7 +3973,7 @@ impl Workspace {
                 }) { return; }
                 if let Err(error) = app.select_loose_files(window, cx) { app.report(error, cx); }
             })))
-            .child(div().relative().flex_1().min_h_0().child(
+            .child(div().relative().flex_1().min_h_0().overflow_hidden().child(
                 div().id("sidebar-content-scroll").flex().flex_col().size_full().overflow_y_scroll()
                 .track_scroll(&self.sidebar_scroll)
                 .child(div().pt_5().pb_2().px_4().flex_shrink_0().text_xs().text_color(rgb(MUTED)).child("项目"))
@@ -4023,9 +4127,11 @@ impl Workspace {
                 )
             })
             .child(
-                div().relative().flex_shrink_0().child(div()
+                // Preserve the tree's content height for the outer scroll handle. A zero
+                // flex basis hides overflowing rows from its measured scroll extent.
+                div().relative().flex().flex_col().flex_grow(1.).flex_shrink_0().child(div()
                     .id("file-tree-scroll")
-                    .flex().flex_col().w_full()
+                    .flex().flex_col().w_full().flex_grow(1.).flex_shrink_0()
                     .key_context("FolioFileTree")
                     .track_focus(&self.file_tree_focus)
                     .on_action(cx.listener(Self::copy_file_path))
@@ -4078,7 +4184,30 @@ impl Workspace {
                         app.file_tree_focus.focus(window, cx);
                     }))
                     .children(rows)
-                    .child(div().h(px(48.)).flex_shrink_0()))
+                    .when_some(self.directory_workspace(), |tree, project| {
+                        let project_id = project.id.clone();
+                        let bounds = self.tree_row_bounds.clone();
+                        // Empty space belongs to the root; folder rows retain their own drop targets.
+                        tree.child(div().id("project-root-drop").relative()
+                            .flex_grow(1.).h(px(48.)).flex_shrink_0()
+                            .drag_over::<crate::terminal::DraggedPaths>(move |style, dragged, _, _| {
+                                if dragged.1.as_deref() == Some(project_id.as_str()) { style.bg(rgb(0xdde9f6)) } else { style }
+                            })
+                            .child(canvas(move |area, _, _| {
+                                bounds.lock().expect("tree bounds").insert(String::new(), (false, area));
+                            }, |_, _, _, _| {}).absolute().top_0().left_0().size_full())
+                            .on_click(cx.listener(|app, _, window, cx| {
+                                cx.stop_propagation();
+                                app.focused_folder = None;
+                                app.file_tree_focus.focus(window, cx);
+                                cx.notify();
+                            }))
+                            .on_drop(cx.listener(|app, dragged: &crate::terminal::DraggedPaths, window, cx| {
+                                cx.stop_propagation();
+                                if let Err(error) = app.move_tree_files(dragged, "", window, cx) { app.report(error, cx); }
+                            })))
+                    })
+                    .when(self.directory_workspace().is_none(), |tree| tree.child(div().h(px(48.)).flex_shrink_0())))
                     .when_some(self.tree_drag.as_ref().filter(|drag| drag.moved).map(TreeSelectionDrag::bounds), |area, selection| {
                         area.child(canvas(|_, _, _| (), move |_, _, window, _| {
                             window.paint_quad(fill(selection, rgb(0x165dff).opacity(0.18)));
@@ -4093,10 +4222,10 @@ impl Workspace {
                             .thumb_hover(|style| style.bg(rgb(0xbcbcb9)).width(px(6.)).inset(px(1.)).radius(px(4.)))
                             .thumb_active(|style| style.bg(rgb(0xa8a8a5)).width(px(6.)).inset(px(1.)).radius(px(4.)))),
                 )))
-            .child(div().mx_4().h(px(1.)).bg(rgb(0xeae9e6)))
+            .child(div().mx_4().h(px(1.)).flex_shrink_0().bg(rgb(0xeae9e6)))
             .child({
                 let bounds = self.trash_bounds.clone();
-                div().id("trash-entry").relative().flex().items_center().gap_2()
+                div().id("trash-entry").relative().flex().flex_shrink_0().items_center().gap_2()
                     .mx_2().my_2().px_2().h(px(32.)).rounded(px(4.)).cursor_pointer()
                     .when(self.show_trash, |row| row.bg(rgb(0xe8e7e4)))
                     .when(dragging_tree_item, |row| row.bg(rgb(0xf0f4fa)))
@@ -4107,8 +4236,9 @@ impl Workspace {
                     .child(canvas(move |area, _, _| { *bounds.lock().expect("trash bounds") = Some(area); }, |_, _, _, _| {}).absolute().size_full())
                     .on_click(cx.listener(|app, _, _, cx| { app.show_trash = true; cx.notify(); }))
                     .on_drop(cx.listener(|app, dragged: &crate::terminal::DraggedPaths, window, cx| {
+                        if dragged.1.is_none() { app.report("独立文件不支持删除。", cx); return; }
                         let Some(project) = app.directory_workspace() else { return; };
-                        if project.id != dragged.1 { app.report("来源项目已切换，请重新拖动。", cx); return; }
+                        if Some(project.id.as_str()) != dragged.1.as_deref() { app.report("来源项目已切换，请重新拖动。", cx); return; }
                         let root = PathBuf::from(&project.folder);
                         let paths: Vec<String> = dragged.0.iter().filter_map(|path| path.strip_prefix(&root).ok().map(|path| path.to_string_lossy().replace('\\', "/"))).collect();
                         if paths.len() == dragged.0.len() { app.confirm_trash(paths, window, cx); }
@@ -4122,7 +4252,7 @@ impl Workspace {
                         app.delete_folder(&dragged.0, window, cx);
                     }))
             })
-            .child(div().id("preferences").flex().items_center().gap_2()
+            .child(div().id("preferences").flex().flex_shrink_0().items_center().gap_2()
                 .mx_2().mb_2().px_2().h(px(32.)).rounded(px(4.)).cursor_pointer()
                 .text_color(rgb(MUTED)).hover(|style| style.bg(rgb(0xefefed)))
                 .child(crate::ui::icon(IconName::Settings)).child("设置")

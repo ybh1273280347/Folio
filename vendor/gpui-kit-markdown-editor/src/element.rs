@@ -282,6 +282,7 @@ fn register_fold_surfaces(
                             .flex_row()
                             .items_center()
                             .gap(px(6.))
+                            .when(open && has_body, |this| this.pb(px(6.)))
                             .child(trigger)
                     })
                     .block_surface(format!("editor-fold-title-{}", id.as_u64()), move |_, _| {
@@ -294,6 +295,35 @@ fn register_fold_surfaces(
 
 /// Items per cull unit of a long top-level list.
 const LIST_CHUNK: usize = 32;
+
+const CONTAINER_EXTRA_GAP: Pixels = px(6.);
+
+fn is_container_node(node: &BlockNode) -> bool {
+    matches!(
+        node,
+        BlockNode::Surface { .. }
+            | BlockNode::Table(_)
+            | BlockNode::CodeBlock(_)
+            | BlockNode::Blockquote { .. }
+    )
+}
+
+fn is_invisible_node(node: &BlockNode) -> bool {
+    matches!(node, BlockNode::Break { .. } | BlockNode::Definition { .. })
+}
+
+fn container_extra_gap(
+    curr_is_container: bool,
+    curr_is_heading: bool,
+    next_is_container: bool,
+    next_is_heading: bool,
+) -> Pixels {
+    if (curr_is_container && !next_is_heading) || (!curr_is_heading && next_is_container) {
+        CONTAINER_EXTRA_GAP
+    } else {
+        px(0.)
+    }
+}
 
 /// A block-based WYSIWYG Markdown editor (spike). Hold an
 /// `Entity<BlockEditorState>` and pass it here in `render`. Instance styling
@@ -328,8 +358,29 @@ impl BlockEditor {
         let node_refs: Vec<&BlockNode> = nodes.iter().collect();
         let mut children = Vec::with_capacity(node_refs.len());
         for (ix, node) in node_refs.iter().enumerate() {
-            let node = node.render(ix, FlowPosition::at(&node_refs, ix, false).last(ix + 1 == node_refs.len()), &context, window, cx);
-            children.push(div().relative().child(node).child(canvas(|_,_,_| (), |bounds,_,window,_| window.vector_block(bounds)).absolute().size_full()).into_any_element());
+            let extra_gap = if is_invisible_node(node) {
+                px(0.)
+            } else if let Some(next) = node_refs[ix + 1..].iter().find(|n| !is_invisible_node(n)) {
+                container_extra_gap(
+                    is_container_node(node),
+                    matches!(node, BlockNode::Heading { .. }),
+                    is_container_node(next),
+                    matches!(next, BlockNode::Heading { .. }),
+                )
+            } else {
+                px(0.)
+            };
+            let rendered = node.render(ix, FlowPosition::at(&node_refs, ix, false).last(ix + 1 == node_refs.len()), &context, window, cx);
+            let block_el = div()
+                .relative()
+                .child(rendered)
+                .child(canvas(|_,_,_| (), |bounds,_,window,_| window.vector_block(bounds)).absolute().size_full())
+                .into_any_element();
+            children.push(if extra_gap > px(0.) {
+                div().w_full().pb(extra_gap).child(block_el).into_any_element()
+            } else {
+                block_el
+            });
         }
         div().w_full().children(children).into_any_element()
     }
@@ -647,6 +698,35 @@ impl RenderOnce for BlockEditor {
                         .child(element)
                         .into_any_element(),
                     None => element,
+                };
+                let is_inner_list_chunk = unit
+                    .items
+                    .as_ref()
+                    .is_some_and(|(range, ids)| range.end < ids.len());
+                let extra_gap = if is_inner_list_chunk || is_invisible_node(&live_node) {
+                    px(0.)
+                } else if let Some(next_unit) = units[unit_ix + 1..].iter().find(|u| {
+                    !is_invisible_node(&snapshot.blocks[u.block].nodes[u.node])
+                }) {
+                    let next_block = &snapshot.blocks[next_unit.block];
+                    let next_node = &next_block.nodes[next_unit.node];
+                    let next_is_fold = matches!(
+                        self.state.read(cx).model.doc.kind(next_block.id),
+                        Some(super::kind::BlockKindData::Fold { .. })
+                    );
+                    container_extra_gap(
+                        is_container_node(&live_node),
+                        matches!(live_node, BlockNode::Heading { .. }),
+                        is_container_node(next_node) || next_is_fold,
+                        matches!(next_node, BlockNode::Heading { .. }),
+                    )
+                } else {
+                    px(0.)
+                };
+                let element = if extra_gap > px(0.) {
+                    div().w_full().pb(extra_gap).child(element).into_any_element()
+                } else {
+                    element
                 };
                 children.push(
                     Measured {
