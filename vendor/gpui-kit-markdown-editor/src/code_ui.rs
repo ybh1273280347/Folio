@@ -3,12 +3,12 @@ use std::time::Duration;
 use gpui::{
     AnyElement, App, AppContext, ClipboardItem, Context, Entity, InteractiveElement,
     IntoElement, MouseButton, ParentElement, SharedString, Styled, Subscription, Task,
-    Window, div, px,
+    prelude::FluentBuilder, Window, div, px,
 };
 use gpui_kit::{
     base::text::editor_host::RenderContext,
     component::{
-        Icon, IconName, Sizable,
+        ActiveTheme as _, Icon, IconName, Sizable,
         button::{Button, ButtonVariants},
         select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
     },
@@ -100,6 +100,13 @@ impl CodeTools {
     }
 }
 
+impl BlockEditorState {
+    /// The copy control is shown while the pointer is over this code block.
+    fn is_code_active_for_controls(&self, block: BlockId) -> bool {
+        self.code_hover == Some(block)
+    }
+}
+
 pub(crate) fn header(
     state: &Entity<BlockEditorState>, block: BlockId, context: &RenderContext,
     window: &mut Window, cx: &mut App,
@@ -118,7 +125,9 @@ pub(crate) fn header(
         });
     }
     let copied = tools.read(cx).copied;
+    let show_copy = copied || state.read(cx).is_code_active_for_controls(block);
     let copy_editor = state.clone();
+    let theme = cx.theme();
     div()
         .id(("code-tools", block.as_u64() as usize))
         .absolute().top(px(4.)).left(px(4.)).right(px(4.))
@@ -126,11 +135,22 @@ pub(crate) fn header(
         .bg(context.style().code_background())
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(
-            Select::new(&selector).small().appearance(false).w(px(160.))
-                .menu_width(px(230.)).search_placeholder("搜索语言…")
-                .disabled(readonly),
+            div()
+                .flex()
+                .items_center()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(theme.border.opacity(0.65))
+                .bg(theme.popover.opacity(0.35))
+                .px_1()
+                .child(
+                    Select::new(&selector).small().appearance(false).w(px(160.))
+                        .text_size(px(13.))
+                        .menu_width(px(230.)).search_placeholder("搜索语言…")
+                        .disabled(readonly),
+                ),
         )
-        .child(
+        .when(show_copy, |this| this.child(
             Button::new("copy").ghost().compact().w(px(28.)).h(px(28.))
                 .icon(Icon::new(if copied { IconName::Check } else { IconName::Copy })
                     .w(px(14.)).h(px(14.)))
@@ -143,6 +163,6 @@ pub(crate) fn header(
                         tools.update(cx, |tools, cx| tools.copied(cx));
                     }
                 }),
-        )
+        ))
         .into_any_element()
 }

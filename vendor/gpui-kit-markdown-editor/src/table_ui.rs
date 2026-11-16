@@ -511,16 +511,17 @@ pub(crate) fn copy_controls(
             .ghost()
             .compact()
             .small()
-            .h(px(22.))
-            .px_1p5()
+            .text_xs()
+            .h(px(18.))
+            .px(px(5.))
             .icon(
                 Icon::new(if is_copied {
                     IconName::Check
                 } else {
                     IconName::Copy
                 })
-                .w(px(12.))
-                .h(px(12.)),
+                .w(px(10.))
+                .h(px(10.)),
             )
             .label(label)
             .tooltip(if is_copied { copied_tip } else { tip })
@@ -547,13 +548,12 @@ pub(crate) fn copy_controls(
             .flex()
             .items_center()
             .gap_0p5()
-            .px_1()
+            .px(px(3.))
             .py_0p5()
-            .rounded(px(6.))
-            .bg(theme.popover.opacity(0.94))
+            .rounded(px(5.))
+            .bg(theme.popover.opacity(0.35))
             .border_1()
-            .border_color(theme.border)
-            .shadow_sm()
+            .border_color(theme.border.opacity(0.65))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(copy_button(
                 "copy-table-md",
