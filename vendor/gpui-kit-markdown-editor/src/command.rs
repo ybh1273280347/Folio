@@ -3,7 +3,7 @@ use super::{
     editor::BlockEditorModel,
     id::BlockId,
     inline::InlineText,
-    kind::{BlockKind, BlockKindData},
+    kind::{BlockKind, BlockKindData, FoldSyntax},
     marks::{MarkChange, MarkKind, MarkState},
     position::{BlockPosition, PositionError},
     selection::{BlockSelection, ResolvedSelection, SelectionError},
@@ -167,6 +167,11 @@ fn delete_range(
     };
     let is_cell =
         |doc: &EditorDocument, id: BlockId| doc.kind(id) == Some(&BlockKindData::TableCell);
+    let is_fold_title = |doc: &EditorDocument, id: BlockId| {
+        doc.index_in_parent(id).is_some_and(|(parent, index)| {
+            index == 0 && matches!(doc.kind(parent), Some(BlockKindData::Fold { .. }))
+        })
+    };
 
     // Start leaf.
     let start_code = doc.plain(start.block).map(str::len);
@@ -187,7 +192,14 @@ fn delete_range(
     let start_inline = start_kept && start_code.is_none();
     // Leaves in between.
     for id in &leaves[si + 1..ei] {
-        if is_cell(tx.doc, *id) {
+        if is_fold_title(tx.doc, *id)
+            && let Some((fold, _)) = tx.doc.index_in_parent(*id)
+            && leaves.iter().position(|leaf| *leaf == tx.doc.last_leaf_in(fold).block).is_some_and(|last| last < ei)
+        {
+            tx.remove_block(fold)?;
+            continue;
+        }
+        if is_cell(tx.doc, *id) || is_fold_title(tx.doc, *id) {
             let len = tx.doc.leaf_len(*id).unwrap_or(0);
             tx.replace_text(*id, 0..len, InlineText::new())?;
         } else if tx.doc.get(*id).is_some() {
@@ -197,7 +209,8 @@ fn delete_range(
     // End leaf.
     if let Some(inline) = tx.doc.inline(end.block) {
         let tail = inline.slice(end.offset..inline.len());
-        let joinable = start_inline && !is_cell(tx.doc, end.block) && !is_cell(tx.doc, start.block);
+        let joinable = start_inline && !is_cell(tx.doc, end.block) && !is_cell(tx.doc, start.block)
+            && !is_fold_title(tx.doc, end.block);
         if joinable {
             tx.remove_block(end.block)?;
             tx.replace_text(start.block, start.offset..start.offset, tail)?;
@@ -605,6 +618,13 @@ impl BlockEditorModel {
             return self.delete_blocks().map(|_| ());
         }
         let range = self.resolved()?;
+        if !forward && range.is_collapsed() && range.start.offset == 0
+            && let Some((fold, 0)) = self.doc.index_in_parent(range.start.block)
+            && matches!(self.doc.kind(fold), Some(BlockKindData::Fold { .. }))
+        {
+            self.set_selection(BlockSelection::Blocks { anchor: fold, head: fold })?;
+            return Ok(());
+        }
         // Backspace at the start of a heading: back to a paragraph, keeping
         // the text and marks, wherever the heading sits.
         if !forward
@@ -737,6 +757,13 @@ impl BlockEditorModel {
             {
                 return Ok(None);
             }
+            if [first, second].iter().any(|id| {
+                doc.index_in_parent(*id).is_some_and(|(parent, index)| {
+                    index == 0 && matches!(doc.kind(parent), Some(BlockKindData::Fold { .. }))
+                })
+            }) {
+                return Ok(None);
+            }
             match (doc.inline(first), doc.inline(second)) {
                 (Some(a), Some(b)) => {
                     let at = a.len();
@@ -778,6 +805,34 @@ impl BlockEditorModel {
                 tx.insert(parent, index + usize::from(range.start.offset > 0), vec![paragraph])?;
                 Ok(caret(BlockPosition::new(id, 0)))
             }).map(|_| ());
+        }
+        if range.is_collapsed()
+            && let Some((quote, 0)) = self.doc.index_in_parent(range.start.block)
+            && self.doc.kind(quote) == Some(&BlockKindData::Blockquote)
+            && let Some(inline) = self.doc.inline(range.start.block)
+            && range.start.offset == inline.len()
+            && let Some(rest) = inline.text().strip_prefix("[!")
+            && inline.pieces().all(|(_, mark, atom)| !mark.code && atom.is_none())
+            && let Some(end) = rest.find(']')
+            && end > 0
+            && let Some(sign) = rest.as_bytes().get(end + 1)
+            && (*sign == b'+' || *sign == b'-')
+            && rest[end + 2..].chars().next().is_none_or(|ch| ch == ' ' || ch == '\t')
+        {
+            let name = SharedString::from(&rest[..end]);
+            let initially_open = *sign == b'+';
+            let start = 2 + end + 2;
+            let title_start = start + inline.text()[start..].len() - inline.text()[start..].trim_start_matches([' ', '\t']).len();
+            let block = range.start.block;
+            self.transact(EditOrigin::InputRule("fold"), |tx| {
+                tx.replace_text(block, 0..title_start, InlineText::new())?;
+                tx.set_kind(quote, BlockKindData::Fold { syntax: FoldSyntax::Alert { name }, initially_open })?;
+                let body = DetachedBlock::paragraph(InlineText::new());
+                let id = body.id;
+                tx.insert(quote, 1, vec![body])?;
+                Ok(caret(BlockPosition::new(id, 0)))
+            })?;
+            return Ok(());
         }
         if range.is_collapsed()
             && let Some((quote, 0)) = self.doc.index_in_parent(range.start.block)
@@ -1218,18 +1273,14 @@ impl BlockEditorModel {
             && !text.contains('$')
             && !text.contains("\\(")
             && !text.contains("\\[")
+            && !text.to_ascii_lowercase().contains("<details")
         {
             return Ok(false);
         }
-        let Ok(parsed) = super::math::parse_markdown(text, self.doc.extensions.clone()) else {
+        let normalized = super::math::normalize_math(text);
+        let Ok(blocks) = super::import::import_markdown_blocks(&normalized, self.doc.extensions.clone()) else {
             return Ok(false);
         };
-        let mut defs = super::import::Defs::new();
-        super::import::collect_definitions(&parsed, &mut defs);
-        let mut blocks = Vec::new();
-        for node in parsed.iter() {
-            super::import::import_block(node, &defs, &mut blocks);
-        }
         // Nothing structural (one paragraph, soft line breaks only): plain
         // text, where each line becomes a block as typed.
         let has_atoms = |block: &DetachedBlock| {

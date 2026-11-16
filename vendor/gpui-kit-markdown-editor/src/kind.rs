@@ -37,12 +37,19 @@ pub enum BlockKind {
     Unknown,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum FoldSyntax {
+    Details { opening: SharedString, summary_opening: SharedString },
+    Alert { name: SharedString },
+}
+
 /// Internal kind with payload.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum BlockKindData {
     Root,
     Blockquote,
     Alert { name: SharedString },
+    Fold { syntax: FoldSyntax, initially_open: bool },
     List {
         ordered: bool,
         start: Option<u32>,
@@ -81,7 +88,7 @@ impl BlockKindData {
     pub(crate) fn public(&self) -> BlockKind {
         match self {
             Self::Root => BlockKind::Root,
-            Self::Blockquote | Self::Alert { .. } => BlockKind::Blockquote,
+            Self::Blockquote | Self::Alert { .. } | Self::Fold { .. } => BlockKind::Blockquote,
             Self::List { ordered, .. } => BlockKind::List { ordered: *ordered },
             Self::ListItem { checked, .. } => BlockKind::ListItem { checked: *checked },
             Self::Table { .. } => BlockKind::Table,
@@ -105,6 +112,7 @@ impl BlockKindData {
             Self::Root
                 | Self::Blockquote
                 | Self::Alert { .. }
+                | Self::Fold { .. }
                 | Self::List { .. }
                 | Self::ListItem { .. }
                 | Self::Table { .. }

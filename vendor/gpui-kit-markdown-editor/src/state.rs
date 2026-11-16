@@ -377,6 +377,7 @@ pub struct BlockEditorState {
     /// Last complete frame, written by the element after prepaint.
     pub(crate) frame: Rc<RefCell<FrameLayout>>,
     pub(crate) cull: Rc<RefCell<super::cull::CullState>>,
+    pub(crate) fold_open: std::collections::HashMap<BlockId, bool>,
     /// The accessible value (document text), cached per revision (D8).
     pub(crate) a11y_value: RefCell<Option<(u64, SharedString)>>,
     /// Scroll container to keep the caret in view (see `set_scroll_handle`).
@@ -457,6 +458,7 @@ impl BlockEditorState {
             projection: ProjectionCache::default(),
             frame: Rc::default(),
             cull: Rc::default(),
+            fold_open: Default::default(),
             a11y_value: RefCell::default(),
             scroll_handle: Some(gpui::ScrollHandle::new()),
             reveal: Default::default(),
@@ -590,6 +592,8 @@ impl BlockEditorState {
     /// Builder: initial Markdown.
     pub fn with_source(mut self, source: &str) -> Self {
         let _ = self.model.set_source(source);
+        self.fold_open.clear();
+        self.reveal_selection_folds();
         self.projection.invalidate();
         self
     }
@@ -602,6 +606,8 @@ impl BlockEditorState {
         cx: &mut Context<Self>,
     ) -> Result<(), SharedString> {
         self.model = BlockEditorModel::from_markdown(&self.model.source(), extensions)?;
+        self.fold_open.clear();
+        self.reveal_selection_folds();
         self.projection.invalidate();
         cx.notify();
         Ok(())
@@ -610,6 +616,8 @@ impl BlockEditorState {
     /// Replace the content. No `Changed` event; clears history.
     pub fn set_source(&mut self, source: &str, cx: &mut Context<Self>) -> Result<(), SharedString> {
         self.model.set_source(source)?;
+        self.fold_open.clear();
+        self.reveal_selection_folds();
         self.marked = None;
         self.composition_open = false;
         self.pending_paste = None;
@@ -628,6 +636,8 @@ impl BlockEditorState {
     pub fn set_model(&mut self, mut model: BlockEditorModel, cx: &mut Context<Self>) {
         model.doc.revision = self.model.revision() + 1;
         self.model = model;
+        self.fold_open.clear();
+        self.reveal_selection_folds();
         self.marked = None;
         self.composition_open = false;
         self.pending_paste = None;
@@ -966,7 +976,7 @@ impl BlockEditorState {
             && let Some((_, id, b)) = blocks.iter().find(|(_, _, b)| {
                 at.y >= b.top() - px(4.)
                     && at.y <= b.bottom() + px(4.)
-                    && at.x >= b.left() - px(64.)
+                    && at.x >= b.left() - px(88.)
                     && at.x <= b.right() + px(16.)
             })
         {
@@ -1225,6 +1235,85 @@ impl BlockEditorState {
         self.projection.snapshot(&self.model.doc)
     }
 
+    pub(crate) fn is_fold_open(&self, id: BlockId) -> bool {
+        match self.model.doc.kind(id) {
+            Some(super::kind::BlockKindData::Fold { initially_open, .. }) => {
+                self.fold_open.get(&id).copied().unwrap_or(*initially_open)
+            }
+            _ => true,
+        }
+    }
+
+    fn reveal_fold_ancestors(&mut self, block: BlockId) -> bool {
+        let path = self.model.doc.path(block);
+        let mut changed = false;
+        for pair in path.windows(2) {
+            let fold = pair[0];
+            if matches!(self.model.doc.kind(fold), Some(super::kind::BlockKindData::Fold { .. }))
+                && self.model.doc.children(fold).first() != Some(&pair[1])
+                && !self.is_fold_open(fold)
+            {
+                self.fold_open.insert(fold, true);
+                changed = true;
+            }
+        }
+        if changed {
+            let mut cull = self.cull.borrow_mut();
+            cull.heights.clear();
+            cull.index = Default::default();
+        }
+        changed
+    }
+
+    pub(crate) fn toggle_fold(&mut self, fold: BlockId, cx: &mut Context<Self>) {
+        let open = self.is_fold_open(fold);
+        if open {
+            let doc = &self.model.doc;
+            let selected = doc.resolve_selection(self.model.selection()).ok();
+            let body = &doc.children(fold)[1..];
+            let intersects = selected.is_some_and(|range| body.iter().any(|id| {
+                let start = doc.first_leaf_in(*id);
+                let end = doc.last_leaf_in(*id);
+                doc.cmp_positions(range.start, end).is_ok_and(|o| o.is_le())
+                    && doc.cmp_positions(range.end, start).is_ok_and(|o| o.is_ge())
+            }));
+            if intersects {
+                let title = doc.children(fold)[0];
+                let pos = BlockPosition::new(title, doc.leaf_len(title).unwrap_or(0));
+                self.end_composition();
+                self.model.set_selection(BlockSelection::caret(pos)).expect("fold title is editable");
+                self.selection_changed(cx);
+            }
+        }
+        self.fold_open.insert(fold, !open);
+        let mut cull = self.cull.borrow_mut();
+        cull.heights.clear();
+        cull.index = Default::default();
+        drop(cull);
+        cx.notify();
+    }
+
+    fn reveal_selection_folds(&mut self) {
+        let blocks: Vec<_> = self.selection_ranges().into_iter().map(|(id, _)| id)
+            .chain(self.head_anchor().into_iter().flat_map(|(a, h)| [a.block, h.block]))
+            .collect();
+        for block in blocks {
+            self.reveal_fold_ancestors(block);
+        }
+    }
+
+    fn reveal_delete_neighbour(&mut self, forward: bool) -> bool {
+        let Some(pos) = self.model.caret() else { return false; };
+        let len = self.model.doc.leaf_len(pos.block).unwrap_or(0);
+        if (forward && pos.offset != len) || (!forward && pos.offset != 0) {
+            return false;
+        }
+        let leaves = self.model.doc.leaves();
+        let Some(ix) = leaves.iter().position(|id| *id == pos.block) else { return false; };
+        let next = if forward { leaves.get(ix + 1) } else { ix.checked_sub(1).and_then(|i| leaves.get(i)) };
+        next.copied().is_some_and(|id| self.reveal_fold_ancestors(id))
+    }
+
     /// Blocks that are always laid out: the selection ends, the IME
     /// composition, and their ancestors.
     pub(crate) fn pinned_blocks(&self) -> Vec<BlockId> {
@@ -1276,6 +1365,7 @@ impl BlockEditorState {
     // ---- internal edit plumbing -------------------------------------------
 
     fn after_edit(&mut self, origin: EditOrigin, cx: &mut Context<Self>) {
+        self.reveal_selection_folds();
         self.goal_x = None;
         self.reveal.set(true);
         self.pause_blink(cx);
@@ -1288,6 +1378,7 @@ impl BlockEditorState {
     }
 
     fn selection_changed(&mut self, cx: &mut Context<Self>) {
+        self.reveal_selection_folds();
         self.reveal.set(true);
         self.pause_blink(cx);
         cx.emit(BlockEditorEvent::SelectionChanged);
@@ -1729,6 +1820,10 @@ impl BlockEditorState {
     fn delete_by(&mut self, line: bool, forward: bool, cx: &mut Context<Self>) {
         self.end_composition();
         if self.readonly {
+            return;
+        }
+        if self.reveal_delete_neighbour(forward) {
+            cx.notify();
             return;
         }
         let origin = if forward {
@@ -2368,10 +2463,12 @@ impl BlockEditorState {
 
     pub(crate) fn on_backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
         self.end_composition();
+        if self.reveal_delete_neighbour(false) { cx.notify(); return; }
         self.edit(EditOrigin::Backspace, |m| m.delete(false), cx);
     }
     pub(crate) fn on_delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
         self.end_composition();
+        if self.reveal_delete_neighbour(true) { cx.notify(); return; }
         self.edit(EditOrigin::DeleteForward, |m| m.delete(true), cx);
     }
     pub(crate) fn on_enter(&mut self, _: &Enter, window: &mut Window, cx: &mut Context<Self>) {

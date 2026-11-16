@@ -7,7 +7,7 @@ use super::{
     document::{AtomData, BlockContent, EditorDocument},
     id::BlockId,
     inline::{InlineAtom, InlineText},
-    kind::BlockKindData,
+    kind::{BlockKindData, FoldSyntax},
 };
 use crate::markdown_source::{
     MarkdownSource, MarkdownSourceOptions, markdown_destination, markdown_title,
@@ -79,6 +79,36 @@ fn block(doc: &EditorDocument, id: BlockId) -> String {
                 }
             }
             result
+        }
+        (BlockKindData::Fold { syntax, initially_open }, _) => {
+            let title = children.first().map(|id| block(doc, *id)).unwrap_or_default();
+            let body = join_blocks(doc, children.get(1..).unwrap_or_default());
+            match syntax {
+                FoldSyntax::Details { opening, summary_opening } => {
+                    if body.is_empty() {
+                        format!("{opening}\n{summary_opening}{title}</summary>\n</details>")
+                    } else {
+                        format!("{opening}\n{summary_opening}{title}</summary>\n\n{body}\n\n</details>")
+                    }
+                }
+                FoldSyntax::Alert { name } => {
+                    let marker = if *initially_open { '+' } else { '-' };
+                    let mut result = format!("> [!{name}]{marker}");
+                    if !title.is_empty() {
+                        result.push(' ');
+                        result.push_str(&title.replace('\n', " "));
+                    }
+                    for line in body.lines() {
+                        result.push('\n');
+                        result.push('>');
+                        if !line.is_empty() {
+                            result.push(' ');
+                            result.push_str(line);
+                        }
+                    }
+                    result
+                }
+            }
         }
         (BlockKindData::List { ordered, start }, _) => {
             let loose = children.iter().any(|item| {

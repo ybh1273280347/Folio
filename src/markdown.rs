@@ -126,6 +126,13 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         icon: IconName::TextQuote,
     },
     SlashCommand {
+        id: "details",
+        title: "可折叠区域",
+        hint: "<details>",
+        keywords: &["details", "fold", "collapse", "zhedie", "折叠", "可折叠区域"],
+        icon: IconName::TextQuote,
+    },
+    SlashCommand {
         id: "code",
         title: "代码块",
         hint: "```",
@@ -1017,6 +1024,12 @@ impl MarkdownPane {
                 EditorCommand::InsertBlock(BlockKind::HorizontalRule),
                 cx,
             ),
+            "details" => {
+                self.visual_editor.update(cx, |editor, cx| {
+                    editor.replace_selected_markdown("<details open>\n<summary>标题</summary>\n\n正文\n\n</details>", cx);
+                    editor.focus(window, cx);
+                });
+            }
             "math" => {
                 self.visual_editor.update(cx, |editor, cx| {
                     editor.replace_selected_markdown("$$\n\\int_a^b f(x)\\,dx\n$$", cx);
@@ -2007,6 +2020,8 @@ impl MarkdownPane {
         };
         let gutter_offset = if kind == BlockKind::Table {
             px(52.)
+        } else if kind == BlockKind::Blockquote {
+            px(72.)
         } else {
             px(46.)
         };

@@ -320,6 +320,11 @@ impl EditorDocument {
                     if children.is_empty() && entry.kind != BlockKindData::Root {
                         return Err(format!("empty container {:?}", entry.kind));
                     }
+                    if matches!(entry.kind, BlockKindData::Fold { .. })
+                        && !children.first().is_some_and(|c| matches!(self.kind(*c), Some(BlockKindData::Paragraph)))
+                    {
+                        return Err("fold does not start with a title paragraph".into());
+                    }
                     if let BlockKindData::List { .. } = entry.kind
                         && children
                             .iter()
