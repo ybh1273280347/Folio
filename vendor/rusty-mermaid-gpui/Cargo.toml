@@ -1,0 +1,11 @@
+[package]
+name = "rusty-mermaid-gpui"
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+description = "gpui rendering backend for rusty-mermaid diagrams"
+
+[dependencies]
+rusty-mermaid-core = { git = "https://github.com/base58ed/rusty-mermaid", rev = "6907e0747822cc2ee7044250a065497ce7d8f3c0" }
+rusty-mermaid-viewport = { git = "https://github.com/base58ed/rusty-mermaid", rev = "6907e0747822cc2ee7044250a065497ce7d8f3c0" }
+gpui = { package = "gpui-kit", version = "0.9.1", default-features = false }

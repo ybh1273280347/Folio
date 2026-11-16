@@ -20,6 +20,8 @@ gpui-pdf = { path = "vendor/gpui-pdf", features = ["search"] }
 image = { version = "0.25.10", default-features = false }
 markdown = "1.0.0"
 latex-rust = { path = "vendor/latex-rust", default-features = false, features = ["std"] }
+rusty-mermaid = { git = "https://github.com/base58ed/rusty-mermaid", rev = "6907e0747822cc2ee7044250a065497ce7d8f3c0", default-features = false }
+rusty-mermaid-gpui = { path = "vendor/rusty-mermaid-gpui" }
 krilla = { version = "0.8.2", default-features = false, features = ["raster-images"] }
 ttf-parser = "0.25.1"
 notify = "8.2.2"
@@ -37,6 +39,7 @@ windows-core = "0.61"
 
 [dev-dependencies]
 tempfile = "3.24.0"
+rusty-mermaid-core = { git = "https://github.com/base58ed/rusty-mermaid", rev = "6907e0747822cc2ee7044250a065497ce7d8f3c0" }
 
 [profile.release]
 strip = true

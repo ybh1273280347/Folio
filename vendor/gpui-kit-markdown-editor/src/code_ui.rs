@@ -21,9 +21,8 @@ const LANGUAGES: &[(&str, &str)] = &[
     ("javascript", "JavaScript"), ("typescript", "TypeScript"), ("tsx", "TSX"),
     ("c", "C"), ("cpp", "C++"), ("csharp", "C#"), ("java", "Java"),
     ("go", "Go"), ("bash", "Shell / Bash"), ("powershell", "PowerShell"),
-    ("json", "JSON"), ("yaml", "YAML"), ("toml", "TOML"),
     ("html", "HTML"), ("css", "CSS"), ("sql", "SQL"),
-    ("latex", "LaTeX"), ("markdown", "Markdown"),
+    ("latex", "LaTeX"), ("markdown", "Markdown"), ("mermaid", "Mermaid"),
 ];
 
 #[derive(Clone)]
@@ -118,8 +117,33 @@ pub(crate) fn header(
         });
     }
     let copied = tools.read(cx).copied;
+    let source = state.read(cx).code_preview_source() == Some(block);
     let copy_editor = state.clone();
+    let source_editor = state.clone();
     let theme = cx.theme();
+    let copy = Button::new(("copy", block.as_u64() as usize))
+        .ghost().compact().w(px(28.)).h(px(28.))
+        .icon(Icon::new(if copied { IconName::Check } else { IconName::Copy })
+            .w(px(14.)).h(px(14.)))
+        .tooltip(if copied { "已复制" } else { "复制代码" })
+        .on_click(move |_, _, cx| {
+            let text = copy_editor.read(cx).model().document().block(block)
+                .and_then(|block| block.text()).map(str::to_owned);
+            if let Some(text) = text {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                tools.update(cx, |tools, cx| tools.copied(cx));
+            }
+        });
+    let mut actions = div().flex().items_center().gap(px(4.)).child(copy);
+    if source {
+        actions = actions.child(
+            Button::new(("code-preview", block.as_u64() as usize))
+                .ghost().compact().small().label("显示图表")
+                .on_click(move |_, _, cx| {
+                    source_editor.update(cx, |state, cx| state.exit_code_preview_source(cx));
+                }),
+        );
+    }
     div()
         .id(("code-tools", block.as_u64() as usize))
         .absolute().top(px(4.)).left(px(4.)).right(px(4.))
@@ -142,19 +166,6 @@ pub(crate) fn header(
                         .disabled(readonly),
                 ),
         )
-        .child(
-            Button::new("copy").ghost().compact().w(px(28.)).h(px(28.))
-                .icon(Icon::new(if copied { IconName::Check } else { IconName::Copy })
-                    .w(px(14.)).h(px(14.)))
-                .tooltip(if copied { "已复制" } else { "复制代码" })
-                .on_click(move |_, _, cx| {
-                    let text = copy_editor.read(cx).model().document().block(block)
-                        .and_then(|block| block.text()).map(str::to_owned);
-                    if let Some(text) = text {
-                        cx.write_to_clipboard(ClipboardItem::new_string(text));
-                        tools.update(cx, |tools, cx| tools.copied(cx));
-                    }
-                }),
-        )
+        .child(actions)
         .into_any_element()
 }

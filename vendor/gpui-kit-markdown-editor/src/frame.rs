@@ -61,7 +61,9 @@ impl LeafGeom {
         if self.info.atomic || matches!(self.align, ColumnAlign::None | ColumnAlign::Left) {
             return px(0.);
         }
-        let geometry = self.geometry.as_ref().expect("text leaf geometry");
+        let Some(geometry) = self.geometry.as_ref() else {
+            return px(0.);
+        };
         let len = geometry.len();
         let b = self.bounds();
         let (mut lo, mut hi) = (None::<Pixels>, None::<Pixels>);
@@ -110,8 +112,11 @@ impl LeafGeom {
 
     /// Top of the caret at `offset`, window coordinates.
     pub(crate) fn caret_point(&self, offset: usize) -> Point<Pixels> {
-        if self.info.atomic {
-            return point(if offset == 0 { self.bounds.left() } else { self.bounds.right() }, self.bounds.top());
+        if self.info.atomic || self.geometry.is_none() {
+            return point(
+                if offset == 0 { self.bounds.left() } else { self.bounds.right() },
+                self.bounds.top(),
+            );
         }
         let mut p = self.geometry.as_ref().expect("text leaf geometry").position_for_index(self.index(offset));
         p.x += self.row_shift(p.y);
@@ -120,13 +125,12 @@ impl LeafGeom {
 
     /// Closest model offset for a window point.
     pub(crate) fn offset_at(&self, at: Point<Pixels>) -> usize {
-        if self.info.atomic {
-            return usize::from(at.x > self.bounds.center().x);
+        if self.info.atomic || self.geometry.is_none() {
+            return if at.x > self.bounds.center().x { self.info.len } else { 0 };
         }
         let geometry = self.geometry.as_ref().expect("text leaf geometry");
         let mut at = at;
         if !matches!(self.align, ColumnAlign::None | ColumnAlign::Left) {
-            // The row under `at`, then undo its alignment shift.
             let row = geometry.index_for_position(at);
             let y = geometry.position_for_index(row).y;
             at.x -= self.row_shift(y);
@@ -174,6 +178,27 @@ impl FrameLayout {
         self.leaves.sort_by_key(|leaf| order[&leaf.info.block]);
         self.index = self.leaves.iter().enumerate().map(|(ix, leaf)| (leaf.info.block, ix)).collect();
     }
+    /// Insert preview blocks with real bounds but without text geometry.
+    pub(crate) fn insert_code_previews(
+        &mut self,
+        leaves: &[LeafInfo],
+        bounds: &HashMap<BlockId, Bounds<Pixels>>,
+    ) {
+        for info in leaves.iter().filter(|info| !info.atomic) {
+            if let Some(bounds) = bounds.get(&info.block) {
+                self.leaves.push(LeafGeom {
+                    info: *info,
+                    geometry: None,
+                    bounds: *bounds,
+                    align: ColumnAlign::None,
+                });
+            }
+        }
+        let order: HashMap<_, _> = leaves.iter().enumerate().map(|(ix, info)| (info.block, ix)).collect();
+        self.leaves.sort_by_key(|leaf| order[&leaf.info.block]);
+        self.index = self.leaves.iter().enumerate().map(|(ix, leaf)| (leaf.info.block, ix)).collect();
+    }
+
 
     pub(crate) fn leaf(&self, block: BlockId) -> Option<&LeafGeom> {
         self.index.get(&block).map(|ix| &self.leaves[*ix])

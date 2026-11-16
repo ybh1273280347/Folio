@@ -5,12 +5,13 @@ use std::sync::Arc;
 use std::{cell::RefCell, ops::Range, rc::Rc};
 
 use gpui::{
-    App, AppContext, Bounds, ClipboardItem, Context, Entity, EntityInputHandler, EventEmitter,
+    AnyElement, App, AppContext, Bounds, ClipboardItem, Context, Entity, EntityInputHandler, EventEmitter,
     FocusHandle, Focusable, KeyBinding, Pixels, Point, SharedString, Subscription, UTF16Selection,
     Window, actions,
 };
 
 use super::{
+    code_preview::Registration,
     command::{CommandError, EditorCommand},
     editor::BlockEditorModel,
     frame::FrameLayout,
@@ -24,7 +25,7 @@ use super::{
     transaction::EditOrigin,
 };
 use crate::support::BlinkCursor;
-use gpui_kit::base::text::{MarkdownExtensions, editor_host::RenderContext};
+use gpui_kit::base::text::{MarkdownExtensions, editor_host::{CodeBlock, RenderContext}};
 
 pub(crate) const CONTEXT: &str = "BlockEditor";
 /// Side of the whole-table corner handle, in px.
@@ -94,6 +95,7 @@ actions!(
         SelectParagraphStart,
         SelectParagraphEnd,
         ToggleToolbar,
+        ExitCodeBlockSource,
     ]
 );
 
@@ -214,7 +216,7 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new(platform_key!("cmd", "alt-down"), TableInsertRowBelow, ctx),
         KeyBinding::new(platform_key!("cmd", "alt-backspace"), TableDeleteLine, ctx),
         KeyBinding::new("escape", CloseTableMenu, Some("BlockEditor && table_menu")),
-        KeyBinding::new("shift-enter", SoftBreak, ctx),
+        KeyBinding::new("escape", ExitCodeBlockSource, ctx),
         KeyBinding::new(platform_key!("cmd", "enter"), ExitBlock, ctx),
         KeyBinding::new(platform_key!("cmd", "c"), Copy, ctx),
         KeyBinding::new(platform_key!("cmd", "x"), Cut, ctx),
@@ -375,6 +377,8 @@ pub struct BlockEditorState {
     block_code_style: gpui::StyleRefinement,
     pub(crate) callout_styles: std::collections::HashMap<SharedString, super::style::CalloutStyle>,
     pub(crate) projection: ProjectionCache,
+    pub(crate) code_preview: Option<Registration>,
+    pub(crate) code_preview_source: Option<BlockId>,
     /// Last complete frame, written by the element after prepaint.
     pub(crate) frame: Rc<RefCell<FrameLayout>>,
     pub(crate) cull: Rc<RefCell<super::cull::CullState>>,
@@ -457,6 +461,8 @@ impl BlockEditorState {
             inline_code_style: gpui::StyleRefinement::default(),
             block_code_style: gpui::StyleRefinement::default(),
             callout_styles: Default::default(),
+            code_preview: None,
+            code_preview_source: None,
             projection: ProjectionCache::default(),
             frame: Rc::default(),
             cull: Rc::default(),
@@ -590,10 +596,145 @@ impl BlockEditorState {
                 )
             })
     }
+    /// Register one language-specific block preview. Re-registration replaces
+    /// the previous preview and matches language tokens ASCII-case-insensitively.
+    pub fn set_code_block_preview(
+        &mut self,
+        language: SharedString,
+        renderer: impl Fn(
+                BlockId,
+                u64,
+                &CodeBlock,
+                &mut Window,
+                &mut App,
+            ) -> AnyElement
+            + Send
+            + Sync
+            + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.code_preview = Some(Registration {
+            language: language.to_ascii_lowercase().into(),
+            renderer: Arc::new(renderer),
+        });
+        self.reset_code_preview_selection();
+        cx.notify();
+    }
+
+    pub(crate) fn code_preview_registration(&self) -> Option<Registration> {
+        self.code_preview.clone()
+    }
+
+    pub(crate) fn code_preview_source(&self) -> Option<BlockId> {
+        self.code_preview_source
+    }
+
+    fn code_preview_matches(&self, block: BlockId) -> bool {
+        let Some(Registration { language, .. }) = &self.code_preview else {
+            return false;
+        };
+        let Some(super::kind::BlockKindData::CodeBlock { lang, .. }) = self.model.doc.kind(block)
+        else {
+            return false;
+        };
+        lang.as_deref()
+            .is_some_and(|lang| lang.eq_ignore_ascii_case(language))
+    }
+
+    fn sanitize_code_preview_source(&mut self) {
+        if self.readonly
+            || self
+                .code_preview_source
+                .is_some_and(|block| self.model.doc.get(block).is_none() || !self.code_preview_matches(block))
+        {
+            self.code_preview_source = None;
+        }
+    }
+
+    pub(crate) fn select_code_preview(
+        &mut self,
+        block: BlockId,
+        extend: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.model.doc.get(block).is_none() {
+            return;
+        }
+        self.end_composition();
+        let anchor = match self.model.selection() {
+            BlockSelection::Blocks { anchor, .. } | BlockSelection::Cells { anchor, .. } => *anchor,
+            BlockSelection::Text { anchor, .. } => anchor.block,
+        };
+        let selection = if extend
+            && let (Some((anchor_parent, _)), Some((block_parent, _))) = (
+                self.model.doc.index_in_parent(anchor),
+                self.model.doc.index_in_parent(block),
+            )
+            && anchor_parent == block_parent
+        {
+            BlockSelection::Blocks {
+                anchor,
+                head: block,
+            }
+        } else if extend {
+            let anchor = match self.model.selection() {
+                BlockSelection::Text { anchor, .. } => *anchor,
+                BlockSelection::Blocks { anchor, .. } | BlockSelection::Cells { anchor, .. } => {
+                    self.model.doc.first_leaf_in(*anchor)
+                }
+            };
+            let start = BlockPosition::new(block, 0);
+            let head = if self.model.doc.cmp_positions(anchor, start)
+                .expect("preview selection positions belong to the document").is_le()
+            {
+                BlockPosition::new(block, self.model.doc.leaf_len(block).expect("preview is a code leaf"))
+            } else {
+                start
+            };
+            BlockSelection::Text { anchor, head }
+        } else {
+            BlockSelection::Blocks {
+                anchor: block,
+                head: block,
+            }
+        };
+        let _ = self.model.set_selection(selection);
+        self.dragging = true;
+        self.block_drag = None;
+        self.selection_changed(cx);
+    }
+
+    pub(crate) fn enter_code_preview_source(&mut self, block: BlockId, cx: &mut Context<Self>) {
+        if self.readonly || !self.code_preview_matches(block) {
+            return;
+        }
+        let Some(len) = self.model.doc.leaf_len(block) else {
+            return;
+        };
+        self.end_composition();
+        let _ = self.model.set_selection(BlockSelection::caret(BlockPosition::new(block, len)));
+        self.code_preview_source = Some(block);
+        self.selection_changed(cx);
+    }
+
+    pub(crate) fn exit_code_preview_source(&mut self, cx: &mut Context<Self>) {
+        let Some(block) = self.code_preview_source.take() else {
+            return;
+        };
+        if self.model.doc.get(block).is_some() {
+            let _ = self.model.set_selection(BlockSelection::Blocks {
+                anchor: block,
+                head: block,
+            });
+        }
+        self.selection_changed(cx);
+    }
+
 
     /// Builder: initial Markdown.
     pub fn with_source(mut self, source: &str) -> Self {
         let _ = self.model.set_source(source);
+        self.reset_code_preview_selection();
         self.fold_open.clear();
         self.reveal_selection_folds();
         self.projection.invalidate();
@@ -610,6 +751,7 @@ impl BlockEditorState {
         let callout_names = std::mem::take(&mut self.model.callout_names);
         self.model = BlockEditorModel::from_markdown(&self.model.source(), extensions)?;
         self.model.callout_names = callout_names;
+        self.reset_code_preview_selection();
         self.fold_open.clear();
         self.reveal_selection_folds();
         self.projection.invalidate();
@@ -620,6 +762,7 @@ impl BlockEditorState {
     /// Replace the content. No `Changed` event; clears history.
     pub fn set_source(&mut self, source: &str, cx: &mut Context<Self>) -> Result<(), SharedString> {
         self.model.set_source(source)?;
+        self.reset_code_preview_selection();
         self.fold_open.clear();
         self.reveal_selection_folds();
         self.marked = None;
@@ -641,6 +784,7 @@ impl BlockEditorState {
         model.doc.revision = self.model.revision() + 1;
         model.callout_names = std::mem::take(&mut self.model.callout_names);
         self.model = model;
+        self.reset_code_preview_selection();
         self.fold_open.clear();
         self.reveal_selection_folds();
         self.marked = None;
@@ -649,7 +793,6 @@ impl BlockEditorState {
         self.projection.invalidate();
         cx.notify();
     }
-
     /// Select the exact custom object chosen by the host's rendered editor.
     pub fn select_custom_node(
         &mut self,
@@ -1147,6 +1290,7 @@ impl BlockEditorState {
     /// Block or allow edits.
     pub fn set_readonly(&mut self, readonly: bool, cx: &mut Context<Self>) {
         self.readonly = readonly;
+        self.reset_code_preview_selection();
         cx.notify();
     }
 
@@ -1390,6 +1534,12 @@ impl BlockEditorState {
     // ---- internal edit plumbing -------------------------------------------
 
     fn after_edit(&mut self, origin: EditOrigin, cx: &mut Context<Self>) {
+        self.sanitize_code_preview_source();
+        if self.code_preview_source.is_some() {
+            self.code_preview_source = self.selection_preview_block();
+        } else {
+            self.reset_code_preview_selection();
+        }
         self.reveal_selection_folds();
         self.goal_x = None;
         self.reveal.set(true);
@@ -1402,7 +1552,38 @@ impl BlockEditorState {
         cx.notify();
     }
 
+    fn selection_preview_block(&self) -> Option<BlockId> {
+        let BlockSelection::Text { anchor, head } = self.model.selection() else {
+            return None;
+        };
+        (anchor.block == head.block && self.code_preview_matches(head.block)).then_some(head.block)
+    }
+
+    fn reset_code_preview_selection(&mut self) {
+        self.code_preview_source = None;
+        if let Some(block) = self.selection_preview_block() {
+            let _ = self.model.set_selection(BlockSelection::Blocks {
+                anchor: block,
+                head: block,
+            });
+        }
+    }
+
     fn selection_changed(&mut self, cx: &mut Context<Self>) {
+        self.sanitize_code_preview_source();
+        if let Some(block) = self.selection_preview_block() {
+            if self.readonly {
+                let _ = self.model.set_selection(BlockSelection::Blocks {
+                    anchor: block,
+                    head: block,
+                });
+                self.code_preview_source = None;
+            } else {
+                self.code_preview_source = Some(block);
+            }
+        } else {
+            self.code_preview_source = None;
+        }
         self.reveal_selection_folds();
         self.reveal.set(true);
         self.pause_blink(cx);
@@ -2500,6 +2681,14 @@ impl BlockEditorState {
         if self.readonly || self.is_composing() {
             return;
         }
+        if let Some(block) = self.model.selected_blocks().and_then(|(parent, range)| {
+            let ids = &self.model.doc.children(parent)[range];
+            (ids.len() == 1).then_some(ids[0])
+        }) && self.code_preview_matches(block)
+        {
+            self.enter_code_preview_source(block, cx);
+            return;
+        }
         if let Some(h) = self.slash_key_handler.clone()
             && h(self, "enter", window, cx)
         {
@@ -2650,7 +2839,18 @@ impl BlockEditorState {
         );
         self.model.break_coalescing();
     }
-
+    pub(crate) fn on_exit_code_block_source(
+        &mut self,
+        _: &ExitCodeBlockSource,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.code_preview_source.is_some() {
+            self.exit_code_preview_source(cx);
+        } else {
+            cx.propagate();
+        }
+    }
     pub(crate) fn on_move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.horizontal(false, false, cx);
     }

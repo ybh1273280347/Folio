@@ -2,6 +2,7 @@
 //! source editor only for the explicit source-mode toggle.
 use crate::theme::color as rgb;
 use crate::math::{MathReady, MathRenderer, formula_id};
+use crate::mermaid::{MermaidReady, MermaidRenderer};
 use crate::model::{AnnotationItem, AppSettings, HIGHLIGHT_COLORS};
 use crate::storage;
 use comrak::{Arena, Options, nodes::NodeValue, parse_document};
@@ -256,6 +257,7 @@ pub struct MarkdownPane {
     scroll: ScrollHandle,
     settings: AppSettings,
     math: Entity<MathRenderer>,
+    mermaid: Entity<MermaidRenderer>,
     formula_editor: Option<(Entity<EditorState>, bool)>,
     pending_image: Option<(PathBuf, PathBuf)>,
     image_error: Option<String>,
@@ -293,6 +295,7 @@ pub struct MarkdownPane {
     _source_subscription: Subscription,
     _visual_subscription: Subscription,
     _math_subscription: Subscription,
+    _mermaid_subscription: Subscription,
 }
 
 impl EventEmitter<MarkdownEvent> for MarkdownPane {}
@@ -320,6 +323,7 @@ impl MarkdownPane {
         let editor = self.visual_editor.clone();
         let math = self.math.clone();
         let width = self.export_width;
+        let mermaid = self.mermaid.clone();
         Some(
             div()
                 .id("markdown-pdf-export")
@@ -367,6 +371,7 @@ impl MarkdownPane {
                                 .load(std::sync::atomic::Ordering::Relaxed);
                             if !cancelled
                                 && (!math.read(cx).is_idle()
+                                    || !mermaid.read(cx).is_idle()
                                     || ops.iter().any(|op| matches!(op, VectorPaint::PendingImage)))
                             {
                                 return;
@@ -424,6 +429,7 @@ impl MarkdownPane {
         }).detach();
         let scroll = ScrollHandle::new();
         math.update(cx, |renderer, cx| renderer.set_appearance(&settings, cx));
+        let mermaid = cx.new(MermaidRenderer::new);
         let mut extensions = MarkdownExtensions::default()
             .plugin(math.read(cx).plugin(false, math.clone()))
             .plugin(math.read(cx).plugin(true, math.clone()));
@@ -474,6 +480,11 @@ impl MarkdownPane {
             editor.set_callout_styles(callout_styles, cx);
             editor.set_scroll_handle(scroll.clone());
             editor.set_code_styles(crate::ui::inline_code_style(&settings), crate::ui::block_code_style(&settings), cx);
+            let renderer = mermaid.downgrade();
+            editor.set_code_block_preview("mermaid".into(), move |id, revision, code, window, cx| {
+                renderer.update(cx, |renderer, cx| renderer.element(id, revision, code, window, cx))
+                    .expect("Mermaid renderer lives with its Markdown pane")
+            }, cx);
             editor
         });
         let weak_pane = cx.weak_entity();
@@ -609,6 +620,7 @@ impl MarkdownPane {
                 if matches!(event, InputEvent::Change) && pane.source {
                     // A source edit supersedes any model currently being prepared.
                     pane.loading = None;
+                    pane.mermaid.update(cx, |renderer, _| renderer.retain_blocks([]));
                     pane.text = state.read(cx).value().to_string();
                     pane.parse_outline();
                     cx.emit(MarkdownEvent::Change(pane.text.clone()));
@@ -624,6 +636,7 @@ impl MarkdownPane {
             |pane, editor, event: &BlockEditorEvent, window, cx| match event {
                 BlockEditorEvent::Changed { .. } => {
                     pane.text = editor.read(cx).source();
+                    pane.retain_mermaid_blocks(cx);
                     pane.parse_outline();
                     pane.slash_index = 0;
                     pane.slash_scroll.set_offset(point(px(0.), px(0.)));
@@ -713,6 +726,10 @@ impl MarkdownPane {
                 }
                 cx.notify();
             });
+        let mermaid_subscription = cx.subscribe(&mermaid, |pane, _, _: &MermaidReady, cx| {
+            pane.visual_editor.update(cx, |_, cx| cx.notify());
+            cx.notify();
+        });
         let annotations = storage::load_annotations(&path);
         let mut pane = Self {
             export: Rc::new(RefCell::new(None)),
@@ -735,6 +752,7 @@ impl MarkdownPane {
             formula_editor: None,
             pending_image: None,
             image_error: None,
+            mermaid,
             slash_index: 0,
             slash_scroll: ScrollHandle::new(),
             dismissed_slash_prefix: None,
@@ -764,6 +782,7 @@ impl MarkdownPane {
             _source_subscription: source_subscription,
             _visual_subscription: visual_subscription,
             _math_subscription: math_subscription,
+            _mermaid_subscription: mermaid_subscription,
         };
         pane.load_visual(cx);
         pane
@@ -788,6 +807,7 @@ impl MarkdownPane {
                 .set_source(&self.text[..preview_end], cx)
                 .expect("Markdown preview parses with the configured GPUI extensions");
         });
+        self.retain_mermaid_blocks(cx);
         if !long {
             self.parse_outline();
             return;
@@ -807,6 +827,7 @@ impl MarkdownPane {
                     editor.set_model(model, cx);
                     editor.set_readonly(false, cx);
                 });
+                pane.retain_mermaid_blocks(cx);
                 pane.headings = headings;
                 pane.loading = None;
                 if let Some(anchor) = pane.pending_anchor.take() {
@@ -815,6 +836,14 @@ impl MarkdownPane {
                 cx.notify();
             });
         }));
+    }
+
+    fn retain_mermaid_blocks(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<_> = self.visual_editor.read(cx).model().document().leaves()
+            .filter(|block| block.code_language().is_some_and(|language| language.eq_ignore_ascii_case("mermaid")))
+            .map(|block| block.id())
+            .collect();
+        self.mermaid.update(cx, |renderer, _| renderer.retain_blocks(ids));
     }
 
     fn parse_outline(&mut self) {
