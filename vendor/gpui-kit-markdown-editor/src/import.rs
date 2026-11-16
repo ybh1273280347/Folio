@@ -137,6 +137,13 @@ pub(crate) fn import_block(node: &BlockNode, defs: &Defs, out: &mut Vec<Detached
         BlockNode::Blockquote { children, .. } => {
             DetachedBlock::container(BlockKindData::Blockquote, import_children(children, defs))
         }
+        BlockNode::Surface { name, children, .. } => {
+            let mut children = import_children(children, defs);
+            if children.is_empty() {
+                children.push(leaf(BlockKindData::Paragraph, BlockContent::Inline(InlineText::new())));
+            }
+            DetachedBlock::container(BlockKindData::Alert { name: name.clone() }, children)
+        }
         BlockNode::List {
             children,
             ordered,

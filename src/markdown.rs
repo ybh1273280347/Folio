@@ -415,9 +415,21 @@ impl MarkdownPane {
         }).detach();
         let scroll = ScrollHandle::new();
         math.update(cx, |renderer, cx| renderer.set_appearance(&settings, cx));
-        let extensions = MarkdownExtensions::default()
+        let mut extensions = MarkdownExtensions::default()
             .plugin(math.read(cx).plugin(false, math.clone()))
             .plugin(math.read(cx).plugin(true, math.clone()));
+        for (name, title, color) in [
+            ("note", "ⓘ  Note", 0x0969da),
+            ("tip", "✓  Tip", 0x1a7f37),
+            ("important", "◉  Important", 0x8250df),
+            ("warning", "⚠  Warning", 0x9a6700),
+            ("caution", "⊗  Caution", 0xcf222e),
+        ] {
+            extensions = extensions.block_surface(name, move |_, _| {
+                div().border_l_2().border_color(gpui_kit::rgb(color)).pl(px(16.))
+                    .child(div().text_color(gpui_kit::rgb(color)).font_weight(FontWeight::SEMIBOLD).pb(px(6.)).child(title))
+            });
+        }
         let visual_editor = cx.new(|cx| {
             let mut editor = BlockEditorState::new(window, cx);
             editor

@@ -67,6 +67,19 @@ fn block(doc: &EditorDocument, id: BlockId) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
+        (BlockKindData::Alert { name }, _) => {
+            let body = join_blocks(doc, children);
+            let mut result = format!("> [!{}]", name.to_ascii_uppercase());
+            for line in body.lines() {
+                result.push('\n');
+                result.push('>');
+                if !line.is_empty() {
+                    result.push(' ');
+                    result.push_str(line);
+                }
+            }
+            result
+        }
         (BlockKindData::List { ordered, start }, _) => {
             let loose = children.iter().any(|item| {
                 matches!(
