@@ -378,10 +378,8 @@ fn register_code_surfaces(
         *extensions = std::mem::take(extensions).block_surface(
             format!("editor-code-source-{}", id.as_u64()),
             move |window, cx| {
-                div()
-                    .relative()
-                    .pt(px(42.))
-                    .child(super::code_ui::header(&editor, id, &context, window, cx))
+                super::code_ui::container(&context)
+                    .child(super::code_ui::header(&editor, id, window, cx))
             },
         );
     }
@@ -621,7 +619,13 @@ impl RenderOnce for BlockEditor {
             });
         }
         register_fold_surfaces(&mut extensions, self.state.read(cx), Some(&fold_bounds), &theme);
-        let node_cx = render_cx
+        // Code surfaces own the background and outline, including for nested/source
+        // blocks. Refine the native body after its default background and border.
+        let code_body_style = text_style.code_block().clone()
+            .bg(gpui::transparent_black())
+            .border_0();
+        let node_cx = render_cx.clone()
+            .with_style(text_style.clone().with_code_block(code_body_style))
             .with_markdown_extensions(Arc::new(extensions))
             .with_body_font_size(typography.font_size.to_pixels(window.rem_size()));
         let (cull, revision) = {
@@ -790,15 +794,12 @@ impl RenderOnce for BlockEditor {
                         )
                     }
                     (_, BlockNode::CodeBlock(_)) => {
-                        // Reserve a header inside the block; culling measures it together
-                        // with the code, while document/PDF rendering stays free of controls.
-                        let style = node_cx.style().clone().with_code_block(
-                            node_cx.style().code_block().clone().pt(px(42.)),
-                        );
-                        let code_cx = node_cx.clone().with_style(style);
-                        let code = node.render(node_ix, flow.last(is_last_node), &code_cx, window, cx);
-                        div().relative().w_full().child(code)
-                            .child(super::code_ui::header(&self.state, unit.id, &code_cx, window, cx))
+                        // Keep the header and body in one measured container so
+                        // virtual scrolling includes the controls' actual height.
+                        let code = node.render(node_ix, flow.last(is_last_node), &node_cx, window, cx);
+                        super::code_ui::container(&render_cx)
+                            .child(super::code_ui::header(&self.state, unit.id, window, cx))
+                            .child(code)
                             .into_any_element()
                     }
                     (_, BlockNode::Table(_)) => {
