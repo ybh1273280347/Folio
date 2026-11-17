@@ -2711,6 +2711,27 @@ impl ChatPane {
     ) -> AnyElement {
         let is_file_edit = block.name == "edit" || block.name == "write";
         let is_cmd = block.name == "bash" || block.name == "powershell";
+        let has_input = block.args.as_object().is_some_and(|args| !args.is_empty());
+        // Show the model's actual arguments, including partial arguments while it is still generating.
+        let input_panel = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().text_size(ps.meta_size).text_color(ps.fg_tertiary).child("输入参数"))
+            .child(
+                div()
+                    .id(("tool-input", msg_idx * 1000 + part_idx))
+                    .p_2()
+                    .max_h(px(180.))
+                    .overflow_y_scroll()
+                    .on_scroll(|_, _, cx| cx.stop_propagation())
+                    .rounded(px(6.))
+                    .bg(gpui_kit::rgb(palette.code_background))
+                    .font_family(code_font.clone())
+                    .text_size(ps.detail_size)
+                    .text_color(ps.fg_secondary)
+                    .child(serde_json::to_string_pretty(&block.args).expect("tool arguments are JSON")),
+            );
 
         if is_file_edit && !block.diffs.is_empty() {
             return div()
@@ -2766,6 +2787,7 @@ impl ChatPane {
                             .map(|d| self.render_diff_card(d, palette, cx)),
                     )
                 })
+                .when(block.expanded && has_input, |col| col.child(input_panel))
                 .into_any_element();
         }
 
@@ -2797,6 +2819,7 @@ impl ChatPane {
         };
 
         let has_output = !block.output.trim().is_empty();
+        let has_detail = has_input || has_output;
         let detail_font = if is_cmd { code_font } else { ui_font };
         let row_id = SharedString::from(format!("ai-cmd-row-{msg_idx}-{part_idx}"));
         let row = render_command_detail_row(
@@ -2806,12 +2829,12 @@ impl ChatPane {
             block.done,
             block.is_error,
             block.duration_ms,
-            has_output,
+            has_detail,
             detail_font,
             code_font,
             ps,
         )
-        .when(has_output, |r| {
+        .when(has_detail, |r| {
             r.on_click(cx.listener(move |pane, _, _, cx| {
                 if let Some(ChatMessage::Assistant { parts, .. }) = pane.messages.get_mut(msg_idx)
                     && let Some(AssistantPart::Tool(b)) = parts.get_mut(part_idx)
@@ -2832,6 +2855,7 @@ impl ChatPane {
             .flex_col()
             .gap(ps.row_gap)
             .child(row)
+            .when(has_input && (block.expanded || !block.done), |col| col.child(input_panel))
             .when(block.expanded && has_output, |col| {
                 col.child(
                     div()
@@ -5837,7 +5861,7 @@ fn summarize_tool_call(name: &str, args: &Value, diffs: &[FileDiff]) -> String {
                 .unwrap_or("");
             format!("{name} {pat}")
         }
-        _ => name.to_owned(),
+        _ => format!("{name} {}", serde_json::to_string(args).expect("tool arguments are JSON")),
     }
 }
 

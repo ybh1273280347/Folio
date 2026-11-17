@@ -6,11 +6,54 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
+/** Expected external failures carry a short, model-facing category rather than a diagnostic stack. */
+class ToolFailure extends Error {
+  constructor(type, message, retryable = false, httpStatus) {
+    super(message);
+    this.detail = { type, message, retryable, ...(httpStatus === undefined ? {} : { http_status: httpStatus }) };
+  }
+}
+
+async function toolResult(run, signal) {
+  try {
+    const result = await run();
+    return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status === 'error' };
+  } catch (error) {
+    if (signal?.aborted) error = new ToolFailure('cancelled', '工具调用已取消。');
+    // Unexpected programming errors still surface through Pi; this boundary only translates known failures.
+    if (!(error instanceof ToolFailure)) throw error;
+    const result = { status: error.detail.type === 'cancelled' ? 'cancelled' : 'error', error: error.detail };
+    return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: true };
+  }
+}
+
 async function post(url, headers, body, signal) {
-  const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers },
-    body: JSON.stringify(body), signal: AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(25000)]) });
-  if (!response.ok) throw new Error(`${new URL(url).hostname}: HTTP ${response.status}`);
-  return response.json();
+  let response;
+  try {
+    response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify(body), signal: AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(25000)]) });
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason;
+    if (error.name === 'TimeoutError') throw new ToolFailure('timeout', '连接或读取搜索服务超时。', true);
+    if (error instanceof TypeError && error.message === 'fetch failed') {
+      throw new ToolFailure('connection_error', '无法连接搜索服务，请检查网络、代理或 DNS。', true);
+    }
+    throw error;
+  }
+  if (!response.ok) {
+    const status = response.status;
+    const type = { 401: 'authentication_error', 402: 'quota_exceeded', 403: 'permission_denied', 429: 'rate_limited' }[status]
+      ?? (status >= 500 ? 'remote_error' : 'invalid_request');
+    throw new ToolFailure(type, `${new URL(url).hostname} 返回 HTTP ${status}（${type}）。`, status === 429 || status >= 500, status);
+  }
+  try {
+    return await response.json();
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new ToolFailure('invalid_response', '搜索服务返回的内容不是有效 JSON。');
+    if (error.name === 'TimeoutError') throw new ToolFailure('timeout', '读取搜索服务响应超时。', true);
+    if (error instanceof TypeError && error.message === 'terminated') throw new ToolFailure('connection_error', '读取响应时连接中断。', true);
+    throw error;
+  }
 }
 
 /** Keep ranked evidence and provider metadata, deduplicating only candidates with a URL. */
@@ -22,15 +65,15 @@ function searchResult(provider, query, mode, candidates, maxResults) {
     seen.add(candidate.url);
     return true;
   }).slice(0, maxResults);
-  return { provider, query, mode, candidates: unique,
+  return { status: unique.length ? 'ok' : 'empty', provider, query, mode, candidates: unique,
     ...(unique.length ? {} : { notice: '没有找到结果。可调整查询，或尝试另一个搜索工具；请保留所需的来源和学术范围约束。' }) };
 }
 
 export async function searchExa(params, settings, signal, request = post) {
   signal?.throwIfAborted();
-  if (!settings.exaApiKey) throw new Error('Exa: 未配置 API Key。可使用 baidu_qianfan_search 搜索网页。');
+  if (!settings.exaApiKey) throw new ToolFailure('configuration_error', 'Exa 未配置 API Key。');
   const query = params.query.trim();
-  if (!query) throw new Error('query 不能为空白。');
+  if (!query) throw new ToolFailure('invalid_request', 'query 不能为空白。');
   const maxResults = params.max_results ?? 10;
   const mode = params.mode ?? 'web';
   const days = { day: 1, week: 7, month: 30, year: 365 }[params.recency];
@@ -44,6 +87,7 @@ export async function searchExa(params, settings, signal, request = post) {
     ...(days ? { startPublishedDate: new Date(Date.now() - days * 86400000).toISOString() } : {}),
   }, signal);
   signal?.throwIfAborted();
+  if (!Array.isArray(data?.results)) throw new ToolFailure('invalid_response', 'Exa 响应缺少 results 数组。');
   return searchResult('exa', query, mode, data.results.map(item => ({ title: item.title, url: item.url,
     published_date: item.publishedDate, evidences: item.highlights ?? [],
     metadata: { author: item.author, highlight_scores: item.highlightScores, entities: item.entities },
@@ -52,9 +96,9 @@ export async function searchExa(params, settings, signal, request = post) {
 
 export async function searchBaidu(params, settings, signal, request = post) {
   signal?.throwIfAborted();
-  if (!settings.baiduQianfanApiKey) throw new Error('百度千帆: 未配置 API Key。');
+  if (!settings.baiduQianfanApiKey) throw new ToolFailure('configuration_error', '百度千帆未配置 API Key。');
   const query = params.query.trim();
-  if (!query) throw new Error('query 不能为空白。');
+  if (!query) throw new ToolFailure('invalid_request', 'query 不能为空白。');
   const maxResults = params.max_results ?? 10;
   const payload = { messages: [{ role: 'user', content: query }], search_source: 'baidu_search_v2',
     resource_type_filter: [{ type: 'web', top_k: maxResults }] };
@@ -66,6 +110,7 @@ export async function searchBaidu(params, settings, signal, request = post) {
   const data = await request('https://qianfan.baidubce.com/v2/ai_search/web_search',
     { 'X-Appbuilder-Authorization': `Bearer ${settings.baiduQianfanApiKey}` }, payload, signal);
   signal?.throwIfAborted();
+  if (!Array.isArray(data?.references)) throw new ToolFailure('invalid_response', '百度千帆响应缺少 references 数组。');
   return searchResult('baidu_qianfan', query, 'web', data.references.map(item => ({ title: item.title, url: item.url,
     published_date: item.date, evidences: [item.markdown_content || item.content || item.snippet].filter(Boolean),
     metadata: { authority_score: item.authority_score, rerank_score: item.rerank_score, aladdin: item.aladdin },
@@ -81,7 +126,7 @@ const searchParameters = {
     { description: 'Soft freshness filter; omit for unrestricted search. Exact date requirements should also be stated in query.' })),
   include_domains: Type.Optional(domainList),
 };
-const evidenceRules = 'Treat candidates[].evidences as factual grounding; inspect titles, URLs, dates and metadata for relevance and authority. Refine weak searches instead of inventing facts. Cite supporting sources beside the relevant claim using [short source label](exact URL). A provider summary is only a lead, not independent evidence.';
+const evidenceRules = 'Treat candidates[].evidences as factual grounding; inspect titles, URLs, dates and metadata for relevance and authority. Refine weak searches instead of inventing facts. Cite supporting sources beside the relevant claim using [short source label](exact URL). A provider summary is only a lead, not independent evidence. status=empty means a successful search with no matches; status=error includes error.type, message and retryable. A connection error is not evidence that no sources exist. On cancelled, stop without fallback.';
 
 export function webTools(getSettings, cwd, dataRoot) {
   return [
@@ -92,22 +137,20 @@ export function webTools(getSettings, cwd, dataRoot) {
         exclude_domains: Type.Optional(domainList),
       }, { additionalProperties: false }),
       execute: async (_id, params, signal) => {
-        const result = await searchExa(params, { ...getSettings() }, signal);
-        return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
+        return toolResult(() => searchExa(params, { ...getSettings() }, signal), signal);
       },
     },
     { name: 'baidu_qianfan_search', label: 'Baidu Qianfan Search', description: `Search with Baidu Qianfan, especially when Chinese sources are important, or as a fallback after Exa fails or returns no results. Supports web search, include_domains and recency. Does not support academic mode, focus or exclude_domains. recency=day means the current Beijing calendar day; week/month/year follow the provider. ${evidenceRules}`,
       parameters: Type.Object(searchParameters, { additionalProperties: false }),
       execute: async (_id, params, signal) => {
-        const result = await searchBaidu(params, { ...getSettings() }, signal);
-        return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
+        return toolResult(() => searchBaidu(params, { ...getSettings() }, signal), signal);
       },
     },
     { name: 'web_fetch', label: 'Web Fetch', description: 'Fetch a URL as Markdown. PDFs are detected before HTML parsing. Use mode=dynamic explicitly for JavaScript sites. Scanned PDF results include a local file and OCR page numbers; continue with the independent PaddleOCR MCP tool or render selected pages.',
       parameters: Type.Object({ url: Type.String({ format: 'uri' }),
         mode: Type.Optional(Type.Union([Type.Literal('http'), Type.Literal('dynamic')])),
         pages: Type.Optional(Type.String({ description: '1-based PDF pages, e.g. 1,3-5' })) }),
-      execute: async (_id, params, signal) => {
+      execute: async (_id, params, signal) => toolResult(async () => {
         signal?.throwIfAborted();
         const output = path.join(dataRoot, 'ai-artifacts', randomUUID());
         fs.mkdirSync(output, { recursive: true });
@@ -128,17 +171,29 @@ export function webTools(getSettings, cwd, dataRoot) {
           signal?.addEventListener('abort', abort, { once: true });
           child.stdout.on('data', chunk => { stdout += chunk; });
           child.stderr.on('data', chunk => { stderr += chunk; });
-          child.once('error', error => { signal?.removeEventListener('abort', abort); reject(error); });
+          child.once('error', error => {
+            signal?.removeEventListener('abort', abort);
+            if (error.code === 'ENOENT') reject(new ToolFailure('dependency_error', 'web_fetch 的 Python 运行环境不存在，请重新安装 AI 运行依赖。'));
+            else reject(error);
+          });
           child.once('close', code => {
             signal?.removeEventListener('abort', abort);
             if (signal?.aborted) reject(signal.reason);
             else if (code === 0) resolve(stdout);
-            else reject(new Error(`web_fetch: ${stderr || `exit ${code}`}`));
+            else {
+              // Python diagnostics stay in the host log, never in the model's tool result.
+              console.error(stderr);
+              reject(new ToolFailure('process_error', `抓取辅助进程异常退出（退出码 ${code}）。`));
+            }
           });
         });
-        const parsed = JSON.parse(result);
-        return { content: [{ type: 'text', text: JSON.stringify(parsed) }], details: parsed };
-      },
+        try {
+          return JSON.parse(result);
+        } catch (error) {
+          if (error instanceof SyntaxError) throw new ToolFailure('invalid_response', '抓取辅助进程未返回有效 JSON。');
+          throw error;
+        }
+      }, signal),
     },
   ];
 }
