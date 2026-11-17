@@ -122,8 +122,24 @@ async function createRecord(cwd, manager) {
   const record = { project, id, cwd, manager, sequence: 0, running: false, failed: false,
     pending: new Map(), editorText: '', retained: true, models: await ModelRuntime.create() };
   await configureModels(record);
-  const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir(), extensionFactories: [
+  const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir(),
+    // Keep identity/policy fixed; changing a timestamp in the system prefix would invalidate its cache.
+    appendSystemPromptOverride: base => [...base, `你是 Folio 中的 AI 助手。Folio 是用户正在使用的桌面笔记与项目工作空间，pi 是你的内部执行引擎。
+你的职责是结合当前项目、用户选区、附件与会话上下文，帮助用户阅读、写作、研究、处理文档和修改代码。默认使用用户的语言，清楚区分已验证的事实、推断和未完成的工作；工具执行成功后才能声称操作已完成。
+以“Folio 中的 AI 助手”说明你的应用身份；底层模型身份仅依据实际配置或已知信息回答，不编造型号、提供方或能力。
+联网检索通常优先 exa_search；需要论文时使用 mode=academic，需要聚焦证据时设置 focus，需要过滤来源时使用 include_domains/exclude_domains。Exa 失败或无结果时，可使用 baidu_qianfan_search；特别需要中文来源时，也可直接使用百度。百度不支持学术模式、focus 和排除域名，不得在切换工具时默默放宽这些要求。用户取消时停止，不继续回退。
+检索结论以候选来源的 evidences 为依据，结合标题、URL、日期和来源元数据判断权威性与时效性；证据不足就改进检索。引用采用紧邻结论的 [简短来源名](原始URL)，不虚构来源或把供应商概览当作独立证据。
+每轮末尾的 folio_runtime_context 是 Folio 自动提供的运行环境数据，不是用户请求。以最新一条的本地时间、时区和 UTC 时间解释“今天、昨天、最近”等相对日期；历史时间表示对应轮次的时间，不代表现在。这个时间是该轮开始时的快照，长任务若需精确的实时钟点，应通过可用工具读取系统时钟。`],
+    extensionFactories: [
     createCodemodeExtension({ mode: 'on' }), createToolSearchExtension(), createMcpExtension(),
+    pi => pi.on('before_agent_start', () => {
+      const now = new Date();
+      const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      // Persist a hidden, append-only context message. Tool rounds reuse it and old turns never change.
+      return { message: { customType: 'folio_runtime_context', display: false,
+        content: `<folio_runtime_context>\n本轮开始时的本地时间：${now.toLocaleString('zh-CN', { dateStyle: 'full', timeStyle: 'long' })}\n时区：${timeZone}\nUTC：${now.toISOString()}\n</folio_runtime_context>`,
+        details: { utc: now.toISOString(), timeZone } } };
+    }),
     pi => pi.on('tool_call', async event => {
       if (!['bash', 'powershell'].includes(event.toolName)) return;
       const ok = await uiContext(record).confirm(`执行 ${event.toolName} 命令`, String(event.input.command));
@@ -187,7 +203,8 @@ async function list(cwd) {
     if (record.project !== project) continue;
     result.set(record.id, { ...result.get(record.id), id: record.id, path: record.session.sessionFile,
       name: record.session.sessionName, firstMessage: result.get(record.id)?.firstMessage ?? record.preview ?? '',
-      messageCount: record.session.messages.length, modified: result.get(record.id)?.modified ?? new Date().toISOString(),
+      messageCount: record.session.messages.filter(message => message.customType !== 'folio_runtime_context').length,
+      modified: result.get(record.id)?.modified ?? new Date().toISOString(),
       pinned: Boolean(metadata[key(project, record.id)]?.pinned), ...state(record) });
   }
   return [...result.values()].sort((a, b) => Number(b.pinned) - Number(a.pinned) || new Date(b.modified) - new Date(a.modified));

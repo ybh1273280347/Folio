@@ -34,7 +34,12 @@ Events carry project/session identity and a monotonically increasing sequence wi
 
 ## Web and OCR tools
 
-`web_search` uses Exa and then Baidu Qianfan. Missing credentials, external failures, or empty Exa results enter the fallback path; explicit cancellation does not. Results identify their actual provider and contain URLs and excerpts. The Baidu `day` filter uses the current Beijing calendar date.
+Search tools expose the full capabilities of the supplied WisePen provider adapters separately, so switching providers cannot silently discard filters:
+
+- `exa_search`: `query`, `mode` (`web` or `academic`), `focus`, `recency`, `include_domains`, `exclude_domains`, and `max_results` (1–20, default 10). Academic mode selects research papers; focus guides highlight extraction. Recency maps to a publication-date lower bound.
+- `baidu_qianfan_search`: `query`, `recency`, `include_domains`, and `max_results` (1–20, default 10). The `day` filter uses the current Beijing calendar date. Academic mode, focus, and excluded domains are not supported.
+
+The fixed Folio system instructions prefer Exa and direct the assistant to use Baidu after failure or no results, or directly when Chinese sources are particularly important. This is an explicit tool choice, not a hidden automatic fallback. Domain restrictions and academic requirements must be preserved; cancellation must not start another search. Both tools return provider, query, actual mode, and ranked `candidates` with title, URL, publication date, `evidences`, and provider metadata. Duplicate URLs are removed; URL-less candidates remain distinct. Empty results are reported explicitly. Provider credentials remain outside tool arguments and results.
 
 `web_fetch` reads HTTP response bytes before constructing a Scrapling HTML response, so extensionless and redirected PDF URLs are classified before HTML parsing. HTML uses Scrapling Markdown extraction; `mode: dynamic` starts a temporary browser explicitly. PDF uses pdf-inspector and accepts one-based page selections. The full Markdown artifact remains on disk, while the model-facing preview is limited to 30,000 characters and declares truncation.
 
@@ -52,6 +57,12 @@ The same interface works for PDF and PPTX. Page numbers are one-based. Word uses
 
 ## Focused validation
 
-`npm test --prefix resources/pi-host` exercises the public JSONL protocol with a controlled OpenAI-compatible server: simultaneous independent streams, live snapshots, project isolation, close/reopen retention, deletion protection, manual-title precedence, pinning, and deletion. Separate tests cover Exa-to-Baidu fallback and cancellation without fallback. No fixed sleeps are used.
+`npm test --prefix resources/pi-host` exercises the public JSONL protocol with a controlled OpenAI-compatible server: simultaneous independent streams, live snapshots, project isolation, close/reopen retention, deletion protection, manual-title precedence, pinning, deletion, and stable request prefixes with runtime time context. Separate tests cover provider-specific search options, evidence/metadata preservation, and cancellation. No fixed sleeps are used.
+
+## Folio identity and current time
+
+Folio appends a fixed system policy to the existing Pi resources, preserving project instructions, skills and tool rules. It identifies the assistant as Folio's AI assistant, describes its workspace role, search selection and source citations, and explains runtime timestamps.
+
+The `before_agent_start` extension appends one hidden `folio_runtime_context` message after the user input for each run. It records local date/time, the system's IANA time zone and UTC. The message persists in Pi JSONL and is reused unchanged throughout tool rounds and future history; the next run appends a new snapshot. Folio does not rewrite timestamps in the system prompt or earlier messages, preserving the existing request prefix for provider caching. Actual cache hits depend on the selected model/gateway. Long-running tasks needing an exact live clock must read it through a tool.
 
 Real-machine verification also covers the Magpie title model, both search providers, static and dynamic HTML, native-text and scanned PDFs, PaddleOCR Markdown output, and selected Word/PowerPoint/PDF page rendering. GPUI appearance and hands-on interaction remain subject to user acceptance.

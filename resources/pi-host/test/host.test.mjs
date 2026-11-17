@@ -8,7 +8,7 @@ import readline from 'node:readline';
 import http from 'node:http';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
-import { searchWeb } from '../web-tools.mjs';
+import { searchExa, searchBaidu } from '../web-tools.mjs';
 
 /** The driver exercises the public JSONL boundary; server gates replace timed waits. */
 function driver(child) {
@@ -29,7 +29,7 @@ function driver(child) {
       const id = `${value.sessionId}:${value.type}`;
       waiters.get(id)?.resolve(value);
       waiters.delete(id);
-      const subtype = `${id}:${value.assistantMessageEvent?.type}`;
+      const subtype = `${id}:${value.assistantMessageEvent?.type ?? value.toolCallId}`;
       waiters.get(subtype)?.resolve(value);
       waiters.delete(subtype);
     }
@@ -48,7 +48,7 @@ function driver(child) {
     },
     event: (sessionId, type, subtype) => {
       const existing = events.find(value => value.sessionId === sessionId && value.type === type
-        && (subtype === undefined || value.assistantMessageEvent?.type === subtype));
+        && (subtype === undefined || (value.assistantMessageEvent?.type ?? value.toolCallId) === subtype));
       if (existing) return Promise.resolve(existing);
       const deferred = Promise.withResolvers();
       waiters.set(`${sessionId}:${type}${subtype === undefined ? '' : `:${subtype}`}`, deferred);
@@ -91,7 +91,7 @@ test('independent SDK sessions keep running across snapshots, closing tabs, and 
       return;
     }
     response.setHeader('Content-Type', 'text/event-stream');
-    const label = JSON.stringify(body.messages.at(-1).content).includes('second') ? '乙' : '甲';
+    const label = JSON.stringify(body.messages).includes('second user message') ? '乙' : '甲';
     response.write(`data: ${JSON.stringify({ id: 'run', choices: [{ index: 0, delta: { role: 'assistant', content: `${label}开始` }, finish_reason: null }] })}\n\n`);
     streamed.resolve();
     await finishStream.promise;
@@ -185,7 +185,6 @@ test('independent SDK sessions keep running across snapshots, closing tabs, and 
 
 test('creating a tab returns its identity before model initialization completes', { timeout: 45000 }, async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'folio-new-tab-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const agentDir = path.join(directory, 'agent');
   const cwd = path.join(directory, 'project');
   fs.mkdirSync(agentDir); fs.mkdirSync(cwd);
@@ -205,7 +204,12 @@ test('creating a tab returns its identity before model initialization completes'
     env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, FOLIO_USER_DATA: directory,
       FOLIO_AI_SETTINGS: JSON.stringify({ baseUrl: `http://127.0.0.1:${server.address().port}`, titleModelId: '' }) }, windowsHide: true,
   });
-  t.after(() => { child.stdin.end(); child.kill(); });
+  t.after(async () => {
+    const exited = once(child, 'exit');
+    child.stdin.end(); child.kill();
+    await exited;
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
   const client = driver(child);
   const project = { cwd, projectKey: fs.realpathSync.native(cwd).replaceAll('/', '\\').replace(/\\+$/, '').toLowerCase() };
   const created = await client.request({ ...project, type: 'create_session' });
@@ -269,21 +273,23 @@ test('tool argument deltas reach the conversation before generation ends', { tim
   assert.equal((await run).success, true);
 });
 
-test('write events retain pre-write content for new files and later overwrites', { timeout: 45000 }, async t => {
+test('writes retain original content and runtime clock snapshots preserve the request prefix', { timeout: 45000 }, async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'folio-write-diff-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const agentDir = path.join(directory, 'agent');
   const cwd = path.join(directory, 'project');
   fs.mkdirSync(agentDir); fs.mkdirSync(cwd);
+  const requests = [];
   const server = http.createServer(async (request, response) => {
     const chunks = [];
     request.on('data', chunk => chunks.push(chunk));
     await once(request, 'end');
     const body = JSON.parse(Buffer.concat(chunks).toString());
+    requests.push(body);
     response.setHeader('Content-Type', 'text/event-stream');
     const role = body.messages.at(-1).role;
-    const content = body.messages.find(message => message.role === 'user').content[0].text;
-    const delta = { tool: { content: '完成' }, user: { tool_calls: [{ index: 0, id: 'write-call', type: 'function',
+    const content = body.messages.findLast(message => message.role === 'user' && message.content[0].text.startsWith('# ')).content[0].text;
+    const toolCallId = { '# 新文件\n第一行\n第二行\n': 'write-new', '# 覆盖\n修改后\n': 'write-overwrite' }[content];
+    const delta = { tool: { content: '完成' }, user: { tool_calls: [{ index: 0, id: toolCallId, type: 'function',
       function: { name: 'write', arguments: JSON.stringify({ path: '新建文件.md', content }) } }] } }[role];
     response.write(`data: ${JSON.stringify({ id: 'write-run', choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
     response.end(`data: ${JSON.stringify({ id: 'write-run', choices: [{ index: 0, delta: {}, finish_reason: { tool: 'stop', user: 'tool_calls' }[role] }] })}\n\ndata: [DONE]\n\n`);
@@ -301,7 +307,12 @@ test('write events retain pre-write content for new files and later overwrites',
     env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, FOLIO_USER_DATA: directory,
       FOLIO_AI_SETTINGS: JSON.stringify({ baseUrl, titleModelId: '' }) }, windowsHide: true,
   });
-  t.after(() => { child.stdin.end(); child.kill(); });
+  t.after(async () => {
+    const exited = once(child, 'exit');
+    child.stdin.end(); child.kill();
+    await exited;
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
   const client = driver(child);
   const project = { cwd, projectKey: fs.realpathSync.native(cwd).replaceAll('/', '\\').replace(/\\+$/, '').toLowerCase() };
   const created = await client.request({ ...project, type: 'create_session' });
@@ -313,33 +324,72 @@ test('write events retain pre-write content for new files and later overwrites',
   // Inspect after writing has completed, as a delayed UI consumer would.
   assert.equal(fs.readFileSync(path.join(cwd, '新建文件.md'), 'utf8'), '# 新文件\n第一行\n第二行\n');
   assert.equal((await client.event(sessionId, 'tool_execution_start')).writeBefore, '');
-  const second = await client.request({ ...project, type: 'create_session' });
-  const secondId = second.data.sessionId;
-  assert.equal((await client.request({ ...project, sessionId: secondId, type: 'prompt', message: '# 覆盖\n修改后\n' })).success, true);
-  await client.event(secondId, 'agent_settled');
+  assert.equal((await client.request({ ...project, sessionId, type: 'prompt', message: '# 覆盖\n修改后\n' })).success, true);
   assert.equal(fs.readFileSync(path.join(cwd, '新建文件.md'), 'utf8'), '# 覆盖\n修改后\n');
-  assert.equal((await client.event(secondId, 'tool_execution_start')).writeBefore, '# 新文件\n第一行\n第二行\n');
-  assert.equal((await client.event(secondId, 'tool_execution_end')).isError, false);
+  assert.equal((await client.event(sessionId, 'tool_execution_start', 'write-overwrite')).writeBefore, '# 新文件\n第一行\n第二行\n');
+  assert.equal((await client.event(sessionId, 'tool_execution_end', 'write-overwrite')).isError, false);
+  const history = await client.request({ ...project, sessionId, type: 'snapshot' });
+  const clocks = history.data.messages.filter(message => message.customType === 'folio_runtime_context');
+  assert.equal(clocks.length, 2);
+  assert.equal(clocks[0].display, false);
+  assert.equal(Number.isNaN(Date.parse(clocks[0].details.utc)), false);
+  assert.equal(clocks[0].details.timeZone, Intl.DateTimeFormat().resolvedOptions().timeZone);
+  assert.match(JSON.stringify(requests[0].messages), /你是 Folio 中的 AI 助手/);
+  assert.match(JSON.stringify(requests[0].messages.at(-1)), /folio_runtime_context/);
+  // Both a tool continuation and the next user run retain the exact previous request prefix.
+  assert.deepEqual(requests[1].messages.slice(0, requests[0].messages.length), requests[0].messages);
+  assert.deepEqual(requests[2].messages.slice(0, requests[1].messages.length), requests[1].messages);
+  assert.match(JSON.stringify(requests[2].messages.at(-1)), /folio_runtime_context/);
 });
 
-test('empty Exa results fall back to Baidu with Beijing calendar-day filtering', async () => {
-  const calls = [];
-  const transport = async (url, headers, body) => {
-    calls.push({ url, headers, body });
-    return url.includes('exa.ai') ? { results: [] } : { references: [{ title: '来源', url: 'https://example.com', snippet: '证据' }] };
-  };
-  const result = await searchWeb({ query: '查询', recency: 'day', include_domains: ['example.com'] },
-    { exaApiKey: 'exa-secret', baiduQianfanApiKey: 'baidu-secret' }, new AbortController().signal, transport);
-  assert.equal(result.provider, 'baidu_qianfan');
-  assert.equal(result.results[0].summary, '证据');
-  assert.deepEqual(calls[1].body.search_filter.match.site, ['example.com']);
-  assert.match(calls[1].body.search_filter.range.page_time.gte, /^\d{4}-\d{2}-\d{2}$/);
+test('Exa supports academic scope, focused evidence, domain filters and provider metadata', async () => {
+  const transport = test.mock.fn(async () => ({ results: [
+    { title: '论文', url: 'https://example.com/paper', publishedDate: '2026-11-01', highlights: ['关键证据'],
+      author: '作者', highlightScores: [0.9], entities: [{ id: 'entity' }] },
+    { title: '重复论文', url: 'https://example.com/paper', highlights: ['重复'] },
+    { title: '无 URL 论文一', highlights: ['证据一'] }, { title: '无 URL 论文二', highlights: ['证据二'] },
+  ] }));
+  const result = await searchExa({ query: ' 查询 ', mode: 'academic', focus: ' 训练数据 ', recency: 'week',
+    include_domains: ['Example.com'], exclude_domains: ['excluded.com'] }, { exaApiKey: 'exa-secret' },
+  new AbortController().signal, transport);
+  const [url, headers, body] = transport.mock.calls[0].arguments;
+  assert.equal(url, 'https://api.exa.ai/search');
+  assert.equal(headers['x-api-key'], 'exa-secret');
+  assert.equal(body.query, '查询');
+  assert.equal(body.category, 'research paper');
+  assert.equal(body.numResults, 10);
+  assert.deepEqual(body.contents, { highlights: { query: '训练数据' }, text: false, summary: false });
+  assert.deepEqual(body.includeDomains, ['example.com']);
+  assert.deepEqual(body.excludeDomains, ['excluded.com']);
+  assert.match(body.startPublishedDate, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(result.mode, 'academic');
+  assert.equal(result.candidates.length, 3);
+  assert.deepEqual(result.candidates[0].evidences, ['关键证据']);
+  assert.deepEqual(result.candidates[0].metadata, { author: '作者', highlight_scores: [0.9], entities: [{ id: 'entity' }] });
   assert.doesNotMatch(JSON.stringify(result), /secret/);
 });
 
-test('cancelling Exa does not issue a fallback request', async () => {
+test('Baidu preserves site and Beijing-day filters and source evidence scores', async t => {
+  const today = '2026-11-17';
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-17T00:30:00+08:00') });
+  const transport = test.mock.fn(async () => ({ references: [{ title: '来源', url: 'https://example.com',
+    markdown_content: 'Markdown 证据', content: '备用正文', snippet: '片段', authority_score: 0, rerank_score: 0.9, aladdin: { type: 'news' } }] }));
+  const result = await searchBaidu({ query: '查询', recency: 'day', include_domains: ['example.com'] },
+    { baiduQianfanApiKey: 'baidu-secret' }, new AbortController().signal, transport);
+  const [url, headers, body] = transport.mock.calls[0].arguments;
+  assert.equal(url, 'https://qianfan.baidubce.com/v2/ai_search/web_search');
+  assert.equal(headers['X-Appbuilder-Authorization'], 'Bearer baidu-secret');
+  assert.equal(result.provider, 'baidu_qianfan');
+  assert.deepEqual(result.candidates[0].evidences, ['Markdown 证据']);
+  assert.deepEqual(result.candidates[0].metadata, { authority_score: 0, rerank_score: 0.9, aladdin: { type: 'news' } });
+  assert.deepEqual(body.search_filter, { match: { site: ['example.com'] }, range: { page_time: { gte: today, lte: today } } });
+  assert.equal(body.resource_type_filter[0].top_k, 10);
+  assert.doesNotMatch(JSON.stringify(result), /secret/);
+});
+
+test('cancelling Exa stops the request without calling another provider', async () => {
   const controller = new AbortController();
   const transport = test.mock.fn(async () => { controller.abort(new Error('cancelled')); throw controller.signal.reason; });
-  await assert.rejects(searchWeb({ query: 'query' }, { exaApiKey: 'x', baiduQianfanApiKey: 'y' }, controller.signal, transport), /cancelled/);
+  await assert.rejects(searchExa({ query: 'query' }, { exaApiKey: 'x', baiduQianfanApiKey: 'y' }, controller.signal, transport), /cancelled/);
   assert.equal(transport.mock.callCount(), 1);
 });
