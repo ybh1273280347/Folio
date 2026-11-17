@@ -4824,14 +4824,18 @@ impl Render for ChatPane {
                                 .track_scroll(&self.scroll)
                                 .size_full()
                                 .overflow_y_scroll()
-                                .on_scroll(cx.listener(|pane, event: &ScrollEvent, _, _| {
+                                .on_scroll(cx.listener(|pane, event: &ScrollEvent, _, cx| {
                                     let delta_y = f32::from(event.delta.pixel_delta(px(20.)).y);
                                     let max_y = f32::from(pane.scroll.max_offset().y);
                                     let cur_y = -f32::from(pane.scroll.offset().y);
+                                    let prev_stick = pane.stick_to_bottom;
                                     if delta_y > 0.5 {
                                         pane.stick_to_bottom = false;
                                     } else if cur_y >= (max_y - 28.0).max(0.0) {
                                         pane.stick_to_bottom = true;
+                                    }
+                                    if pane.stick_to_bottom != prev_stick {
+                                        cx.notify();
                                     }
                                 }))
                                 .pl(px(42.))
@@ -5160,7 +5164,58 @@ impl Render for ChatPane {
                                     }),
                             ),
                     )
-                    .child(self.render_message_navigation(&navigation, palette, cx)),
+                    .child(self.render_message_navigation(&navigation, palette, cx))
+                    .when(
+                        {
+                            let max_y = f32::from(self.scroll.max_offset().y);
+                            let cur_y = -f32::from(self.scroll.offset().y);
+                            max_y > 20.0 && cur_y < (max_y - 28.0).max(0.0)
+                        },
+                        |container| {
+                            container.child(
+                                div()
+                                    .absolute()
+                                    .bottom(px(12.))
+                                    .left_0()
+                                    .right_0()
+                                    .flex()
+                                    .justify_center()
+                                    .child(
+                                        div()
+                                            .id("ai-scroll-to-bottom")
+                                            .size(px(32.))
+                                            .rounded_full()
+                                            .bg(gpui_kit::rgb(palette.surface))
+                                            .border_1()
+                                            .border_color(subtle_border(palette.border))
+                                            .shadow(card_shadow(palette.is_dark()))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(gpui_kit::rgb(palette.hover)))
+                                            .active(|s| s.bg(gpui_kit::rgb(palette.pressed)))
+                                            .tooltip(|window, cx| {
+                                                Tooltip::new("回到底部").build(window, cx)
+                                            })
+                                            .child(
+                                                crate::ui::icon(IconName::ArrowDown)
+                                                    .w(px(15.))
+                                                    .h(px(15.))
+                                                    .text_color(gpui_kit::rgb(palette.text)),
+                                            )
+                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                cx.stop_propagation();
+                                            })
+                                            .on_click(cx.listener(|pane, _, _, cx| {
+                                                pane.stick_to_bottom = true;
+                                                pane.scroll.scroll_to_bottom();
+                                                cx.notify();
+                                            })),
+                                    ),
+                            )
+                        },
+                    ),
                 )
             })
             .when_some(self.pending_ui.as_ref(), |root, pending| {

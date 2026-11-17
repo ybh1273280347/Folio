@@ -280,12 +280,6 @@ impl RpcClient {
     pub fn abort(&self) -> Result<String, String> {
         self.send(json!({"type":"abort"}))
     }
-    pub fn get_state(&self) -> Result<String, String> {
-        self.send(json!({"type":"get_state"}))
-    }
-    pub fn get_messages(&self) -> Result<String, String> {
-        self.send(json!({"type":"get_messages"}))
-    }
     pub fn get_available_models(&self) -> Result<String, String> {
         self.send(json!({"type":"get_available_models"}))
     }
@@ -303,9 +297,6 @@ impl RpcClient {
     }
     pub fn set_thinking_level(&self, level: &str) -> Result<String, String> {
         self.send(json!({"type":"set_thinking_level","level":level}))
-    }
-    pub fn set_session_name(&self, name: &str) -> Result<String, String> {
-        self.send(json!({"type":"set_session_name","name":name}))
     }
     pub fn compact(&self) -> Result<String, String> {
         self.send(json!({"type":"compact"}))
