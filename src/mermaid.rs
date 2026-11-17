@@ -1,12 +1,16 @@
 use std::{
     cell::RefCell,
     collections::HashMap,
+    hash::{Hash, Hasher},
     rc::Rc,
     sync::Arc,
 };
 
 use gpui_kit::{
-    base::text::editor_host::CodeBlock,
+    base::text::{
+        MarkdownNode, MarkdownParseContext, MarkdownPlugin,
+        editor_host::{CodeBlock, Span},
+    },
     *,
 };
 use markdown_editor::BlockId;
@@ -85,8 +89,8 @@ pub struct MermaidReady;
 impl EventEmitter<MermaidReady> for MermaidRenderer {}
 
 pub struct MermaidRenderer {
-    blocks: HashMap<BlockId, BlockState>,
-    jobs: HashMap<BlockId, (u64, Task<()>)>,
+    blocks: HashMap<u64, BlockState>,
+    jobs: HashMap<u64, (u64, Task<()>)>,
     next_job: u64,
 }
 
@@ -99,9 +103,25 @@ impl MermaidRenderer {
         }
     }
 
+    /// Build a `TextView` block plugin rendering closed `mermaid` fenced code blocks.
+    pub fn plugin(&self, renderer: WeakEntity<Self>) -> MermaidPlugin {
+        MermaidPlugin { renderer }
+    }
+
     pub fn element(
         &mut self,
         id: BlockId,
+        revision: u64,
+        code: &CodeBlock,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.element_for_key(id.as_u64(), revision, code, window, cx)
+    }
+
+    pub fn element_for_key(
+        &mut self,
+        id: u64,
         revision: u64,
         code: &CodeBlock,
         window: &mut Window,
@@ -156,7 +176,7 @@ impl MermaidRenderer {
     }
 
     pub fn retain_blocks(&mut self, ids: impl IntoIterator<Item = BlockId>) {
-        let retained: std::collections::HashSet<_> = ids.into_iter().collect();
+        let retained: std::collections::HashSet<_> = ids.into_iter().map(BlockId::as_u64).collect();
         self.blocks.retain(|id, _| retained.contains(id));
         self.jobs.retain(|id, _| retained.contains(id));
     }
@@ -167,7 +187,7 @@ impl MermaidRenderer {
 
     fn finish(
         &mut self,
-        id: BlockId,
+        id: u64,
         revision: u64,
         appearance: Appearance,
         job: u64,
@@ -204,6 +224,101 @@ impl MermaidRenderer {
         }
         cx.emit(MermaidReady);
         cx.notify();
+    }
+}
+
+struct MermaidPluginNode {
+    key: u64,
+    code: CodeBlock,
+}
+
+pub struct MermaidPlugin {
+    renderer: WeakEntity<MermaidRenderer>,
+}
+
+fn has_closing_fence(raw: &str) -> bool {
+    let mut lines = raw.lines();
+    let Some(first) = lines.next().map(str::trim_start) else {
+        return false;
+    };
+    let Some(fence_ch) = first.bytes().next().filter(|&b| b == b'`' || b == b'~') else {
+        return false;
+    };
+    let fence_len = first.bytes().take_while(|&b| b == fence_ch).count();
+    if fence_len < 3 {
+        return false;
+    }
+    let Some(last) = lines.last().map(str::trim) else {
+        return false;
+    };
+    last.len() >= fence_len && last.bytes().all(|b| b == fence_ch)
+}
+
+fn mermaid_key(source: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source.hash(&mut hasher);
+    hasher.finish()
+}
+
+impl MarkdownPlugin for MermaidPlugin {
+    fn is_block(&self) -> bool {
+        true
+    }
+
+    fn name(&self) -> &str {
+        "folio-mermaid-block"
+    }
+
+    fn parse(
+        &self,
+        node: &markdown::mdast::Node,
+        context: &MarkdownParseContext<'_>,
+    ) -> Option<MarkdownNode> {
+        let markdown::mdast::Node::Code(code) = node else {
+            return None;
+        };
+        if !code
+            .lang
+            .as_deref()
+            .is_some_and(|l| l.eq_ignore_ascii_case("mermaid"))
+        {
+            return None;
+        }
+        let raw = context.node_source(node)?;
+        // Keep streaming unclosed blocks as plain code until the closing fence arrives.
+        if !has_closing_fence(raw) || code.value.trim().is_empty() {
+            return None;
+        }
+        let key = mermaid_key(&code.value);
+        let block = CodeBlock::new(
+            code.value.clone().into(),
+            Some("mermaid".into()),
+            None::<Span>,
+        );
+        Some(
+            MarkdownNode::new("folio-mermaid-block", MermaidPluginNode { key, code: block })
+                .text(code.value.clone())
+                .markdown(raw.to_owned()),
+        )
+    }
+
+    fn render(&self, node: &MarkdownNode, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let data = node.data::<MermaidPluginNode>().expect("mermaid block data");
+        let palette = crate::theme::palette();
+        let chart = self
+            .renderer
+            .update(cx, |renderer, cx| {
+                renderer.element_for_key(data.key, data.key, &data.code, window, cx)
+            })
+            .unwrap_or_else(|_| div().into_any_element());
+        div()
+            .my_1()
+            .p_2p5()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(crate::theme::color(palette.border))
+            .bg(crate::theme::color(palette.surface))
+            .child(chart)
     }
 }
 

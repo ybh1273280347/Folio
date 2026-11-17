@@ -3,23 +3,28 @@ mod diff;
 mod rpc;
 mod sessions;
 
+use crate::math::{MathReady, MathRenderer};
+use crate::mermaid::{MermaidReady, MermaidRenderer};
 use crate::model::AppSettings;
 use crate::terminal::{DraggedFolder, DraggedPaths};
 use crate::theme::{Palette, color as theme_color, palette as active_palette};
 use diff::{DiffLine, FileDiff, compute_diff};
 use gpui::{
     ClipboardEntry, EntityInputHandler, ExternalPaths, ImageFormat, MouseButton, ObjectFit,
-    ScrollHandle, Subscription,
+    ScrollEvent, ScrollHandle, Subscription,
 };
 use gpui_kit::{
     assets::IconName,
     base::{
-        StyledExt,
-        text::{TextViewStyle, markdown as render_markdown},
+        Scrollbar, ScrollbarMode, StyledExt,
+        text::{MarkdownExtensions, TextView, TextViewStyle},
     },
     component::{
         button::{Button, ButtonCustomVariant, ButtonVariants},
-        input::{InlineToken, Input, InputEvent, InputState, InputToken, Textarea, TextareaState},
+        input::{
+            Enter, Escape, IndentInline, InlineToken, Input, InputEvent, InputState, InputToken,
+            MoveDown, MoveUp, Textarea, TextareaState,
+        },
         tooltip::Tooltip,
     },
     prelude::FluentBuilder,
@@ -90,6 +95,7 @@ struct PastedImage {
 struct ToolBlock {
     id: String,
     name: String,
+    args: Value,
     summary: String,
     output: String,
     is_error: bool,
@@ -234,7 +240,11 @@ pub struct AiPane {
     write_snapshots: HashMap<String, String>,
     active_part_map: HashMap<usize, usize>,
     input: Entity<TextareaState>,
+    _math: Entity<MathRenderer>,
+    _mermaid: Entity<MermaidRenderer>,
+    md_extensions: MarkdownExtensions,
     scroll: ScrollHandle,
+    stick_to_bottom: bool,
     _subscriptions: Vec<Subscription>,
     _poll: Task<()>,
 }
@@ -243,12 +253,25 @@ impl AiPane {
     pub fn new(
         cwd: PathBuf,
         settings: AppSettings,
+        math: Entity<MathRenderer>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         crate::theme::apply_font(&settings.interface_font, cx);
+        let mermaid = cx.new(MermaidRenderer::new);
+        let md_extensions = crate::markdown::markdown_extensions(&math, cx)
+            .plugin(mermaid.read(cx).plugin(mermaid.downgrade()));
+        let sub_math = cx.subscribe(&math, |_, _, event: &MathReady, cx| {
+            if matches!(event, MathReady::Ready) {
+                cx.notify();
+            }
+        });
+        let sub_mermaid = cx.subscribe(&mermaid, |_, _, _: &MermaidReady, cx| {
+            cx.notify();
+        });
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
+                .auto_grow(2, 7)
                 .placeholder("随心输入，/ 呼出命令…")
                 .submit_on_enter(true)
         });
@@ -382,8 +405,19 @@ impl AiPane {
             write_snapshots: HashMap::new(),
             active_part_map: HashMap::new(),
             input,
+            _math: math,
+            _mermaid: mermaid,
+            md_extensions,
             scroll: ScrollHandle::new(),
-            _subscriptions: vec![sub_input, sub_model_search, sub_rename, sub_ext],
+            stick_to_bottom: true,
+            _subscriptions: vec![
+                sub_input,
+                sub_model_search,
+                sub_rename,
+                sub_ext,
+                sub_math,
+                sub_mermaid,
+            ],
             _poll: poll,
         };
         pane.refresh_sessions();
@@ -806,6 +840,7 @@ impl AiPane {
                                     parts.push(AssistantPart::Tool(ToolBlock {
                                         id,
                                         name,
+                                        args,
                                         summary,
                                         output,
                                         is_error,
@@ -929,6 +964,7 @@ impl AiPane {
                         }
                     }
                 }
+                self.scroll_to_bottom();
             }
             "tool_execution_start" => {
                 let call_id = ev
@@ -986,6 +1022,28 @@ impl AiPane {
                 let output =
                     extract_text_content(ev.get("result").and_then(|r| r.get("content")));
                 let write_before = self.write_snapshots.remove(call_id);
+                let write_new_fallback = if name == "write" && !is_err {
+                    self.find_tool_mut(call_id)
+                        .map(|block| (block.name.clone(), block.args.clone()))
+                        .map(|(block_name, mut write_args)| {
+                            if write_args.get("content").and_then(|v| v.as_str()).is_none()
+                                && let Some(rel) = extract_path_arg(&write_args)
+                                && let Ok(disk_new) =
+                                    std::fs::read_to_string(self.resolve_tool_path(&rel))
+                                && let Some(obj) = write_args.as_object_mut()
+                            {
+                                obj.insert("content".to_owned(), Value::String(disk_new));
+                            }
+                            let diffs = build_diffs_for_tool(
+                                &block_name,
+                                &write_args,
+                                write_before.as_deref(),
+                            );
+                            (write_args, diffs)
+                        })
+                } else {
+                    None
+                };
 
                 if let Some(block) = self.find_tool_mut(call_id) {
                     block.done = true;
@@ -994,12 +1052,9 @@ impl AiPane {
                     if !output.is_empty() {
                         block.output = output;
                     }
-                    if name == "write" && !is_err {
-                        block.diffs = build_diffs_for_tool(
-                            &block.name,
-                            &Value::Null,
-                            write_before.as_deref(),
-                        );
+                    if let Some((write_args, diffs)) = write_new_fallback {
+                        block.args = write_args;
+                        block.diffs = diffs;
                     }
                     if let Some(first_diff) = block.diffs.first() {
                         let name_only = Path::new(&first_diff.path)
@@ -1052,6 +1107,7 @@ impl AiPane {
                 {
                     text.push_str(delta);
                 }
+                self.scroll_to_bottom();
             }
             "thinking_end" => {
                 if let Some(content) = ame.get("content").and_then(|v| v.as_str())
@@ -1061,10 +1117,12 @@ impl AiPane {
                 {
                     *text = content.to_owned();
                 }
+                self.scroll_to_bottom();
             }
             "text_start" => {
                 let idx = self.push_assistant_part(AssistantPart::Text(String::new()));
                 self.active_part_map.insert(content_index, idx);
+                self.scroll_to_bottom();
             }
             "text_delta" => {
                 let delta = ame.get("delta").and_then(|v| v.as_str()).unwrap_or("");
@@ -1084,6 +1142,7 @@ impl AiPane {
                 {
                     *text = content.to_owned();
                 }
+                self.scroll_to_bottom();
             }
             "toolcall_start" => {
                 let id = ame.get("id").and_then(|v| v.as_str()).unwrap_or("").to_owned();
@@ -1095,6 +1154,7 @@ impl AiPane {
                 let block = ToolBlock {
                     id,
                     name: name.clone(),
+                    args: Value::Null,
                     summary: name,
                     output: String::new(),
                     is_error: false,
@@ -1105,6 +1165,7 @@ impl AiPane {
                 };
                 let idx = self.push_assistant_part(AssistantPart::Tool(block));
                 self.active_part_map.insert(content_index, idx);
+                self.scroll_to_bottom();
             }
             "toolcall_end" => {
                 if let Some(tc) = ame.get("toolCall") {
@@ -1127,12 +1188,14 @@ impl AiPane {
                     {
                         block.id = id;
                         block.name = name;
+                        block.args = args;
                         block.summary = summary;
                         if !diffs.is_empty() {
                             block.diffs = diffs;
                         }
                     }
                 }
+                self.scroll_to_bottom();
             }
             _ => {}
         }
@@ -1167,6 +1230,7 @@ impl AiPane {
         };
         let summary = summarize_tool_call(name, args, &diffs);
         if let Some(block) = self.find_tool_mut(call_id) {
+            block.args = args.clone();
             block.summary = summary;
             if !diffs.is_empty() {
                 block.diffs = diffs;
@@ -1176,6 +1240,7 @@ impl AiPane {
         self.push_assistant_part(AssistantPart::Tool(ToolBlock {
             id: call_id.to_owned(),
             name: name.to_owned(),
+            args: args.clone(),
             summary,
             output: String::new(),
             is_error: false,
@@ -1434,6 +1499,13 @@ impl AiPane {
 
     fn slash_query(&self, cx: &App) -> Option<String> {
         self.slash_span_and_query(cx).map(|(_, q)| q)
+    }
+
+    fn current_slash_items(&self, cx: &App) -> Vec<SlashItem> {
+        self.slash_query(cx)
+            .as_deref()
+            .map(|q| self.filtered_slash_items(q))
+            .unwrap_or_default()
     }
 
     fn slash_items(&self) -> Vec<SlashItem> {
@@ -1794,6 +1866,7 @@ impl AiPane {
             input.set_value(String::new(), window, cx);
         });
         self.is_streaming = true;
+        self.stick_to_bottom = true;
         self.scroll_to_bottom();
         cx.notify();
     }
@@ -1806,6 +1879,7 @@ impl AiPane {
     }
 
     fn new_session(&mut self, cx: &mut Context<Self>) {
+        self.stick_to_bottom = true;
         if let Some(client) = &self.client {
             let _ = client.new_session();
         } else {
@@ -1818,6 +1892,7 @@ impl AiPane {
     }
 
     fn switch_session(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.stick_to_bottom = true;
         if let Some(client) = &self.client {
             let _ = client.switch_session(&path.to_string_lossy());
         }
@@ -1893,7 +1968,9 @@ impl AiPane {
     }
 
     fn scroll_to_bottom(&self) {
-        self.scroll.scroll_to_bottom();
+        if self.stick_to_bottom {
+            self.scroll.scroll_to_bottom();
+        }
     }
 
     fn md_style(&self, cx: &App) -> TextViewStyle {
@@ -1927,6 +2004,7 @@ impl AiPane {
             .border_1()
             .border_color(gpui_kit::rgb(palette.border))
             .overflow_hidden()
+            .on_scroll(|_, _, cx| cx.stop_propagation())
             .child(
                 div()
                     .id(SharedString::from(format!("diff-open-{}", diff.path)))
@@ -2224,18 +2302,22 @@ impl AiPane {
                                     .when(!block.output.trim().is_empty(), |s| {
                                         s.child(
                                             div()
-                                                .id(("tool-output", msg_idx * 1000 + part_idx))
-                                                .p_2p5()
-                                                .max_h(px(180.))
-                                                .overflow_y_scroll()
-                                                .rounded(px(8.))
-                                                .border_1()
-                                                .border_color(subtle_border(palette.border))
-                                                .bg(gpui_kit::rgb(palette.code_background))
-                                                .font_family("Consolas")
-                                                .text_size(typo.sm)
-                                                .text_color(gpui_kit::rgb(palette.text))
-                                                .child(block.output.clone()),
+                                                .on_scroll(|_, _, cx| cx.stop_propagation())
+                                                .child(
+                                                    div()
+                                                        .id(("tool-output", msg_idx * 1000 + part_idx))
+                                                        .p_2p5()
+                                                        .max_h(px(180.))
+                                                        .overflow_y_scroll()
+                                                        .rounded(px(8.))
+                                                        .border_1()
+                                                        .border_color(subtle_border(palette.border))
+                                                        .bg(gpui_kit::rgb(palette.code_background))
+                                                        .font_family("Consolas")
+                                                        .text_size(typo.sm)
+                                                        .text_color(gpui_kit::rgb(palette.text))
+                                                        .child(block.output.clone()),
+                                                ),
                                         )
                                     })
                                 })
@@ -2819,11 +2901,6 @@ impl AiPane {
             .to_ascii_lowercase();
         let current_id = self.current_model.as_ref().map(|m| m.id.as_str());
         let supports_thinking = self.current_model.as_ref().is_none_or(|m| m.reasoning);
-        let cur_model_short = self
-            .current_model
-            .as_ref()
-            .map(|m| short_model_name(&m.name))
-            .unwrap_or_else(|| "模型".to_owned());
 
         let mut models: Vec<(bool, ModelInfo)> = self
             .available_models
@@ -2958,17 +3035,15 @@ impl AiPane {
                                             .gap_1p5()
                                             .min_w_0()
                                             .flex_1()
-                                            .child(
-                                                crate::ui::icon(IconName::Sparkles)
-                                                    .w(px(12.))
-                                                    .h(px(12.))
-                                                    .flex_shrink_0()
-                                                    .text_color(gpui_kit::rgb(if selected {
-                                                        palette.accent
-                                                    } else {
-                                                        palette.muted
-                                                    })),
-                                            )
+                                            .child(render_model_icon(
+                                                Some(&m),
+                                                px(13.),
+                                                if selected {
+                                                    palette.accent
+                                                } else {
+                                                    palette.muted
+                                                },
+                                            ))
                                             .child(
                                                 div()
                                                     .text_size(typo.sm)
@@ -3042,21 +3117,12 @@ impl AiPane {
                             .border_color(subtle_border(palette.border))
                             .flex()
                             .items_center()
-                            .justify_between()
-                            .gap_1()
                             .child(
                                 div()
                                     .text_size(typo.xs)
                                     .font_semibold()
                                     .text_color(gpui_kit::rgb(palette.muted))
-                                    .child("Thinking Level"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(typo.xs)
-                                    .text_color(gpui_kit::rgb(palette.muted))
-                                    .text_ellipsis()
-                                    .child(cur_model_short),
+                                    .child("Effort"),
                             ),
                     )
                     .child(
@@ -3249,6 +3315,7 @@ impl Render for AiPane {
             .as_ref()
             .map(|m| short_model_name(&m.name))
             .unwrap_or_else(|| "模型".to_owned());
+        let selected_model = self.current_model.as_ref();
         let supports_thinking = self.current_model.as_ref().is_none_or(|m| m.reasoning);
         let model_effort_label = if supports_thinking {
             format!(
@@ -3270,12 +3337,7 @@ impl Render for AiPane {
         let has_chips = attached_chip.is_some()
             || self.quoted_selection.is_some()
             || !self.pasted_images.is_empty();
-        let slash_query = self.slash_query(cx);
-        let slash_items = slash_query
-            .as_deref()
-            .map(|q| self.filtered_slash_items(q))
-            .unwrap_or_default();
-        let slash_items_for_keys = slash_items.clone();
+        let slash_items = self.current_slash_items(cx);
         let has_slash_items = !slash_items.is_empty();
         let can_send = !self.input.read(cx).value().trim().is_empty()
             || self.quoted_selection.is_some()
@@ -3283,6 +3345,7 @@ impl Render for AiPane {
         let input_focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let pane_paste = cx.entity();
         let md_style = self.md_style(cx);
+        let total_msgs = self.messages.len();
 
         let user_bubble_bg = mix_color(
             palette.surface,
@@ -3522,18 +3585,39 @@ impl Render for AiPane {
                     .with_priority(4),
                 )
             })
-            .child(
+            .child({
+                if self.is_streaming && self.stick_to_bottom {
+                    self.scroll.scroll_to_bottom();
+                }
+                let thumb_bg = if palette.is_dark() { 0x45474b } else { 0xd9d9d7 };
+                let thumb_hover = if palette.is_dark() { 0x5c5f66 } else { 0xbcbcb9 };
+                let thumb_active = if palette.is_dark() { 0x72767f } else { 0xa8a8a5 };
+
                 div()
-                    .id("ai-message-stream")
-                    .track_scroll(&self.scroll)
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .px_3p5()
-                    .py_3p5()
-                    .flex()
-                    .flex_col()
-                    .gap_3p5()
+                    .child(
+                        div()
+                            .id("ai-message-stream")
+                            .track_scroll(&self.scroll)
+                            .size_full()
+                            .overflow_y_scroll()
+                            .on_scroll(cx.listener(|pane, event: &ScrollEvent, _, _| {
+                                let delta_y = f32::from(event.delta.pixel_delta(px(20.)).y);
+                                let max_y = f32::from(pane.scroll.max_offset().y);
+                                let cur_y = -f32::from(pane.scroll.offset().y);
+                                if delta_y > 0.5 {
+                                    pane.stick_to_bottom = false;
+                                } else if cur_y >= (max_y - 28.0).max(0.0) {
+                                    pane.stick_to_bottom = true;
+                                }
+                            }))
+                            .px_3p5()
+                            .py_3p5()
+                            .flex()
+                            .flex_col()
+                            .gap_3p5()
                     .when_some(self.startup_error.clone(), |stream, err| {
                         stream.child(
                             div()
@@ -3754,13 +3838,36 @@ impl Render for AiPane {
                                         })
                                         .when(!display_text.is_empty(), |b| {
                                             b.child(
-                                                div()
-                                                    .text_size(typo.body)
-                                                    .line_height(relative(1.5))
-                                                    .child(display_text.clone()),
+                                                TextView::markdown(
+                                                    SharedString::from(format!(
+                                                        "ai-user-md-{msg_idx}"
+                                                    )),
+                                                    display_text.clone(),
+                                                )
+                                                .selectable(true)
+                                                .style(md_style.clone())
+                                                .font_family(ui_font.clone())
+                                                .text_size(typo.body),
                                             )
                                         }),
                                 )
+                                .when(!display_text.is_empty(), |col| {
+                                    col.child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_end()
+                                            .pt_0p5()
+                                            .child(ai_copy_button(
+                                                SharedString::from(format!(
+                                                    "ai-copy-user-{msg_idx}"
+                                                )),
+                                                "复制消息",
+                                                "已复制",
+                                                display_text.clone(),
+                                            )),
+                                    )
+                                })
                                 .into_any_element(),
                             ChatMessage::Assistant {
                                 parts,
@@ -3887,16 +3994,84 @@ impl Render for AiPane {
                                             idx += 1;
                                         }
                                         AssistantPart::Text(text) => {
+                                            let part_idx = idx;
+                                            let normalized = markdown_editor::normalize_math(text);
                                             rendered_parts.push(
                                                 div()
                                                     .font_family(ui_font.clone())
                                                     .text_size(typo.body)
                                                     .line_height(relative(1.6))
                                                     .child(
-                                                        render_markdown(text.clone())
+                                                        TextView::markdown(
+                                                            SharedString::from(format!(
+                                                                "ai-assistant-md-{msg_idx}-{part_idx}"
+                                                            )),
+                                                            normalized,
+                                                        )
+                                                        .selectable(true)
+                                                            .markdown_extensions(
+                                                                self.md_extensions.clone(),
+                                                            )
                                                             .style(md_style.clone())
                                                             .font_family(ui_font.clone())
-                                                            .text_size(typo.body),
+                                                            .text_size(typo.body)
+                                                            .code_block_actions(move |block, _, _| {
+                                                                let code = block.code().to_string();
+                                                                let lang = block
+                                                                    .lang()
+                                                                    .filter(|l| !l.is_empty());
+                                                                let span_start = block
+                                                                    .span
+                                                                    .as_ref()
+                                                                    .map(|s| s.start)
+                                                                    .unwrap_or(0);
+                                                                div()
+                                                                    .flex()
+                                                                    .items_center()
+                                                                    .gap_1()
+                                                                    .when_some(lang, |row, lang| {
+                                                                        row.child(
+                                                                            div()
+                                                                                .pl_1p5()
+                                                                                .text_size(typo.xs)
+                                                                                .text_color(
+                                                                                    gpui_kit::rgb(
+                                                                                        palette
+                                                                                            .muted,
+                                                                                    ),
+                                                                                )
+                                                                                .child(lang),
+                                                                        )
+                                                                    })
+                                                                    .child(ai_copy_button(
+                                                                        SharedString::from(format!(
+                                                                            "ai-copy-code-{msg_idx}-{part_idx}-{span_start}"
+                                                                        )),
+                                                                        "复制代码",
+                                                                        "已复制",
+                                                                        code,
+                                                                    ))
+                                                            })
+                                                            .table_actions(move |table, _, _| {
+                                                                let md = table.markdown.clone();
+                                                                let span_start = table
+                                                                    .span
+                                                                    .as_ref()
+                                                                    .map(|s| s.start)
+                                                                    .unwrap_or(0);
+                                                                div()
+                                                                    .w_full()
+                                                                    .flex()
+                                                                    .justify_end()
+                                                                    .child(ai_copy_button(
+                                                                        SharedString::from(format!(
+                                                                            "ai-copy-table-{msg_idx}-{part_idx}-{span_start}"
+                                                                        )),
+                                                                        "复制表格",
+                                                                        "已复制",
+                                                                        md,
+                                                                    ))
+                                                            }),
                                                     )
                                                     .into_any_element(),
                                             );
@@ -3924,11 +4099,49 @@ impl Render for AiPane {
                                     }
                                 }
 
+                                let full_answer = parts
+                                    .iter()
+                                    .filter_map(|p| match p {
+                                        AssistantPart::Text(t) if !t.trim().is_empty() => {
+                                            Some(t.as_str())
+                                        }
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n\n");
+
+                                let is_last_msg = msg_idx + 1 == total_msgs;
+                                let any_tool_running = parts
+                                    .iter()
+                                    .any(|p| matches!(p, AssistantPart::Tool(b) if !b.done));
+
                                 div()
                                     .flex()
                                     .flex_col()
                                     .gap_2()
                                     .children(rendered_parts)
+                                    .when(
+                                        !*streaming
+                                            && !any_tool_running
+                                            && !(is_last_msg && self.is_streaming)
+                                            && !full_answer.is_empty(),
+                                        |box_| {
+                                        box_.child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .justify_start()
+                                                .pt_0p5()
+                                                .child(ai_copy_button(
+                                                    SharedString::from(format!(
+                                                        "ai-copy-msg-{msg_idx}"
+                                                    )),
+                                                    "复制回答",
+                                                    "已复制",
+                                                    full_answer,
+                                                )),
+                                        )
+                                    })
                                     .when(*streaming && parts.is_empty(), |box_| {
                                         box_.child(
                                             div()
@@ -4003,7 +4216,45 @@ impl Render for AiPane {
                                 .into_any_element(),
                         }
                     })),
-            )
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(6.))
+                            .bottom(px(6.))
+                            .left_0()
+                            .right_0()
+                            .child(
+                                Scrollbar::vertical(&self.scroll)
+                                    .mode(ScrollbarMode::Always)
+                                    .styles(move |styles| {
+                                        styles
+                                            .thumb(move |style| {
+                                                style
+                                                    .bg(gpui_kit::rgb(thumb_bg))
+                                                    .width(px(6.))
+                                                    .inset(px(1.))
+                                                    .radius(px(4.))
+                                                    .min_length(px(24.))
+                                            })
+                                            .thumb_hover(move |style| {
+                                                style
+                                                    .bg(gpui_kit::rgb(thumb_hover))
+                                                    .width(px(6.))
+                                                    .inset(px(1.))
+                                                    .radius(px(4.))
+                                            })
+                                            .thumb_active(move |style| {
+                                                style
+                                                    .bg(gpui_kit::rgb(thumb_active))
+                                                    .width(px(6.))
+                                                    .inset(px(1.))
+                                                    .radius(px(4.))
+                                            })
+                                    }),
+                            ),
+                    )
+            })
             .when_some(self.pending_ui.as_ref(), |root, pending| {
                 root.child(self.render_pending_ui(pending, palette, cx))
             })
@@ -4034,49 +4285,60 @@ impl Render for AiPane {
                     .px_3()
                     .pb_3()
                     .pt_1p5()
-                    .capture_key_down(cx.listener(move |pane, event: &KeyDownEvent, window, cx| {
-                        let key = event.keystroke.key.to_ascii_lowercase();
-                        if slash_items_for_keys.is_empty() {
-                            if pane.model_popover_open && key == "escape" {
-                                pane.model_popover_open = false;
-                                window.prevent_default();
-                                cx.stop_propagation();
-                                cx.notify();
-                            }
-                            return;
+                    .capture_action::<MoveUp>(cx.listener(|pane, _: &MoveUp, _, cx| {
+                        let items = pane.current_slash_items(cx);
+                        if !items.is_empty() {
+                            let count = items.len();
+                            pane.slash_index = (pane.slash_index.min(count - 1) + count - 1) % count;
+                            pane.slash_scroll.scroll_to_item(pane.slash_index);
+                            cx.stop_propagation();
+                            cx.notify();
                         }
-                        let count = slash_items_for_keys.len();
-                        match key.as_str() {
-                            "up" => {
-                                pane.slash_index = (pane.slash_index + count - 1) % count;
-                                pane.slash_scroll.scroll_to_item(pane.slash_index);
-                                window.prevent_default();
-                                cx.stop_propagation();
-                                cx.notify();
-                            }
-                            "down" => {
-                                pane.slash_index = (pane.slash_index + 1) % count;
-                                pane.slash_scroll.scroll_to_item(pane.slash_index);
-                                window.prevent_default();
-                                cx.stop_propagation();
-                                cx.notify();
-                            }
-                            "escape" => {
-                                pane.dismissed_slash_text =
-                                    Some(pane.input.read(cx).value().to_string());
-                                pane.slash_was_open = false;
-                                window.prevent_default();
-                                cx.stop_propagation();
-                                cx.notify();
-                            }
-                            "tab" | "enter" if !event.keystroke.modifiers.shift => {
+                    }))
+                    .capture_action::<MoveDown>(cx.listener(|pane, _: &MoveDown, _, cx| {
+                        let items = pane.current_slash_items(cx);
+                        if !items.is_empty() {
+                            let count = items.len();
+                            pane.slash_index = (pane.slash_index.min(count - 1) + 1) % count;
+                            pane.slash_scroll.scroll_to_item(pane.slash_index);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                    }))
+                    .capture_action::<IndentInline>(cx.listener(
+                        |pane, _: &IndentInline, window, cx| {
+                            let items = pane.current_slash_items(cx);
+                            if !items.is_empty() {
                                 let chosen =
-                                    slash_items_for_keys[pane.slash_index.min(count - 1)].clone();
-                                window.prevent_default();
+                                    items[pane.slash_index.min(items.len() - 1)].clone();
                                 cx.stop_propagation();
                                 pane.execute_slash_item(chosen, window, cx);
                             }
-                            _ => {}
+                        },
+                    ))
+                    .capture_action::<Enter>(cx.listener(|pane, ev: &Enter, window, cx| {
+                        if ev.shift || ev.secondary {
+                            return;
+                        }
+                        let items = pane.current_slash_items(cx);
+                        if !items.is_empty() {
+                            let chosen = items[pane.slash_index.min(items.len() - 1)].clone();
+                            cx.stop_propagation();
+                            pane.execute_slash_item(chosen, window, cx);
+                        }
+                    }))
+                    .capture_action::<Escape>(cx.listener(|pane, _: &Escape, _, cx| {
+                        let items = pane.current_slash_items(cx);
+                        if !items.is_empty() {
+                            pane.dismissed_slash_text =
+                                Some(pane.input.read(cx).value().to_string());
+                            pane.slash_was_open = false;
+                            cx.stop_propagation();
+                            cx.notify();
+                        } else if pane.model_popover_open {
+                            pane.model_popover_open = false;
+                            cx.stop_propagation();
+                            cx.notify();
                         }
                     }))
                     .when(
@@ -4131,11 +4393,11 @@ impl Render for AiPane {
                             .bg(gpui_kit::rgb(palette.surface))
                             .shadow(composer_shadow)
                             .px_3()
-                            .pt_2p5()
-                            .pb_2()
+                            .pt_2()
+                            .pb_1p5()
                             .flex()
                             .flex_col()
-                            .gap_1p5()
+                            .gap_1()
                             .when(has_chips, |card| {
                                 card.child(
                                     div()
@@ -4304,7 +4566,6 @@ impl Render for AiPane {
                                     .bordered(false)
                                     .font_family(ui_font.clone())
                                     .text_size(typo.body)
-                                    .h(px(64.))
                                     .on_paste(move |item, window, cx| {
                                         pane_paste.update(cx, |pane, cx| {
                                             pane.handle_paste(item, window, cx)
@@ -4388,11 +4649,7 @@ impl Render for AiPane {
                                                         if palette.is_dark() { 0.22 } else { 0.12 },
                                                     )
                                                 } else {
-                                                    mix_color(
-                                                        palette.background,
-                                                        palette.hover,
-                                                        0.65,
-                                                    )
+                                                    gpui_kit::rgb(palette.surface).into()
                                                 };
                                                 div()
                                                     .id("ai-toggle-active-context")
@@ -4556,6 +4813,11 @@ impl Render for AiPane {
                                                             cx.notify();
                                                         },
                                                     ))
+                                                    .child(render_model_icon(
+                                                        selected_model,
+                                                        px(13.),
+                                                        palette.muted,
+                                                    ))
                                                     .child(
                                                         div()
                                                             .max_w(px(160.))
@@ -4706,6 +4968,172 @@ fn thinking_short_label(level: &str) -> String {
         "xhigh" => "XHigh".into(),
         "max" => "Max".into(),
         other => other.to_owned(),
+    }
+}
+
+fn model_brand_icon_path(model: &ModelInfo) -> Option<&'static str> {
+    let provider = model.provider.to_ascii_lowercase();
+    let id = model.id.to_ascii_lowercase();
+    let name = model.name.to_ascii_lowercase();
+    for s in [&id, &name, &provider] {
+        if s.contains("claude") || s.contains("anthropic") {
+            return Some("brand/claude.svg");
+        }
+        if s.contains("gemini") || s.contains("google") {
+            return Some("brand/gemini.svg");
+        }
+        if s.contains("hunyuan")
+            || s.contains("tencent")
+            || s == "hy"
+            || s.starts_with("hy-")
+            || s.starts_with("hy_")
+        {
+            return Some("brand/hunyuan.svg");
+        }
+        if s.contains("deepseek") {
+            return Some("brand/deepseek.svg");
+        }
+        if s.contains("qwen")
+            || s.contains("tongyi")
+            || s.contains("dashscope")
+            || s.contains("alibaba")
+        {
+            return Some("brand/qwen.svg");
+        }
+        if s.contains("glm") || s.contains("zhipu") || s.contains("chatglm") {
+            return Some("brand/zhipu.svg");
+        }
+        if s.contains("grok") || s.contains("xai") || s.contains("x-ai") {
+            return Some("brand/grok.svg");
+        }
+        if s.contains("kimi") || s.contains("moonshot") {
+            return Some("brand/kimi.svg");
+        }
+        if s.contains("minimax") {
+            return Some("brand/minimax.svg");
+        }
+        if s.contains("mistral")
+            || s.contains("codestral")
+            || s.contains("mixtral")
+            || s.contains("pixtral")
+        {
+            return Some("brand/mistral.svg");
+        }
+        if s.contains("llama") || s.contains("meta") {
+            return Some("brand/meta.svg");
+        }
+        if s.contains("antigravity") {
+            return Some("brand/antigravity.svg");
+        }
+        if s.contains("openai")
+            || s.contains("codex")
+            || s.contains("gpt")
+            || s.starts_with("o1")
+            || s.starts_with("o3")
+            || s.starts_with("o4")
+        {
+            return Some("brand/codex.svg");
+        }
+    }
+    None
+}
+
+fn render_model_icon(model: Option<&ModelInfo>, size: Pixels, tint: u32) -> AnyElement {
+    if let Some(path) = model.and_then(model_brand_icon_path) {
+        if path == "brand/codex.svg" {
+            return gpui::svg()
+                .path(path)
+                .w(size)
+                .h(size)
+                .flex_shrink_0()
+                .text_color(gpui_kit::rgb(tint))
+                .into_any_element();
+        }
+        return img(path)
+            .w(size)
+            .h(size)
+            .object_fit(ObjectFit::Contain)
+            .flex_shrink_0()
+            .into_any_element();
+    }
+    crate::ui::icon(IconName::Sparkles)
+        .w(size)
+        .h(size)
+        .flex_shrink_0()
+        .text_color(gpui_kit::rgb(tint))
+        .into_any_element()
+}
+
+fn ai_copy_button(
+    id: impl Into<ElementId>,
+    idle_tip: &'static str,
+    copied_tip: &'static str,
+    text: String,
+) -> impl IntoElement {
+    AiCopyButton {
+        id: id.into(),
+        idle_tip,
+        copied_tip,
+        text,
+    }
+}
+
+#[derive(IntoElement)]
+struct AiCopyButton {
+    id: ElementId,
+    idle_tip: &'static str,
+    copied_tip: &'static str,
+    text: String,
+}
+
+struct AiCopyFeedback {
+    copied: bool,
+    reset: Task<()>,
+}
+
+impl RenderOnce for AiCopyButton {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let feedback = window.use_keyed_state(self.id.clone(), cx, |_, _| AiCopyFeedback {
+            copied: false,
+            reset: Task::ready(()),
+        });
+        let copied = feedback.read(cx).copied;
+        let text = self.text;
+        Button::new(self.id)
+            .ghost()
+            .compact()
+            .w(px(24.))
+            .h(px(24.))
+            .icon(
+                crate::ui::icon(if copied {
+                    IconName::Check
+                } else {
+                    IconName::Copy
+                })
+                .w(px(12.))
+                .h(px(12.)),
+            )
+            .tooltip(if copied {
+                self.copied_tip
+            } else {
+                self.idle_tip
+            })
+            .on_click(move |_, _, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+                feedback.update(cx, |feedback, cx| {
+                    feedback.copied = true;
+                    cx.notify();
+                    feedback.reset = cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(1500))
+                            .await;
+                        let _ = this.update(cx, |feedback, cx| {
+                            feedback.copied = false;
+                            cx.notify();
+                        });
+                    });
+                });
+            })
     }
 }
 

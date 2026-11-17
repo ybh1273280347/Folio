@@ -26,6 +26,48 @@ use std::{cell::RefCell, ops::Range, path::PathBuf, rc::Rc};
 
 mod emoji;
 
+pub(crate) const CALLOUTS: &[(&str, &str, u32)] = &[
+    ("note", "ⓘ  Note", 0x0969da),
+    ("info", "ⓘ  Info", 0x0969da),
+    ("abstract", "≡  Abstract", 0x0969da),
+    ("summary", "≡  Summary", 0x0969da),
+    ("tldr", "≡  TL;DR", 0x0969da),
+    ("tip", "✓  Tip", 0x1a7f37),
+    ("success", "✓  Success", 0x1a7f37),
+    ("check", "✓  Check", 0x1a7f37),
+    ("done", "✓  Done", 0x1a7f37),
+    ("important", "◉  Important", 0x8250df),
+    ("warning", "⚠  Warning", 0x9a6700),
+    ("question", "?  Question", 0x9a6700),
+    ("help", "?  Help", 0x9a6700),
+    ("faq", "?  FAQ", 0x9a6700),
+    ("todo", "☐  Todo", 0x0969da),
+    ("caution", "⊗  Caution", 0xcf222e),
+    ("danger", "⊗  Danger", 0xcf222e),
+    ("error", "⊗  Error", 0xcf222e),
+    ("failure", "✕  Failure", 0xcf222e),
+    ("fail", "✕  Fail", 0xcf222e),
+    ("missing", "✕  Missing", 0xcf222e),
+    ("bug", "✦  Bug", 0xcf222e),
+    ("example", "❖  Example", 0x8250df),
+    ("quote", "❝  Quote", 0x6e7781),
+    ("cite", "❝  Cite", 0x6e7781),
+];
+
+/// Build Folio's shared Markdown extensions (math typesetting + 25 callout surfaces).
+pub(crate) fn markdown_extensions(math: &Entity<MathRenderer>, cx: &App) -> MarkdownExtensions {
+    let mut extensions = MarkdownExtensions::default()
+        .plugin(math.read(cx).plugin(false, math.clone()))
+        .plugin(math.read(cx).plugin(true, math.clone()));
+    for &(name, title, color) in CALLOUTS {
+        let hsla: Hsla = gpui_kit::rgb(color).into();
+        extensions = extensions.block_surface(name, move |_, _| {
+            callout_container(hsla).child(callout_header(title.into(), hsla).pb(px(6.)))
+        });
+    }
+    extensions
+}
+
 pub enum MarkdownEvent {
     RenameTitle(String),
     Change(String),
@@ -430,48 +472,15 @@ impl MarkdownPane {
         let scroll = ScrollHandle::new();
         math.update(cx, |renderer, cx| renderer.set_appearance(&settings, cx));
         let mermaid = cx.new(MermaidRenderer::new);
-        let mut extensions = MarkdownExtensions::default()
-            .plugin(math.read(cx).plugin(false, math.clone()))
-            .plugin(math.read(cx).plugin(true, math.clone()));
-        let callouts: [(&str, &str, u32); 25] = [
-            ("note", "ⓘ  Note", 0x0969da),
-            ("info", "ⓘ  Info", 0x0969da),
-            ("abstract", "≡  Abstract", 0x0969da),
-            ("summary", "≡  Summary", 0x0969da),
-            ("tldr", "≡  TL;DR", 0x0969da),
-            ("tip", "✓  Tip", 0x1a7f37),
-            ("success", "✓  Success", 0x1a7f37),
-            ("check", "✓  Check", 0x1a7f37),
-            ("done", "✓  Done", 0x1a7f37),
-            ("important", "◉  Important", 0x8250df),
-            ("warning", "⚠  Warning", 0x9a6700),
-            ("question", "?  Question", 0x9a6700),
-            ("help", "?  Help", 0x9a6700),
-            ("faq", "?  FAQ", 0x9a6700),
-            ("todo", "☐  Todo", 0x0969da),
-            ("caution", "⊗  Caution", 0xcf222e),
-            ("danger", "⊗  Danger", 0xcf222e),
-            ("error", "⊗  Error", 0xcf222e),
-            ("failure", "✕  Failure", 0xcf222e),
-            ("fail", "✕  Fail", 0xcf222e),
-            ("missing", "✕  Missing", 0xcf222e),
-            ("bug", "✦  Bug", 0xcf222e),
-            ("example", "❖  Example", 0x8250df),
-            ("quote", "❝  Quote", 0x6e7781),
-            ("cite", "❝  Cite", 0x6e7781),
-        ];
-        let mut callout_styles = Vec::with_capacity(callouts.len());
-        for (name, title, color) in callouts {
-            let hsla: Hsla = gpui_kit::rgb(color).into();
-            callout_styles.push(CalloutStyle {
+        let extensions = markdown_extensions(&math, cx);
+        let callout_styles: Vec<_> = CALLOUTS
+            .iter()
+            .map(|&(name, title, color)| CalloutStyle {
                 name: name.into(),
                 title: title.into(),
-                color: hsla,
-            });
-            extensions = extensions.block_surface(name, move |_, _| {
-                callout_container(hsla).child(callout_header(title.into(), hsla).pb(px(6.)))
-            });
-        }
+                color: gpui_kit::rgb(color).into(),
+            })
+            .collect();
         let visual_editor = cx.new(|cx| {
             let mut editor = BlockEditorState::new(window, cx);
             editor
