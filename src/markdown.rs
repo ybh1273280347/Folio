@@ -280,6 +280,15 @@ struct OutlineHeading {
     title: String,
 }
 
+#[derive(Clone)]
+struct OutlineResizeDrag;
+
+impl Render for OutlineResizeDrag {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
 pub struct MarkdownPane {
     export: Rc<RefCell<Option<crate::markdown_pdf::ExportRequest>>>,
     export_width: Pixels,
@@ -294,6 +303,8 @@ pub struct MarkdownPane {
     loading: Option<Task<()>>,
     source: bool,
     outline: bool,
+    outline_width: f32,
+    outline_drag: Option<(f32, f32)>,
     reading: bool,
     focus: FocusHandle,
     scroll: ScrollHandle,
@@ -753,6 +764,8 @@ impl MarkdownPane {
             loading: None,
             source: false,
             outline: false,
+            outline_width: 210.,
+            outline_drag: None,
             reading,
             focus: cx.focus_handle(),
             scroll,
@@ -2530,23 +2543,54 @@ impl Render for MarkdownPane {
                         }),
                     )
             });
-            content = content.child(
-                div()
-                    .id("markdown-outline")
-                    .w(px(210.))
-                    .flex_shrink_0()
-                    .h_full()
-                    .overflow_y_scroll()
-                    .bg(rgb(0xfafaf9))
-                    .border_r_1()
-                    .border_color(rgb(0xe8e7e3))
-                    .p_3()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(crate::ui::label("标题导航".into()))
-                    .children(headings),
-            );
+            content = content
+                .child(
+                    div()
+                        .id("markdown-outline")
+                        .w(px(self.outline_width))
+                        .flex_shrink_0()
+                        .h_full()
+                        .overflow_y_scroll()
+                        .bg(rgb(0xfafaf9))
+                        .p_3()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(crate::ui::label("标题导航".into()))
+                        .children(headings),
+                )
+                .child(
+                    div()
+                        .id("markdown-outline-resize")
+                        .w(px(5.))
+                        .flex_shrink_0()
+                        .h_full()
+                        .border_l_1()
+                        .border_color(rgb(0xe8e7e3))
+                        .cursor_col_resize()
+                        .hover(|s| s.bg(rgb(0xe8e7e3)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|pane, ev: &MouseDownEvent, _, cx| {
+                                pane.outline_drag =
+                                    Some((f32::from(ev.position.x), pane.outline_width));
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .on_drag(OutlineResizeDrag, |_, _, _, cx| {
+                            cx.stop_propagation();
+                            cx.new(|_| OutlineResizeDrag)
+                        })
+                        .on_drag_move(cx.listener(
+                            |pane, e: &DragMoveEvent<OutlineResizeDrag>, _, cx| {
+                                if let Some((start_x, start_w)) = pane.outline_drag {
+                                    let delta = f32::from(e.event.position.x) - start_x;
+                                    pane.outline_width = (start_w + delta).clamp(140., 480.);
+                                    cx.notify();
+                                }
+                            },
+                        )),
+                );
         }
 
         if self.source {
