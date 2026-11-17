@@ -49,6 +49,18 @@ Network tools distinguish `status: ok`, `empty`, `error`, and `cancelled`. Error
 
 Scanned or mixed PDFs return `pdf_path`, `pdf_type`, and one-based `needs_ocr_pages`. Continue with the independent MCP server `paddleocr` (model `PaddleOCR-VL-1.6`), using its `paddleocr_vl` tool; it is not an embedded local OCR model or an automatic hidden fetch dependency. MCP configuration is merged into the user's Pi `mcp.json`, preserving other servers. Server IDs must follow Pi's naming rules; the model version belongs in the environment configuration, not in a server ID containing a dot.
 
+## Folio annotations
+
+`folio_annotations_list({path})` reads Folio annotations. `folio_annotation_create({path, quote, comment, page?, occurrence?})` adds a yellow highlight and comment. PDF pages and match occurrences are one-based at the tool boundary; the existing sidecar format remains zero-based. Repeated matches return candidates unless the caller specifies an occurrence. Repeating the same annotation is idempotent; a different existing comment is never overwritten.
+
+The SDK sends a project/session-scoped `annotation_request`; Rust prepares Markdown with the editor model or PDF with the viewer's native text layer, then commits on the GPUI thread. It checks that the originating project is still active, the target stays inside its canonical root, and the document has not changed during preparation. Markdown uses the live buffer when open. Tool requests never activate a document tab or focus an editor. Cancellation retires pending work before its commit.
+
+Markdown highlights use the normal serializer and save path; PDF annotations only update the adjacent `.folio/annotations.json`. The store merges preserve other files' annotations and malformed stores fail instead of being treated as empty. Source and sidecar are separate files: if source saving succeeds but sidecar saving fails, the tool explicitly reports that the highlight was saved without its comment.
+
+The first version supports single Markdown text blocks and text-layer PDF pages. It excludes scans/OCR coordinates, picture/formula regions, cross-block anchors, native PDF/Word comment export, and automatic anchor repair. The small `folio-annotations` skill lives in the Magpie shared library; standalone packages carry a bundled copy, loaded when the Pi user skill is absent. Workflow guidance stays in that skill and tool descriptions, not the system prompt.
+
+Focused checks: `cargo test --release --test annotations annotation_` and `node --test --test-force-exit --test-name-pattern annotation resources/pi-host/test/host.test.mjs resources/pi-host/test/annotation-tools.test.mjs`.
+
 ## Shared document renderers
 
 Versioned additions live in `resources/pi-skills`. The installer copies scripts into the existing Magpie `pdf`, `docx`, and `pptx` skills and adds the Windows instructions once. The PDF skill owns the renderer; Word and PowerPoint entrypoints use it through their resolved shared-library locations.

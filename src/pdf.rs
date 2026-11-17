@@ -34,6 +34,13 @@ pub struct PdfPane {
 }
 
 impl PdfPane {
+    pub fn path(&self) -> &std::path::Path { &self.path }
+
+    pub fn sync_annotations(&mut self, items: &[AnnotationItem], cx: &mut Context<Self>) {
+        self.annotations = items.to_vec();
+        self.sync_highlights(cx);
+        cx.notify();
+    }
     pub fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let annotations = storage::load_annotations(&path);
         let annotation_comment_input =

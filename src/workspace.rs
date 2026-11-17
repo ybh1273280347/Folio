@@ -1,5 +1,6 @@
 //! Workspace orchestration: disk-backed drafts, project actions and asynchronous builds.
 //! Disk revisions arbitrate external edits; conflicted drafts never autosave over them.
+mod annotations;
 use crate::ai::{AiPane, AiPaneEvent, AttachedFile};
 use crate::theme::color as rgb;
 use crate::html::{HtmlPane, HtmlPaneEvent};
@@ -233,6 +234,7 @@ struct DialogPrompt {
 }
 
 pub struct Workspace {
+    annotation_requests: BTreeSet<String>,
     default_workspace: Project,
     config: ProjectConfig,
     workspace_sessions: BTreeMap<String, WorkspaceSession>,
@@ -448,6 +450,7 @@ impl Workspace {
         let initial_dir = dirs::home_dir().expect("user home");
         let ai = cx.new(|cx| AiPane::new(initial_dir, settings.clone(), math.clone(), window, cx));
         cx.subscribe_in(&ai, window, |app, _, event: &AiPaneEvent, window, cx| match event {
+            AiPaneEvent::Annotation(request) => app.annotation_request(request, window, cx),
             AiPaneEvent::OpenFile(path) => {
                 app.open_path_from_ai(path, window, cx);
             }
@@ -544,6 +547,7 @@ impl Workspace {
             }
         });
         let mut app = Self {
+            annotation_requests: BTreeSet::new(),
             default_workspace,
             config,
             workspace_sessions,

@@ -383,6 +383,10 @@ impl AiPane {
                 }
                 RpcInbound::Event(event) => {
                     let kind = event["type"].as_str().unwrap_or("");
+                    if matches!(kind, "annotation_request" | "annotation_cancel") {
+                        // Project control routes stay alive even when the originating tab is hidden.
+                        cx.emit(AiPaneEvent::Annotation(event.clone()));
+                    }
                     if matches!(
                         kind,
                         "session_status" | "session_info_changed" | "agent_settled" | "title_error"
@@ -434,6 +438,13 @@ impl AiPane {
         }
         self.ensure_view(window, cx);
         self.focus(window, cx);
+    }
+    pub fn respond_annotation(&self, request: &Value, result: Value) {
+        let project = request["projectKey"].as_str().expect("host annotation project");
+        if let Some(client) = self.controls.get(project) {
+            let _ = client.send(json!({ "type": "annotation_response", "id": request["id"],
+                "sessionId": request["sessionId"], "result": result }));
+        }
     }
     pub fn dismiss_history(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if !self.drawer {
@@ -588,6 +599,7 @@ impl AiPane {
             });
         }
         let subscription = cx.subscribe(&view, |_, _, event: &AiPaneEvent, cx| match event {
+            AiPaneEvent::Annotation(_) => unreachable!("annotation requests use the project control route"),
             AiPaneEvent::OpenFile(path) => cx.emit(AiPaneEvent::OpenFile(path.clone())),
             AiPaneEvent::Hide => cx.emit(AiPaneEvent::Hide),
             AiPaneEvent::ToggleMaximize => cx.emit(AiPaneEvent::ToggleMaximize),

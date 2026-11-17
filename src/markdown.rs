@@ -1159,6 +1159,11 @@ impl MarkdownPane {
         cx.notify();
     }
 
+    pub fn sync_annotations(&mut self, items: &[AnnotationItem], cx: &mut Context<Self>) {
+        self.annotations = items.to_vec();
+        cx.notify();
+    }
+
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.source {
             let source_editor = self.source_editor.clone();
