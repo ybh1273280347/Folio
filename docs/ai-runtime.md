@@ -47,7 +47,7 @@ Network tools distinguish `status: ok`, `empty`, `error`, and `cancelled`. Error
 
 `web_fetch` reads HTTP response bytes before constructing a Scrapling HTML response, so extensionless and redirected PDF URLs are classified before HTML parsing. HTML uses Scrapling Markdown extraction; `mode: dynamic` starts a temporary browser explicitly. PDF uses pdf-inspector and accepts one-based page selections. The full Markdown artifact remains on disk, while the model-facing preview is limited to 30,000 characters and declares truncation.
 
-Scanned or mixed PDFs return `pdf_path`, `pdf_type`, and one-based `needs_ocr_pages`. Continue with the independently mounted `PaddleOCR-VL-1.6` MCP tool `paddleocr_vl`; it is not an embedded local OCR model or an automatic hidden fetch dependency. MCP configuration is merged into the user's Pi `mcp.json`, preserving other servers.
+Scanned or mixed PDFs return `pdf_path`, `pdf_type`, and one-based `needs_ocr_pages`. Continue with the independent MCP server `paddleocr` (model `PaddleOCR-VL-1.6`), using its `paddleocr_vl` tool; it is not an embedded local OCR model or an automatic hidden fetch dependency. MCP configuration is merged into the user's Pi `mcp.json`, preserving other servers. Server IDs must follow Pi's naming rules; the model version belongs in the environment configuration, not in a server ID containing a dot.
 
 ## Shared document renderers
 
@@ -74,5 +74,7 @@ The `before_agent_start` extension appends one hidden `folio_runtime_context` me
 The shortcut settings include AI panel toggle (default `Ctrl+Shift+A`) and terminal toggle (default Ctrl+backtick). Both work throughout the workspace, including terminal focus, and focus the opened panel. Escape closes an open AI session-history popup before its search/rename input handles the key, then returns focus to the conversation.
 
 Completed answers have an export-to-note button beside Copy, using the bundled `NotebookPen` SVG. Export writes the same Markdown text as Copy to the source conversation's project root, using its session title and a timestamp as the filename, and opens the saved note. File creation refuses to overwrite an existing path; errors appear in the conversation toast.
+
+The conversation's left edge includes a compact message navigator. Longer ticks represent user messages and shorter ticks represent assistant runs; consecutive assistant messages share a target, matching the rendered conversation. Hovering previews visible prose, excluding thinking and tool logs. Clicking jumps to the corresponding scroll row and pauses following new output. The reading-position marker uses the live scroll handle during paint, including scrollbar drags. The rail compresses to fit the message viewport as the conversation grows, while normal scrolling remains available on the right.
 
 Real-machine verification also covers the Magpie title model, both search providers, static and dynamic HTML, native-text and scanned PDFs, PaddleOCR Markdown output, and selected Word/PowerPoint/PDF page rendering. GPUI appearance and hands-on interaction remain subject to user acceptance.

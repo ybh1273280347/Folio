@@ -140,6 +140,13 @@ enum ChatMessage {
     },
 }
 
+/// Navigation targets use immediate scroll-child indices; consecutive assistant messages share one row.
+struct MessageAnchor {
+    item: usize,
+    user: bool,
+    preview: String,
+}
+
 #[derive(Clone, Debug)]
 enum PendingUiKind {
     Confirm {
@@ -1976,6 +1983,78 @@ impl ChatPane {
         if self.stick_to_bottom {
             self.scroll.scroll_to_bottom();
         }
+    }
+
+    fn render_message_navigation(
+        &self,
+        anchors: &[MessageAnchor],
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .absolute()
+            .left_0()
+            .top_2()
+            .bottom_2()
+            .w(px(32.))
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .h_full()
+                    .max_h(px(anchors.len() as f32 * 14.))
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .children(anchors.iter().enumerate().map(|(index, anchor)| {
+                        let item = anchor.item;
+                        let next = anchors.get(index + 1).map_or(usize::MAX, |next| next.item);
+                        let user = anchor.user;
+                        let scroll = self.scroll.clone();
+                        let preview = anchor.preview.clone();
+                        let label = if user { "你的消息" } else { "AI 回答" };
+                        div()
+                            .id(("ai-message-anchor", item))
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(fg_alpha(palette.text, 0.05)))
+                            .child(
+                                canvas(
+                                    |_, _, _| (),
+                                    move |bounds, (), window, _| {
+                                        // Read during paint so wheel scrolling and scrollbar dragging both update the marker.
+                                        let top = scroll.top_item();
+                                        let active = (index == 0 || top >= item) && top < next;
+                                        let width = if active { 26. } else if user { 17. } else { 9. };
+                                        let color = fg_alpha(palette.text, if active { 0.9 } else { 0.22 });
+                                        window.paint_quad(gpui::fill(
+                                            gpui::Bounds::new(
+                                                point(bounds.left() + px(3.), bounds.center().y - px(1.)),
+                                                size(px(width), px(2.)),
+                                            ),
+                                            color,
+                                        ));
+                                    },
+                                ).size_full(),
+                            )
+                            .tooltip(move |window, cx| {
+                                let preview = preview.clone();
+                                Tooltip::element(move |_, _| {
+                                    div().w(px(220.)).flex().flex_col().gap_1()
+                                        .child(div().text_xs().text_color(gpui_kit::rgb(palette.muted)).child(label))
+                                        .child(div().text_sm().text_color(gpui_kit::rgb(palette.text)).child(preview.clone()))
+                                }).p_2().build(window, cx)
+                            })
+                            .on_click(cx.listener(move |pane, _, _, cx| {
+                                pane.stick_to_bottom = false;
+                                pane.scroll.scroll_to_top_of_item(item);
+                                cx.notify();
+                            }))
+                    })),
+            )
+            .into_any_element()
     }
 
     fn md_style(&self, cx: &App) -> TextViewStyle {
@@ -4517,6 +4596,7 @@ impl Render for ChatPane {
                 let thumb_bg = if palette.is_dark() { 0x45474b } else { 0xd9d9d7 };
                 let thumb_hover = if palette.is_dark() { 0x5c5f66 } else { 0xbcbcb9 };
                 let thumb_active = if palette.is_dark() { 0x72767f } else { 0xa8a8a5 };
+                let mut navigation = Vec::new();
 
                 root.child(
                     div()
@@ -4539,7 +4619,8 @@ impl Render for ChatPane {
                                         pane.stick_to_bottom = true;
                                     }
                                 }))
-                                .px_3p5()
+                                .pl(px(42.))
+                                .pr_3p5()
                                 .py_3p5()
                                 .flex()
                                 .flex_col()
@@ -4575,6 +4656,8 @@ impl Render for ChatPane {
                         let mut rendered_messages: Vec<AnyElement> = Vec::new();
                         let mut msg_idx = 0usize;
                         while msg_idx < total_msgs {
+                            // The startup banner is also an immediate scroll child and must count toward jump indices.
+                            let item = rendered_messages.len() + usize::from(self.startup_error.is_some());
                             match &self.messages[msg_idx] {
                                 ChatMessage::User {
                                     display_text,
@@ -4583,6 +4666,15 @@ impl Render for ChatPane {
                                     quote,
                                     images,
                                 } => {
+                                    let text = if !display_text.is_empty() {
+                                        display_text.as_str()
+                                    } else if let Some(quote) = quote {
+                                        quote.text.as_str()
+                                    } else {
+                                        attached_file.as_deref().unwrap_or("图片消息")
+                                    };
+                                    navigation.push(MessageAnchor { item, user: true,
+                                        preview: text.chars().take(160).collect() });
                                     rendered_messages.push(
                                         div()
                                 .w_full()
@@ -4762,6 +4854,21 @@ impl Render for ChatPane {
                                     ) {
                                         run_end += 1;
                                     }
+                                    // Preview only visible prose; thinking and tool logs stay out of navigation cards.
+                                    let preview: String = self.messages[run_start..run_end].iter()
+                                        .flat_map(|message| match message {
+                                            ChatMessage::Assistant { parts, .. } => parts.as_slice(),
+                                            _ => &[],
+                                        })
+                                        .filter_map(|part| match part {
+                                            AssistantPart::Text(text) => Some(text.as_str()),
+                                            _ => None,
+                                        })
+                                        .flat_map(str::chars)
+                                        .take(160)
+                                        .collect();
+                                    navigation.push(MessageAnchor { item, user: false,
+                                        preview: if preview.trim().is_empty() { "思考与工具调用".into() } else { preview } });
                                     rendered_messages.push(self.render_assistant_run(
                                         run_start,
                                         run_end,
@@ -4839,7 +4946,8 @@ impl Render for ChatPane {
                                             })
                                     }),
                             ),
-                    ),
+                    )
+                    .child(self.render_message_navigation(&navigation, palette, cx)),
                 )
             })
             .when_some(self.pending_ui.as_ref(), |root, pending| {
