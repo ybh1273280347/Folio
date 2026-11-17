@@ -440,7 +440,7 @@ impl Workspace {
         })
         .detach();
         let initial_dir = dirs::home_dir().expect("user home");
-        let ai = cx.new(|cx| AiPane::new(initial_dir, settings.clone(), window, cx));
+        let ai = cx.new(|cx| AiPane::new(initial_dir, settings.clone(), math.clone(), window, cx));
         cx.subscribe_in(&ai, window, |app, _, event: &AiPaneEvent, window, cx| match event {
             AiPaneEvent::OpenFile(path) => {
                 app.open_path_from_ai(path, window, cx);
