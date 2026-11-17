@@ -1024,15 +1024,10 @@ impl ChatPane {
                 let args = ev.get("args").cloned().unwrap_or(Value::Null);
 
                 if name == "write"
-                    && let Some(rel) = extract_path_arg(&args)
+                    && let Some(old) = ev.get("writeBefore").and_then(|v| v.as_str())
                 {
-                    let target = self.resolve_tool_path(&rel);
-                    if let Ok(meta) = std::fs::metadata(&target)
-                        && meta.len() <= 512 * 1024
-                        && let Ok(old) = std::fs::read_to_string(&target)
-                    {
-                        self.write_snapshots.insert(call_id.clone(), old);
-                    }
+                    // The host captures this before execution; reading here races the actual write.
+                    self.write_snapshots.insert(call_id.clone(), old.to_owned());
                 }
 
                 self.ensure_tool_block(&call_id, &name, &args);
