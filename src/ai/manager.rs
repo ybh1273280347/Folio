@@ -1,5 +1,6 @@
 //! Project-scoped tab ownership. Conversation entities stay alive while their tasks run off screen.
 use super::*;
+use gpui_kit::component::Sizable;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -65,7 +66,7 @@ pub struct AiPane {
     renaming: Option<String>,
     drawer: bool,
     history_scroll: ScrollHandle,
-    tab_scroll: ScrollHandle,
+    pending_focus: Option<(String, String)>,
     error: Option<String>,
     creating: HashSet<String>,
     restoring: HashSet<String>,
@@ -145,7 +146,7 @@ impl AiPane {
             renaming: None,
             drawer: false,
             history_scroll: ScrollHandle::new(),
-            tab_scroll: ScrollHandle::new(),
+            pending_focus: None,
             error,
             creating: HashSet::new(),
             restoring,
@@ -200,6 +201,8 @@ impl AiPane {
         self.command(json!({"type":"list_sessions"}), cx);
     }
     fn create(&mut self, cx: &mut Context<Self>) {
+        self.drawer = false;
+        self.renaming = None;
         if self.creating.insert(self.project()) {
             self.command(json!({"type":"create_session"}), cx);
         }
@@ -319,7 +322,8 @@ impl AiPane {
                                 .to_owned();
                             let tabs = self.store.projects.entry(project.clone()).or_default();
                             tabs.tabs.push(id.clone());
-                            tabs.active = Some(id);
+                            tabs.active = Some(id.clone());
+                            self.pending_focus = Some((project.clone(), id));
                             self.save();
                             if let Some(client) = self.controls.get(&project) {
                                 let _ = client.send(json!({"type":"list_sessions"}));
@@ -563,6 +567,13 @@ impl AiPane {
 
     fn history(&self, cx: &mut Context<Self>) -> AnyElement {
         let palette = active_palette();
+        let font_size = (self.settings.interface_font_size as f32 - 2.).max(10.);
+        let metadata_color = mix_color(palette.surface, palette.muted, 0.65);
+        let pinned_style = ButtonCustomVariant::new(cx)
+            .color(mix_color(palette.surface, palette.accent, 0.14).into())
+            .foreground(gpui_kit::rgb(palette.accent).into())
+            .hover(mix_color(palette.surface, palette.accent, 0.22).into())
+            .active(gpui_kit::rgb(palette.pressed).into());
         let query = self.search.read(cx).value().to_lowercase();
         let mut rows: Vec<_> = self
             .histories
@@ -574,18 +585,19 @@ impl AiPane {
             })
             .collect();
         rows.sort_by_key(|(rank, _)| *rank);
-        div().w(px(340.)).max_h(px(400.)).p_1p5().rounded(px(12.)).border_1()
+        div().w(px(300.)).max_h(px(340.)).p_1().rounded(px(10.)).border_1().text_size(px(font_size))
             .border_color(subtle_border(palette.border)).bg(gpui_kit::rgb(palette.surface))
             .shadow(popover_shadow(palette.is_dark())).flex().flex_col().gap_1().occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(Input::new(&self.search))
-            .child(div().relative().min_h_0().child(div().id("ai-history-list").max_h(px(335.)).overflow_y_scroll().track_scroll(&self.history_scroll)
+            .child(div().w(px(220.)).max_w_full().child(Input::new(&self.search).small()))
+            .child(div().relative().min_h_0().child(div().id("ai-history-list").max_h(px(285.)).overflow_y_scroll().track_scroll(&self.history_scroll)
                 .children(rows.into_iter().map(|(_, entry)| {
-                    let id = entry.id.clone(); let open = id.clone(); let pin = id.clone(); let rename = id.clone(); let delete = id.clone(); let regen = id.clone();
+                    let id = entry.id.clone(); let open = id.clone(); let pin = id.clone(); let rename = id.clone(); let delete = id.clone();
                     let running = entry.running; let waiting = entry.waiting;
                     let title = entry.title(); let initial = title.clone(); let pinned = entry.pinned;
                     let status = if waiting { "等待操作" } else if running { "运行中" } else if entry.failed { "失败" } else { "" };
-                    div().id(SharedString::from(format!("history-{id}"))).px_2().py_2().rounded(px(8.))
+                    div().id(SharedString::from(format!("history-{id}"))).px_2().py_1p5().rounded(px(6.))
+                        .when(pinned, |row| row.bg(mix_color(palette.surface, palette.accent, 0.045)))
                         .cursor_pointer().hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
                         .on_click(cx.listener(move |pane, _, _, cx| {
                             if pane.renaming.as_ref() != Some(&open) { pane.activate(open.clone(), cx); }
@@ -593,15 +605,13 @@ impl AiPane {
                         .child(div().flex().items_center().gap_1()
                             .child(if self.renaming.as_ref() == Some(&id) { div().flex_1().min_w_0().on_mouse_down(MouseButton::Left, |_,_,cx| cx.stop_propagation()).child(Input::new(&self.rename)).into_any_element() }
                                 else { div().flex_1().min_w_0().text_ellipsis().child(title).into_any_element() })
-                            .child(Button::new(SharedString::from(format!("pin-{id}"))).ghost().compact().w(px(24.)).h(px(24.)).icon(crate::ui::icon(IconName::Pin)).tooltip(if pinned { "取消置顶" } else { "置顶" })
+                            .child(Button::new(SharedString::from(format!("pin-{id}"))).ghost().when(pinned, |button| button.custom(pinned_style)).compact().with_size(px(font_size / 0.75)).w(px(font_size + 6.)).h(px(font_size + 6.)).icon(crate::ui::icon(IconName::Pin)).tooltip(if pinned { "取消置顶" } else { "置顶" })
                                 .on_click(cx.listener(move |pane, _, _, cx| { cx.stop_propagation(); pane.command(json!({"type":"set_pinned","sessionId":pin,"pinned":!pinned}), cx); })))
-                            .child(Button::new(SharedString::from(format!("rename-{id}"))).ghost().compact().w(px(24.)).h(px(24.)).icon(crate::ui::icon(IconName::PencilLine)).tooltip("重命名")
+                            .child(Button::new(SharedString::from(format!("rename-{id}"))).ghost().compact().with_size(px(font_size / 0.75)).w(px(font_size + 6.)).h(px(font_size + 6.)).icon(crate::ui::icon(IconName::PencilLine)).tooltip("重命名")
                                 .on_click(cx.listener(move |pane, _, window, cx| { cx.stop_propagation(); pane.renaming = Some(rename.clone()); pane.rename.update(cx, |input,cx| { input.set_value(initial.clone(),window,cx); input.focus(window,cx); }); cx.notify(); })))
-                            .child(Button::new(SharedString::from(format!("title-{id}"))).ghost().compact().w(px(24.)).h(px(24.)).icon(crate::ui::icon(IconName::RefreshCw)).tooltip("重新生成标题")
-                                .on_click(cx.listener(move |pane, _, _, cx| { cx.stop_propagation(); pane.command(json!({"type":"regenerate_title","sessionId":regen}),cx); })))
-                            .child(Button::new(SharedString::from(format!("delete-{id}"))).ghost().compact().w(px(24.)).h(px(24.)).icon(crate::ui::icon(IconName::Trash)).tooltip("删除会话")
+                            .child(Button::new(SharedString::from(format!("delete-{id}"))).ghost().compact().with_size(px(font_size / 0.75)).w(px(font_size + 6.)).h(px(font_size + 6.)).icon(crate::ui::icon(IconName::Trash)).tooltip("删除会话")
                                 .on_click(cx.listener(move |pane, _, _, cx| { cx.stop_propagation(); if running || waiting { pane.pending_deletion = Some(delete.clone()); cx.notify(); } else { pane.delete(delete.clone(),false,cx); } }))))
-                        .child(div().flex().justify_between().text_xs().text_color(gpui_kit::rgb(palette.muted))
+                        .child(div().flex().justify_between().text_size(px((font_size - 2.).max(9.))).text_color(metadata_color)
                             .child(format!("{}{} 条 {}", if pinned { "置顶 · " } else { "" }, entry.count, status))
                             .child(chrono::DateTime::parse_from_rfc3339(&entry.modified).map(|t| t.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()).unwrap_or_default()))
                 })))
@@ -632,6 +642,24 @@ fn fuzzy_rank(title: &str, query: &str) -> Option<usize> {
 impl Render for AiPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_view(window, cx);
+        if let Some((project, id)) = self.pending_focus.take() {
+            // Apply focus after the new textarea mounts; the toolbar click must not reclaim it.
+            let this = cx.entity().downgrade();
+            window.on_next_frame(move |window, cx| {
+                let _ = this.update(cx, |pane, cx| {
+                    if pane.project_key == project
+                        && pane
+                            .store
+                            .projects
+                            .get(&project)
+                            .and_then(|tabs| tabs.active.as_ref())
+                            == Some(&id)
+                    {
+                        pane.focus(window, cx);
+                    }
+                });
+            });
+        }
         let project = self.project();
         let palette = active_palette();
         let tabs = self
@@ -657,7 +685,7 @@ impl Render for AiPane {
             .text_color(gpui_kit::rgb(palette.text))
             .child(
                 div()
-                    .h(px(36.))
+                    .h(px(32.))
                     .px_1p5()
                     .flex_shrink_0()
                     .flex()
@@ -668,8 +696,9 @@ impl Render for AiPane {
                         Button::new("ai-history")
                             .ghost()
                             .compact()
-                            .w(px(26.))
-                            .h(px(26.))
+                            .with_size(px(16.))
+                            .w(px(22.))
+                            .h(px(22.))
                             .icon(crate::ui::icon(IconName::Clock))
                             .tooltip("会话历史")
                             .on_click(cx.listener(|pane, _, _, cx| {
@@ -686,10 +715,9 @@ impl Render for AiPane {
                             .flex_1()
                             .min_w_0()
                             .flex()
-                            .gap_1()
-                            .overflow_x_scroll()
-                            .track_scroll(&self.tab_scroll)
-                            .children(tabs.into_iter().map(|id| {
+                            .items_center()
+                            .overflow_hidden()
+                            .children(tabs.into_iter().enumerate().map(|(index, id)| {
                                 let entry = self
                                     .histories
                                     .get(&project)
@@ -711,17 +739,23 @@ impl Render for AiPane {
                                 let current = active.as_ref() == Some(&id);
                                 let open = id.clone();
                                 let close = id.clone();
-                                div()
+                                // Inactive tabs shrink and overlap; the selected tab stays readable above the stack.
+                                let tab = div()
                                     .id(SharedString::from(format!("tab-{id}")))
-                                    .flex_shrink_0()
-                                    .max_w(px(190.))
-                                    .h(px(28.))
+                                    .w(px(150.))
+                                    .min_w_0()
+                                    .flex_shrink(1.)
+                                    .when(current, |tab| tab.flex_shrink_0().max_w(relative(0.65)))
+                                    .when(index > 0, |tab| tab.ml(px(-4.)))
+                                    .h(px(26.))
                                     .px_2()
                                     .rounded(px(6.))
                                     .flex()
+                                    .overflow_hidden()
                                     .items_center()
                                     .gap_1()
                                     .cursor_pointer()
+                                    .bg(gpui_kit::rgb(palette.surface))
                                     .when(current, |s| s.bg(gpui_kit::rgb(palette.hover)))
                                     .on_click(cx.listener(move |pane, _, _, cx| {
                                         pane.activate(open.clone(), cx)
@@ -742,38 +776,56 @@ impl Render for AiPane {
                                                 ""
                                             }),
                                     )
-                                    .child(div().min_w_0().text_xs().text_ellipsis().child(title))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_xs()
+                                            .text_ellipsis()
+                                            .child(title),
+                                    )
                                     .child(
                                         Button::new(SharedString::from(format!("close-{id}")))
                                             .ghost()
                                             .compact()
-                                            .w(px(20.))
-                                            .h(px(20.))
+                                            .with_size(px(16.))
+                                            .w(px(18.))
+                                            .h(px(18.))
+                                            .flex_shrink_0()
                                             .icon(crate::ui::icon(IconName::Close))
                                             .tooltip("关闭标签，任务继续运行")
                                             .on_click(cx.listener(move |pane, _, _, cx| {
                                                 cx.stop_propagation();
                                                 pane.close(&close, cx);
                                             })),
-                                    )
-                            })),
-                    )
-                    .child(
-                        Button::new("ai-add-tab")
-                            .ghost()
-                            .compact()
-                            .w(px(26.))
-                            .h(px(26.))
-                            .icon(crate::ui::icon(IconName::Plus))
-                            .tooltip("新建会话")
-                            .on_click(cx.listener(|pane, _, _, cx| pane.create(cx))),
+                                    );
+                                if current {
+                                    deferred(tab).with_priority(1).into_any_element()
+                                } else {
+                                    tab.into_any_element()
+                                }
+                            }))
+                            .child(
+                                Button::new("ai-add-tab")
+                                    .ghost()
+                                    .compact()
+                                    .with_size(px(16.))
+                                    .w(px(22.))
+                                    .h(px(22.))
+                                    .flex_shrink_0()
+                                    .ml_1()
+                                    .icon(crate::ui::icon(IconName::Plus))
+                                    .tooltip("新建会话")
+                                    .on_click(cx.listener(|pane, _, _, cx| pane.create(cx))),
+                            ),
                     )
                     .child(
                         Button::new("ai-maximize")
                             .ghost()
                             .compact()
-                            .w(px(26.))
-                            .h(px(26.))
+                            .with_size(px(16.))
+                            .w(px(22.))
+                            .h(px(22.))
                             .icon(crate::ui::icon(IconName::Maximize2))
                             .tooltip("最大化 / 还原")
                             .on_click(
@@ -784,8 +836,9 @@ impl Render for AiPane {
                         Button::new("ai-hide")
                             .ghost()
                             .compact()
-                            .w(px(26.))
-                            .h(px(26.))
+                            .with_size(px(16.))
+                            .w(px(22.))
+                            .h(px(22.))
                             .icon(crate::ui::icon(IconName::PanelRightOpen))
                             .tooltip("收起")
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(AiPaneEvent::Hide))),

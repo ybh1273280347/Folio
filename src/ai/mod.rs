@@ -584,8 +584,11 @@ impl ChatPane {
                 };
                 match command.as_str() {
                     "snapshot" => {
-                        self.apply_messages(&data);
+                        // The input is ready while SDK startup runs; an earlier snapshot cannot erase a submitted prompt.
+                        let submitted_during_startup = self.is_streaming && data["isStreaming"].as_bool() != Some(true);
+                        if !submitted_during_startup { self.apply_messages(&data); }
                         self.apply_state(&data);
+                        self.is_streaming |= submitted_during_startup;
                         self.last_sequence = data["sequence"].as_u64().unwrap_or(0);
                     }
                     "get_state" => self.apply_state(&data),
@@ -896,6 +899,13 @@ impl ChatPane {
                                 if p_dur.is_none() {
                                     *p_dur = think_elapsed;
                                 }
+                            } else if let AssistantPart::Tool(block) = p {
+                                // Aborting argument generation produces no tool_execution_end event.
+                                if !block.done {
+                                    block.done = true;
+                                    block.is_error = true;
+                                    block.summary = "工具调用未完成".into();
+                                }
                             }
                         }
                         break;
@@ -918,7 +928,7 @@ impl ChatPane {
                     .map(str::to_owned);
             }
             "title_error" => {
-                self.show_toast(format!("标题生成失败，可在会话历史中重试：{}", ev["error"].as_str().unwrap_or("请求失败")), true, cx);
+                self.show_toast(format!("标题生成失败，可手动重命名：{}", ev["error"].as_str().unwrap_or("请求失败")), true, cx);
             }
             "compaction_start" => {
                 self.is_compacting = true;
@@ -1205,31 +1215,12 @@ impl ChatPane {
                 }
                 self.scroll_to_bottom();
             }
-            "toolcall_start" => {
-                let id = ame.get("id").and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                let name = ame
-                    .get("toolName")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("tool")
-                    .to_owned();
-                let block = ToolBlock {
-                    id,
-                    name: name.clone(),
-                    args: Value::Null,
-                    summary: name,
-                    output: String::new(),
-                    is_error: false,
-                    done: false,
-                    duration_ms: None,
-                    diffs: Vec::new(),
-                    expanded: false,
-                };
-                let idx = self.push_assistant_part(AssistantPart::Tool(block));
-                self.active_part_map.insert(content_index, idx);
-                self.scroll_to_bottom();
-            }
-            "toolcall_end" => {
-                if let Some(tc) = ame.get("toolCall") {
+            "toolcall_start" | "toolcall_delta" | "toolcall_end" => {
+                // Pi carries live tool arguments in partial.content, not top-level id/toolName fields.
+                let tool_call = if ty == "toolcall_end" { ame.get("toolCall") }
+                    else { ame.get("partial").and_then(|partial| partial.get("content"))
+                        .and_then(|content| content.get(content_index)) };
+                if let Some(tc) = tool_call {
                     let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_owned();
                     let name = tc
                         .get("name")
@@ -1237,14 +1228,18 @@ impl ChatPane {
                         .unwrap_or("tool")
                         .to_owned();
                     let args = tc.get("arguments").cloned().unwrap_or(Value::Null);
-                    let diffs = if name == "edit" {
+                    let diffs = if ty == "toolcall_end" && name == "edit" {
                         build_diffs_for_tool(&name, &args, None)
                     } else {
                         Vec::new()
                     };
                     let summary = summarize_tool_call(&name, &args, &diffs);
-                    if let Some(&idx) = self.active_part_map.get(&content_index)
-                        && let Some(ChatMessage::Assistant { parts, .. }) = self.messages.last_mut()
+                    let idx = self.get_or_create_part(content_index, || AssistantPart::Tool(ToolBlock {
+                        id: id.clone(), name: name.clone(), args: args.clone(), summary: summary.clone(),
+                        output: String::new(), is_error: false, done: false, duration_ms: None,
+                        diffs: Vec::new(), expanded: false,
+                    }));
+                    if let Some(ChatMessage::Assistant { parts, .. }) = self.messages.last_mut()
                         && let Some(AssistantPart::Tool(block)) = parts.get_mut(idx)
                     {
                         block.id = id;
@@ -2215,9 +2210,10 @@ impl ChatPane {
                 .iter()
                 .any(|(_, _, p)| matches!(p, AssistantPart::Tool(b) if b.is_error));
 
-        let final_text_pos = all_parts
-            .iter()
-            .rposition(|(_, _, p)| matches!(p, AssistantPart::Text(t) if !t.trim().is_empty()));
+        // Only a trailing text block is an answer; tools/thinking after earlier prose must remain in the timeline.
+        let final_text_pos = all_parts.last()
+            .filter(|(_, _, p)| matches!(p, AssistantPart::Text(t) if !t.trim().is_empty()))
+            .map(|_| all_parts.len() - 1);
 
         enum TimelineNode<'a> {
             Group(Vec<ProcessStep<'a>>),
