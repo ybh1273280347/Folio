@@ -561,6 +561,11 @@ impl RenderOnce for BlockEditor {
             self.state.update(cx, |state, _| {
                 let snapshot = state.snapshot();
                 let mut backgrounds: HashMap<u64, Vec<(Range<usize>, Hsla)>> = HashMap::new();
+                if let Some((block, _)) = &state.heading_highlight
+                    && let Some(len) = state.model.doc.leaf_len(*block)
+                {
+                    backgrounds.insert(block.as_u64(), vec![(0..len, style.selection())]);
+                }
                 for (block, range) in state.selection_ranges() {
                     // Atoms paint whole (O(1) lookup, not a scan of the leaves).
                     let range = match state.model.doc.get(block).map(|e| &e.content) {
@@ -718,6 +723,20 @@ impl RenderOnce for BlockEditor {
                 .filter(|ix| *ix < first || *ix >= last)
                 .collect();
             wanted.extend(first..last);
+            let state = self.state.read(cx);
+            if let Some(heading) = state.heading_jump.get()
+                && let Some(&ix) = state.model.doc.path(heading).iter().find_map(|id| index.unit_of.get(id))
+            {
+                // Measure near the destination in the jump frame so the
+                // heading's position includes the actual preceding blocks.
+                let height = state.scroll_handle.as_ref().map_or(window.viewport_size().height, |handle| {
+                    handle.bounds().size.height
+                });
+                let margin = (height * 2.).max(px(600.));
+                let start = index.find((index.prefix(ix) - margin).max(px(0.)));
+                let end = (index.find(index.prefix(ix + 1) + margin) + 1).min(n);
+                wanted.extend(start..end);
+            }
             wanted.sort_unstable();
             wanted.dedup();
             let mut cursor = px(0.);
@@ -1022,21 +1041,22 @@ impl EditorRoot {
     /// Scroll the caret into view in the owner's scroll container, once its
     /// block has been laid out (a culled block is pinned, so it is laid out
     /// in the frame after the caret moved there).
-    fn reveal_caret(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+    fn reveal_caret(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) -> Pixels {
         let state = self.state.read(cx);
         if !state.reveal.get() {
-            return;
+            return px(0.);
         }
         let (Some(handle), Some(pos)) = (state.scroll_handle.clone(), state.model.caret()) else {
             state.reveal.set(false);
-            return;
+            state.heading_jump.set(None);
+            return px(0.);
         };
         let Some(caret) = state
             .frame
             .borrow()
             .caret_bounds(pos, self.style.caret_width())
         else {
-            return;
+            return px(0.);
         };
         state.reveal.set(false);
         // The scroll owner stays at the region edge; text and the revealed
@@ -1048,15 +1068,26 @@ impl EditorRoot {
         view.origin.y += padding.top;
         view.size.height = (view.size.height - padding.top - padding.bottom).max(Pixels::ZERO);
         let mut offset = handle.offset();
+        if state.heading_jump.take() == Some(pos.block) {
+            let previous = offset.y;
+            let target = view.top() + view.size.height * 0.25;
+            offset.y = (offset.y + target - caret.top()).clamp(-handle.max_offset().y, px(0.));
+            if offset.y != previous {
+                handle.set_offset(offset);
+                window.request_animation_frame();
+            }
+            return offset.y - previous;
+        }
         if caret.top() < view.top() {
             offset.y += view.top() - caret.top();
         } else if caret.bottom() > view.bottom() {
             offset.y -= caret.bottom() - view.bottom();
         } else {
-            return;
+            return px(0.);
         }
         handle.set_offset(offset);
         window.refresh();
+        px(0.)
     }
 }
 
@@ -1132,7 +1163,7 @@ impl Element for EditorRoot {
             }
             *self.state.read(cx).frame.borrow_mut() = frame;
             let mask = window.content_mask().bounds;
-            let content = self.content_bounds.get();
+            let mut content = self.content_bounds.get();
             let cull = self.state.read(cx).cull.clone();
             let geometry_changed = cull.borrow_mut().set_geometry(
                 content.size.width,
@@ -1146,7 +1177,8 @@ impl Element for EditorRoot {
                     self.state.read(cx).reveal.set(true);
                 }
             } else {
-                self.reveal_caret(bounds, window, cx);
+                // Cull the next layout against the heading jump's new viewport.
+                content.origin.y += self.reveal_caret(bounds, window, cx);
             }
             if geometry_changed || cull.borrow_mut().finish_frame(content, mask) {
                 // Geometry changed or scrolling left the laid-out span.

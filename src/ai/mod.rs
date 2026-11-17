@@ -838,10 +838,22 @@ impl ChatPane {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             if context_window > 0 {
+                let tokens = cu.get("tokens").and_then(|v| v.as_u64());
+                let percent = cu
+                    .get("percent")
+                    .and_then(|v| v.as_f64())
+                    .map(|p| p.round().clamp(0.0, 100.0) as u64)
+                    .or_else(|| {
+                        tokens.map(|t| {
+                            ((t as f64 / context_window as f64) * 100.0)
+                                .round()
+                                .clamp(0.0, 100.0) as u64
+                        })
+                    });
                 self.context_usage = Some(ContextUsage {
-                    tokens: cu.get("tokens").and_then(|v| v.as_u64()),
+                    tokens,
                     context_window,
-                    percent: cu.get("percent").and_then(|v| v.as_u64()),
+                    percent,
                 });
             }
         }
@@ -3388,7 +3400,13 @@ impl ChatPane {
         } else {
             gpui_kit::rgb(palette.accent)
         };
-        let fraction = (pct as f32 / 100.0).clamp(0.0, 1.0);
+        let fraction = match &self.context_usage {
+            Some(cu) if cu.context_window > 0 => cu
+                .tokens
+                .map(|t| (t as f32 / cu.context_window as f32).clamp(0.0, 1.0))
+                .unwrap_or_else(|| (pct as f32 / 100.0).clamp(0.0, 1.0)),
+            _ => (pct as f32 / 100.0).clamp(0.0, 1.0),
+        };
 
         div()
             .id("ai-context-ring")
@@ -3423,7 +3441,7 @@ impl ChatPane {
                             window.paint_path(path, track_color);
                         }
 
-                        if fraction > 0.01 {
+                        if fraction > 0.0 {
                             let active_steps = ((segments as f32) * fraction).ceil() as usize;
                             let mut arc = gpui_kit::PathBuilder::stroke(px(1.8));
                             for i in 0..=active_steps.max(1) {

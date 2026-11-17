@@ -389,6 +389,10 @@ pub struct BlockEditorState {
     pub(crate) scroll_handle: Option<gpui::ScrollHandle>,
     /// The caret moved and should be scrolled into view after layout.
     pub(crate) reveal: std::cell::Cell<bool>,
+    /// One explicit heading jump, consumed after its destination is laid out.
+    pub(crate) heading_jump: std::cell::Cell<Option<BlockId>>,
+    /// The range highlight and its cancellable reset task.
+    pub(crate) heading_highlight: Option<(BlockId, gpui::Task<()>)>,
     marked: Option<Marked>,
     /// An IME composition opened an undo group that is not committed yet.
     composition_open: bool,
@@ -470,6 +474,8 @@ impl BlockEditorState {
             a11y_value: RefCell::default(),
             scroll_handle: Some(gpui::ScrollHandle::new()),
             reveal: Default::default(),
+            heading_jump: Default::default(),
+            heading_highlight: None,
             marked: None,
             composition_open: false,
             goal_x: None,
@@ -923,6 +929,27 @@ impl BlockEditorState {
     pub fn reveal_caret(&mut self, cx: &mut Context<Self>) {
         self.reveal.set(true);
         cx.notify();
+    }
+
+    /// Move to a heading, align it within the viewport, and briefly highlight its text.
+    pub fn navigate_to_heading(
+        &mut self,
+        block: BlockId,
+        cx: &mut Context<Self>,
+    ) -> Result<(), super::SelectionError> {
+        self.set_selection(BlockSelection::caret(BlockPosition::new(block, 0)), cx)?;
+        self.heading_jump.set(Some(block));
+        // Replacing the task gives repeated clicks a full highlight duration.
+        self.heading_highlight = Some((block, cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1200))
+                .await;
+            let _ = this.update(cx, |editor, cx| {
+                editor.heading_highlight = None;
+                cx.notify();
+            });
+        })));
+        Ok(())
     }
     /// Fence host callbacks on external owner changes without reparsing content.
     pub fn invalidate_captures(&mut self) {
@@ -1544,6 +1571,7 @@ impl BlockEditorState {
     // ---- internal edit plumbing -------------------------------------------
 
     fn after_edit(&mut self, origin: EditOrigin, cx: &mut Context<Self>) {
+        self.heading_jump.set(None);
         self.sanitize_code_preview_source();
         if self.code_preview_source.is_some() {
             self.code_preview_source = self.selection_preview_block();
@@ -1580,6 +1608,7 @@ impl BlockEditorState {
     }
 
     fn selection_changed(&mut self, cx: &mut Context<Self>) {
+        self.heading_jump.set(None);
         self.sanitize_code_preview_source();
         if let Some(block) = self.selection_preview_block() {
             if self.readonly {

@@ -10,7 +10,10 @@ use gpui_kit::{
     assets::IconName,
     base::{Scrollbar, ScrollbarMode, StyledExt, text::MarkdownExtensions},
     component::{
-        input::{Editor, EditorState, Input, InputEvent, InputState, Position, Textarea, TextareaState},
+        input::{
+            Editor, EditorState, Input, InputEvent, InputState, Position, RangeDecoration,
+            RangeDecorationCollection, RangeDecorationStyle, Textarea, TextareaState,
+        },
         menu::ContextMenuExt,
         resizable::{h_resizable, resizable_panel},
     },
@@ -297,6 +300,8 @@ pub struct MarkdownPane {
     title_input: Entity<InputState>,
     headings: Vec<OutlineHeading>,
     source_editor: Entity<EditorState>,
+    source_heading_highlight: RangeDecorationCollection,
+    source_heading_highlight_timer: Task<()>,
     visual_editor: Entity<BlockEditorState>,
     extensions: MarkdownExtensions,
     // The preview is never the saved document; editing resumes after the full model arrives.
@@ -579,6 +584,9 @@ impl MarkdownPane {
                 .soft_wrap(true)
                 .searchable(true)
         });
+        let source_heading_highlight = source_editor.update(cx, |editor, cx| {
+            editor.create_range_decorations_collection(Vec::new(), cx)
+        });
         let link_input = cx.new(|cx| InputState::new(window, cx).placeholder("输入链接 URL (回车确认)"));
         cx.subscribe_in(
             &link_input,
@@ -790,6 +798,8 @@ impl MarkdownPane {
             title_input,
             headings: Vec::new(),
             source_editor,
+            source_heading_highlight,
+            source_heading_highlight_timer: Task::ready(()),
             visual_editor,
             extensions,
             loading: None,
@@ -993,12 +1003,29 @@ impl MarkdownPane {
                 return;
             };
             let offset = heading.range.start.min(self.text.len());
+            let range = heading.range.clone();
             let line = self.text.as_bytes()[..offset]
                 .iter()
                 .filter(|&&byte| byte == b'\n')
                 .count();
             self.source_editor.update(cx, |editor, cx| {
-                editor.set_cursor_position(Position::new(line as u32, 0), window, cx)
+                editor.set_cursor_position(Position::new(line as u32, 0), window, cx);
+                if let Some(line_height) = editor.line_height() {
+                    // Display rows account for wrapping before the target line.
+                    let row = editor.display_map().buffer_line_to_display_row(line);
+                    let mut offset = editor.scroll_offset();
+                    offset.y = editor.input_bounds().size.height * 0.25 - line_height * row;
+                    editor.set_scroll_offset(offset, cx);
+                }
+            });
+            self.source_heading_highlight.set(vec![RangeDecoration::new(range)
+                .with_style(RangeDecorationStyle::Fill)
+                .with_color(gpui_kit::base::Theme::global(cx).tokens.colors.selection)], cx);
+            self.source_heading_highlight_timer = cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(1200))
+                    .await;
+                let _ = this.update(cx, |pane, cx| pane.source_heading_highlight.clear(cx));
             });
         } else {
             self.select_visual_heading(index, Some(window), cx);
@@ -1012,33 +1039,29 @@ impl MarkdownPane {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
-        let headings = self
+        let heading = self
             .visual_editor
             .read(cx)
             .model()
             .document()
             .leaves()
             .filter(|block| matches!(block.kind(), BlockKind::Heading { .. }))
-            .map(|block| block.id())
-            .collect::<Vec<_>>();
-        let Some(&block) = headings.get(index) else {
+            .nth(index);
+        let Some(block) = heading.map(|block| block.id()) else {
             return;
         };
         let visual_editor = self.visual_editor.clone();
         if let Some(window) = window {
             window.defer(cx, move |window, cx| {
                 visual_editor.update(cx, |editor, cx| {
-                    let _ = editor
-                        .set_selection(BlockSelection::caret(BlockPosition::new(block, 0)), cx);
-                    editor.reveal_caret(cx);
-                    editor.focus(window, cx);
+                    if editor.navigate_to_heading(block, cx).is_ok() {
+                        editor.focus(window, cx);
+                    }
                 });
             });
         } else {
             visual_editor.update(cx, |editor, cx| {
-                let _ = editor
-                    .set_selection(BlockSelection::caret(BlockPosition::new(block, 0)), cx);
-                editor.reveal_caret(cx);
+                let _ = editor.navigate_to_heading(block, cx);
             });
         }
     }
