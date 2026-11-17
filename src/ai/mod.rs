@@ -195,7 +195,7 @@ impl AiTypography {
 }
 
 const AI_COMPOSER_MAX_WIDTH: Pixels = px(720.);
-const AI_WELCOME_ICON_SIZE: Pixels = px(40.);
+const AI_WELCOME_ICON_SIZE: Pixels = px(64.);
 const AI_WELCOME_ICON_TITLE_GAP: Pixels = px(18.);
 const AI_COPY_BUTTON_SIZE: Pixels = px(20.);
 const AI_COPY_ICON_SIZE: Pixels = px(12.);
@@ -4011,11 +4011,10 @@ impl AiPane {
                     .flex_col()
                     .items_center()
                     .child(
-                        gpui::svg()
-                            .path("brand/folio.svg")
+                        img("brand/ai-mascot.png")
                             .size(AI_WELCOME_ICON_SIZE)
-                            .flex_shrink_0()
-                            .text_color(fg_alpha(palette.text, 0.88)),
+                            .object_fit(ObjectFit::Contain)
+                            .flex_shrink_0(),
                     )
                     .child(title_el)
                     .child(

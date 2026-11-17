@@ -3361,10 +3361,6 @@ impl Workspace {
         let projects = self.config.projects.iter().map(|project| {
             let id = project.id.clone();
             let rename_id = id.clone();
-            let row_rename = id.clone();
-            let row_remove = id.clone();
-            let row_name = project.name.clone();
-            let menu_app = cx.entity();
             let name = project.name.clone();
             let root = PathBuf::from(&project.folder);
             let app = cx.entity();
@@ -3391,41 +3387,6 @@ impl Workspace {
                         .min_w_0()
                         .text_ellipsis()
                         .child(project.name.clone()),
-                )
-                .child(
-                    Button::new(SharedString::from(format!("project-menu-{id}")))
-                        .ghost()
-                        .compact()
-                        .w(px(27.))
-                        .h(px(27.))
-                        .icon(crate::ui::icon(IconName::Ellipsis))
-                        .tooltip("更多操作")
-                        .dropdown_menu(move |menu, _, _| {
-                            let rename_app = menu_app.clone();
-                            let remove_app = menu_app.clone();
-                            let rename = row_rename.clone();
-                            let name = row_name.clone();
-                            let remove = row_remove.clone();
-                            menu.item(PopupMenuItem::new("重命名项目…").on_click(
-                                move |_, window, cx| {
-                                    rename_app.update(cx, |app, cx| {
-                                        app.start_name(
-                                            NameAction::RenameProject(rename.clone()),
-                                            &name,
-                                            window,
-                                            cx,
-                                        )
-                                    });
-                                },
-                            ))
-                            .item(
-                                PopupMenuItem::new("移除项目…").on_click(move |_, window, cx| {
-                                    remove_app.update(cx, |app, cx| {
-                                        app.remove_project(&remove, window, cx)
-                                    });
-                                }),
-                            )
-                        }),
                 )
                 .on_click(
                     cx.listener(move |app, _, window, cx| { app.show_trash = false; app.switch_project(&id, window, cx); cx.notify(); }),
@@ -3642,7 +3603,6 @@ impl Workspace {
                     let full = PathBuf::from(&self.directory_workspace().expect("folder has project").folder)
                         .join(path);
                     let deleted = path.clone();
-                    let row_deleted = path.clone();
                     let app = cx.entity();
                     let folder_drag = crate::terminal::DraggedFolder(path.clone(), self.directory_workspace().expect("folder has project").id.clone());
                     let folder_path = full.clone();
@@ -3693,18 +3653,6 @@ impl Workspace {
                                     .to_string_lossy()
                                     .into_owned(),
                             ),
-                        )
-                        .child(
-                            crate::ui::control(
-                                SharedString::from(format!("delete-folder-{path}")),
-                                IconName::Trash,
-                            )
-                            .on_click(cx.listener(
-                                move |app, _, window, cx| {
-                                    cx.stop_propagation();
-                                    app.delete_folder(&row_deleted, window, cx);
-                                },
-                            )),
                         )
                         .on_click(cx.listener(move |app, _, window, cx| {
                             cx.stop_propagation();
@@ -3812,16 +3760,8 @@ impl Workspace {
                 let app = cx.entity();
                 let split = file.clone();
                 let row_split = file.clone();
-                let row_rename = file.path.clone();
-                let row_delete = file.path.clone();
                 let selected_path = file.path.clone();
                 let clicked_path = file.path.clone();
-                let menu_app = cx.entity();
-                let row_name = Path::new(path)
-                    .file_name()
-                    .expect("file has name")
-                    .to_string_lossy()
-                    .into_owned();
                 let pdf_file = file.path.to_lowercase().ends_with(".pdf");
                 let name = Path::new(&file.path)
                     .file_name()
@@ -3933,41 +3873,6 @@ impl Workspace {
                                 )),
                             )
                         },
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("file-menu-{path}")))
-                            .ghost()
-                            .compact()
-                            .w(px(27.))
-                            .h(px(27.))
-                            .icon(crate::ui::icon(IconName::Ellipsis))
-                            .tooltip("更多操作")
-                            .dropdown_menu(move |menu, _, _| {
-                                let rename_app = menu_app.clone();
-                                let delete_app = menu_app.clone();
-                                let rename = row_rename.clone();
-                                let name = row_name.clone();
-                                let delete = row_delete.clone();
-                                menu.item(PopupMenuItem::new("重命名…").on_click(
-                                    move |_, window, cx| {
-                                        rename_app.update(cx, |app, cx| {
-                                            app.start_name(
-                                                NameAction::RenameFile(rename.clone()),
-                                                &name,
-                                                window,
-                                                cx,
-                                            )
-                                        });
-                                    },
-                                ))
-                                .item(
-                                    PopupMenuItem::new("删除…").on_click(move |_, window, cx| {
-                                        delete_app.update(cx, |app, cx| {
-                                            app.delete_file(&delete, window, cx)
-                                        });
-                                    }),
-                                )
-                            }),
                     )
                     .on_click(cx.listener(move |app, event: &ClickEvent, window, cx| {
                         cx.stop_propagation();
