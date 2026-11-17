@@ -248,6 +248,8 @@ struct ChatPane {
     toast: Option<(String, bool)>,
     toast_task: Task<()>,
     toast_anim_gen: u64,
+    nav_hovered: bool,
+    hovered_anchor: Option<usize>,
     model_popover_open: bool,
     model_popover_anim_gen: u64,
     model_search_input: Entity<InputState>,
@@ -407,6 +409,8 @@ impl ChatPane {
             toast: None,
             toast_task: Task::ready(()),
             toast_anim_gen: 0,
+            nav_hovered: false,
+            hovered_anchor: None,
             model_popover_open: false,
             model_popover_anim_gen: 0,
             model_search_input,
@@ -1991,68 +1995,149 @@ impl ChatPane {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let nav_hovered = self.nav_hovered;
+        let rail = div()
+            .id("ai-nav-rail")
+            .h_full()
+            .max_h(px(anchors.len() as f32 * 14.))
+            .w(px(26.))
+            .py_1()
+            .px_0p5()
+            .rounded(px(8.))
+            .flex()
+            .flex_col()
+            .on_hover(cx.listener(|pane, hovered, _, cx| {
+                if pane.nav_hovered != *hovered {
+                    pane.nav_hovered = *hovered;
+                    if !hovered {
+                        pane.hovered_anchor = None;
+                    }
+                    cx.notify();
+                }
+            }))
+            .children(anchors.iter().enumerate().map(|(index, anchor)| {
+                let item = anchor.item;
+                let next = anchors.get(index + 1).map_or(usize::MAX, |next| next.item);
+                let user = anchor.user;
+                let is_hovered = self.hovered_anchor == Some(item);
+                let scroll = self.scroll.clone();
+                let preview = anchor.preview.clone();
+                let label = if user { "你的消息" } else { "AI 回答" };
+                let row = div()
+                    .id(("ai-message-anchor", item))
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .on_hover(cx.listener(move |pane, hovered, _, cx| {
+                        let next_hover = if *hovered {
+                            Some(item)
+                        } else if pane.hovered_anchor == Some(item) {
+                            None
+                        } else {
+                            pane.hovered_anchor
+                        };
+                        if pane.hovered_anchor != next_hover {
+                            pane.hovered_anchor = next_hover;
+                            cx.notify();
+                        }
+                    }))
+                    .child(
+                        canvas(
+                            |_, _, _| (),
+                            move |bounds, (), window, _| {
+                                // Read during paint so wheel scrolling and scrollbar dragging both update the marker.
+                                let top = scroll.top_item();
+                                let active = (index == 0 || top >= item) && top < next;
+                                let width = if is_hovered { 16. } else { 14. };
+                                let color = if active {
+                                    fg_alpha(palette.accent, if is_hovered { 0.85 } else { 0.68 })
+                                } else if is_hovered {
+                                    fg_alpha(palette.text, 0.34)
+                                } else if user {
+                                    fg_alpha(palette.text, 0.16)
+                                } else {
+                                    fg_alpha(palette.text, 0.08)
+                                };
+                                let x = bounds.center().x - px(width / 2.);
+                                let y = bounds.center().y - px(1.25);
+                                window.paint_quad(
+                                    gpui::fill(
+                                        gpui::Bounds::new(point(x, y), size(px(width), px(2.5))),
+                                        color,
+                                    )
+                                    .corner_radii(px(1.5)),
+                                );
+                            },
+                        )
+                        .size_full(),
+                    )
+                    .tooltip(move |window, cx| {
+                        let preview = preview.clone();
+                        Tooltip::element(move |_, _| {
+                            div()
+                                .w(px(220.))
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(gpui_kit::rgb(palette.muted))
+                                        .child(label),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(gpui_kit::rgb(palette.text))
+                                        .child(preview.clone()),
+                                )
+                        })
+                        .p_2()
+                        .build(window, cx)
+                    })
+                    .on_click(cx.listener(move |pane, _, _, cx| {
+                        pane.stick_to_bottom = false;
+                        pane.scroll.scroll_to_top_of_item(item);
+                        cx.notify();
+                    }));
+
+                row.with_animation(
+                    (
+                        "ai-nav-anchor-anim",
+                        ((item as u64) << 1) | u64::from(is_hovered),
+                    ),
+                    Animation::new(Duration::from_millis(120)).with_easing(ease_out_quint()),
+                    move |el, t| {
+                        let alpha = if is_hovered { 0.05 * t } else { 0.05 * (1. - t) };
+                        el.bg(fg_alpha(palette.text, alpha))
+                    },
+                )
+            }));
+
         div()
             .absolute()
-            .left_0()
+            .left_1()
             .top_2()
             .bottom_2()
-            .w(px(32.))
+            .w(px(28.))
             .flex()
             .items_center()
             .child(
-                div()
-                    .h_full()
-                    .max_h(px(anchors.len() as f32 * 14.))
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .children(anchors.iter().enumerate().map(|(index, anchor)| {
-                        let item = anchor.item;
-                        let next = anchors.get(index + 1).map_or(usize::MAX, |next| next.item);
-                        let user = anchor.user;
-                        let scroll = self.scroll.clone();
-                        let preview = anchor.preview.clone();
-                        let label = if user { "你的消息" } else { "AI 回答" };
-                        div()
-                            .id(("ai-message-anchor", item))
-                            .flex_1()
-                            .min_h_0()
-                            .w_full()
-                            .cursor_pointer()
-                            .hover(move |style| style.bg(fg_alpha(palette.text, 0.05)))
-                            .child(
-                                canvas(
-                                    |_, _, _| (),
-                                    move |bounds, (), window, _| {
-                                        // Read during paint so wheel scrolling and scrollbar dragging both update the marker.
-                                        let top = scroll.top_item();
-                                        let active = (index == 0 || top >= item) && top < next;
-                                        let width = if active { 26. } else if user { 17. } else { 9. };
-                                        let color = fg_alpha(palette.text, if active { 0.9 } else { 0.22 });
-                                        window.paint_quad(gpui::fill(
-                                            gpui::Bounds::new(
-                                                point(bounds.left() + px(3.), bounds.center().y - px(1.)),
-                                                size(px(width), px(2.)),
-                                            ),
-                                            color,
-                                        ));
-                                    },
-                                ).size_full(),
-                            )
-                            .tooltip(move |window, cx| {
-                                let preview = preview.clone();
-                                Tooltip::element(move |_, _| {
-                                    div().w(px(220.)).flex().flex_col().gap_1()
-                                        .child(div().text_xs().text_color(gpui_kit::rgb(palette.muted)).child(label))
-                                        .child(div().text_sm().text_color(gpui_kit::rgb(palette.text)).child(preview.clone()))
-                                }).p_2().build(window, cx)
-                            })
-                            .on_click(cx.listener(move |pane, _, _, cx| {
-                                pane.stick_to_bottom = false;
-                                pane.scroll.scroll_to_top_of_item(item);
-                                cx.notify();
-                            }))
-                    })),
+                rail.with_animation(
+                    ("ai-nav-rail-anim", if nav_hovered { 1u64 } else { 0u64 }),
+                    Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()),
+                    move |el, t| {
+                        let opacity = if nav_hovered {
+                            0.72 + 0.28 * t
+                        } else {
+                            1.0 - 0.28 * t
+                        };
+                        let bg_alpha = if nav_hovered { 0.03 * t } else { 0.03 * (1. - t) };
+                        el.opacity(opacity).bg(fg_alpha(palette.text, bg_alpha))
+                    },
+                ),
             )
             .into_any_element()
     }
