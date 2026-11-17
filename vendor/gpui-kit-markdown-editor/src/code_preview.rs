@@ -1,10 +1,9 @@
 use std::{collections::HashMap, sync::{Arc, Mutex}};
 
 use gpui::{
-    AnyElement, App, AppContext, ClipboardItem, Entity, InteractiveElement, IntoElement,
+    AnyElement, App, ClipboardItem, Entity, InteractiveElement, IntoElement,
     MouseButton, ParentElement, SharedString, Styled, Window, canvas, div, px,
 };
-use gpui::prelude::FluentBuilder as _;
 use gpui_kit::{
     base::text::{
         editor_host::CodeBlock,
@@ -88,8 +87,8 @@ fn render(data: &Data, window: &mut Window, cx: &mut App) -> AnyElement {
                     .small()
                     .label("编辑源码")
                     .on_click(move |_, window, cx| {
-                        edit_state.read(cx).focus(window, cx);
                         edit_state.update(cx, |state, cx| {
+                            state.focus(window, cx);
                             state.enter_code_preview_source(block, cx);
                         });
                     }),
@@ -131,9 +130,9 @@ fn render(data: &Data, window: &mut Window, cx: &mut App) -> AnyElement {
         .relative()
         .w_full()
         .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-            state.read(cx).focus(window, cx);
             cx.stop_propagation();
             state.update(cx, |state, cx| {
+                state.focus(window, cx);
                 if event.click_count >= 2 {
                     state.enter_code_preview_source(block, cx);
                 } else {

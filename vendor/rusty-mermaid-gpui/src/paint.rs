@@ -232,10 +232,10 @@ fn prepare_node(
             let r = *radius as f32 * ctx.zoom;
             *fill = style
                 .fill
-                .map(|color| ellipse_fill_path(cx, cy, r, r))
+                .map(|_| ellipse_fill_path(cx, cy, r, r))
                 .transpose()?;
             *stroke = resolve_stroke_opt(style, ctx.theme)
-                .map(|(color, width)| ellipse_stroke_path(cx, cy, r, r, width * ctx.zoom))
+                .map(|(_, width)| ellipse_stroke_path(cx, cy, r, r, width * ctx.zoom))
                 .transpose()?;
         }
         (

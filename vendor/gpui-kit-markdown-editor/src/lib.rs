@@ -45,6 +45,7 @@ extern crate gpui_kit as gpui;
 
 mod command;
 mod code_preview;
+mod code_ui;
 mod cull;
 mod direct;
 mod document;

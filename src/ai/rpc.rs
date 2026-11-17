@@ -88,6 +88,12 @@ pub enum RpcInbound {
     Exited(Option<i32>),
 }
 
+#[derive(Clone, Debug)]
+pub struct RpcImage {
+    pub data: String,
+    pub mime_type: String,
+}
+
 pub struct RpcClient {
     stdin_tx: mpsc::Sender<String>,
     pub inbound: mpsc::Receiver<RpcInbound>,
@@ -272,10 +278,31 @@ impl RpcClient {
             .map_err(|_| "pi RPC 进程输入通道已关闭".to_owned())
     }
 
-    pub fn prompt(&self, message: &str) -> Result<String, String> {
+    pub fn prompt_with_images(
+        &self,
+        message: &str,
+        images: &[RpcImage],
+    ) -> Result<String, String> {
+        if images.is_empty() {
+            return self.send(json!({
+                "type": "prompt",
+                "message": message,
+            }));
+        }
+        let encoded: Vec<Value> = images
+            .iter()
+            .map(|img| {
+                json!({
+                    "type": "image",
+                    "data": img.data,
+                    "mimeType": img.mime_type,
+                })
+            })
+            .collect();
         self.send(json!({
             "type": "prompt",
             "message": message,
+            "images": encoded,
         }))
     }
 
@@ -342,10 +369,6 @@ impl RpcClient {
 
     pub fn get_commands(&self) -> Result<String, String> {
         self.send(json!({ "type": "get_commands" }))
-    }
-
-    pub fn clone_session(&self) -> Result<String, String> {
-        self.send(json!({ "type": "clone" }))
     }
 
     pub fn respond_extension_confirm(&self, id: &str, confirmed: bool) -> Result<(), String> {

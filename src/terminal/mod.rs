@@ -6,7 +6,7 @@ use crate::{model::TerminalSettings, theme::Palette};
 use gpui_kit::{
     assets::IconName,
     component::{
-        button::{Button, ButtonVariants},
+        button::{Button, ButtonCustomVariant, ButtonVariants},
         menu::{DropdownMenu, PopupMenuItem},
     },
     prelude::FluentBuilder,
@@ -423,11 +423,16 @@ impl Render for TerminalPane {
         let current = self.sessions.iter().find(|tab| Some(tab.id) == self.active);
         let pane_entity = cx.entity();
         let new_menu_btn = Button::new("new-terminal")
-            .ghost()
+            .custom(
+                ButtonCustomVariant::new(cx)
+                    .foreground(gpui_kit::rgb(palette.muted).into())
+                    .hover(gpui_kit::rgb(palette.hover).into())
+                    .active(gpui_kit::rgb(palette.pressed).into()),
+            )
             .compact()
             .w(px(26.))
             .h(px(26.))
-            .icon(crate::ui::icon(IconName::Plus))
+            .icon(crate::ui::icon(IconName::Plus).text_color(gpui_kit::rgb(palette.muted)))
             .tooltip("新建终端或启动 Agent")
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                 let pane_term = pane_entity.clone();

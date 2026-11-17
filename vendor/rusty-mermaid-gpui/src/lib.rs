@@ -2,8 +2,7 @@ mod paint;
 
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
-use gpui::base::StyledExt as _;
-use gpui::{App, IntoElement, Styled, Window, canvas, div, px};
+use gpui::{App, IntoElement, ParentElement, Styled, Window, canvas, div, px};
 use rusty_mermaid_core::{Scene, Theme, Transform};
 
 /// Scene data prepared for repeated GPUI paints.

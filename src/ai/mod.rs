@@ -4,9 +4,13 @@ mod rpc;
 mod sessions;
 
 use crate::model::AppSettings;
+use crate::terminal::{DraggedFolder, DraggedPaths};
 use crate::theme::{Palette, color as theme_color, palette as active_palette};
 use diff::{DiffLine, FileDiff, compute_diff};
-use gpui::{MouseButton, ScrollHandle, Subscription};
+use gpui::{
+    ClipboardEntry, EntityInputHandler, ExternalPaths, ImageFormat, MouseButton, ObjectFit,
+    ScrollHandle, Subscription,
+};
 use gpui_kit::{
     assets::IconName,
     base::{
@@ -14,20 +18,21 @@ use gpui_kit::{
         text::{TextViewStyle, markdown as render_markdown},
     },
     component::{
-        button::{Button, ButtonVariants},
-        input::{Input, InputEvent, InputState, Textarea, TextareaState},
-        menu::{DropdownMenu, PopupMenuItem},
+        button::{Button, ButtonCustomVariant, ButtonVariants},
+        input::{InlineToken, Input, InputEvent, InputState, InputToken, Textarea, TextareaState},
         tooltip::Tooltip,
     },
     prelude::FluentBuilder,
     *,
 };
-use rpc::{RpcClient, RpcInbound};
+use rpc::{RpcClient, RpcImage, RpcInbound};
 use serde_json::Value;
 use sessions::SessionSummary;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    ops::Range,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -72,11 +77,13 @@ struct PiCommandInfo {
     source: String,
 }
 
-#[derive(Clone, Debug)]
-struct McpServerEntry {
-    name: String,
-    transport: String,
-    enabled: bool,
+#[derive(Clone)]
+struct PastedImage {
+    id: u64,
+    image: Arc<gpui::Image>,
+    mime_type: String,
+    data_b64: String,
+    label: String,
 }
 
 #[derive(Clone, Debug)]
@@ -99,13 +106,14 @@ enum AssistantPart {
     Tool(ToolBlock),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 enum ChatMessage {
     User {
         display_text: String,
         attached_file: Option<String>,
         mounted_skills: Vec<String>,
         quote: Option<SelectionQuote>,
+        images: Vec<Arc<gpui::Image>>,
     },
     Assistant {
         parts: Vec<AssistantPart>,
@@ -142,11 +150,9 @@ struct PendingExtensionUi {
 
 #[derive(Clone, Debug)]
 enum SlashAction {
+    ToggleActiveContext,
     Compact,
-    McpStatus,
-    Fork,
     MountSkill(String),
-    InsertCommand(String),
 }
 
 #[derive(Clone, Debug)]
@@ -156,6 +162,24 @@ struct SlashItem {
     subtitle: String,
     icon: IconName,
     action: SlashAction,
+}
+
+#[derive(Clone, Copy)]
+struct AiTypography {
+    body: Pixels,
+    sm: Pixels,
+    xs: Pixels,
+}
+
+impl AiTypography {
+    fn from_settings(settings: &AppSettings) -> Self {
+        let base = (settings.interface_font_size as f32).clamp(11., 24.);
+        Self {
+            body: px(base),
+            sm: px((base - 1.5).max(10.5)),
+            xs: px((base - 2.5).max(9.5)),
+        }
+    }
 }
 
 pub struct AiPane {
@@ -179,10 +203,11 @@ pub struct AiPane {
     current_thinking: String,
     context_usage: Option<ContextUsage>,
     commands: Vec<PiCommandInfo>,
-    mounted_skills: Vec<String>,
     active_file: Option<AttachedFile>,
-    detached_for_file: Option<PathBuf>,
+    attach_active_file: bool,
     quoted_selection: Option<SelectionQuote>,
+    pasted_images: Vec<PastedImage>,
+    next_image_id: u64,
     auto_approve_shell: bool,
     pending_ui: Option<PendingExtensionUi>,
     pending_ext_prefill: Option<(String, bool)>,
@@ -193,10 +218,17 @@ pub struct AiPane {
     ext_widgets: BTreeMap<String, Vec<String>>,
     toast: Option<(String, bool)>,
     toast_task: Task<()>,
-    plus_menu_open: bool,
-    mcp_status_open: bool,
-    mcp_servers: Vec<McpServerEntry>,
+    toast_anim_gen: u64,
+    model_popover_open: bool,
+    model_popover_anim_gen: u64,
+    model_search_input: Entity<InputState>,
+    favorite_models: HashSet<String>,
+    history_anim_gen: u64,
+    slash_anim_gen: u64,
+    slash_was_open: bool,
     slash_index: usize,
+    slash_scroll: ScrollHandle,
+    last_input_text: String,
     dismissed_slash_text: Option<String>,
     expanded_tool_groups: HashSet<(usize, usize)>,
     write_snapshots: HashMap<String, String>,
@@ -214,12 +246,14 @@ impl AiPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        crate::theme::apply_font(&settings.interface_font, cx);
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("随心输入，/ 呼出命令…")
                 .submit_on_enter(true)
         });
         let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("输入会话名称"));
+        let model_search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search models..."));
         let ext_input = cx.new(|cx| InputState::new(window, cx).placeholder("输入内容…"));
         let ext_textarea = cx.new(|cx| TextareaState::new(window, cx).placeholder("编辑文本…"));
 
@@ -229,17 +263,26 @@ impl AiPane {
             |pane, state, event: &InputEvent, window, cx| match event {
                 InputEvent::Change => {
                     let val = state.read(cx).value().to_string();
+                    if val != pane.last_input_text {
+                        pane.last_input_text = val.clone();
+                        pane.slash_index = 0;
+                    }
                     if pane.dismissed_slash_text.as_deref() != Some(val.as_str()) {
                         pane.dismissed_slash_text = None;
                     }
-                    pane.slash_index = 0;
-                    if !val.is_empty() {
-                        pane.plus_menu_open = false;
+                    let is_open = pane
+                        .slash_query(cx)
+                        .is_some_and(|q| !pane.filtered_slash_items(&q).is_empty());
+                    if is_open && !pane.slash_was_open {
+                        pane.slash_anim_gen = pane.slash_anim_gen.wrapping_add(1);
                     }
+                    pane.slash_was_open = is_open;
                     cx.notify();
                 }
                 InputEvent::PressEnter { shift: false, .. } => {
-                    if !pane.slash_items().is_empty() && pane.slash_query(cx).is_some() {
+                    if let Some(q) = pane.slash_query(cx)
+                        && !pane.filtered_slash_items(&q).is_empty()
+                    {
                         return;
                     }
                     pane.send_prompt(window, cx);
@@ -247,6 +290,11 @@ impl AiPane {
                 _ => {}
             },
         );
+        let sub_model_search = cx.subscribe(&model_search_input, |_, _, event: &InputEvent, cx| {
+            if let InputEvent::Change = event {
+                cx.notify();
+            }
+        });
         let sub_rename = cx.subscribe_in(
             &rename_input,
             window,
@@ -303,10 +351,11 @@ impl AiPane {
             current_thinking: "high".into(),
             context_usage: None,
             commands: Vec::new(),
-            mounted_skills: Vec::new(),
             active_file: None,
-            detached_for_file: None,
+            attach_active_file: false,
             quoted_selection: None,
+            pasted_images: Vec::new(),
+            next_image_id: 1,
             auto_approve_shell: false,
             pending_ui: None,
             pending_ext_prefill: None,
@@ -317,17 +366,24 @@ impl AiPane {
             ext_widgets: BTreeMap::new(),
             toast: None,
             toast_task: Task::ready(()),
-            plus_menu_open: false,
-            mcp_status_open: false,
-            mcp_servers: Vec::new(),
+            toast_anim_gen: 0,
+            model_popover_open: false,
+            model_popover_anim_gen: 0,
+            model_search_input,
+            favorite_models: load_favorite_models(),
+            history_anim_gen: 0,
+            slash_anim_gen: 0,
+            slash_was_open: false,
             slash_index: 0,
+            slash_scroll: ScrollHandle::new(),
+            last_input_text: String::new(),
             dismissed_slash_text: None,
             expanded_tool_groups: HashSet::new(),
             write_snapshots: HashMap::new(),
             active_part_map: HashMap::new(),
             input,
             scroll: ScrollHandle::new(),
-            _subscriptions: vec![sub_input, sub_rename, sub_ext],
+            _subscriptions: vec![sub_input, sub_model_search, sub_rename, sub_ext],
             _poll: poll,
         };
         pane.refresh_sessions();
@@ -371,6 +427,7 @@ impl AiPane {
     pub fn sync_settings(&mut self, settings: &AppSettings, cx: &mut Context<Self>) {
         let base_changed = self.settings.ai.base_url != settings.ai.base_url;
         self.settings = settings.clone();
+        crate::theme::apply_font(&self.settings.interface_font, cx);
         if base_changed && self.client.is_some() {
             self.client = None;
             self.start_rpc(cx);
@@ -382,8 +439,10 @@ impl AiPane {
         if self.active_file == file {
             return;
         }
+        if file.is_none() {
+            self.attach_active_file = false;
+        }
         self.active_file = file;
-        self.detached_for_file = None;
         cx.notify();
     }
 
@@ -404,18 +463,15 @@ impl AiPane {
         }
         if let Some(f) = file {
             self.active_file = Some(f);
-            self.detached_for_file = None;
+            self.attach_active_file = true;
         }
         self.open(window, cx);
     }
 
     fn effective_attached_file(&self) -> Option<&AttachedFile> {
-        let file = self.active_file.as_ref()?;
-        if self.detached_for_file.as_ref() == Some(&file.path) {
-            None
-        } else {
-            Some(file)
-        }
+        self.active_file
+            .as_ref()
+            .filter(|_| self.attach_active_file)
     }
 
     fn start_rpc(&mut self, cx: &mut Context<Self>) {
@@ -442,6 +498,7 @@ impl AiPane {
 
     fn show_toast(&mut self, text: String, is_error: bool, cx: &mut Context<Self>) {
         self.toast = Some((text, is_error));
+        self.toast_anim_gen = self.toast_anim_gen.wrapping_add(1);
         self.toast_task = cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(3200))
@@ -695,6 +752,7 @@ impl AiPane {
                         attached_file,
                         mounted_skills,
                         quote,
+                        images: Vec::new(),
                     });
                 }
                 Some("assistant") => {
@@ -1334,17 +1392,48 @@ impl AiPane {
         cx.notify();
     }
 
-    fn slash_query(&self, cx: &App) -> Option<String> {
-        let val = self.input.read(cx).value().to_string();
-        if self.dismissed_slash_text.as_deref() == Some(val.as_str()) {
+    fn slash_span_and_query(&self, cx: &App) -> Option<(Range<usize>, String)> {
+        let state = self.input.read(cx);
+        let content = state.content();
+        let text = content.text().as_ref();
+        if self.dismissed_slash_text.as_deref() == Some(text) {
             return None;
         }
-        let first_line = val.lines().next()?;
-        if !val.contains('\n') && first_line.starts_with('/') && !first_line.contains(' ') {
-            Some(first_line[1..].to_ascii_lowercase())
-        } else {
-            None
+        let cursor = state.selected_range().start.min(text.len());
+        if !text.is_char_boundary(cursor) {
+            return None;
         }
+        if content
+            .tokens()
+            .iter()
+            .any(|sp| sp.range().start < cursor && cursor < sp.range().end)
+        {
+            return None;
+        }
+        let min_start = content
+            .tokens()
+            .iter()
+            .filter(|sp| sp.range().end <= cursor)
+            .map(|sp| sp.range().end)
+            .max()
+            .unwrap_or(0);
+        let slice = text.get(min_start..cursor)?;
+        let word_rel_start = slice
+            .char_indices()
+            .rfind(|(_, ch)| ch.is_whitespace())
+            .map(|(idx, ch)| idx + ch.len_utf8())
+            .unwrap_or(0);
+        let word_start = min_start + word_rel_start;
+        let word = text.get(word_start..cursor)?;
+        let query = word.strip_prefix('/')?;
+        if query.contains(char::is_whitespace) {
+            return None;
+        }
+        Some((word_start..cursor, query.to_ascii_lowercase()))
+    }
+
+    fn slash_query(&self, cx: &App) -> Option<String> {
+        self.slash_span_and_query(cx).map(|(_, q)| q)
     }
 
     fn slash_items(&self) -> Vec<SlashItem> {
@@ -1355,56 +1444,53 @@ impl AiPane {
             .map(|p| format!("压缩此聊天的上下文（已使用 {p}%）"))
             .unwrap_or_else(|| "压缩此聊天的上下文".to_owned());
 
-        let mut items = vec![
-            SlashItem {
-                id: "compact".into(),
-                title: "压缩".into(),
-                subtitle: pct_label,
-                icon: IconName::CircleDot,
-                action: SlashAction::Compact,
-            },
-            SlashItem {
-                id: "mcp".into(),
-                title: "MCP".into(),
-                subtitle: "显示 MCP 服务器状态".into(),
-                icon: IconName::Paperclip,
-                action: SlashAction::McpStatus,
-            },
-            SlashItem {
-                id: "fork".into(),
-                title: "创建聊天分支".into(),
-                subtitle: "从此对话复制新分支".into(),
-                icon: IconName::GitBranch,
-                action: SlashAction::Fork,
-            },
-        ];
+        let mut items = Vec::new();
+        if let Some(file) = &self.active_file {
+            if self.attach_active_file {
+                items.push(SlashItem {
+                    id: "detach-active-context".into(),
+                    title: "取消当前上下文".into(),
+                    subtitle: format!("移除 @{}", file.display),
+                    icon: IconName::FileText,
+                    action: SlashAction::ToggleActiveContext,
+                });
+            } else {
+                items.push(SlashItem {
+                    id: "attach-active-context".into(),
+                    title: "附加当前上下文".into(),
+                    subtitle: format!("附加 @{}", file.display),
+                    icon: IconName::FileText,
+                    action: SlashAction::ToggleActiveContext,
+                });
+            }
+        }
+        items.push(SlashItem {
+            id: "compact".into(),
+            title: "压缩".into(),
+            subtitle: pct_label,
+            icon: IconName::CircleDot,
+            action: SlashAction::Compact,
+        });
 
         for cmd in &self.commands {
-            let is_skill = cmd.source == "skill";
-            let display_name = if is_skill {
-                cmd.name.strip_prefix("skill:").unwrap_or(&cmd.name).to_owned()
-            } else {
-                format!("/{}", cmd.name)
-            };
-            let action = if is_skill {
-                SlashAction::MountSkill(cmd.name.clone())
-            } else {
-                SlashAction::InsertCommand(format!("/{} ", cmd.name))
-            };
+            if cmd.source != "skill" {
+                continue;
+            }
+            let display_name = cmd
+                .name
+                .strip_prefix("skill:")
+                .unwrap_or(&cmd.name)
+                .to_owned();
             items.push(SlashItem {
                 id: cmd.name.clone(),
                 title: display_name,
                 subtitle: if cmd.description.is_empty() {
-                    cmd.source.clone()
+                    "skill".to_owned()
                 } else {
                     cmd.description.clone()
                 },
-                icon: if is_skill {
-                    IconName::Sparkles
-                } else {
-                    IconName::Terminal
-                },
-                action,
+                icon: IconName::Sparkles,
+                action: SlashAction::MountSkill(cmd.name.clone()),
             });
         }
         items
@@ -1430,35 +1516,41 @@ impl AiPane {
     ) {
         self.dismissed_slash_text = None;
         self.slash_index = 0;
+        self.slash_was_open = false;
+        let slash_range = self.slash_span_and_query(cx).map(|(r, _)| r);
+        let clear_slash_span = |pane: &Self, window: &mut Window, cx: &mut Context<Self>| {
+            pane.input.update(cx, |input, cx| {
+                if let Some(range) = slash_range.clone() {
+                    replace_utf8_range(input, range, "", window, cx);
+                } else {
+                    input.set_value(String::new(), window, cx);
+                }
+                input.focus(window, cx);
+            });
+        };
+
         match item.action {
+            SlashAction::ToggleActiveContext => {
+                self.attach_active_file = !self.attach_active_file;
+                clear_slash_span(self, window, cx);
+            }
             SlashAction::Compact => {
-                self.input.update(cx, |input, cx| input.set_value(String::new(), window, cx));
+                clear_slash_span(self, window, cx);
                 self.compact_context(cx);
             }
-            SlashAction::McpStatus => {
-                self.input.update(cx, |input, cx| input.set_value(String::new(), window, cx));
-                self.refresh_mcp_status();
-                self.mcp_status_open = true;
-                cx.notify();
-            }
-            SlashAction::Fork => {
-                self.input.update(cx, |input, cx| input.set_value(String::new(), window, cx));
-                if let Some(client) = &self.client {
-                    let _ = client.clone_session();
-                }
-            }
             SlashAction::MountSkill(skill) => {
-                if !self.mounted_skills.contains(&skill) {
-                    self.mounted_skills.push(skill);
-                }
+                let short = skill.strip_prefix("skill:").unwrap_or(&skill).to_owned();
+                let token_id = format!("skill:{short}");
+                let token_text = format!("/skill:{short}");
+                let token = InlineToken::new(token_id, token_text).with_label(short);
                 self.input.update(cx, |input, cx| {
-                    input.set_value(String::new(), window, cx);
-                    input.focus(window, cx);
-                });
-            }
-            SlashAction::InsertCommand(cmd) => {
-                self.input.update(cx, |input, cx| {
-                    input.set_value(cmd, window, cx);
+                    let range = slash_range.unwrap_or_else(|| input.selected_range());
+                    if input
+                        .replace_range_with_token(range, token, window, cx)
+                        .is_ok()
+                    {
+                        input.insert(" ", window, cx);
+                    }
                     input.focus(window, cx);
                 });
             }
@@ -1466,82 +1558,151 @@ impl AiPane {
         cx.notify();
     }
 
-    fn refresh_mcp_status(&mut self) {
-        let mut out = Vec::new();
-        let mut paths = Vec::new();
-        if let Some(agent_dir) = std::env::var_os("PI_CODING_AGENT_DIR") {
-            paths.push(PathBuf::from(agent_dir).join("mcp.json"));
-        } else if let Some(home) = dirs::home_dir() {
-            paths.push(home.join(".pi").join("agent").join("mcp.json"));
+    fn insert_path_tokens(
+        &mut self,
+        paths: &[PathBuf],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() {
+            return;
         }
-        paths.push(self.cwd.join(".pi").join("mcp.json"));
-
-        for path in paths {
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let Ok(json) = serde_json::from_str::<Value>(&text) else {
-                continue;
-            };
-            let servers = json
-                .get("mcpServers")
-                .or_else(|| json.get("servers"))
-                .and_then(|v| v.as_object());
-            if let Some(map) = servers {
-                for (name, cfg) in map {
-                    let enabled = !cfg
-                        .get("disabled")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    let transport = if cfg.get("url").is_some() {
-                        "HTTP/SSE".to_owned()
-                    } else if let Some(cmd) = cfg.get("command").and_then(|v| v.as_str()) {
-                        cmd.to_owned()
-                    } else {
-                        "stdio".to_owned()
-                    };
-                    out.push(McpServerEntry {
-                        name: name.clone(),
-                        transport,
-                        enabled,
-                    });
+        self.input.update(cx, |input, cx| {
+            for path in paths {
+                let rel = path_for_prompt(&self.cwd, path);
+                if rel.trim().is_empty() {
+                    continue;
+                }
+                let is_dir = path.is_dir();
+                let base_name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| rel.clone());
+                let label = if is_dir && !base_name.ends_with('/') {
+                    format!("{base_name}/")
+                } else {
+                    base_name
+                };
+                let prefix = if is_dir { "dir" } else { "file" };
+                let token = InlineToken::new(format!("{prefix}:{rel}"), format!("@{rel}"))
+                    .with_label(label);
+                let sel = input.selected_range();
+                if input
+                    .replace_range_with_token(sel, token, window, cx)
+                    .is_ok()
+                {
+                    input.insert(" ", window, cx);
                 }
             }
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dialog = rfd::AsyncFileDialog::new()
+            .set_parent(window)
+            .set_directory(&self.cwd)
+            .set_title("选择附加文件");
+        cx.spawn_in(window, async move |this, cx| {
+            let Some(files) = dialog.pick_files().await else {
+                return;
+            };
+            let paths: Vec<PathBuf> = files.into_iter().map(|f| f.path().to_path_buf()).collect();
+            let _ = this.update_in(cx, |pane, window, cx| {
+                pane.insert_path_tokens(&paths, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn handle_paste(
+        &mut self,
+        item: &gpui::ClipboardItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut handled = false;
+        let mut attach_paths: Vec<PathBuf> = Vec::new();
+        let mut added_images = false;
+        let mut had_error: Option<String> = None;
+
+        for entry in item.entries() {
+            match entry {
+                ClipboardEntry::Image(img) => {
+                    let id = self.next_image_id;
+                    self.next_image_id += 1;
+                    match clipboard_image_to_pasted(id, img) {
+                        Ok(pasted) => {
+                            self.pasted_images.push(pasted);
+                            added_images = true;
+                            handled = true;
+                        }
+                        Err(err) => {
+                            had_error = Some(err);
+                            handled = true;
+                        }
+                    }
+                }
+                ClipboardEntry::ExternalPaths(ext) => {
+                    for p in ext.paths() {
+                        if is_image_file_path(p) {
+                            let id = self.next_image_id;
+                            self.next_image_id += 1;
+                            match file_path_to_pasted_image(id, p) {
+                                Ok(pasted) => {
+                                    self.pasted_images.push(pasted);
+                                    added_images = true;
+                                }
+                                Err(err) => {
+                                    had_error = Some(err);
+                                }
+                            }
+                        } else {
+                            attach_paths.push(p.clone());
+                        }
+                    }
+                    handled = true;
+                }
+                ClipboardEntry::String(_) => {}
+            }
         }
-        self.mcp_servers = out;
+
+        if !attach_paths.is_empty() {
+            self.insert_path_tokens(&attach_paths, window, cx);
+        }
+        if let Some(err) = had_error {
+            self.show_toast(err, true, cx);
+        } else if added_images {
+            cx.notify();
+        }
+        handled
+    }
+
+    fn toggle_favorite_model(&mut self, key: &str, cx: &mut Context<Self>) {
+        if !self.favorite_models.remove(key) {
+            self.favorite_models.insert(key.to_owned());
+        }
+        save_favorite_models(&self.favorite_models);
+        cx.notify();
     }
 
     fn send_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_streaming {
             return;
         }
-        let raw_text = self.input.read(cx).value().to_string();
+        let content = self.input.read(cx).content();
+        let raw_text = content.text().as_ref();
         let trimmed = raw_text.trim();
-        if trimmed.is_empty() && self.quoted_selection.is_none() && self.mounted_skills.is_empty() {
+        if trimmed.is_empty() && self.quoted_selection.is_none() && self.pasted_images.is_empty() {
             return;
         }
 
-        match trimmed {
-            "/compact" => {
-                self.input.update(cx, |i, cx| i.set_value(String::new(), window, cx));
-                self.compact_context(cx);
-                return;
-            }
-            "/mcp" => {
-                self.input.update(cx, |i, cx| i.set_value(String::new(), window, cx));
-                self.refresh_mcp_status();
-                self.mcp_status_open = true;
-                cx.notify();
-                return;
-            }
-            "/fork" => {
-                self.input.update(cx, |i, cx| i.set_value(String::new(), window, cx));
-                if let Some(client) = &self.client {
-                    let _ = client.clone_session();
-                }
-                return;
-            }
-            _ => {}
+        if trimmed == "/compact" && self.pasted_images.is_empty() {
+            self.input.update(cx, |i, cx| i.set_value(String::new(), window, cx));
+            self.compact_context(cx);
+            return;
         }
 
         if self.client.is_none() {
@@ -1551,18 +1712,53 @@ impl AiPane {
             return;
         };
 
+        let mut skills: Vec<String> = Vec::new();
+        let mut clean_body = String::with_capacity(raw_text.len());
+        let mut cursor = 0usize;
+        let mut spans = content.tokens().to_vec();
+        spans.sort_by_key(|s| s.range().start);
+        for span in &spans {
+            let range = span.range();
+            if range.start > cursor && range.start <= raw_text.len() {
+                clean_body.push_str(&raw_text[cursor..range.start]);
+            }
+            if let Some(skill_short) = span.token().id().strip_prefix("skill:") {
+                let full_skill = format!("skill:{skill_short}");
+                if !skills.contains(&full_skill) {
+                    skills.push(full_skill);
+                }
+                clean_body.push_str(span.token().label().as_ref());
+            } else if range.end <= raw_text.len() {
+                clean_body.push_str(&raw_text[range.start..range.end]);
+            }
+            cursor = range.end.min(raw_text.len());
+        }
+        if cursor < raw_text.len() {
+            clean_body.push_str(&raw_text[cursor..]);
+        }
+        let body_trimmed = clean_body.trim();
+
         let attached = self.effective_attached_file().cloned();
         let quote = self.quoted_selection.take();
-        let skills = std::mem::take(&mut self.mounted_skills);
+        let pasted = std::mem::take(&mut self.pasted_images);
+        let rpc_images: Vec<RpcImage> = pasted
+            .iter()
+            .map(|p| RpcImage {
+                data: p.data_b64.clone(),
+                mime_type: p.mime_type.clone(),
+            })
+            .collect();
+        let msg_images: Vec<Arc<gpui::Image>> = pasted.into_iter().map(|p| p.image).collect();
 
         let mut payload = String::new();
-        for sk in &skills {
+        if let Some(first_skill) = skills.first() {
+            // `pi` splits `/skill:<name> <args>` on the first ASCII space.
             payload.push('/');
-            payload.push_str(sk);
-            payload.push('\n');
+            payload.push_str(first_skill);
+            payload.push_str(" \n");
         }
         if let Some(file) = &attached
-            && !trimmed.starts_with('/')
+            && !body_trimmed.starts_with('/')
         {
             let rel = path_for_prompt(&self.cwd, &file.path);
             payload.push('@');
@@ -1580,18 +1776,19 @@ impl AiPane {
             }
             payload.push('\n');
         }
-        payload.push_str(trimmed);
+        payload.push_str(body_trimmed);
 
-        if let Err(err) = client.prompt(&payload) {
+        if let Err(err) = client.prompt_with_images(&payload, &rpc_images) {
             self.show_toast(format!("发送失败：{err}"), true, cx);
             return;
         }
 
         self.messages.push(ChatMessage::User {
-            display_text: trimmed.to_owned(),
+            display_text: body_trimmed.to_owned(),
             attached_file: attached.map(|f| f.display),
             mounted_skills: skills,
             quote,
+            images: msg_images,
         });
         self.input.update(cx, |input, cx| {
             input.set_value(String::new(), window, cx);
@@ -1620,10 +1817,12 @@ impl AiPane {
         cx.notify();
     }
 
-    fn switch_session(&mut self, path: &Path, _cx: &mut Context<Self>) {
+    fn switch_session(&mut self, path: &Path, cx: &mut Context<Self>) {
         if let Some(client) = &self.client {
             let _ = client.switch_session(&path.to_string_lossy());
         }
+        self.session_drawer_open = false;
+        cx.notify();
     }
 
     fn delete_session(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -1715,6 +1914,7 @@ impl AiPane {
         let del_fg = gpui_kit::rgb(palette.danger);
 
         let target = self.resolve_tool_path(&diff.path);
+        let typo = AiTypography::from_settings(&self.settings);
         let code_font = if self.settings.block_code_font.is_empty() {
             SharedString::from("Consolas")
         } else {
@@ -1752,7 +1952,7 @@ impl AiPane {
                             .child(crate::ui::icon(IconName::FileDiff).w(px(12.)).h(px(12.)))
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_size(typo.sm)
                                     .font_medium()
                                     .text_ellipsis()
                                     .child(diff.path.clone()),
@@ -1763,7 +1963,7 @@ impl AiPane {
                             .flex()
                             .items_center()
                             .gap_1p5()
-                            .text_xs()
+                            .text_size(typo.sm)
                             .flex_shrink_0()
                             .when(diff.added > 0, |r| {
                                 r.child(div().text_color(add_fg).child(format!("+{}", diff.added)))
@@ -1779,7 +1979,7 @@ impl AiPane {
                     .max_h(px(200.))
                     .overflow_y_scroll()
                     .font_family(code_font)
-                    .text_xs()
+                    .text_size(typo.sm)
                     .line_height(relative(1.4))
                     .children(diff.lines.iter().take(120).map(|line| match line {
                         DiffLine::Context(s) => div()
@@ -1822,6 +2022,7 @@ impl AiPane {
         let group_expanded = self.expanded_tool_groups.contains(&group_key);
 
         let any_running = blocks.iter().any(|(_, b)| !b.done);
+        let any_error = blocks.iter().any(|(_, b)| b.is_error);
         let has_edit = blocks
             .iter()
             .any(|(_, b)| b.name == "edit" || b.name == "write");
@@ -1848,6 +2049,39 @@ impl AiPane {
         } else {
             IconName::Terminal
         };
+        let pill_bg = mix_color(palette.background, palette.surface, 0.72);
+        let pill_hover = mix_color(palette.hover, palette.surface, 0.35);
+        let typo = AiTypography::from_settings(&self.settings);
+        let dot_color = if any_error {
+            gpui_kit::rgb(palette.danger)
+        } else if any_running {
+            gpui_kit::rgb(palette.accent)
+        } else {
+            theme_color(0x16a34a)
+        };
+
+        let status_dot = if any_running {
+            div()
+                .size(px(6.))
+                .rounded_full()
+                .bg(dot_color)
+                .with_animation(
+                    ("tool-pulse", msg_idx * 1000 + start_idx),
+                    Animation::new(Duration::from_millis(1000)).repeat(),
+                    |el, t| {
+                        let a = 0.35 + 0.65 * (0.5 - 0.5 * (t * std::f32::consts::TAU).cos());
+                        el.opacity(a)
+                    },
+                )
+                .into_any_element()
+        } else {
+            div()
+                .size(px(6.))
+                .rounded_full()
+                .bg(dot_color)
+                .opacity(0.85)
+                .into_any_element()
+        };
 
         div()
             .my_0p5()
@@ -1856,40 +2090,53 @@ impl AiPane {
             .gap_1()
             .child(
                 div()
-                    .id(("tool-group", msg_idx * 1000 + start_idx))
                     .flex()
                     .items_center()
-                    .gap_1p5()
-                    .py_0p5()
-                    .cursor_pointer()
-                    .text_xs()
-                    .text_color(gpui_kit::rgb(palette.muted))
-                    .hover(move |s| s.text_color(gpui_kit::rgb(palette.text)))
-                    .on_click(cx.listener(move |pane, _, _, cx| {
-                        if !pane.expanded_tool_groups.remove(&group_key) {
-                            pane.expanded_tool_groups.insert(group_key);
-                        }
-                        cx.notify();
-                    }))
-                    .child(crate::ui::icon(header_icon).w(px(12.)).h(px(12.)))
-                    .child(group_label)
                     .child(
-                        crate::ui::icon(if group_expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .w(px(12.))
-                        .h(px(12.)),
+                        div()
+                            .id(("tool-group", msg_idx * 1000 + start_idx))
+                            .px_2p5()
+                            .py_1()
+                            .rounded(px(8.))
+                            .bg(pill_bg)
+                            .border_1()
+                            .border_color(subtle_border(palette.border))
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .cursor_pointer()
+                            .text_size(typo.sm)
+                            .text_color(gpui_kit::rgb(palette.muted))
+                            .hover(move |s| {
+                                s.bg(pill_hover).text_color(gpui_kit::rgb(palette.text))
+                            })
+                            .on_click(cx.listener(move |pane, _, _, cx| {
+                                if !pane.expanded_tool_groups.remove(&group_key) {
+                                    pane.expanded_tool_groups.insert(group_key);
+                                }
+                                cx.notify();
+                            }))
+                            .child(status_dot)
+                            .child(crate::ui::icon(header_icon).w(px(12.)).h(px(12.)))
+                            .child(div().font_medium().child(group_label))
+                            .child(
+                                crate::ui::icon(if group_expanded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .w(px(12.))
+                                .h(px(12.)),
+                            ),
                     ),
             )
             .when(group_expanded, |col| {
                 col.child(
                     div()
-                        .ml_1p5()
-                        .pl_2p5()
-                        .border_l_1()
-                        .border_color(gpui_kit::rgb(palette.border))
+                        .ml_2p5()
+                        .pl_3()
+                        .border_l_2()
+                        .border_color(subtle_border(palette.border))
                         .flex()
                         .flex_col()
                         .gap_1()
@@ -1908,12 +2155,17 @@ impl AiPane {
                                 .child(
                                     div()
                                         .id(("tool-step", msg_idx * 1000 + part_idx))
+                                        .px_2()
+                                        .py_1()
+                                        .rounded(px(6.))
                                         .flex()
                                         .items_center()
                                         .justify_between()
                                         .gap_2()
-                                        .py_0p5()
-                                        .when(has_detail, |row| row.cursor_pointer())
+                                        .when(has_detail, |row| {
+                                            row.cursor_pointer()
+                                                .hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
+                                        })
                                         .on_click(cx.listener(move |pane, _, _, cx| {
                                             if !has_detail {
                                                 return;
@@ -1933,7 +2185,7 @@ impl AiPane {
                                                 .items_center()
                                                 .gap_1p5()
                                                 .min_w_0()
-                                                .text_xs()
+                                                .text_size(typo.sm)
                                                 .text_color(gpui_kit::rgb(if block.is_error {
                                                     palette.danger
                                                 } else {
@@ -1953,7 +2205,7 @@ impl AiPane {
                                         .when_some(block.duration_ms, |row, ms| {
                                             row.child(
                                                 div()
-                                                    .text_size(px(11.))
+                                                    .text_size(typo.xs)
                                                     .text_color(gpui_kit::rgb(palette.muted))
                                                     .flex_shrink_0()
                                                     .child(format!("{ms}ms")),
@@ -1973,22 +2225,27 @@ impl AiPane {
                                         s.child(
                                             div()
                                                 .id(("tool-output", msg_idx * 1000 + part_idx))
-                                                .p_2()
+                                                .p_2p5()
                                                 .max_h(px(180.))
                                                 .overflow_y_scroll()
-                                                .rounded(px(5.))
+                                                .rounded(px(8.))
                                                 .border_1()
-                                                .border_color(gpui_kit::rgb(palette.border))
+                                                .border_color(subtle_border(palette.border))
                                                 .bg(gpui_kit::rgb(palette.code_background))
                                                 .font_family("Consolas")
-                                                .text_xs()
+                                                .text_size(typo.sm)
                                                 .text_color(gpui_kit::rgb(palette.text))
                                                 .child(block.output.clone()),
                                         )
                                     })
                                 })
                                 .into_any_element()
-                        })),
+                        }))
+                        .with_animation(
+                            ("tool-group-open", msg_idx * 1000 + start_idx),
+                            Animation::new(Duration::from_millis(140)).with_easing(ease_out_quint()),
+                            |el, t| el.opacity(t),
+                        ),
                 )
             })
             .into_any_element()
@@ -2000,6 +2257,7 @@ impl AiPane {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let typo = AiTypography::from_settings(&self.settings);
         let warn_bg = mix_color(palette.surface, palette.accent, 0.08);
         let mut card = div()
             .mx_3()
@@ -2017,7 +2275,7 @@ impl AiPane {
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .text_xs()
+                    .text_size(typo.sm)
                     .font_semibold()
                     .text_color(gpui_kit::rgb(palette.text))
                     .child(crate::ui::icon(IconName::ShieldAlert).w(px(13.)).h(px(13.)))
@@ -2039,7 +2297,7 @@ impl AiPane {
                             .rounded(px(5.))
                             .bg(gpui_kit::rgb(palette.code_background))
                             .font_family("Consolas")
-                            .text_xs()
+                            .text_size(typo.sm)
                             .text_color(gpui_kit::rgb(palette.text))
                             .child(message.clone()),
                     );
@@ -2118,7 +2376,7 @@ impl AiPane {
                     .when(!placeholder.is_empty() && is_multi, |c| {
                         c.child(
                             div()
-                                .text_xs()
+                                .text_size(typo.sm)
                                 .text_color(gpui_kit::rgb(palette.muted))
                                 .child(placeholder.clone()),
                         )
@@ -2158,177 +2416,193 @@ impl AiPane {
         card.into_any_element()
     }
 
-    fn render_sessions_drawer(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_sessions_popover(
+        &self,
+        palette: Palette,
+        ui_font: SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let typo = AiTypography::from_settings(&self.settings);
+        let active_bg = mix_color(palette.surface, palette.accent, if palette.is_dark() { 0.16 } else { 0.08 });
         div()
-            .flex_1()
-            .min_h_0()
+            .id("ai-sessions-popover")
+            .w(px(308.))
+            .max_h(px(360.))
+            .rounded(px(12.))
+            .border_1()
+            .border_color(subtle_border(palette.border))
+            .bg(gpui_kit::rgb(palette.surface))
+            .shadow(popover_shadow(palette.is_dark()))
+            .font_family(ui_font)
+            .p_1p5()
             .flex()
             .flex_col()
-            .child(
+            .overflow_y_scroll()
+            .gap_1()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .when(self.sessions.is_empty(), |list| {
+                list.child(
+                    div()
+                        .px_3()
+                        .py_4()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap_1p5()
+                        .text_size(typo.sm)
+                        .text_color(gpui_kit::rgb(palette.muted))
+                        .child(crate::ui::icon(IconName::Clock).w(px(13.)).h(px(13.)))
+                        .child("暂无历史会话"),
+                )
+            })
+            .children(self.sessions.iter().enumerate().map(|(idx, s)| {
+                let is_active = self.session_file.as_ref() == Some(&s.path)
+                    || self.session_id.as_deref() == Some(s.id.as_str());
+                let is_renaming = self.renaming_session.as_ref() == Some(&s.path);
+                let switch_path = s.path.clone();
+                let rename_path = s.path.clone();
+                let delete_path = s.path.clone();
+                let current_title = s.display_title().to_owned();
                 div()
-                    .px_3()
-                    .py_1p5()
-                    .border_b_1()
-                    .border_color(gpui_kit::rgb(palette.border))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(div().text_xs().font_semibold().child("历史会话"))
-                    .child(
-                        Button::new("ai-sessions-back")
-                            .ghost()
-                            .compact()
-                            .label("返回")
-                            .on_click(cx.listener(|pane, _, _, cx| {
-                                pane.session_drawer_open = false;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .id("ai-sessions-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .p_2()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .when(self.sessions.is_empty(), |list| {
-                        list.child(
-                            div()
-                                .p_4()
-                                .text_xs()
-                                .text_color(gpui_kit::rgb(palette.muted))
-                                .child("暂无历史会话"),
-                        )
+                    .id(("ai-session-row", idx))
+                    .px_2p5()
+                    .py_2()
+                    .rounded(px(8.))
+                    .when(is_active, |row| row.bg(active_bg))
+                    .when(!is_active, |row| {
+                        row.hover(move |st| st.bg(gpui_kit::rgb(palette.hover)))
                     })
-                    .children(self.sessions.iter().enumerate().map(|(idx, s)| {
-                        let is_active = self.session_file.as_ref() == Some(&s.path)
-                            || self.session_id.as_deref() == Some(s.id.as_str());
-                        let is_renaming = self.renaming_session.as_ref() == Some(&s.path);
-                        let switch_path = s.path.clone();
-                        let rename_path = s.path.clone();
-                        let delete_path = s.path.clone();
-                        let current_title = s.display_title().to_owned();
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |pane, _, _, cx| {
+                        if pane.renaming_session.is_none() {
+                            pane.switch_session(&switch_path, cx);
+                        }
+                    }))
+                    .child(
                         div()
-                            .id(("ai-session-row", idx))
-                            .px_2p5()
-                            .py_2()
-                            .rounded(px(6.))
-                            .border_1()
-                            .border_color(gpui_kit::rgb(if is_active {
-                                palette.accent
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(if is_renaming {
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .child(Input::new(&self.rename_input))
+                                    .into_any_element()
                             } else {
-                                palette.border
-                            }))
-                            .when(is_active, |row| row.bg(gpui_kit::rgb(palette.hover)))
-                            .hover(move |st| st.bg(gpui_kit::rgb(palette.hover)))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |pane, _, _, cx| {
-                                if pane.renaming_session.is_none() {
-                                    pane.switch_session(&switch_path, cx);
-                                }
-                            }))
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(
+                                        div()
+                                            .size(px(6.))
+                                            .rounded_full()
+                                            .flex_shrink_0()
+                                            .bg(gpui_kit::rgb(if is_active {
+                                                palette.accent
+                                            } else {
+                                                palette.border
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_size(typo.sm)
+                                            .font_medium()
+                                            .text_color(gpui_kit::rgb(palette.text))
+                                            .text_ellipsis()
+                                            .child(current_title.clone()),
+                                    )
+                                    .into_any_element()
+                            })
                             .child(
                                 div()
                                     .flex()
                                     .items_center()
-                                    .justify_between()
-                                    .gap_2()
-                                    .child(if is_renaming {
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                cx.stop_propagation()
-                                            })
-                                            .child(Input::new(&self.rename_input))
-                                            .into_any_element()
-                                    } else {
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_xs()
-                                            .font_medium()
-                                            .text_ellipsis()
-                                            .child(current_title.clone())
-                                            .into_any_element()
+                                    .gap_0p5()
+                                    .flex_shrink_0()
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
                                     })
                                     .child(
                                         div()
+                                            .id(("ai-sess-ren", idx))
+                                            .size(px(22.))
+                                            .rounded(px(5.))
                                             .flex()
                                             .items_center()
-                                            .gap_1()
-                                            .flex_shrink_0()
-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                cx.stop_propagation()
+                                            .justify_center()
+                                            .text_color(gpui_kit::rgb(palette.muted))
+                                            .hover(move |st| {
+                                                st.bg(gpui_kit::rgb(palette.pressed))
+                                                    .text_color(gpui_kit::rgb(palette.text))
                                             })
                                             .child(
-                                                div()
-                                                    .id(("ai-sess-ren", idx))
-                                                    .size(px(22.))
-                                                    .rounded(px(4.))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .hover(move |st| {
-                                                        st.bg(gpui_kit::rgb(palette.pressed))
-                                                    })
-                                                    .child(
-                                                        crate::ui::icon(IconName::PencilLine)
-                                                            .w(px(12.))
-                                                            .h(px(12.)),
-                                                    )
-                                                    .on_click(cx.listener(move |pane, _, window, cx| {
-                                                        pane.start_rename(
-                                                            rename_path.clone(),
-                                                            current_title.clone(),
-                                                            window,
-                                                            cx,
-                                                        );
-                                                        cx.stop_propagation();
-                                                    })),
+                                                crate::ui::icon(IconName::PencilLine)
+                                                    .w(px(12.))
+                                                    .h(px(12.)),
                                             )
+                                            .on_click(cx.listener(move |pane, _, window, cx| {
+                                                pane.start_rename(
+                                                    rename_path.clone(),
+                                                    current_title.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                                cx.stop_propagation();
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("ai-sess-del", idx))
+                                            .size(px(22.))
+                                            .rounded(px(5.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .text_color(gpui_kit::rgb(palette.muted))
+                                            .hover(move |st| {
+                                                st.bg(gpui_kit::rgb(palette.pressed))
+                                                    .text_color(gpui_kit::rgb(palette.danger))
+                                            })
                                             .child(
-                                                div()
-                                                    .id(("ai-sess-del", idx))
-                                                    .size(px(22.))
-                                                    .rounded(px(4.))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .hover(move |st| {
-                                                        st.bg(gpui_kit::rgb(palette.pressed))
-                                                    })
-                                                    .child(
-                                                        crate::ui::icon(IconName::Trash)
-                                                            .w(px(12.))
-                                                            .h(px(12.)),
-                                                    )
-                                                    .on_click(cx.listener(move |pane, _, _, cx| {
-                                                        pane.delete_session(
-                                                            delete_path.clone(),
-                                                            cx,
-                                                        );
-                                                        cx.stop_propagation();
-                                                    })),
-                                            ),
+                                                crate::ui::icon(IconName::Trash)
+                                                    .w(px(12.))
+                                                    .h(px(12.)),
+                                            )
+                                            .on_click(cx.listener(move |pane, _, _, cx| {
+                                                pane.delete_session(delete_path.clone(), cx);
+                                                cx.stop_propagation();
+                                            })),
                                     ),
-                            )
-                            .child(
-                                div()
-                                    .mt_0p5()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .text_size(px(11.))
-                                    .text_color(gpui_kit::rgb(palette.muted))
-                                    .child(format!("{} 条", s.message_count))
-                                    .child(s.timestamp_label.clone()),
-                            )
-                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .mt_0p5()
+                            .pl_3()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .text_size(typo.xs)
+                            .text_color(gpui_kit::rgb(palette.muted))
+                            .child(format!("{} 条", s.message_count))
+                            .child(s.timestamp_label.clone()),
+                    )
+            }))
+            .with_animation(
+                ("ai-history-pop", self.history_anim_gen),
+                Animation::new(Duration::from_millis(150)).with_easing(ease_out_quint()),
+                |el, t| el.opacity(t).mt(px((1. - t) * -6.)),
             )
             .into_any_element()
     }
@@ -2421,21 +2695,30 @@ impl AiPane {
         &self,
         items: Vec<SlashItem>,
         palette: Palette,
+        ui_font: SharedString,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let count = items.len();
         let active_idx = self.slash_index.min(count.saturating_sub(1));
+        let typo = AiTypography::from_settings(&self.settings);
+        let sel_bg = mix_color(
+            palette.hover,
+            palette.accent,
+            if palette.is_dark() { 0.14 } else { 0.08 },
+        );
         div()
             .id("ai-slash-popover")
+            .track_scroll(&self.slash_scroll)
             .w_full()
-            .max_h(px(260.))
+            .max_h(px(268.))
             .overflow_y_scroll()
-            .rounded(px(10.))
+            .rounded(px(12.))
             .border_1()
-            .border_color(gpui_kit::rgb(palette.border))
+            .border_color(subtle_border(palette.border))
             .bg(gpui_kit::rgb(palette.surface))
-            .shadow_lg()
-            .p_1()
+            .shadow(popover_shadow(palette.is_dark()))
+            .font_family(ui_font)
+            .p_1p5()
             .flex()
             .flex_col()
             .gap_0p5()
@@ -2444,18 +2727,29 @@ impl AiPane {
             .children(items.into_iter().enumerate().map(|(idx, item)| {
                 let selected = idx == active_idx;
                 let item_click = item.clone();
+                let icon_box_bg = if selected {
+                    mix_color(
+                        palette.surface,
+                        palette.accent,
+                        if palette.is_dark() { 0.22 } else { 0.12 },
+                    )
+                } else {
+                    gpui_kit::rgb(palette.background)
+                };
                 div()
                     .id(("ai-slash-item", idx))
-                    .px_2p5()
+                    .px_2()
                     .py_1p5()
-                    .rounded(px(6.))
+                    .rounded(px(8.))
                     .cursor_pointer()
                     .flex()
                     .items_center()
                     .justify_between()
                     .gap_2()
-                    .when(selected, |row| row.bg(gpui_kit::rgb(palette.hover)))
-                    .hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
+                    .when(selected, |row| row.bg(sel_bg))
+                    .when(!selected, |row| {
+                        row.hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
+                    })
                     .on_click(cx.listener(move |pane, _, window, cx| {
                         pane.execute_slash_item(item_click.clone(), window, cx);
                     }))
@@ -2466,14 +2760,28 @@ impl AiPane {
                             .gap_2()
                             .min_w_0()
                             .child(
-                                crate::ui::icon(item.icon)
-                                    .w(px(13.))
-                                    .h(px(13.))
-                                    .text_color(gpui_kit::rgb(palette.muted)),
+                                div()
+                                    .size(px(22.))
+                                    .rounded(px(6.))
+                                    .flex_shrink_0()
+                                    .bg(icon_box_bg)
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        crate::ui::icon(item.icon)
+                                            .w(px(12.))
+                                            .h(px(12.))
+                                            .text_color(gpui_kit::rgb(if selected {
+                                                palette.accent
+                                            } else {
+                                                palette.muted
+                                            })),
+                                    ),
                             )
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_size(typo.sm)
                                     .font_medium()
                                     .text_color(gpui_kit::rgb(palette.text))
                                     .flex_shrink_0()
@@ -2481,133 +2789,408 @@ impl AiPane {
                             )
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_size(typo.sm)
                                     .text_color(gpui_kit::rgb(palette.muted))
                                     .text_ellipsis()
                                     .child(item.subtitle),
                             ),
                     )
             }))
+            .with_animation(
+                ("ai-slash-pop", self.slash_anim_gen),
+                Animation::new(Duration::from_millis(145)).with_easing(ease_out_quint()),
+                |el, t| el.opacity(t).mb(px((1. - t) * -6.)),
+            )
             .into_any_element()
     }
 
-    fn render_plus_popover(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let reattach = if self.effective_attached_file().is_none() {
-            self.active_file.clone()
-        } else {
-            None
-        };
-        let skills: Vec<&PiCommandInfo> = self
-            .commands
+    fn render_model_popover(
+        &self,
+        palette: Palette,
+        ui_font: SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let typo = AiTypography::from_settings(&self.settings);
+        let search_q = self
+            .model_search_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_ascii_lowercase();
+        let current_id = self.current_model.as_ref().map(|m| m.id.as_str());
+        let supports_thinking = self.current_model.as_ref().is_none_or(|m| m.reasoning);
+        let cur_model_short = self
+            .current_model
+            .as_ref()
+            .map(|m| short_model_name(&m.name))
+            .unwrap_or_else(|| "模型".to_owned());
+
+        let mut models: Vec<(bool, ModelInfo)> = self
+            .available_models
             .iter()
-            .filter(|c| c.source == "skill")
+            .filter(|m| {
+                search_q.is_empty()
+                    || m.name.to_ascii_lowercase().contains(&search_q)
+                    || m.id.to_ascii_lowercase().contains(&search_q)
+                    || m.provider.to_ascii_lowercase().contains(&search_q)
+            })
+            .cloned()
+            .map(|m| {
+                let key = format!("{}/{}", m.provider, m.id);
+                let fav = self.favorite_models.contains(&key);
+                (fav, m)
+            })
             .collect();
-        let has_skills = !skills.is_empty();
+        models.sort_by_key(|(fav, _)| !*fav);
+
+        let sel_bg = mix_color(
+            palette.hover,
+            palette.accent,
+            if palette.is_dark() { 0.16 } else { 0.09 },
+        );
 
         div()
-            .id("ai-plus-popover")
-            .w(px(230.))
-            .max_h(px(260.))
-            .overflow_y_scroll()
-            .rounded(px(10.))
+            .id("ai-model-popover")
+            .w_full()
+            .h(px(292.))
+            .rounded(px(12.))
             .border_1()
-            .border_color(gpui_kit::rgb(palette.border))
+            .border_color(subtle_border(palette.border))
             .bg(gpui_kit::rgb(palette.surface))
-            .shadow_lg()
-            .p_1()
+            .shadow(popover_shadow(palette.is_dark()))
+            .font_family(ui_font.clone())
+            .overflow_hidden()
             .flex()
-            .flex_col()
-            .gap_0p5()
             .occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .when_some(reattach, |pop, file| {
-                pop.child(
-                    div()
-                        .id("plus-reattach-file")
-                        .px_2p5()
-                        .py_1p5()
-                        .rounded(px(6.))
-                        .cursor_pointer()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .text_xs()
-                        .hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
-                        .on_click(cx.listener(|pane, _, _, cx| {
-                            pane.detached_for_file = None;
-                            pane.plus_menu_open = false;
-                            cx.notify();
-                        }))
-                        .child(crate::ui::icon(IconName::FileText).w(px(13.)).h(px(13.)))
-                        .child(format!("附加 @{}", file.display)),
-                )
-            })
-            .when(has_skills, |pop| {
-                pop.child(
-                    div()
-                        .px_2p5()
-                        .py_1()
-                        .text_size(px(11.))
-                        .text_color(gpui_kit::rgb(palette.muted))
-                        .child("Skills"),
-                )
-                .children(skills.into_iter().enumerate().map(|(idx, sk)| {
-                    let skill_name = sk.name.clone();
-                    let label = sk.name.strip_prefix("skill:").unwrap_or(&sk.name).to_owned();
-                    let mounted = self.mounted_skills.contains(&skill_name);
-                    div()
-                        .id(("plus-skill", idx))
-                        .px_2p5()
-                        .py_1p5()
-                        .rounded(px(6.))
-                        .cursor_pointer()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .text_xs()
-                        .hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
-                        .on_click(cx.listener(move |pane, _, _, cx| {
-                            if !pane.mounted_skills.contains(&skill_name) {
-                                pane.mounted_skills.push(skill_name.clone());
-                            }
-                            pane.plus_menu_open = false;
-                            cx.notify();
-                        }))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .min_w_0()
-                                .child(
-                                    crate::ui::icon(IconName::Sparkles)
-                                        .w(px(13.))
-                                        .h(px(13.))
-                                        .text_color(gpui_kit::rgb(palette.muted)),
-                                )
-                                .child(div().text_ellipsis().child(label)),
-                        )
-                        .when(mounted, |row| {
-                            row.child(
-                                crate::ui::icon(IconName::Check)
-                                    .w(px(12.))
-                                    .h(px(12.))
-                                    .text_color(gpui_kit::rgb(palette.accent)),
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .border_r_1()
+                    .border_color(subtle_border(palette.border))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .px_2p5()
+                            .py_1p5()
+                            .border_b_1()
+                            .border_color(subtle_border(palette.border))
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .flex_shrink_0()
+                            .child(
+                                crate::ui::icon(IconName::Search)
+                                    .w(px(13.))
+                                    .h(px(13.))
+                                    .text_color(gpui_kit::rgb(palette.muted)),
                             )
-                        })
-                }))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(typo.sm)
+                                    .child(
+                                        Input::new(&self.model_search_input)
+                                            .appearance(false)
+                                            .bordered(false)
+                                            .font_family(ui_font.clone())
+                                            .text_size(typo.sm),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("ai-model-list")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .p_1p5()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .when(models.is_empty(), |list| {
+                                list.child(
+                                    div()
+                                        .px_2p5()
+                                        .py_4()
+                                        .text_size(typo.sm)
+                                        .text_color(gpui_kit::rgb(palette.muted))
+                                        .child(if self.available_models.is_empty() {
+                                            "暂无可用模型"
+                                        } else {
+                                            "无匹配模型"
+                                        }),
+                                )
+                            })
+                            .children(models.into_iter().enumerate().map(|(idx, (fav, m))| {
+                                let selected = current_id == Some(m.id.as_str());
+                                let provider = m.provider.clone();
+                                let model_id = m.id.clone();
+                                let fav_key = format!("{}/{}", m.provider, m.id);
+                                div()
+                                    .id(("ai-model-row", idx))
+                                    .px_2()
+                                    .py_1p5()
+                                    .rounded(px(7.))
+                                    .cursor_pointer()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_1p5()
+                                    .when(selected, |r| r.bg(sel_bg))
+                                    .when(!selected, |r| {
+                                        r.hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
+                                    })
+                                    .on_click(cx.listener(move |pane, _, _, cx| {
+                                        if let Some(client) = &pane.client {
+                                            let _ = client.set_model(&provider, &model_id);
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .child(
+                                                crate::ui::icon(IconName::Sparkles)
+                                                    .w(px(12.))
+                                                    .h(px(12.))
+                                                    .flex_shrink_0()
+                                                    .text_color(gpui_kit::rgb(if selected {
+                                                        palette.accent
+                                                    } else {
+                                                        palette.muted
+                                                    })),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(typo.sm)
+                                                    .font_medium()
+                                                    .text_color(gpui_kit::rgb(palette.text))
+                                                    .text_ellipsis()
+                                                    .child(m.name),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .flex_shrink_0()
+                                            .when(selected, |r| {
+                                                r.child(
+                                                    crate::ui::icon(IconName::Check)
+                                                        .w(px(12.))
+                                                        .h(px(12.))
+                                                        .text_color(gpui_kit::rgb(palette.accent)),
+                                                )
+                                            })
+                                            .child(
+                                                div()
+                                                    .id(("ai-model-fav", idx))
+                                                    .size(px(20.))
+                                                    .rounded(px(5.))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .text_color(gpui_kit::rgb(if fav {
+                                                        palette.accent
+                                                    } else {
+                                                        palette.muted
+                                                    }))
+                                                    .opacity(if fav { 1.0 } else { 0.45 })
+                                                    .hover(move |s| {
+                                                        s.opacity(1.0)
+                                                            .bg(gpui_kit::rgb(palette.pressed))
+                                                    })
+                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                        cx.stop_propagation();
+                                                    })
+                                                    .on_click(cx.listener(move |pane, _, _, cx| {
+                                                        pane.toggle_favorite_model(&fav_key, cx);
+                                                        cx.stop_propagation();
+                                                    }))
+                                                    .child(
+                                                        crate::ui::icon(IconName::Star)
+                                                            .w(px(11.))
+                                                            .h(px(11.)),
+                                                    ),
+                                            ),
+                                    )
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(136.))
+                    .flex_shrink_0()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .px_2p5()
+                            .py_1p5()
+                            .border_b_1()
+                            .border_color(subtle_border(palette.border))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(typo.xs)
+                                    .font_semibold()
+                                    .text_color(gpui_kit::rgb(palette.muted))
+                                    .child("Thinking Level"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(typo.xs)
+                                    .text_color(gpui_kit::rgb(palette.muted))
+                                    .text_ellipsis()
+                                    .child(cur_model_short),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("ai-think-list")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .p_1p5()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .when(!supports_thinking, |col| {
+                                col.child(
+                                    div()
+                                        .px_2()
+                                        .py_2()
+                                        .text_size(typo.xs)
+                                        .text_color(gpui_kit::rgb(palette.muted))
+                                        .child("当前模型不支持调节"),
+                                )
+                            })
+                            .when(supports_thinking, |col| {
+                                col.children(self.thinking_levels.iter().enumerate().map(
+                                    |(idx, lvl)| {
+                                        let checked = self.current_thinking == *lvl;
+                                        let lvl_set = lvl.clone();
+                                        div()
+                                            .id(("ai-think-row", idx))
+                                            .px_2()
+                                            .py_1p5()
+                                            .rounded(px(7.))
+                                            .cursor_pointer()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap_1p5()
+                                            .when(checked, |r| r.bg(sel_bg))
+                                            .when(!checked, |r| {
+                                                r.hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
+                                            })
+                                            .on_click(cx.listener(move |pane, _, _, cx| {
+                                                pane.current_thinking = lvl_set.clone();
+                                                if let Some(client) = &pane.client {
+                                                    let _ = client.set_thinking_level(&lvl_set);
+                                                }
+                                                pane.model_popover_open = false;
+                                                cx.notify();
+                                            }))
+                                            .child(
+                                                div()
+                                                    .text_size(typo.sm)
+                                                    .font_medium()
+                                                    .text_color(gpui_kit::rgb(palette.text))
+                                                    .child(thinking_short_label(lvl)),
+                                            )
+                                            .when(checked, |r| {
+                                                r.child(
+                                                    crate::ui::icon(IconName::Check)
+                                                        .w(px(12.))
+                                                        .h(px(12.))
+                                                        .text_color(gpui_kit::rgb(palette.accent)),
+                                                )
+                                            })
+                                    },
+                                ))
+                            }),
+                    ),
+            )
+            .with_animation(
+                ("ai-model-pop", self.model_popover_anim_gen),
+                Animation::new(Duration::from_millis(145)).with_easing(ease_out_quint()),
+                |el, t| el.opacity(t).mb(px((1. - t) * -6.)),
+            )
+            .into_any_element()
+    }
+
+    fn render_toast_popover(
+        &self,
+        msg: String,
+        is_err: bool,
+        palette: Palette,
+        ui_font: SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let typo = AiTypography::from_settings(&self.settings);
+        div()
+            .id("ai-toast-popover")
+            .w_full()
+            .px_3()
+            .py_2()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(if is_err {
+                gpui_kit::rgb(palette.danger)
+            } else {
+                subtle_border(palette.border)
             })
-            .when(!has_skills && self.effective_attached_file().is_some(), |pop| {
-                pop.child(
-                    div()
-                        .px_2p5()
-                        .py_2()
-                        .text_xs()
-                        .text_color(gpui_kit::rgb(palette.muted))
-                        .child("暂无可启用的 Skill"),
-                )
-            })
+            .bg(gpui_kit::rgb(palette.surface))
+            .shadow(popover_shadow(palette.is_dark()))
+            .font_family(ui_font)
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .text_size(typo.sm)
+            .text_color(gpui_kit::rgb(if is_err {
+                palette.danger
+            } else {
+                palette.text
+            }))
+            .child(div().min_w_0().text_ellipsis().child(msg))
+            .child(
+                div()
+                    .id("ai-toast-close")
+                    .size(px(18.))
+                    .rounded(px(4.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .text_color(gpui_kit::rgb(palette.muted))
+                    .hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
+                    .on_click(cx.listener(|pane, _, _, cx| {
+                        pane.toast = None;
+                        cx.notify();
+                    }))
+                    .child(crate::ui::icon(IconName::Close).w(px(11.)).h(px(11.))),
+            )
+            .with_animation(
+                ("ai-toast-pop", self.toast_anim_gen),
+                Animation::new(Duration::from_millis(140)).with_easing(ease_out_quint()),
+                |el, t| el.opacity(t).mb(px((1. - t) * -6.)),
+            )
             .into_any_element()
     }
 }
@@ -2635,6 +3218,12 @@ impl Render for AiPane {
         }
 
         let palette = active_palette();
+        let typo = AiTypography::from_settings(&self.settings);
+        let ui_font: SharedString = if self.settings.interface_font.is_empty() {
+            "Segoe UI".into()
+        } else {
+            self.settings.interface_font.clone().into()
+        };
         let workspace_title = self
             .cwd
             .file_name()
@@ -2655,82 +3244,32 @@ impl Render for AiPane {
                 }
             });
 
-        let pane_entity = cx.entity();
-        let current_model_id = self.current_model.as_ref().map(|m| m.id.clone());
         let model_label = self
             .current_model
             .as_ref()
             .map(|m| short_model_name(&m.name))
             .unwrap_or_else(|| "模型".to_owned());
-        let models_for_menu = self.available_models.clone();
-
-        let model_btn = Button::new("ai-model-select")
-            .ghost()
-            .compact()
-            .label(model_label)
-            .tooltip("切换模型")
-            .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                let mut menu = menu.max_h(px(300.)).scrollable(true);
-                if models_for_menu.is_empty() {
-                    return menu.item(PopupMenuItem::label("暂无可用模型"));
-                }
-                for m in models_for_menu.iter().cloned() {
-                    let pane = pane_entity.clone();
-                    let checked = current_model_id.as_deref() == Some(m.id.as_str());
-                    let provider = m.provider.clone();
-                    let model_id = m.id.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(m.name.clone())
-                            .checked(checked)
-                            .on_click(move |_, _, cx| {
-                                pane.update(cx, |pane, cx| {
-                                    if let Some(client) = &pane.client {
-                                        let _ = client.set_model(&provider, &model_id);
-                                    }
-                                    cx.notify();
-                                });
-                            }),
-                    );
-                }
-                menu
-            });
-
         let supports_thinking = self.current_model.as_ref().is_none_or(|m| m.reasoning);
-        let pane_think = cx.entity();
-        let levels = self.thinking_levels.clone();
-        let cur_think = self.current_thinking.clone();
-        let think_btn = Button::new("ai-thinking-select")
-            .ghost()
-            .compact()
-            .label(thinking_short_label(&self.current_thinking))
-            .tooltip("推理深度")
-            .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                let mut menu = menu;
-                for lvl in levels.iter().cloned() {
-                    let pane = pane_think.clone();
-                    let checked = cur_think == lvl;
-                    let lvl_set = lvl.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(thinking_short_label(&lvl))
-                            .checked(checked)
-                            .on_click(move |_, _, cx| {
-                                pane.update(cx, |pane, cx| {
-                                    pane.current_thinking = lvl_set.clone();
-                                    if let Some(client) = &pane.client {
-                                        let _ = client.set_thinking_level(&lvl_set);
-                                    }
-                                    cx.notify();
-                                });
-                            }),
-                    );
-                }
-                menu
-            });
+        let model_effort_label = if supports_thinking {
+            format!(
+                "{model_label} · {}",
+                thinking_short_label(&self.current_thinking)
+            )
+        } else {
+            model_label
+        };
+
+        let subtle_btn = |cx: &App| {
+            ButtonCustomVariant::new(cx)
+                .foreground(gpui_kit::rgb(palette.muted).into())
+                .hover(gpui_kit::rgb(palette.hover).into())
+                .active(gpui_kit::rgb(palette.pressed).into())
+        };
 
         let attached_chip = self.effective_attached_file().cloned();
         let has_chips = attached_chip.is_some()
             || self.quoted_selection.is_some()
-            || !self.mounted_skills.is_empty();
+            || !self.pasted_images.is_empty();
         let slash_query = self.slash_query(cx);
         let slash_items = slash_query
             .as_deref()
@@ -2738,35 +3277,133 @@ impl Render for AiPane {
             .unwrap_or_default();
         let slash_items_for_keys = slash_items.clone();
         let has_slash_items = !slash_items.is_empty();
+        let can_send = !self.input.read(cx).value().trim().is_empty()
+            || self.quoted_selection.is_some()
+            || !self.pasted_images.is_empty();
+        let input_focused = self.input.read(cx).focus_handle(cx).is_focused(window);
+        let pane_paste = cx.entity();
         let md_style = self.md_style(cx);
-        let user_bubble_bg = gpui_kit::rgb(palette.background);
-        let quote_bg = mix_color(palette.surface, palette.accent, 0.08);
+
+        let user_bubble_bg = mix_color(
+            palette.surface,
+            palette.accent,
+            if palette.is_dark() { 0.16 } else { 0.08 },
+        );
+        let user_bubble_border = mix_color(
+            palette.border,
+            palette.accent,
+            if palette.is_dark() { 0.28 } else { 0.18 },
+        );
+        let quote_bg = mix_color(
+            palette.surface,
+            palette.accent,
+            if palette.is_dark() { 0.15 } else { 0.08 },
+        );
+        let skill_token_bg = mix_color(
+            palette.surface,
+            palette.accent,
+            if palette.is_dark() { 0.22 } else { 0.11 },
+        );
+        let skill_token_border = mix_color(
+            palette.border,
+            palette.accent,
+            if palette.is_dark() { 0.45 } else { 0.35 },
+        );
+        let drag_tint = mix_color(
+            palette.background,
+            palette.accent,
+            if palette.is_dark() { 0.12 } else { 0.06 },
+        );
+        let composer_border = if input_focused {
+            mix_color(
+                palette.border,
+                palette.accent,
+                if palette.is_dark() { 0.65 } else { 0.55 },
+            )
+        } else {
+            subtle_border(palette.border)
+        };
+        let composer_shadow = if input_focused {
+            vec![
+                BoxShadow::new(
+                    px(0.),
+                    px(6.),
+                    hsla(0., 0., 0., if palette.is_dark() { 0.38 } else { 0.08 }),
+                )
+                .blur_radius(px(18.)),
+                BoxShadow::new(px(0.), px(0.), gpui_kit::rgb(palette.accent).into())
+                    .blur_radius(px(0.))
+                    .spread_radius(px(0.5)),
+            ]
+        } else {
+            card_shadow(palette.is_dark())
+        };
 
         div()
             .id("folio-ai-pane")
+            .relative()
             .size_full()
             .flex()
             .flex_col()
             .min_w_0()
             .min_h_0()
-            .bg(gpui_kit::rgb(palette.surface))
+            .bg(gpui_kit::rgb(palette.background))
             .text_color(gpui_kit::rgb(palette.text))
+            .font_family(ui_font.clone())
+            .text_size(typo.body)
+            .border_1()
+            .border_color(gpui_kit::transparent_black())
+            .drag_over::<DraggedPaths>(move |style, _, _, _| {
+                style
+                    .bg(drag_tint)
+                    .border_color(gpui_kit::rgb(palette.accent))
+            })
+            .drag_over::<DraggedFolder>(move |style, _, _, _| {
+                style
+                    .bg(drag_tint)
+                    .border_color(gpui_kit::rgb(palette.accent))
+            })
+            .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                style
+                    .bg(drag_tint)
+                    .border_color(gpui_kit::rgb(palette.accent))
+            })
+            .on_drop(cx.listener(|pane, dragged: &DraggedPaths, window, cx| {
+                pane.insert_path_tokens(&dragged.0, window, cx);
+            }))
+            .on_drop(cx.listener(|pane, dragged: &DraggedFolder, window, cx| {
+                let full = pane.cwd.join(&dragged.0);
+                pane.insert_path_tokens(&[full], window, cx);
+            }))
+            .on_drop(cx.listener(|pane, external: &ExternalPaths, window, cx| {
+                pane.insert_path_tokens(external.paths(), window, cx);
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|pane, _, _, cx| {
-                    if pane.plus_menu_open {
-                        pane.plus_menu_open = false;
+                    let mut changed = false;
+                    if pane.session_drawer_open {
+                        pane.session_drawer_open = false;
+                        pane.renaming_session = None;
+                        changed = true;
+                    }
+                    if pane.model_popover_open {
+                        pane.model_popover_open = false;
+                        changed = true;
+                    }
+                    if changed {
                         cx.notify();
                     }
                 }),
             )
             .child(
                 div()
-                    .h(px(34.))
-                    .px_2()
+                    .h(px(36.))
+                    .px_2p5()
                     .flex_shrink_0()
+                    .bg(gpui_kit::rgb(palette.surface))
                     .border_b_1()
-                    .border_color(gpui_kit::rgb(palette.border))
+                    .border_color(subtle_border(palette.border))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -2779,14 +3416,21 @@ impl Render for AiPane {
                             .gap_1p5()
                             .px_2()
                             .h(px(26.))
-                            .rounded(px(5.))
+                            .rounded(px(7.))
                             .cursor_pointer()
                             .min_w_0()
+                            .when(self.session_drawer_open, |el| {
+                                el.bg(gpui_kit::rgb(palette.hover))
+                            })
                             .hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(|pane, _, _, cx| {
                                 pane.session_drawer_open = !pane.session_drawer_open;
                                 if pane.session_drawer_open {
+                                    pane.history_anim_gen = pane.history_anim_gen.wrapping_add(1);
                                     pane.refresh_sessions();
+                                } else {
+                                    pane.renaming_session = None;
                                 }
                                 cx.notify();
                             }))
@@ -2794,20 +3438,28 @@ impl Render for AiPane {
                                 crate::ui::icon(IconName::Clock)
                                     .w(px(13.))
                                     .h(px(13.))
-                                    .text_color(gpui_kit::rgb(palette.muted)),
+                                    .text_color(gpui_kit::rgb(if self.session_drawer_open {
+                                        palette.accent
+                                    } else {
+                                        palette.muted
+                                    })),
                             )
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_size(typo.sm)
                                     .font_medium()
                                     .text_ellipsis()
                                     .child(session_label),
                             )
                             .child(
-                                crate::ui::icon(IconName::ChevronDown)
-                                    .w(px(12.))
-                                    .h(px(12.))
-                                    .text_color(gpui_kit::rgb(palette.muted)),
+                                crate::ui::icon(if self.session_drawer_open {
+                                    IconName::ChevronUp
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .w(px(12.))
+                                .h(px(12.))
+                                .text_color(gpui_kit::rgb(palette.muted)),
                             ),
                     )
                     .child(
@@ -2818,7 +3470,7 @@ impl Render for AiPane {
                             .flex_shrink_0()
                             .child(
                                 Button::new("ai-new-session")
-                                    .ghost()
+                                    .custom(subtle_btn(cx))
                                     .compact()
                                     .w(px(26.))
                                     .h(px(26.))
@@ -2830,7 +3482,7 @@ impl Render for AiPane {
                             )
                             .child(
                                 Button::new("ai-maximize")
-                                    .ghost()
+                                    .custom(subtle_btn(cx))
                                     .compact()
                                     .w(px(26.))
                                     .h(px(26.))
@@ -2842,7 +3494,7 @@ impl Render for AiPane {
                             )
                             .child(
                                 Button::new("ai-hide")
-                                    .ghost()
+                                    .custom(subtle_btn(cx))
                                     .compact()
                                     .w(px(26.))
                                     .h(px(26.))
@@ -2854,318 +3506,312 @@ impl Render for AiPane {
                             ),
                     ),
             )
-            .when_some(self.toast.clone(), |root, (msg, is_err)| {
+            .when(self.session_drawer_open, |root| {
                 root.child(
-                    div()
-                        .mx_3()
-                        .mt_1p5()
-                        .px_2p5()
-                        .py_1()
-                        .rounded(px(6.))
-                        .border_1()
-                        .border_color(gpui_kit::rgb(if is_err {
-                            palette.danger
-                        } else {
-                            palette.border
-                        }))
-                        .bg(gpui_kit::rgb(palette.background))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .text_xs()
-                        .text_color(gpui_kit::rgb(if is_err {
-                            palette.danger
-                        } else {
-                            palette.muted
-                        }))
-                        .child(div().min_w_0().text_ellipsis().child(msg))
-                        .child(
-                            div()
-                                .id("ai-toast-close")
-                                .cursor_pointer()
-                                .on_click(cx.listener(|pane, _, _, cx| {
-                                    pane.toast = None;
-                                    cx.notify();
-                                }))
-                                .child(crate::ui::icon(IconName::Close).w(px(11.)).h(px(11.))),
-                        ),
+                    deferred(
+                        div()
+                            .absolute()
+                            .top(px(40.))
+                            .left_2()
+                            .child(self.render_sessions_popover(
+                                palette,
+                                ui_font.clone(),
+                                cx,
+                            )),
+                    )
+                    .with_priority(4),
                 )
             })
-            .when(self.mcp_status_open, |root| {
-                root.child(
-                    div()
-                        .mx_3()
-                        .mt_1p5()
-                        .p_2p5()
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(gpui_kit::rgb(palette.border))
-                        .bg(gpui_kit::rgb(palette.background))
-                        .flex()
-                        .flex_col()
-                        .gap_1p5()
-                        .child(
+            .child(
+                div()
+                    .id("ai-message-stream")
+                    .track_scroll(&self.scroll)
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_3p5()
+                    .py_3p5()
+                    .flex()
+                    .flex_col()
+                    .gap_3p5()
+                    .when_some(self.startup_error.clone(), |stream, err| {
+                        stream.child(
                             div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_semibold()
-                                        .child("MCP 服务器状态"),
-                                )
-                                .child(
-                                    div()
-                                        .id("ai-mcp-close")
-                                        .cursor_pointer()
-                                        .text_color(gpui_kit::rgb(palette.muted))
-                                        .on_click(cx.listener(|pane, _, _, cx| {
-                                            pane.mcp_status_open = false;
-                                            cx.notify();
-                                        }))
-                                        .child(
-                                            crate::ui::icon(IconName::Close)
-                                                .w(px(12.))
-                                                .h(px(12.)),
-                                        ),
-                                ),
-                        )
-                        .when(self.mcp_servers.is_empty(), |box_| {
-                            box_.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(gpui_kit::rgb(palette.muted))
-                                    .child("未在 mcp.json 中发现 MCP 服务器配置"),
-                            )
-                        })
-                        .children(self.mcp_servers.iter().map(|srv| {
-                            div()
+                                .p_2p5()
+                                .rounded(px(10.))
+                                .bg(gpui_kit::rgb(palette.surface))
+                                .border_1()
+                                .border_color(gpui_kit::rgb(palette.danger))
+                                .shadow(card_shadow(palette.is_dark()))
+                                .text_size(typo.sm)
+                                .text_color(gpui_kit::rgb(palette.danger))
                                 .flex()
                                 .items_center()
                                 .justify_between()
                                 .gap_2()
-                                .text_xs()
+                                .child(err)
                                 .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1p5()
-                                        .child(
-                                            div()
-                                                .w(px(6.))
-                                                .h(px(6.))
-                                                .rounded_full()
-                                                .bg(if srv.enabled {
-                                                    theme_color(0x16a34a)
-                                                } else {
-                                                    gpui_kit::rgb(palette.muted)
-                                                }),
-                                        )
-                                        .child(srv.name.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_color(gpui_kit::rgb(palette.muted))
-                                        .child(srv.transport.clone()),
-                                )
-                        })),
-                )
-            })
-            .when(self.session_drawer_open, |root| {
-                root.child(self.render_sessions_drawer(palette, cx))
-            })
-            .when(!self.session_drawer_open, |root| {
-                root.child(
-                    div()
-                        .id("ai-message-stream")
-                        .track_scroll(&self.scroll)
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .px_3()
-                        .py_3()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .when_some(self.startup_error.clone(), |stream, err| {
+                                    Button::new("ai-retry-start")
+                                        .ghost()
+                                        .compact()
+                                        .label("重试")
+                                        .on_click(cx.listener(|pane, _, _, cx| {
+                                            pane.start_rpc(cx);
+                                        })),
+                                ),
+                        )
+                    })
+                    .when(
+                        self.messages.is_empty() && self.startup_error.is_none(),
+                        |stream| {
+                            let badge_bg = mix_color(
+                                palette.surface,
+                                palette.accent,
+                                if palette.is_dark() { 0.16 } else { 0.08 },
+                            );
+                            let badge_border = mix_color(
+                                palette.border,
+                                palette.accent,
+                                if palette.is_dark() { 0.35 } else { 0.22 },
+                            );
                             stream.child(
                                 div()
-                                    .p_2p5()
-                                    .rounded(px(6.))
-                                    .border_1()
-                                    .border_color(gpui_kit::rgb(palette.danger))
-                                    .text_xs()
-                                    .text_color(gpui_kit::rgb(palette.danger))
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_2()
-                                    .child(err)
-                                    .child(
-                                        Button::new("ai-retry-start")
-                                            .ghost()
-                                            .compact()
-                                            .label("重试")
-                                            .on_click(cx.listener(|pane, _, _, cx| {
-                                                pane.start_rpc(cx);
-                                            })),
-                                    ),
-                            )
-                        })
-                        .when(
-                            self.messages.is_empty() && self.startup_error.is_none(),
-                            |stream| {
-                                stream.child(
-                                    div()
-                                        .flex_1()
-                                        .min_h(px(220.))
-                                        .flex()
-                                        .flex_col()
-                                        .items_center()
-                                        .justify_center()
-                                        .gap_2()
-                                        .child(
-                                            crate::ui::icon(IconName::Sparkles)
-                                                .w(px(22.))
-                                                .h(px(22.))
-                                                .text_color(gpui_kit::rgb(palette.muted)),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_base()
-                                                .font_medium()
-                                                .text_color(gpui_kit::rgb(palette.text))
-                                                .child(workspace_title.clone()),
-                                        ),
-                                )
-                            },
-                        )
-                        .children(self.messages.iter().enumerate().map(|(msg_idx, msg)| {
-                            match msg {
-                                ChatMessage::User {
-                                    display_text,
-                                    attached_file,
-                                    mounted_skills,
-                                    quote,
-                                } => div()
-                                    .px_3()
-                                    .py_2()
-                                    .rounded(px(10.))
-                                    .bg(user_bubble_bg)
-                                    .border_1()
-                                    .border_color(gpui_kit::rgb(palette.border))
+                                    .flex_1()
+                                    .min_h(px(240.))
                                     .flex()
                                     .flex_col()
-                                    .gap_1()
-                                    .when(
-                                        attached_file.is_some() || !mounted_skills.is_empty(),
-                                        |b| {
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_2p5()
+                                    .child(
+                                        div()
+                                            .size(px(42.))
+                                            .rounded(px(13.))
+                                            .bg(badge_bg)
+                                            .border_1()
+                                            .border_color(badge_border)
+                                            .shadow(card_shadow(palette.is_dark()))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(
+                                                crate::ui::icon(IconName::Sparkles)
+                                                    .w(px(20.))
+                                                    .h(px(20.))
+                                                    .text_color(gpui_kit::rgb(palette.accent)),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(typo.body)
+                                            .font_semibold()
+                                            .text_color(gpui_kit::rgb(palette.text))
+                                            .child(workspace_title.clone()),
+                                    ),
+                            )
+                        },
+                    )
+                    .children(self.messages.iter().enumerate().map(|(msg_idx, msg)| {
+                        match msg {
+                            ChatMessage::User {
+                                display_text,
+                                attached_file,
+                                mounted_skills,
+                                quote,
+                                images,
+                            } => div()
+                                .w_full()
+                                .flex()
+                                .flex_col()
+                                .items_end()
+                                .child(
+                                    div()
+                                        .max_w(relative(0.9))
+                                        .px_3p5()
+                                        .py_2()
+                                        .rounded(px(14.))
+                                        .bg(user_bubble_bg)
+                                        .border_1()
+                                        .border_color(user_bubble_border)
+                                        .shadow_2xs()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1p5()
+                                        .when(!images.is_empty(), |b| {
                                             b.child(
                                                 div()
                                                     .flex()
                                                     .flex_wrap()
-                                                    .items_center()
                                                     .gap_1p5()
-                                                    .when_some(attached_file.as_ref(), |r, f| {
-                                                        r.child(
-                                                            div()
-                                                                .flex()
-                                                                .items_center()
-                                                                .gap_1()
-                                                                .text_xs()
-                                                                .text_color(gpui_kit::rgb(
-                                                                    palette.accent,
-                                                                ))
-                                                                .child(
-                                                                    crate::ui::icon(
-                                                                        IconName::FileText,
-                                                                    )
-                                                                    .w(px(11.))
-                                                                    .h(px(11.)),
-                                                                )
-                                                                .child(format!("@{f}")),
-                                                        )
-                                                    })
-                                                    .children(mounted_skills.iter().map(|sk| {
-                                                        let lbl = sk
-                                                            .strip_prefix("skill:")
-                                                            .unwrap_or(sk)
-                                                            .to_owned();
-                                                        div()
-                                                            .px_1p5()
-                                                            .py(px(1.))
-                                                            .rounded(px(4.))
-                                                            .bg(gpui_kit::rgb(palette.surface))
-                                                            .border_1()
-                                                            .border_color(gpui_kit::rgb(
-                                                                palette.border,
-                                                            ))
-                                                            .text_size(px(11.))
-                                                            .text_color(gpui_kit::rgb(palette.muted))
-                                                            .child(lbl)
+                                                    .children(images.iter().map(|im| {
+                                                        img(im.clone())
+                                                            .w(px(72.))
+                                                            .h(px(72.))
+                                                            .rounded(px(8.))
+                                                            .object_fit(ObjectFit::Cover)
                                                     })),
                                             )
-                                        },
-                                    )
-                                    .when_some(quote.as_ref(), |b, q| {
-                                        b.child(
-                                            div()
-                                                .px_2()
-                                                .py_1()
-                                                .border_l_2()
-                                                .border_color(gpui_kit::rgb(palette.accent))
-                                                .text_xs()
-                                                .text_color(gpui_kit::rgb(palette.muted))
-                                                .child(format!(
-                                                    "{}: {}",
-                                                    q.source,
-                                                    q.text.chars().take(160).collect::<String>()
-                                                )),
-                                        )
-                                    })
-                                    .when(!display_text.is_empty(), |b| {
-                                        b.child(
-                                            div()
-                                                .text_sm()
-                                                .line_height(relative(1.5))
-                                                .child(display_text.clone()),
-                                        )
-                                    })
-                                    .into_any_element(),
-                                ChatMessage::Assistant {
-                                    parts,
-                                    error,
-                                    streaming,
-                                } => {
-                                    let mut rendered_parts: Vec<AnyElement> = Vec::new();
-                                    let mut idx = 0usize;
-                                    while idx < parts.len() {
-                                        match &parts[idx] {
-                                            AssistantPart::Thinking { text, collapsed } => {
-                                                let is_collapsed = *collapsed;
-                                                let part_idx = idx;
-                                                rendered_parts.push(
+                                        })
+                                        .when(
+                                            attached_file.is_some() || !mounted_skills.is_empty(),
+                                            |b| {
+                                                b.child(
                                                     div()
-                                                        .rounded(px(6.))
-                                                        .px_2()
-                                                        .py_1()
-                                                        .bg(gpui_kit::rgb(palette.background))
-                                                        .child(
+                                                        .flex()
+                                                        .flex_wrap()
+                                                        .items_center()
+                                                        .gap_1()
+                                                        .when_some(attached_file.as_ref(), |r, f| {
+                                                            r.child(
+                                                                div()
+                                                                    .px_1p5()
+                                                                    .py(px(1.))
+                                                                    .rounded(px(5.))
+                                                                    .bg(gpui_kit::rgb(
+                                                                        palette.surface,
+                                                                    ))
+                                                                    .border_1()
+                                                                    .border_color(subtle_border(
+                                                                        palette.border,
+                                                                    ))
+                                                                    .flex()
+                                                                    .items_center()
+                                                                    .gap_1()
+                                                                    .text_size(typo.xs)
+                                                                    .text_color(gpui_kit::rgb(
+                                                                        palette.accent,
+                                                                    ))
+                                                                    .child(
+                                                                        crate::ui::icon(
+                                                                            IconName::FileText,
+                                                                        )
+                                                                        .w(px(11.))
+                                                                        .h(px(11.)),
+                                                                    )
+                                                                    .child(format!("@{f}")),
+                                                            )
+                                                        })
+                                                        .children(mounted_skills.iter().map(
+                                                            |sk| {
+                                                                let lbl = sk
+                                                                    .strip_prefix("skill:")
+                                                                    .unwrap_or(sk)
+                                                                    .to_owned();
+                                                                div()
+                                                                    .px_1p5()
+                                                                    .py(px(1.))
+                                                                    .rounded(px(5.))
+                                                                    .bg(gpui_kit::rgb(
+                                                                        palette.surface,
+                                                                    ))
+                                                                    .border_1()
+                                                                    .border_color(subtle_border(
+                                                                        palette.border,
+                                                                    ))
+                                                                    .flex()
+                                                                    .items_center()
+                                                                    .gap_1()
+                                                                    .text_size(typo.xs)
+                                                                    .text_color(gpui_kit::rgb(
+                                                                        palette.muted,
+                                                                    ))
+                                                                    .child(
+                                                                        crate::ui::icon(
+                                                                            IconName::Sparkles,
+                                                                        )
+                                                                        .w(px(10.))
+                                                                        .h(px(10.))
+                                                                        .text_color(gpui_kit::rgb(
+                                                                            palette.accent,
+                                                                        )),
+                                                                    )
+                                                                    .child(lbl)
+                                                            },
+                                                        )),
+                                                )
+                                            },
+                                        )
+                                        .when_some(quote.as_ref(), |b, q| {
+                                            b.child(
+                                                div()
+                                                    .px_2()
+                                                    .py_1()
+                                                    .rounded(px(6.))
+                                                    .bg(gpui_kit::rgb(palette.surface))
+                                                    .border_l_2()
+                                                    .border_color(gpui_kit::rgb(palette.accent))
+                                                    .text_size(typo.sm)
+                                                    .text_color(gpui_kit::rgb(palette.muted))
+                                                    .child(format!(
+                                                        "{}: {}",
+                                                        q.source,
+                                                        q.text
+                                                            .chars()
+                                                            .take(160)
+                                                            .collect::<String>()
+                                                    )),
+                                            )
+                                        })
+                                        .when(!display_text.is_empty(), |b| {
+                                            b.child(
+                                                div()
+                                                    .text_size(typo.body)
+                                                    .line_height(relative(1.5))
+                                                    .child(display_text.clone()),
+                                            )
+                                        }),
+                                )
+                                .into_any_element(),
+                            ChatMessage::Assistant {
+                                parts,
+                                error,
+                                streaming,
+                            } => {
+                                let mut rendered_parts: Vec<AnyElement> = Vec::new();
+                                let mut idx = 0usize;
+                                let think_pill_bg =
+                                    mix_color(palette.background, palette.surface, 0.72);
+                                while idx < parts.len() {
+                                    match &parts[idx] {
+                                        AssistantPart::Thinking { text, collapsed } => {
+                                            let is_collapsed = *collapsed;
+                                            let part_idx = idx;
+                                            rendered_parts.push(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap_1()
+                                                    .child(
+                                                        div().flex().items_center().child(
                                                             div()
                                                                 .id((
                                                                     "ai-think-toggle",
                                                                     msg_idx * 1000 + part_idx,
                                                                 ))
+                                                                .px_2p5()
+                                                                .py_1()
+                                                                .rounded(px(8.))
+                                                                .bg(think_pill_bg)
+                                                                .border_1()
+                                                                .border_color(subtle_border(
+                                                                    palette.border,
+                                                                ))
                                                                 .flex()
                                                                 .items_center()
-                                                                .gap_1()
+                                                                .gap_1p5()
                                                                 .cursor_pointer()
-                                                                .text_xs()
+                                                                .text_size(typo.sm)
                                                                 .text_color(gpui_kit::rgb(
                                                                     palette.muted,
                                                                 ))
+                                                                .hover(move |s| {
+                                                                    s.bg(gpui_kit::rgb(
+                                                                        palette.hover,
+                                                                    ))
+                                                                    .text_color(gpui_kit::rgb(
+                                                                        palette.text,
+                                                                    ))
+                                                                })
                                                                 .on_click(cx.listener(
                                                                     move |pane, _, _, cx| {
                                                                         if let Some(
@@ -3191,6 +3837,19 @@ impl Render for AiPane {
                                                                     },
                                                                 ))
                                                                 .child(
+                                                                    crate::ui::icon(IconName::Brain)
+                                                                        .w(px(12.))
+                                                                        .h(px(12.))
+                                                                        .text_color(gpui_kit::rgb(
+                                                                            palette.accent,
+                                                                        )),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .font_medium()
+                                                                        .child("思考过程"),
+                                                                )
+                                                                .child(
                                                                     crate::ui::icon(
                                                                         if is_collapsed {
                                                                             IconName::ChevronRight
@@ -3200,180 +3859,230 @@ impl Render for AiPane {
                                                                     )
                                                                     .w(px(12.))
                                                                     .h(px(12.)),
-                                                                )
-                                                                .child(
-                                                                    crate::ui::icon(IconName::Brain)
-                                                                        .w(px(12.))
-                                                                        .h(px(12.)),
-                                                                )
-                                                                .child("思考过程"),
-                                                        )
-                                                        .when(
-                                                            !is_collapsed && !text.is_empty(),
-                                                            |box_| {
-                                                                box_.child(
-                                                                    div()
-                                                                        .mt_1()
-                                                                        .text_xs()
-                                                                        .line_height(relative(1.45))
-                                                                        .text_color(gpui_kit::rgb(
-                                                                            palette.muted,
-                                                                        ))
-                                                                        .child(text.clone()),
-                                                                )
-                                                            },
-                                                        )
-                                                        .into_any_element(),
-                                                );
-                                                idx += 1;
-                                            }
-                                            AssistantPart::Text(text) => {
-                                                rendered_parts.push(
-                                                    div()
-                                                        .text_sm()
-                                                        .line_height(relative(1.55))
-                                                        .child(
-                                                            render_markdown(text.clone())
-                                                                .style(md_style.clone()),
-                                                        )
-                                                        .into_any_element(),
-                                                );
-                                                idx += 1;
-                                            }
-                                            AssistantPart::Tool(_) => {
-                                                let start = idx;
-                                                let mut group: Vec<(usize, &ToolBlock)> =
-                                                    Vec::new();
-                                                while idx < parts.len() {
-                                                    if let AssistantPart::Tool(b) = &parts[idx] {
-                                                        group.push((idx, b));
-                                                        idx += 1;
-                                                    } else {
-                                                        break;
-                                                    }
+                                                                ),
+                                                        ),
+                                                    )
+                                                    .when(
+                                                        !is_collapsed && !text.is_empty(),
+                                                        |box_| {
+                                                            box_.child(
+                                                                div()
+                                                                    .ml_2p5()
+                                                                    .pl_3()
+                                                                    .border_l_2()
+                                                                    .border_color(subtle_border(
+                                                                        palette.border,
+                                                                    ))
+                                                                    .text_size(typo.sm)
+                                                                    .line_height(relative(1.5))
+                                                                    .text_color(gpui_kit::rgb(
+                                                                        palette.muted,
+                                                                    ))
+                                                                    .child(text.clone()),
+                                                            )
+                                                        },
+                                                    )
+                                                    .into_any_element(),
+                                            );
+                                            idx += 1;
+                                        }
+                                        AssistantPart::Text(text) => {
+                                            rendered_parts.push(
+                                                div()
+                                                    .font_family(ui_font.clone())
+                                                    .text_size(typo.body)
+                                                    .line_height(relative(1.6))
+                                                    .child(
+                                                        render_markdown(text.clone())
+                                                            .style(md_style.clone())
+                                                            .font_family(ui_font.clone())
+                                                            .text_size(typo.body),
+                                                    )
+                                                    .into_any_element(),
+                                            );
+                                            idx += 1;
+                                        }
+                                        AssistantPart::Tool(_) => {
+                                            let start = idx;
+                                            let mut group: Vec<(usize, &ToolBlock)> = Vec::new();
+                                            while idx < parts.len() {
+                                                if let AssistantPart::Tool(b) = &parts[idx] {
+                                                    group.push((idx, b));
+                                                    idx += 1;
+                                                } else {
+                                                    break;
                                                 }
-                                                rendered_parts.push(self.render_tool_group(
-                                                    msg_idx,
-                                                    start,
-                                                    &group,
-                                                    palette,
-                                                    cx,
-                                                ));
                                             }
+                                            rendered_parts.push(self.render_tool_group(
+                                                msg_idx,
+                                                start,
+                                                &group,
+                                                palette,
+                                                cx,
+                                            ));
                                         }
                                     }
+                                }
 
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1p5()
-                                        .children(rendered_parts)
-                                        .when(*streaming && parts.is_empty(), |box_| {
-                                            box_.child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(gpui_kit::rgb(palette.muted))
-                                                    .child("…"),
-                                            )
-                                        })
-                                        .when_some(error.clone(), |box_, err| {
-                                            box_.child(
-                                                div()
-                                                    .p_2()
-                                                    .rounded(px(6.))
-                                                    .border_1()
-                                                    .border_color(gpui_kit::rgb(palette.danger))
-                                                    .text_xs()
-                                                    .text_color(gpui_kit::rgb(palette.danger))
-                                                    .child(err),
-                                            )
-                                        })
-                                        .into_any_element()
-                                }
-                                ChatMessage::Notice { text, is_error } => div()
-                                    .px_2p5()
-                                    .py_1p5()
-                                    .rounded(px(6.))
-                                    .border_1()
-                                    .border_color(gpui_kit::rgb(if *is_error {
-                                        palette.danger
-                                    } else {
-                                        palette.border
-                                    }))
-                                    .text_xs()
-                                    .text_color(gpui_kit::rgb(if *is_error {
-                                        palette.danger
-                                    } else {
-                                        palette.muted
-                                    }))
-                                    .child(text.clone())
-                                    .into_any_element(),
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .children(rendered_parts)
+                                    .when(*streaming && parts.is_empty(), |box_| {
+                                        box_.child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1p5()
+                                                .py_1()
+                                                .child(
+                                                    div()
+                                                        .size(px(7.))
+                                                        .rounded_full()
+                                                        .bg(gpui_kit::rgb(palette.accent))
+                                                        .with_animation(
+                                                            ("ai-stream-pulse", msg_idx),
+                                                            Animation::new(Duration::from_millis(
+                                                                950,
+                                                            ))
+                                                            .repeat(),
+                                                            |el, t| {
+                                                                let a = 0.3
+                                                                    + 0.7
+                                                                        * (0.5
+                                                                            - 0.5
+                                                                                * (t
+                                                                                    * std::f32::consts::TAU)
+                                                                                    .cos());
+                                                                el.opacity(a)
+                                                            },
+                                                        ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(typo.sm)
+                                                        .text_color(gpui_kit::rgb(palette.muted))
+                                                        .child("思考中…"),
+                                                ),
+                                        )
+                                    })
+                                    .when_some(error.clone(), |box_, err| {
+                                        box_.child(
+                                            div()
+                                                .p_2p5()
+                                                .rounded(px(10.))
+                                                .bg(gpui_kit::rgb(palette.surface))
+                                                .border_1()
+                                                .border_color(gpui_kit::rgb(palette.danger))
+                                                .text_size(typo.sm)
+                                                .text_color(gpui_kit::rgb(palette.danger))
+                                                .child(err),
+                                        )
+                                    })
+                                    .into_any_element()
                             }
-                        })),
-                )
-                .when_some(self.pending_ui.as_ref(), |root, pending| {
-                    root.child(self.render_pending_ui(pending, palette, cx))
-                })
-                .when(!self.ext_widgets.is_empty(), |root| {
-                    root.child(
-                        div()
-                            .mx_3()
-                            .mb_1()
-                            .p_2()
-                            .rounded(px(6.))
-                            .border_1()
-                            .border_color(gpui_kit::rgb(palette.border))
-                            .text_xs()
-                            .text_color(gpui_kit::rgb(palette.muted))
-                            .children(
-                                self.ext_widgets
-                                    .values()
-                                    .flat_map(|lines| lines.iter().cloned())
-                                    .map(|l| div().child(l)),
-                            ),
-                    )
-                })
-                .child(
+                            ChatMessage::Notice { text, is_error } => div()
+                                .px_3()
+                                .py_1p5()
+                                .rounded(px(9.))
+                                .bg(gpui_kit::rgb(palette.surface))
+                                .border_1()
+                                .border_color(if *is_error {
+                                    gpui_kit::rgb(palette.danger)
+                                } else {
+                                    subtle_border(palette.border)
+                                })
+                                .text_size(typo.sm)
+                                .text_color(gpui_kit::rgb(if *is_error {
+                                    palette.danger
+                                } else {
+                                    palette.muted
+                                }))
+                                .child(text.clone())
+                                .into_any_element(),
+                        }
+                    })),
+            )
+            .when_some(self.pending_ui.as_ref(), |root, pending| {
+                root.child(self.render_pending_ui(pending, palette, cx))
+            })
+            .when(!self.ext_widgets.is_empty(), |root| {
+                root.child(
                     div()
-                        .relative()
-                        .flex_shrink_0()
-                        .px_3()
-                        .pb_3()
-                        .pt_1()
-                        .capture_key_down(cx.listener(move |pane, event: &KeyDownEvent, window, cx| {
-                            if slash_items_for_keys.is_empty() {
-                                return;
+                        .mx_3()
+                        .mb_1()
+                        .p_2()
+                        .rounded(px(9.))
+                        .bg(gpui_kit::rgb(palette.surface))
+                        .border_1()
+                        .border_color(subtle_border(palette.border))
+                        .text_size(typo.sm)
+                        .text_color(gpui_kit::rgb(palette.muted))
+                        .children(
+                            self.ext_widgets
+                                .values()
+                                .flat_map(|lines| lines.iter().cloned())
+                                .map(|l| div().child(l)),
+                        ),
+                )
+            })
+            .child(
+                div()
+                    .relative()
+                    .flex_shrink_0()
+                    .px_3()
+                    .pb_3()
+                    .pt_1p5()
+                    .capture_key_down(cx.listener(move |pane, event: &KeyDownEvent, window, cx| {
+                        let key = event.keystroke.key.to_ascii_lowercase();
+                        if slash_items_for_keys.is_empty() {
+                            if pane.model_popover_open && key == "escape" {
+                                pane.model_popover_open = false;
+                                window.prevent_default();
+                                cx.stop_propagation();
+                                cx.notify();
                             }
-                            let key = event.keystroke.key.to_ascii_lowercase();
-                            let count = slash_items_for_keys.len();
-                            match key.as_str() {
-                                "up" => {
-                                    pane.slash_index = (pane.slash_index + count - 1) % count;
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                }
-                                "down" => {
-                                    pane.slash_index = (pane.slash_index + 1) % count;
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                }
-                                "escape" => {
-                                    pane.dismissed_slash_text =
-                                        Some(pane.input.read(cx).value().to_string());
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                }
-                                "tab" | "enter" if !event.keystroke.modifiers.shift => {
-                                    let chosen = slash_items_for_keys
-                                        [pane.slash_index.min(count - 1)]
-                                    .clone();
-                                    pane.execute_slash_item(chosen, window, cx);
-                                    cx.stop_propagation();
-                                }
-                                _ => {}
+                            return;
+                        }
+                        let count = slash_items_for_keys.len();
+                        match key.as_str() {
+                            "up" => {
+                                pane.slash_index = (pane.slash_index + count - 1) % count;
+                                pane.slash_scroll.scroll_to_item(pane.slash_index);
+                                window.prevent_default();
+                                cx.stop_propagation();
+                                cx.notify();
                             }
-                        }))
-                        .when(has_slash_items, |wrap| {
+                            "down" => {
+                                pane.slash_index = (pane.slash_index + 1) % count;
+                                pane.slash_scroll.scroll_to_item(pane.slash_index);
+                                window.prevent_default();
+                                cx.stop_propagation();
+                                cx.notify();
+                            }
+                            "escape" => {
+                                pane.dismissed_slash_text =
+                                    Some(pane.input.read(cx).value().to_string());
+                                pane.slash_was_open = false;
+                                window.prevent_default();
+                                cx.stop_propagation();
+                                cx.notify();
+                            }
+                            "tab" | "enter" if !event.keystroke.modifiers.shift => {
+                                let chosen =
+                                    slash_items_for_keys[pane.slash_index.min(count - 1)].clone();
+                                window.prevent_default();
+                                cx.stop_propagation();
+                                pane.execute_slash_item(chosen, window, cx);
+                            }
+                            _ => {}
+                        }
+                    }))
+                    .when(
+                        has_slash_items || self.model_popover_open || self.toast.is_some(),
+                        |wrap| {
+                            let toast_item = self.toast.clone();
                             wrap.child(
                                 deferred(
                                     div()
@@ -3381,367 +4090,594 @@ impl Render for AiPane {
                                         .left_3()
                                         .right_3()
                                         .bottom_full()
-                                        .mb_1p5()
-                                        .child(self.render_slash_popover(
-                                            slash_items,
-                                            palette,
-                                            cx,
-                                        )),
+                                        .mb_2()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1p5()
+                                        .when_some(toast_item, |col, (msg, is_err)| {
+                                            col.child(self.render_toast_popover(
+                                                msg,
+                                                is_err,
+                                                palette,
+                                                ui_font.clone(),
+                                                cx,
+                                            ))
+                                        })
+                                        .when(self.model_popover_open && !has_slash_items, |col| {
+                                            col.child(self.render_model_popover(
+                                                palette,
+                                                ui_font.clone(),
+                                                cx,
+                                            ))
+                                        })
+                                        .when(has_slash_items, |col| {
+                                            col.child(self.render_slash_popover(
+                                                slash_items,
+                                                palette,
+                                                ui_font.clone(),
+                                                cx,
+                                            ))
+                                        }),
                                 )
                                 .with_priority(3),
                             )
-                        })
-                        .when(self.plus_menu_open && !has_slash_items, |wrap| {
-                            wrap.child(
-                                deferred(
+                        },
+                    )
+                    .child(
+                        div()
+                            .rounded(px(16.))
+                            .border_1()
+                            .border_color(composer_border)
+                            .bg(gpui_kit::rgb(palette.surface))
+                            .shadow(composer_shadow)
+                            .px_3()
+                            .pt_2p5()
+                            .pb_2()
+                            .flex()
+                            .flex_col()
+                            .gap_1p5()
+                            .when(has_chips, |card| {
+                                card.child(
                                     div()
-                                        .absolute()
-                                        .left_3()
-                                        .bottom_full()
-                                        .mb_1p5()
-                                        .child(self.render_plus_popover(palette, cx)),
-                                )
-                                .with_priority(3),
-                            )
-                        })
-                        .child(
-                            div()
-                                .rounded(px(14.))
-                                .border_1()
-                                .border_color(gpui_kit::rgb(palette.border))
-                                .bg(gpui_kit::rgb(palette.surface))
-                                .shadow_sm()
-                                .px_2p5()
-                                .pt_2()
-                                .pb_1p5()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .when(has_chips, |card| {
-                                    card.child(
-                                        div()
-                                            .flex()
-                                            .flex_wrap()
-                                            .items_center()
-                                            .gap_1()
-                                            .when_some(attached_chip, |row, file| {
-                                                let open_path = file.path.clone();
-                                                let detach_path = file.path.clone();
-                                                row.child(
-                                                    div()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap_1()
-                                                        .px_2()
-                                                        .py(px(2.))
-                                                        .rounded(px(5.))
-                                                        .bg(gpui_kit::rgb(palette.background))
-                                                        .border_1()
-                                                        .border_color(gpui_kit::rgb(palette.border))
-                                                        .text_xs()
-                                                        .child(
-                                                            div()
-                                                                .id("ai-attached-file")
-                                                                .flex()
-                                                                .items_center()
-                                                                .gap_1()
-                                                                .cursor_pointer()
-                                                                .on_click(cx.listener(
-                                                                    move |_, _, _, cx| {
-                                                                        cx.emit(
-                                                                            AiPaneEvent::OpenFile(
-                                                                                open_path.clone(),
-                                                                            ),
-                                                                        );
-                                                                    },
-                                                                ))
-                                                                .child(
-                                                                    crate::ui::icon(
-                                                                        IconName::FileText,
-                                                                    )
+                                        .flex()
+                                        .flex_wrap()
+                                        .items_center()
+                                        .gap_1()
+                                        .when_some(attached_chip, |row, file| {
+                                            let open_path = file.path.clone();
+                                            row.child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1()
+                                                    .px_2()
+                                                    .py(px(2.))
+                                                    .rounded(px(6.))
+                                                    .bg(gpui_kit::rgb(palette.background))
+                                                    .border_1()
+                                                    .border_color(subtle_border(palette.border))
+                                                    .text_size(typo.sm)
+                                                    .child(
+                                                        div()
+                                                            .id("ai-attached-file")
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap_1()
+                                                            .cursor_pointer()
+                                                            .on_click(cx.listener(
+                                                                move |_, _, _, cx| {
+                                                                    cx.emit(
+                                                                        AiPaneEvent::OpenFile(
+                                                                            open_path.clone(),
+                                                                        ),
+                                                                    );
+                                                                },
+                                                            ))
+                                                            .child(
+                                                                crate::ui::icon(IconName::FileText)
                                                                     .w(px(11.))
                                                                     .h(px(11.))
                                                                     .text_color(gpui_kit::rgb(
-                                                                        palette.muted,
+                                                                        palette.accent,
                                                                     )),
-                                                                )
-                                                                .child(format!(
-                                                                    "@{}",
-                                                                    file.display
-                                                                )),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .id("ai-detach-file")
-                                                                .cursor_pointer()
-                                                                .text_color(gpui_kit::rgb(
-                                                                    palette.muted,
-                                                                ))
-                                                                .on_click(cx.listener(
-                                                                    move |pane, _, _, cx| {
-                                                                        pane.detached_for_file =
-                                                                            Some(
-                                                                                detach_path.clone(),
-                                                                            );
-                                                                        cx.notify();
-                                                                    },
-                                                                ))
-                                                                .child(
-                                                                    crate::ui::icon(IconName::Close)
-                                                                        .w(px(11.))
-                                                                        .h(px(11.)),
-                                                                ),
-                                                        ),
-                                                )
-                                            })
-                                            .children(self.mounted_skills.iter().enumerate().map(
-                                                |(idx, sk)| {
-                                                    let lbl = sk
-                                                        .strip_prefix("skill:")
-                                                        .unwrap_or(sk)
-                                                        .to_owned();
-                                                    let rm_sk = sk.clone();
-                                                    div()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap_1()
-                                                        .px_2()
-                                                        .py(px(2.))
-                                                        .rounded(px(5.))
-                                                        .bg(quote_bg)
-                                                        .border_1()
-                                                        .border_color(gpui_kit::rgb(palette.accent))
-                                                        .text_xs()
-                                                        .child(
-                                                            crate::ui::icon(IconName::Sparkles)
-                                                                .w(px(11.))
-                                                                .h(px(11.))
-                                                                .text_color(gpui_kit::rgb(
-                                                                    palette.accent,
-                                                                )),
-                                                        )
-                                                        .child(lbl)
-                                                        .child(
-                                                            div()
-                                                                .id(("ai-rm-skill", idx))
-                                                                .cursor_pointer()
-                                                                .text_color(gpui_kit::rgb(
-                                                                    palette.muted,
-                                                                ))
-                                                                .on_click(cx.listener(
-                                                                    move |pane, _, _, cx| {
-                                                                        pane.mounted_skills
-                                                                            .retain(|s| s != &rm_sk);
-                                                                        cx.notify();
-                                                                    },
-                                                                ))
-                                                                .child(
-                                                                    crate::ui::icon(
-                                                                        IconName::Close,
-                                                                    )
+                                                            )
+                                                            .child(format!("@{}", file.display)),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .id("ai-detach-file")
+                                                            .cursor_pointer()
+                                                            .text_color(gpui_kit::rgb(
+                                                                palette.muted,
+                                                            ))
+                                                            .on_click(cx.listener(
+                                                                |pane, _, _, cx| {
+                                                                    pane.attach_active_file = false;
+                                                                    cx.notify();
+                                                                },
+                                                            ))
+                                                            .child(
+                                                                crate::ui::icon(IconName::Close)
                                                                     .w(px(11.))
                                                                     .h(px(11.)),
-                                                                ),
-                                                        )
-                                                },
-                                            ))
-                                            .when_some(self.quoted_selection.as_ref(), |row, q| {
-                                                row.child(
-                                                    div()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap_1()
-                                                        .max_w(px(240.))
-                                                        .px_2()
-                                                        .py(px(2.))
-                                                        .rounded(px(5.))
-                                                        .bg(quote_bg)
-                                                        .border_1()
-                                                        .border_color(gpui_kit::rgb(palette.accent))
-                                                        .text_xs()
-                                                        .child(
-                                                            div()
-                                                                .flex_1()
-                                                                .min_w_0()
-                                                                .text_ellipsis()
-                                                                .child(format!(
-                                                                    "引用 {}: {}",
-                                                                    q.source,
-                                                                    q.text.replace('\n', " ")
-                                                                )),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .id("ai-clear-quote")
-                                                                .cursor_pointer()
-                                                                .on_click(cx.listener(
-                                                                    |pane, _, _, cx| {
-                                                                        pane.quoted_selection =
-                                                                            None;
-                                                                        cx.notify();
-                                                                    },
-                                                                ))
-                                                                .child(
-                                                                    crate::ui::icon(
-                                                                        IconName::Close,
-                                                                    )
+                                                            ),
+                                                    ),
+                                            )
+                                        })
+                                        .when_some(self.quoted_selection.as_ref(), |row, q| {
+                                            row.child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1()
+                                                    .max_w(px(260.))
+                                                    .px_2()
+                                                    .py(px(2.))
+                                                    .rounded(px(6.))
+                                                    .bg(quote_bg)
+                                                    .border_1()
+                                                    .border_color(skill_token_border)
+                                                    .text_size(typo.sm)
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .text_ellipsis()
+                                                            .child(format!(
+                                                                "引用 {}: {}",
+                                                                q.source,
+                                                                q.text.replace('\n', " ")
+                                                            )),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .id("ai-clear-quote")
+                                                            .cursor_pointer()
+                                                            .on_click(cx.listener(
+                                                                |pane, _, _, cx| {
+                                                                    pane.quoted_selection = None;
+                                                                    cx.notify();
+                                                                },
+                                                            ))
+                                                            .child(
+                                                                crate::ui::icon(IconName::Close)
                                                                     .w(px(11.))
                                                                     .h(px(11.)),
-                                                                ),
-                                                        ),
-                                                )
-                                            }),
-                                    )
-                                })
-                                .child(
-                                    Textarea::new(&self.input)
-                                        .appearance(false)
-                                        .bordered(false)
-                                        .h(px(64.)),
+                                                            ),
+                                                    ),
+                                            )
+                                        })
+                                        .children(self.pasted_images.iter().enumerate().map(
+                                            |(idx, p)| {
+                                                let rm_id = p.id;
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1p5()
+                                                    .pl_1()
+                                                    .pr_1p5()
+                                                    .py(px(2.))
+                                                    .rounded(px(7.))
+                                                    .bg(gpui_kit::rgb(palette.background))
+                                                    .border_1()
+                                                    .border_color(subtle_border(palette.border))
+                                                    .text_size(typo.xs)
+                                                    .child(
+                                                        img(p.image.clone())
+                                                            .w(px(24.))
+                                                            .h(px(24.))
+                                                            .rounded(px(5.))
+                                                            .object_fit(ObjectFit::Cover),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .max_w(px(110.))
+                                                            .text_ellipsis()
+                                                            .text_color(gpui_kit::rgb(palette.muted))
+                                                            .child(p.label.clone()),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .id(("ai-rm-img", idx))
+                                                            .cursor_pointer()
+                                                            .text_color(gpui_kit::rgb(palette.muted))
+                                                            .on_click(cx.listener(
+                                                                move |pane, _, _, cx| {
+                                                                    pane.pasted_images
+                                                                        .retain(|im| im.id != rm_id);
+                                                                    cx.notify();
+                                                                },
+                                                            ))
+                                                            .child(
+                                                                crate::ui::icon(IconName::Close)
+                                                                    .w(px(11.))
+                                                                    .h(px(11.)),
+                                                            ),
+                                                    )
+                                            },
+                                        )),
                                 )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .child(
-                                                    Button::new("ai-plus-menu")
-                                                        .ghost()
-                                                        .compact()
-                                                        .w(px(24.))
-                                                        .h(px(24.))
-                                                        .icon(crate::ui::icon(IconName::Plus))
-                                                        .tooltip("启用 Skill / 附加文件")
-                                                        .on_mouse_down(
-                                                            MouseButton::Left,
-                                                            |_, _, cx| cx.stop_propagation(),
-                                                        )
-                                                        .on_click(cx.listener(|pane, _, _, cx| {
-                                                            pane.plus_menu_open =
-                                                                !pane.plus_menu_open;
-                                                            cx.notify();
-                                                        })),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .id("ai-perm-toggle")
-                                                        .px_1p5()
-                                                        .h(px(24.))
-                                                        .rounded(px(5.))
-                                                        .cursor_pointer()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap_1()
-                                                        .text_xs()
-                                                        .text_color(gpui_kit::rgb(
-                                                            if self.auto_approve_shell {
-                                                                palette.danger
-                                                            } else {
-                                                                palette.muted
-                                                            },
+                            })
+                            .child(
+                                Textarea::new(&self.input)
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .font_family(ui_font.clone())
+                                    .text_size(typo.body)
+                                    .h(px(64.))
+                                    .on_paste(move |item, window, cx| {
+                                        pane_paste.update(cx, |pane, cx| {
+                                            pane.handle_paste(item, window, cx)
+                                        })
+                                    })
+                                    .token(move |ctx, _, _| {
+                                        let id = ctx.token().id();
+                                        if id.starts_with("skill:") {
+                                            InputToken::new(ctx)
+                                                .icon(IconName::Sparkles)
+                                                .bg(skill_token_bg)
+                                                .border_color(skill_token_border)
+                                                .text_color(gpui_kit::rgb(palette.accent))
+                                        } else if id.starts_with("dir:") {
+                                            InputToken::new(ctx)
+                                                .icon(IconName::FolderOpen)
+                                                .bg(gpui_kit::rgb(palette.background))
+                                                .border_color(subtle_border(palette.border))
+                                                .text_color(gpui_kit::rgb(palette.text))
+                                        } else {
+                                            InputToken::new(ctx)
+                                                .icon(IconName::FileText)
+                                                .bg(gpui_kit::rgb(palette.background))
+                                                .border_color(subtle_border(palette.border))
+                                                .text_color(gpui_kit::rgb(palette.text))
+                                        }
+                                    })
+                                    .on_token_click(cx.listener(
+                                        |pane,
+                                         ev: &gpui_kit::component::input::InlineTokenClickEvent,
+                                         _,
+                                         cx| {
+                                            if let Some(rel) = ev.token().id().strip_prefix("file:") {
+                                                let target = pane.resolve_tool_path(rel);
+                                                cx.emit(AiPaneEvent::OpenFile(target));
+                                            }
+                                        },
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .child(
+                                                Button::new("ai-pick-files")
+                                                    .custom(subtle_btn(cx))
+                                                    .compact()
+                                                    .w(px(26.))
+                                                    .h(px(26.))
+                                                    .icon(crate::ui::icon(IconName::Plus))
+                                                    .tooltip("选择文件附加")
+                                                    .on_click(cx.listener(
+                                                        |pane, _, window, cx| {
+                                                            pane.pick_files(window, cx);
+                                                        },
+                                                    )),
+                                            )
+                                            .child({
+                                                let has_file = self.active_file.is_some();
+                                                let active_ctx = has_file && self.attach_active_file;
+                                                let ctx_tip = match &self.active_file {
+                                                    Some(f) if active_ctx => {
+                                                        format!("已附加 @{}（点击取消）", f.display)
+                                                    }
+                                                    Some(f) => {
+                                                        format!("附加当前文件 @{}", f.display)
+                                                    }
+                                                    None => "当前无打开文件".to_owned(),
+                                                };
+                                                let ctx_bg = if active_ctx {
+                                                    mix_color(
+                                                        palette.surface,
+                                                        palette.accent,
+                                                        if palette.is_dark() { 0.22 } else { 0.12 },
+                                                    )
+                                                } else {
+                                                    mix_color(
+                                                        palette.background,
+                                                        palette.hover,
+                                                        0.65,
+                                                    )
+                                                };
+                                                div()
+                                                    .id("ai-toggle-active-context")
+                                                    .size(px(26.))
+                                                    .rounded(px(7.))
+                                                    .bg(ctx_bg)
+                                                    .when(active_ctx, |el| {
+                                                        el.border_1().border_color(mix_color(
+                                                            palette.border,
+                                                            palette.accent,
+                                                            0.45,
                                                         ))
-                                                        .hover(move |s| {
+                                                    })
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .when(has_file, |el| {
+                                                        el.cursor_pointer().hover(move |s| {
                                                             s.bg(gpui_kit::rgb(palette.hover))
                                                         })
-                                                        .tooltip(|window, cx| {
-                                                            Tooltip::new(
-                                                                "切换 Shell 命令确认权限",
-                                                            )
+                                                    })
+                                                    .when(!has_file, |el| el.opacity(0.42))
+                                                    .tooltip(move |window, cx| {
+                                                        Tooltip::new(ctx_tip.clone())
                                                             .build(window, cx)
-                                                        })
-                                                        .on_click(cx.listener(
-                                                            |pane, _, _, cx| {
-                                                                pane.auto_approve_shell =
-                                                                    !pane.auto_approve_shell;
-                                                                cx.notify();
-                                                            },
-                                                        ))
-                                                        .child(
-                                                            crate::ui::icon(
-                                                                if self.auto_approve_shell {
-                                                                    IconName::ShieldAlert
-                                                                } else {
-                                                                    IconName::Shield
-                                                                },
-                                                            )
+                                                    })
+                                                    .on_click(cx.listener(|pane, _, _, cx| {
+                                                        if pane.active_file.is_some() {
+                                                            pane.attach_active_file =
+                                                                !pane.attach_active_file;
+                                                            cx.notify();
+                                                        }
+                                                    }))
+                                                    .child(
+                                                        crate::ui::icon(IconName::Paperclip)
                                                             .w(px(13.))
-                                                            .h(px(13.)),
-                                                        )
-                                                        .child(if self.auto_approve_shell {
-                                                            "完全访问"
+                                                            .h(px(13.))
+                                                            .text_color(gpui_kit::rgb(
+                                                                if active_ctx {
+                                                                    palette.accent
+                                                                } else {
+                                                                    palette.muted
+                                                                },
+                                                            )),
+                                                    )
+                                            })
+                                            .child(
+                                                div()
+                                                    .id("ai-perm-toggle")
+                                                    .px_2()
+                                                    .h(px(24.))
+                                                    .rounded(px(6.))
+                                                    .cursor_pointer()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1()
+                                                    .text_size(typo.sm)
+                                                    .text_color(gpui_kit::rgb(
+                                                        if self.auto_approve_shell {
+                                                            palette.danger
                                                         } else {
-                                                            "需确认"
-                                                        }),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .min_w_0()
-                                                .child(self.render_context_ring(palette))
-                                                .child(model_btn)
-                                                .when(supports_thinking, |row| row.child(think_btn))
-                                                .child(if self.is_streaming {
-                                                    div()
-                                                        .id("ai-abort")
-                                                        .size(px(26.))
-                                                        .rounded_full()
-                                                        .bg(gpui_kit::rgb(palette.danger))
-                                                        .text_color(gpui_kit::rgb(
-                                                            palette.on_accent,
-                                                        ))
-                                                        .flex()
-                                                        .items_center()
-                                                        .justify_center()
-                                                        .cursor_pointer()
-                                                        .on_click(cx.listener(|pane, _, _, cx| {
-                                                            pane.abort(cx);
-                                                        }))
-                                                        .child(
-                                                            crate::ui::icon(IconName::Square)
-                                                                .w(px(11.))
-                                                                .h(px(11.)),
-                                                        )
-                                                        .into_any_element()
-                                                } else {
-                                                    div()
-                                                        .id("ai-send")
-                                                        .size(px(26.))
-                                                        .rounded_full()
-                                                        .bg(gpui_kit::rgb(palette.accent))
-                                                        .text_color(gpui_kit::rgb(
-                                                            palette.on_accent,
-                                                        ))
-                                                        .flex()
-                                                        .items_center()
-                                                        .justify_center()
-                                                        .cursor_pointer()
-                                                        .on_click(cx.listener(
-                                                            |pane, _, window, cx| {
-                                                                pane.send_prompt(window, cx);
+                                                            palette.muted
+                                                        },
+                                                    ))
+                                                    .hover(move |s| {
+                                                        s.bg(gpui_kit::rgb(palette.hover))
+                                                    })
+                                                    .tooltip(|window, cx| {
+                                                        Tooltip::new("切换 Shell 命令确认权限")
+                                                            .build(window, cx)
+                                                    })
+                                                    .on_click(cx.listener(|pane, _, _, cx| {
+                                                        pane.auto_approve_shell =
+                                                            !pane.auto_approve_shell;
+                                                        cx.notify();
+                                                    }))
+                                                    .child(
+                                                        crate::ui::icon(
+                                                            if self.auto_approve_shell {
+                                                                IconName::ShieldAlert
+                                                            } else {
+                                                                IconName::Shield
                                                             },
-                                                        ))
-                                                        .child(
-                                                            crate::ui::icon(IconName::ArrowUp)
-                                                                .w(px(14.))
-                                                                .h(px(14.)),
                                                         )
-                                                        .into_any_element()
-                                                }),
-                                        ),
-                                ),
-                        ),
-                )
-            })
+                                                        .w(px(13.))
+                                                        .h(px(13.)),
+                                                    )
+                                                    .child(if self.auto_approve_shell {
+                                                        "完全访问"
+                                                    } else {
+                                                        "需确认"
+                                                    }),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .min_w_0()
+                                            .child(self.render_context_ring(palette))
+                                            .child({
+                                                let open = self.model_popover_open;
+                                                let pill_bg = if open {
+                                                    gpui_kit::rgb(palette.hover)
+                                                } else {
+                                                    mix_color(
+                                                        palette.background,
+                                                        palette.surface,
+                                                        0.5,
+                                                    )
+                                                };
+                                                div()
+                                                    .id("ai-model-effort-pill")
+                                                    .h(px(26.))
+                                                    .px_2()
+                                                    .rounded(px(8.))
+                                                    .bg(pill_bg)
+                                                    .border_1()
+                                                    .border_color(if open {
+                                                        mix_color(
+                                                            palette.border,
+                                                            palette.accent,
+                                                            0.5,
+                                                        )
+                                                    } else {
+                                                        subtle_border(palette.border)
+                                                    })
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1()
+                                                    .cursor_pointer()
+                                                    .text_size(typo.sm)
+                                                    .text_color(gpui_kit::rgb(palette.text))
+                                                    .hover(move |s| {
+                                                        s.bg(gpui_kit::rgb(palette.hover))
+                                                    })
+                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                        cx.stop_propagation();
+                                                    })
+                                                    .on_click(cx.listener(
+                                                        |pane, _, window, cx| {
+                                                            pane.model_popover_open =
+                                                                !pane.model_popover_open;
+                                                            if pane.model_popover_open {
+                                                                pane.model_popover_anim_gen = pane
+                                                                    .model_popover_anim_gen
+                                                                    .wrapping_add(1);
+                                                                pane.model_search_input.update(
+                                                                    cx,
+                                                                    |input, cx| {
+                                                                        input.set_value(
+                                                                            String::new(),
+                                                                            window,
+                                                                            cx,
+                                                                        );
+                                                                        input.focus(window, cx);
+                                                                    },
+                                                                );
+                                                            }
+                                                            cx.notify();
+                                                        },
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .max_w(px(160.))
+                                                            .text_ellipsis()
+                                                            .font_medium()
+                                                            .child(model_effort_label),
+                                                    )
+                                                    .child(
+                                                        crate::ui::icon(if open {
+                                                            IconName::ChevronUp
+                                                        } else {
+                                                            IconName::ChevronDown
+                                                        })
+                                                        .w(px(12.))
+                                                        .h(px(12.))
+                                                        .text_color(gpui_kit::rgb(palette.muted)),
+                                                    )
+                                            })
+                                            .child(if self.is_streaming {
+                                                div()
+                                                    .id("ai-abort")
+                                                    .size(px(28.))
+                                                    .rounded_full()
+                                                    .bg(gpui_kit::rgb(palette.danger))
+                                                    .text_color(gpui_kit::rgb(palette.on_accent))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(|pane, _, _, cx| {
+                                                        pane.abort(cx);
+                                                    }))
+                                                    .child(
+                                                        crate::ui::icon(IconName::Square)
+                                                            .w(px(11.))
+                                                            .h(px(11.)),
+                                                    )
+                                                    .into_any_element()
+                                            } else {
+                                                div()
+                                                    .id("ai-send")
+                                                    .size(px(28.))
+                                                    .rounded_full()
+                                                    .bg(gpui_kit::rgb(if can_send {
+                                                        palette.accent
+                                                    } else {
+                                                        palette.hover
+                                                    }))
+                                                    .text_color(gpui_kit::rgb(if can_send {
+                                                        palette.on_accent
+                                                    } else {
+                                                        palette.muted
+                                                    }))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .when(can_send, |btn| btn.cursor_pointer())
+                                                    .on_click(cx.listener(
+                                                        |pane, _, window, cx| {
+                                                            pane.send_prompt(window, cx);
+                                                        },
+                                                    ))
+                                                    .child(
+                                                        crate::ui::icon(IconName::ArrowUp)
+                                                            .w(px(14.))
+                                                            .h(px(14.)),
+                                                    )
+                                                    .into_any_element()
+                                            }),
+                                    ),
+                            ),
+                    ),
+            )
     }
+}
+
+fn replace_utf8_range(
+    input: &mut TextareaState,
+    range: Range<usize>,
+    replacement: &str,
+    window: &mut Window,
+    cx: &mut Context<TextareaState>,
+) {
+    let text = input.value();
+    let start = range.start.min(text.len());
+    let end = range.end.min(text.len());
+    if start > end || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        return;
+    }
+    let start_u16 = text[..start].encode_utf16().count();
+    let end_u16 = start_u16 + text[start..end].encode_utf16().count();
+    EntityInputHandler::replace_text_in_range(
+        input,
+        Some(start_u16..end_u16),
+        replacement,
+        window,
+        cx,
+    );
+}
+
+fn subtle_border(border: u32) -> Rgba {
+    let mut c = gpui_kit::rgb(border);
+    c.a = 0.78;
+    c
+}
+
+fn card_shadow(dark: bool) -> Vec<BoxShadow> {
+    vec![
+        BoxShadow::new(px(0.), px(4.), hsla(0., 0., 0., if dark { 0.34 } else { 0.06 }))
+            .blur_radius(px(14.)),
+        BoxShadow::new(px(0.), px(1.), hsla(0., 0., 0., if dark { 0.22 } else { 0.03 }))
+            .blur_radius(px(3.)),
+    ]
+}
+
+fn popover_shadow(dark: bool) -> Vec<BoxShadow> {
+    vec![
+        BoxShadow::new(px(0.), px(10.), hsla(0., 0., 0., if dark { 0.45 } else { 0.12 }))
+            .blur_radius(px(26.)),
+        BoxShadow::new(px(0.), px(2.), hsla(0., 0., 0., if dark { 0.25 } else { 0.04 }))
+            .blur_radius(px(6.)),
+    ]
 }
 
 fn mix_color(base: u32, tint: u32, amount: f32) -> Rgba {
@@ -3762,15 +4698,158 @@ fn short_model_name(name: &str) -> String {
 
 fn thinking_short_label(level: &str) -> String {
     match level {
-        "off" => "关".into(),
-        "minimal" => "极低".into(),
-        "low" => "低".into(),
-        "medium" => "中".into(),
-        "high" => "高".into(),
-        "xhigh" => "极高".into(),
-        "max" => "最大".into(),
+        "off" => "Off".into(),
+        "minimal" => "Minimal".into(),
+        "low" => "Low".into(),
+        "medium" => "Medium".into(),
+        "high" => "High".into(),
+        "xhigh" => "XHigh".into(),
+        "max" => "Max".into(),
         other => other.to_owned(),
     }
+}
+
+fn favorite_models_path() -> Option<PathBuf> {
+    crate::storage::data_directory()
+        .ok()
+        .map(|d| d.join("ai-favorite-models.json"))
+}
+
+fn load_favorite_models() -> HashSet<String> {
+    let Some(path) = favorite_models_path() else {
+        return HashSet::new();
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return HashSet::new();
+    };
+    serde_json::from_str::<Vec<String>>(&text)
+        .map(|v| v.into_iter().collect())
+        .unwrap_or_default()
+}
+
+fn save_favorite_models(favs: &HashSet<String>) {
+    let Some(path) = favorite_models_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut items: Vec<&String> = favs.iter().collect();
+    items.sort();
+    if let Ok(json) = serde_json::to_string_pretty(&items) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+fn is_image_file_path(path: &Path) -> bool {
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp"
+    )
+}
+
+fn convert_bytes_to_png(bytes: &[u8], src_format: image::ImageFormat) -> Result<Vec<u8>, String> {
+    let decoded = image::load_from_memory_with_format(bytes, src_format)
+        .map_err(|e| format!("无法解析图片：{e}"))?;
+    let mut out = Vec::new();
+    decoded
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .map_err(|e| format!("PNG 转码失败：{e}"))?;
+    Ok(out)
+}
+
+fn clipboard_image_to_pasted(id: u64, img: &gpui::Image) -> Result<PastedImage, String> {
+    let (gpui_fmt, mime, bytes) = match img.format {
+        ImageFormat::Png => (ImageFormat::Png, "image/png", img.bytes.clone()),
+        ImageFormat::Jpeg => (ImageFormat::Jpeg, "image/jpeg", img.bytes.clone()),
+        ImageFormat::Webp => (ImageFormat::Webp, "image/webp", img.bytes.clone()),
+        ImageFormat::Gif => (ImageFormat::Gif, "image/gif", img.bytes.clone()),
+        ImageFormat::Bmp => (
+            ImageFormat::Png,
+            "image/png",
+            convert_bytes_to_png(&img.bytes, image::ImageFormat::Bmp)?,
+        ),
+        ImageFormat::Tiff => (
+            ImageFormat::Png,
+            "image/png",
+            convert_bytes_to_png(&img.bytes, image::ImageFormat::Tiff)?,
+        ),
+        ImageFormat::Svg => return Err("不支持直接粘贴 SVG 矢量图片".to_owned()),
+        ImageFormat::Ico | ImageFormat::Pnm => {
+            return Err("不支持直接粘贴该图片格式".to_owned())
+        }
+    };
+    let data_b64 = encode_base64(&bytes);
+    let render_img = Arc::new(gpui::Image::from_bytes(gpui_fmt, bytes));
+    Ok(PastedImage {
+        id,
+        image: render_img,
+        mime_type: mime.to_owned(),
+        data_b64,
+        label: format!("图片 #{id}"),
+    })
+}
+
+fn file_path_to_pasted_image(id: u64, path: &Path) -> Result<PastedImage, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("读取图片失败：{e}"))?;
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let (gpui_fmt, mime, final_bytes) = match ext.as_str() {
+        "png" => (ImageFormat::Png, "image/png", bytes),
+        "jpg" | "jpeg" => (ImageFormat::Jpeg, "image/jpeg", bytes),
+        "webp" => (ImageFormat::Webp, "image/webp", bytes),
+        "gif" => (ImageFormat::Gif, "image/gif", bytes),
+        "bmp" => (
+            ImageFormat::Png,
+            "image/png",
+            convert_bytes_to_png(&bytes, image::ImageFormat::Bmp)?,
+        ),
+        _ => return Err("不支持的图片格式".to_owned()),
+    };
+    let label = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| format!("图片 #{id}"));
+    let data_b64 = encode_base64(&final_bytes);
+    let render_img = Arc::new(gpui::Image::from_bytes(gpui_fmt, final_bytes));
+    Ok(PastedImage {
+        id,
+        image: render_img,
+        mime_type: mime.to_owned(),
+        data_b64,
+        label,
+    })
+}
+
+fn encode_base64(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((n >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(n & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 fn parse_model(val: &Value) -> Option<ModelInfo> {
