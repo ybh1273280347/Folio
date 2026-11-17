@@ -60,6 +60,15 @@ test('independent SDK sessions keep running across snapshots, closing tabs, and 
   const projectA = path.join(directory, 'a');
   const projectB = path.join(directory, 'b');
   fs.mkdirSync(agentDir); fs.mkdirSync(projectA); fs.mkdirSync(projectB);
+  fs.mkdirSync(path.join(agentDir, 'extensions'));
+  fs.writeFileSync(path.join(agentDir, 'extensions', 'approval.ts'), `
+    export default function(pi) {
+      pi.registerCommand('confirm-test', { description: 'Verify isolated dialogs', handler: async (_,ctx) => {
+        await ctx.ui.confirm('First confirmation', ctx.cwd);
+        await ctx.ui.confirm('Second confirmation', ctx.cwd);
+      } });
+    }
+  `);
   const streamed = Promise.withResolvers();
   const titleRequested = Promise.withResolvers();
   const finishStream = Promise.withResolvers();
@@ -143,6 +152,22 @@ test('independent SDK sessions keep running across snapshots, closing tabs, and 
   const completedB = await client.request({ ...b, sessionId: createdB.data.sessionId, type: 'snapshot' });
   assert.match(JSON.stringify(completedB.data.messages), /乙开始乙完成/);
   assert.doesNotMatch(JSON.stringify(completedB.data.messages), /甲开始/);
+  const approvalA = client.request({ ...a, sessionId, type: 'prompt', message: '/confirm-test' });
+  const approvalB = client.request({ ...b, sessionId: createdB.data.sessionId, type: 'prompt', message: '/confirm-test' });
+  const dialogA = await client.event(sessionId, 'extension_ui_request');
+  const dialogB = await client.event(createdB.data.sessionId, 'extension_ui_request');
+  assert.equal(dialogA.method, 'confirm');
+  assert.equal(dialogB.method, 'confirm');
+  assert.notEqual(dialogA.id, dialogB.id);
+  assert.equal((await client.request({ ...a, sessionId, type: 'extension_ui_response', id: dialogA.id, confirmed: true })).success, true);
+  const waitingB = await client.request({ ...b, sessionId: createdB.data.sessionId, type: 'get_state' });
+  assert.equal(waitingB.data.waiting, true);
+  const deletingB = await client.request({ ...b, sessionId: createdB.data.sessionId, type: 'delete_session', confirmed: true });
+  assert.equal(deletingB.success, true);
+  assert.equal((await approvalB).success, true);
+  const stoppedA = await client.request({ ...a, sessionId, type: 'abort' });
+  assert.equal(stoppedA.success, true);
+  assert.equal((await approvalA).success, true);
   const pinned = await client.request({ ...a, sessionId, type: 'set_pinned', pinned: true });
   assert.equal(pinned.success, true);
   const listed = await client.request({ ...a, type: 'list_sessions' });

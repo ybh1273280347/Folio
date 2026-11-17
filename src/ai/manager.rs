@@ -521,7 +521,7 @@ impl AiPane {
                 view.attach_selection(source, file, text, window, cx)
             });
         }
-        let subscription = cx.subscribe(&view, |pane, _, event: &AiPaneEvent, cx| match event {
+        let subscription = cx.subscribe(&view, |_, _, event: &AiPaneEvent, cx| match event {
             AiPaneEvent::OpenFile(path) => cx.emit(AiPaneEvent::OpenFile(path.clone())),
             AiPaneEvent::Hide => cx.emit(AiPaneEvent::Hide),
             AiPaneEvent::ToggleMaximize => cx.emit(AiPaneEvent::ToggleMaximize),

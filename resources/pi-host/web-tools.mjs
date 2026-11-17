@@ -76,18 +76,32 @@ export function webTools(getSettings, cwd, dataRoot) {
         mode: Type.Optional(Type.Union([Type.Literal('http'), Type.Literal('dynamic')])),
         pages: Type.Optional(Type.String({ description: '1-based PDF pages, e.g. 1,3-5' })) }),
       execute: async (_id, params, signal) => {
+        signal?.throwIfAborted();
         const output = path.join(dataRoot, 'ai-artifacts', randomUUID());
         fs.mkdirSync(output, { recursive: true });
         const script = fileURLToPath(new URL('./fetch.py', import.meta.url));
         const python = process.env.FOLIO_FETCH_PYTHON ?? path.join(path.dirname(script), '.venv', 'Scripts', 'python.exe');
         const result = await new Promise((resolve, reject) => {
           const child = spawn(python, [script, '--url', params.url, '--mode', params.mode ?? 'http', '--output', output,
-            ...(params.pages ? ['--pages', params.pages] : [])], { cwd, windowsHide: true, signal });
+            ...(params.pages ? ['--pages', params.pages] : [])], { cwd, windowsHide: true });
           let stdout = '', stderr = '';
+          // Killing the Python parent alone can leave its dynamic Chromium child behind on Windows.
+          const abort = () => {
+            if (process.platform === 'win32' && child.pid) {
+              const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+              killer.once('error', reject);
+            } else child.kill();
+          };
+          signal?.addEventListener('abort', abort, { once: true });
           child.stdout.on('data', chunk => { stdout += chunk; });
           child.stderr.on('data', chunk => { stderr += chunk; });
-          child.once('error', reject);
-          child.once('close', code => code === 0 ? resolve(stdout) : reject(new Error(`web_fetch: ${stderr || `exit ${code}`}`)));
+          child.once('error', error => { signal?.removeEventListener('abort', abort); reject(error); });
+          child.once('close', code => {
+            signal?.removeEventListener('abort', abort);
+            if (signal?.aborted) reject(signal.reason);
+            else if (code === 0) resolve(stdout);
+            else reject(new Error(`web_fetch: ${stderr || `exit ${code}`}`));
+          });
         });
         const parsed = JSON.parse(result);
         return { content: [{ type: 'text', text: JSON.stringify(parsed) }], details: parsed };

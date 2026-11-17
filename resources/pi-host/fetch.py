@@ -41,12 +41,14 @@ def main() -> None:
         response.raise_for_status()
     data = response.content
     result = {"url": str(response.url), "title": "", "needs_ocr_pages": []}
-    is_pdf = data.lstrip().startswith(b"%PDF-") or "application/pdf" in response.headers.get("content-type", "")
+    content_type = response.headers.get("content-type", "").lower()
+    pdf_download = urlparse(str(response.url)).path.lower().endswith(".pdf") and content_type in {"", "application/octet-stream"}
+    is_pdf = data.lstrip().startswith(b"%PDF-") or "application/pdf" in content_type or pdf_download
     if is_pdf:
         pdf_path = args.output / "source.pdf"
         pdf_path.write_bytes(data)
         extracted = pdf_inspector.process_pdf(str(pdf_path), pages=selected_pages(args.pages))
-        markdown = extracted.markdown
+        markdown = extracted.markdown or ""
         result.update(kind="pdf", pdf_path=str(pdf_path.resolve()), pdf_type=extracted.pdf_type,
                       page_count=extracted.page_count, title=extracted.title or "")
         result["needs_ocr_pages"] = extracted.pages_needing_ocr

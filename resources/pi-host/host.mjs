@@ -45,7 +45,7 @@ function state(record) {
 
 function uiContext(record) {
   const request = (method, fields, options) => new Promise(resolve => {
-    if (options?.signal?.aborted) { resolve(undefined); return; }
+    if (record.cancelling || options?.signal?.aborted) { resolve(undefined); return; }
     const id = randomUUID();
     let timer;
     const abort = () => finish(undefined);
@@ -208,7 +208,6 @@ async function generateTitle(record, text) {
     record.session.setSessionName(title);
     metadata[identity] = { ...metadata[identity], titleSource: 'generated' };
     saveMetadata();
-    publish(record, { type: 'session_info_changed', name: title });
   } catch (error) {
     if (!controller.signal.aborted) publish(record, { type: 'title_error', error: error.message });
   } finally {
@@ -246,7 +245,7 @@ async function dispatch(command) {
       record.retained = true;
       const messages = record.partial && session.messages.at(-1)?.role !== 'assistant'
         ? [...session.messages, record.partial] : session.messages;
-      response({ ...state(record), messages, sequence: record.sequence });
+      response({ ...state(record), messages, partial: Boolean(record.partial), sequence: record.sequence });
       const next = record.pending.entries().next().value;
       if (next) publish(record, { type: 'extension_ui_request', id: next[0], method: next[1].method, ...next[1].fields });
       return;
@@ -269,6 +268,7 @@ async function dispatch(command) {
       const first = !session.messages.some(m => m.role === 'user');
       record.preview = command.titleText ?? command.message.slice(0, 48);
       const task = session.prompt(command.message, { images: command.images });
+      record.task = task;
       if (first && command.titleText?.trim() && settings.title_model_id) {
         metadata[key(record.project, record.id)] = { ...metadata[key(record.project, record.id)], titleSource: 'pending', titleText: command.titleText.slice(0, 2000) };
         saveMetadata();
@@ -276,15 +276,22 @@ async function dispatch(command) {
       }
       publish(record, { type: 'session_status', ...state(record) });
       try { await task; } finally {
+        const needsSettled = record.running;
         record.running = false;
+        record.task = undefined;
+        // Extension commands can finish without starting an agent run, so the host settles those runs.
+        if (needsSettled) publish(record, { type: 'agent_settled' });
         publish(record, { type: 'session_status', ...state(record) });
+        if (!record.retained && !record.titleController && sessions.has(key(record.project, record.id))) disposeRecord(record);
       }
       return response();
     }
-    case 'abort':
+    case 'abort': {
+      record.cancelling = true;
       for (const pending of record.pending.values()) pending.finish(undefined);
-      await session.abort();
+      try { await session.abort(); await record.task; } finally { record.cancelling = false; }
       return response();
+    }
     case 'extension_ui_response': {
       const pending = record.pending.get(command.id);
       if (!pending) throw new Error('确认请求已结束');
@@ -305,7 +312,6 @@ async function dispatch(command) {
       metadata[key(record.project, record.id)] = { ...metadata[key(record.project, record.id)], titleSource: 'manual' };
       saveMetadata();
       session.setSessionName(name);
-      publish(record, { type: 'session_info_changed', name });
       return response();
     }
     case 'regenerate_title': {
@@ -325,9 +331,11 @@ async function dispatch(command) {
     case 'retain': record.retained = true; return response();
     case 'delete_session': {
       if ((record.running || record.pending.size) && !command.confirmed) throw new Error('删除运行中的会话需要确认');
+      record.cancelling = true;
       record.titleController?.abort();
       for (const pending of record.pending.values()) pending.finish(undefined);
       await session.abort();
+      await record.task;
       const file = session.sessionFile;
       disposeRecord(record);
       if (file && fs.existsSync(file)) fs.unlinkSync(file);
