@@ -10,7 +10,7 @@ use gpui_kit::{
     assets::IconName,
     base::{Scrollbar, ScrollbarMode, StyledExt, text::MarkdownExtensions},
     component::{
-        input::{Editor, EditorState, Input, InputEvent, InputState, Position},
+        input::{Editor, EditorState, Input, InputEvent, InputState, Position, Textarea, TextareaState},
         menu::ContextMenuExt,
         resizable::{h_resizable, resizable_panel},
     },
@@ -340,9 +340,11 @@ pub struct MarkdownPane {
     annotations: Vec<AnnotationItem>,
     active_annotation_id: Option<u64>,
     selected_annotation_id: Option<u64>,
+    editing_drawer_annotation_id: Option<u64>,
     annotation_list_focus: FocusHandle,
     show_annotations_drawer: bool,
-    note_input: Entity<InputState>,
+    note_input: Entity<TextareaState>,
+    drawer_note_input: Entity<TextareaState>,
     zoom_hud: crate::ui::ZoomHud,
     translate: crate::translate::TranslatePopover,
     _source_subscription: Subscription,
@@ -614,7 +616,12 @@ impl MarkdownPane {
             },
         )
         .detach();
-        let note_input = cx.new(|cx| InputState::new(window, cx).placeholder("输入批注内容 (回车保存)…"));
+        let note_input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(2, 8)
+                .submit_on_enter(true)
+                .placeholder("输入批注内容 (回车保存)…")
+        });
         cx.subscribe_in(
             &note_input,
             window,
@@ -627,6 +634,30 @@ impl MarkdownPane {
                         }
                         let _ = storage::save_annotations(&pane.path, &pane.annotations);
                         pane.active_annotation_id = None;
+                        cx.notify();
+                    }
+                }
+            },
+        )
+        .detach();
+        let drawer_note_input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(2, 8)
+                .submit_on_enter(true)
+                .placeholder("输入批注内容 (回车保存)…")
+        });
+        cx.subscribe_in(
+            &drawer_note_input,
+            window,
+            |pane: &mut Self, state, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    if let Some(id) = pane.editing_drawer_annotation_id {
+                        let comment = state.read(cx).value().trim().to_string();
+                        if let Some(item) = pane.annotations.iter_mut().find(|a| a.id == id) {
+                            item.comment = comment;
+                        }
+                        let _ = storage::save_annotations(&pane.path, &pane.annotations);
+                        pane.editing_drawer_annotation_id = None;
                         cx.notify();
                     }
                 }
@@ -796,9 +827,11 @@ impl MarkdownPane {
             annotations,
             active_annotation_id: None,
             selected_annotation_id: None,
+            editing_drawer_annotation_id: None,
             annotation_list_focus: cx.focus_handle(),
             show_annotations_drawer: false,
             note_input,
+            drawer_note_input,
             zoom_hud: crate::ui::ZoomHud::default(),
             translate: crate::translate::TranslatePopover::default(),
             _source_subscription: source_subscription,
@@ -2326,6 +2359,7 @@ impl MarkdownPane {
 
         let scale = (self.settings.markdown_font_size as f32) / 14.0;
         let quote_font_size = (12.0 * scale).clamp(11.0, 20.0);
+        let comment_font_size = (12.5 * scale).clamp(11.5, 19.0);
         let popover_w = (308.0 * scale).clamp(280.0, 480.0);
 
         let rel_x = (anchor.origin.x - pane_origin.x)
@@ -2422,7 +2456,7 @@ impl MarkdownPane {
                             .text_ellipsis()
                             .child(format!("“{}”", item.quote)),
                     )
-                    .child(Input::new(&self.note_input))
+                    .child(Textarea::new(&self.note_input).w_full().text_size(px(comment_font_size)))
                     .child(
                         div()
                             .flex()
@@ -2970,9 +3004,9 @@ impl Render for MarkdownPane {
 
             if self.show_annotations_drawer && !self.annotations.is_empty() {
                 let editor_font_size = self.settings.markdown_font_size as f32;
-                let quote_font_size = (editor_font_size - 1.0).clamp(12.0, 26.0);
-                let comment_font_size = editor_font_size.clamp(13.0, 26.0);
-                let title_font_size = (editor_font_size * 0.9).clamp(12.0, 20.0);
+                let quote_font_size = (editor_font_size - 1.5).clamp(11.5, 20.0);
+                let comment_font_size = (editor_font_size - 3.0).clamp(11.5, 19.0);
+                let title_font_size = (editor_font_size * 0.85).clamp(11.5, 18.0);
                 let drawer_width = (editor_font_size * 18.0).clamp(280.0, 600.0);
 
                 let cards = self.annotations.iter().map(|item| {
@@ -2980,30 +3014,74 @@ impl Render for MarkdownPane {
                     let quote = item.quote.clone();
                     let occ = item.occurrence;
                     let comment = item.comment.clone();
+                    let color = item.color.clone();
+                    let is_editing = self.editing_drawer_annotation_id == Some(id);
                     let badge_rgb = HIGHLIGHT_COLORS
                         .iter()
                         .find(|(n, _, _)| *n == item.color)
                         .map(|(_, _, hex)| *hex)
                         .unwrap_or(0xfacc15);
+                    let drawer_swatches = HIGHLIGHT_COLORS.iter().enumerate().map(
+                        |(idx, (cname, _label, hex))| {
+                            let active = color == *cname;
+                            let next_color = (*cname).to_owned();
+                            div()
+                                .id(("md-drawer-ann-color", id as usize * 10 + idx))
+                                .w(px(14.))
+                                .h(px(14.))
+                                .rounded(px(7.))
+                                .bg(rgb(*hex))
+                                .border_1()
+                                .border_color(if active {
+                                    rgb(0x1f2937)
+                                } else {
+                                    rgb(0xd1d5db)
+                                })
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |pane, _, _, cx| {
+                                    if let Some(a) =
+                                        pane.annotations.iter_mut().find(|a| a.id == id)
+                                    {
+                                        a.color = next_color.clone();
+                                    }
+                                    let _ = storage::save_annotations(
+                                        &pane.path,
+                                        &pane.annotations,
+                                    );
+                                    cx.notify();
+                                }))
+                        },
+                    );
+                    let card_bg = Hsla::from(rgb(badge_rgb)).alpha(
+                        if self.selected_annotation_id == Some(id) || is_editing {
+                            0.14
+                        } else {
+                            0.08
+                        },
+                    );
+                    let card_border = Hsla::from(rgb(badge_rgb)).alpha(
+                        if self.selected_annotation_id == Some(id) || is_editing {
+                            0.65
+                        } else {
+                            0.32
+                        },
+                    );
                     div()
                         .id(SharedString::from(format!("md-ann-card-{id}")))
                         .w_full()
                         .p_2p5()
                         .rounded(px(8.))
-                        .bg(rgb(0xffffff))
+                        .bg(card_bg)
                         .border_1()
-                        .border_color(rgb(0xe8e7e3))
-                        .when(self.selected_annotation_id == Some(id), |card| {
-                            card.border_color(rgb(0x94a3b8)).bg(rgb(0xf4f3ef))
-                        })
+                        .border_color(card_border)
                         .flex()
                         .flex_col()
                         .min_w_0()
                         .overflow_hidden()
                         .gap_1p5()
                         .cursor_pointer()
-                        .hover(|s| s.border_color(rgb(0x94a3b8)))
-                        .active(|s| s.border_color(rgb(0x64748b)))
+                        .hover(|s| s.border_color(Hsla::from(rgb(badge_rgb)).alpha(0.65)))
+                        .active(|s| s.border_color(Hsla::from(rgb(badge_rgb)).alpha(0.85)))
                         .child(
                             div()
                                 .w_full()
@@ -3053,6 +3131,9 @@ impl Render for MarkdownPane {
                                         if pane.active_annotation_id == Some(id) {
                                             pane.active_annotation_id = None;
                                         }
+                                        if pane.editing_drawer_annotation_id == Some(id) {
+                                            pane.editing_drawer_annotation_id = None;
+                                        }
                                         let _ = storage::save_annotations(
                                             &pane.path,
                                             &pane.annotations,
@@ -3061,32 +3142,113 @@ impl Render for MarkdownPane {
                                     })),
                                 ),
                         )
-                        .when(!comment.is_empty(), |card| {
+                        .when(is_editing, |card| {
+                            card.child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1p5()
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_key_down(cx.listener(
+                                        |pane, ev: &KeyDownEvent, window, cx| {
+                                            if ev.keystroke.key == "escape" {
+                                                pane.editing_drawer_annotation_id = None;
+                                                pane.annotation_list_focus.focus(window, cx);
+                                                cx.stop_propagation();
+                                                cx.notify();
+                                            }
+                                        },
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .children(drawer_swatches),
+                                    )
+                                    .child(
+                                        Textarea::new(&self.drawer_note_input)
+                                            .w_full()
+                                            .text_size(px(comment_font_size)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_end()
+                                            .gap_1p5()
+                                            .child(
+                                                crate::ui::button("cancel-md-drawer-ann", "取消")
+                                                    .on_click(cx.listener(
+                                                        |pane, _, window, cx| {
+                                                            pane.editing_drawer_annotation_id =
+                                                                None;
+                                                            pane.annotation_list_focus
+                                                                .focus(window, cx);
+                                                            cx.notify();
+                                                        },
+                                                    )),
+                                            )
+                                            .child(
+                                                crate::ui::button_primary(
+                                                    "save-md-drawer-ann",
+                                                    "保存",
+                                                )
+                                                .on_click(cx.listener(move |pane, _, window, cx| {
+                                                    let next_comment = pane
+                                                        .drawer_note_input
+                                                        .read(cx)
+                                                        .value()
+                                                        .trim()
+                                                        .to_string();
+                                                    if let Some(a) = pane
+                                                        .annotations
+                                                        .iter_mut()
+                                                        .find(|a| a.id == id)
+                                                    {
+                                                        a.comment = next_comment;
+                                                    }
+                                                    let _ = storage::save_annotations(
+                                                        &pane.path,
+                                                        &pane.annotations,
+                                                    );
+                                                    pane.editing_drawer_annotation_id = None;
+                                                    pane.annotation_list_focus.focus(window, cx);
+                                                    cx.notify();
+                                                })),
+                                            ),
+                                    ),
+                            )
+                        })
+                        .when(!is_editing && !comment.is_empty(), |card| {
                             card.child(
                                 div()
                                     .w_full()
                                     .min_w_0()
                                     .text_size(px(comment_font_size))
-                                    .text_color(rgb(0x1e293b))
+                                    .text_color(rgb(0x334155))
                                     .child(comment.clone()),
                             )
                         })
                         .on_click(cx.listener(move |pane, _, window, cx| {
                             let visual_editor = pane.visual_editor.clone();
-                            let note_input = pane.note_input.clone();
+                            let drawer_note_input = pane.drawer_note_input.clone();
                             let quote_cl = quote.clone();
                             let comment_cl = comment.clone();
-                            pane.active_annotation_id = Some(id);
+                            pane.active_annotation_id = None;
                             pane.selected_annotation_id = Some(id);
-                            let list_focus = pane.annotation_list_focus.clone();
+                            pane.editing_drawer_annotation_id = Some(id);
                             window.defer(cx, move |window, cx| {
                                 visual_editor.update(cx, |editor, cx| {
                                     editor.select_quote_occurrence(&quote_cl, occ, cx);
                                 });
-                                note_input.update(cx, |input, cx| {
+                                drawer_note_input.update(cx, |input, cx| {
                                     input.set_value(comment_cl, window, cx);
+                                    input.focus(window, cx);
                                 });
-                                list_focus.focus(window, cx);
                             });
                             cx.notify();
                         }))
@@ -3107,12 +3269,16 @@ impl Render for MarkdownPane {
                                         .on_key_down(cx.listener(|pane, event: &KeyDownEvent, window, cx| {
                                             // Deletion keys in the comment editor edit text, not the card.
                                             if matches!(event.keystroke.key.as_str(), "delete" | "backspace")
+                                                && pane.editing_drawer_annotation_id.is_none()
                                                 && pane.annotation_list_focus.is_focused(window)
                                             {
                                                 if let Some(id) = pane.selected_annotation_id.take() {
                                                     pane.annotations.retain(|item| item.id != id);
                                                     if pane.active_annotation_id == Some(id) {
                                                         pane.active_annotation_id = None;
+                                                    }
+                                                    if pane.editing_drawer_annotation_id == Some(id) {
+                                                        pane.editing_drawer_annotation_id = None;
                                                     }
                                                     storage::save_annotations(&pane.path, &pane.annotations)
                                                         .expect("failed to save annotation deletion");
