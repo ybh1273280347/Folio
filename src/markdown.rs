@@ -2883,36 +2883,40 @@ impl Render for MarkdownPane {
                                 ),
                         )
                     })
-                    .child(
+                    .child({
+                        let dark = crate::theme::palette().is_dark();
+                        let thumb_bg = if dark { 0x45474b } else { 0xd9d9d7 };
+                        let thumb_hover = if dark { 0x5c5f66 } else { 0xbcbcb9 };
+                        let thumb_active = if dark { 0x72767f } else { 0xa8a8a5 };
                         div().absolute().inset_0().child(
                             Scrollbar::vertical(&self.scroll)
                                 .mode(ScrollbarMode::Always)
-                                .styles(|styles| {
+                                .styles(move |styles| {
                                     styles
-                                        .thumb(|style| {
+                                        .thumb(move |style| {
                                             style
-                                                .bg(rgb(0x999996))
+                                                .bg(gpui_kit::rgb(thumb_bg))
                                                 .width(px(10.))
                                                 .inset(px(2.))
                                                 .radius(px(6.))
                                         })
-                                        .thumb_hover(|style| {
+                                        .thumb_hover(move |style| {
                                             style
-                                                .bg(rgb(0x777774))
+                                                .bg(gpui_kit::rgb(thumb_hover))
                                                 .width(px(10.))
                                                 .inset(px(2.))
                                                 .radius(px(6.))
                                         })
-                                        .thumb_active(|style| {
+                                        .thumb_active(move |style| {
                                             style
-                                                .bg(rgb(0x5d5d5a))
+                                                .bg(gpui_kit::rgb(thumb_active))
                                                 .width(px(10.))
                                                 .inset(px(2.))
                                                 .radius(px(6.))
                                         })
                                 }),
-                        ),
-                    ),
+                        )
+                    }),
             );
 
             if self.show_annotations_drawer && !self.annotations.is_empty() {
