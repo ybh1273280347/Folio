@@ -1429,11 +1429,20 @@ impl BlockEditorState {
             }
         }
         if changed {
-            let mut cull = self.cull.borrow_mut();
-            cull.heights.clear();
-            cull.index = Default::default();
+            self.invalidate_fold_height(&path);
         }
         changed
+    }
+
+    fn invalidate_fold_height(&self, path: &[BlockId]) {
+        let mut cull = self.cull.borrow_mut();
+        // A top-level block or long-list chunk owns all nested fold heights.
+        if let Some(&index) = path.iter().find_map(|id| cull.index.unit_of.get(id)) {
+            let unit = cull.units[index].id;
+            // Keep the indexed height until prepaint measures the new layout.
+            // Drop the cached measurement so a shorter block can replace it.
+            cull.heights.remove(&unit);
+        }
     }
 
     pub(crate) fn toggle_fold(&mut self, fold: BlockId, cx: &mut Context<Self>) {
@@ -1454,13 +1463,12 @@ impl BlockEditorState {
                 self.end_composition();
                 self.model.set_selection(BlockSelection::caret(pos)).expect("fold title is editable");
                 self.selection_changed(cx);
+                // The clicked header already provides the viewport position.
+                self.reveal.set(false);
             }
         }
         self.fold_open.insert(fold, !open);
-        let mut cull = self.cull.borrow_mut();
-        cull.heights.clear();
-        cull.index = Default::default();
-        drop(cull);
+        self.invalidate_fold_height(&self.model.doc.path(fold));
         cx.notify();
     }
 
