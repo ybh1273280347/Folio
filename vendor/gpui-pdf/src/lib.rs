@@ -245,6 +245,15 @@ impl Render for ScrollbarDrag {
     }
 }
 
+#[derive(Clone)]
+struct TocResizeDrag;
+
+impl Render for TocResizeDrag {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
 /// A page's on-screen height for a given column width, preserving aspect ratio.
 fn display_height((w, h): (f32, f32), page_width: f32) -> f32 {
     if w > 0.0 {
@@ -611,6 +620,10 @@ pub struct PdfView {
     outline: Vec<OutlineItem>,
     /// Whether the table-of-contents panel is open.
     toc_open: bool,
+    /// Current width of the table-of-contents panel in logical pixels.
+    toc_width: f32,
+    /// Active drag state `(start_x, start_width)` while resizing the TOC panel.
+    toc_drag: Option<(f32, f32)>,
     /// Per-page clickable link annotations (internal page jumps + external URIs),
     /// extracted once on load. Overlaid as transparent click targets on each page.
     links: Vec<Vec<PdfLink>>,
@@ -803,6 +816,8 @@ impl PdfView {
             focus: cx.focus_handle(),
             outline: Vec::new(),
             toc_open: false,
+            toc_width: 280.0,
+            toc_drag: None,
             links: Vec::new(),
             #[cfg(feature = "forms")]
             form_fields: Vec::new(),
@@ -3203,11 +3218,9 @@ impl Render for PdfView {
             let mut col = div()
                 .id("pdf-toc")
                 .flex_shrink_0()
-                .w(px(280.0))
+                .w(px(self.toc_width))
                 .h_full()
                 .overflow_y_scroll()
-                .border_r_1()
-                .border_color(style.border)
                 .bg(style.bg)
                 .py(px(6.0));
             for (i, item) in self.outline.iter().enumerate() {
@@ -3243,6 +3256,38 @@ impl Render for PdfView {
             col
         });
 
+        let toc_resize_handle = (self.toc_open && self.has_outline()).then(|| {
+            div()
+                .id("pdf-toc-resize")
+                .w(px(5.0))
+                .flex_shrink_0()
+                .h_full()
+                .border_l_1()
+                .border_color(style.border)
+                .cursor_col_resize()
+                .hover(|s| s.bg(style.placeholder_bg))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, ev: &MouseDownEvent, _window, cx| {
+                        this.toc_drag = Some((f32::from(ev.position.x), this.toc_width));
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_drag(TocResizeDrag, |_, _, _, cx| {
+                    cx.stop_propagation();
+                    cx.new(|_| TocResizeDrag)
+                })
+                .on_drag_move(cx.listener(
+                    |this, e: &gpui::DragMoveEvent<TocResizeDrag>, _window, cx| {
+                        if let Some((start_x, start_w)) = this.toc_drag {
+                            let delta = f32::from(e.event.position.x) - start_x;
+                            this.toc_width = (start_w + delta).clamp(140.0, 520.0);
+                            cx.notify();
+                        }
+                    },
+                ))
+        });
+
         root.child(header)
             .child(
                 // Content row: the optional TOC panel beside the scrollable page column.
@@ -3253,6 +3298,7 @@ impl Render for PdfView {
                     .flex_row()
                     .children(thumbnail_panel)
                     .children(toc_panel)
+                    .children(toc_resize_handle)
                     .child(
                         // A relative wrapper so the scrollbar can float over the scroll
                         // area's right edge without taking layout space (overlay scrollbar).
