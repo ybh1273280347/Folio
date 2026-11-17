@@ -4033,7 +4033,7 @@ impl AiPane {
         palette: Palette,
         typo: AiTypography,
         ui_font: &SharedString,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let model_label = self
@@ -4053,7 +4053,6 @@ impl AiPane {
         let can_send = !self.input.read(cx).value().trim().is_empty()
             || self.quoted_selection.is_some()
             || !self.pasted_images.is_empty();
-        let input_focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let pane_paste = cx.entity();
 
         let subtle_btn = |cx: &App| {
@@ -4077,30 +4076,8 @@ impl AiPane {
             palette.accent,
             if palette.is_dark() { 0.45 } else { 0.35 },
         );
-        let composer_border = if input_focused {
-            mix_color(
-                palette.border,
-                palette.accent,
-                if palette.is_dark() { 0.65 } else { 0.55 },
-            )
-        } else {
-            subtle_border(palette.border)
-        };
-        let composer_shadow = if input_focused {
-            vec![
-                BoxShadow::new(
-                    px(0.),
-                    px(6.),
-                    hsla(0., 0., 0., if palette.is_dark() { 0.38 } else { 0.08 }),
-                )
-                .blur_radius(px(18.)),
-                BoxShadow::new(px(0.), px(0.), gpui_kit::rgb(palette.accent).into())
-                    .blur_radius(px(0.))
-                    .spread_radius(px(0.5)),
-            ]
-        } else {
-            card_shadow(palette.is_dark())
-        };
+        let composer_border = subtle_border(palette.border);
+        let composer_shadow = card_shadow(palette.is_dark());
 
         div()
             .relative()
