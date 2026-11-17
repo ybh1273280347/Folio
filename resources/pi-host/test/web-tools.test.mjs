@@ -1,6 +1,46 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
+import http from 'node:http';
+import { once } from 'node:events';
 import { webTools } from '../web-tools.mjs';
+
+test.beforeEach(t => {
+  t.mock.method(childProcess, 'execFile', (_command, _args, _options, callback) => {
+    callback(null, 'http://127.0.0.1:7897/\r\n');
+  });
+});
+
+test('Exa reaches its destination through the system proxy instead of a direct connection', { timeout: 10000 }, async t => {
+  const connections = [];
+  const proxy = http.createServer();
+  proxy.on('connect', (request, socket) => {
+    connections.push(request.url);
+    socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+  });
+  proxy.listen(0, '127.0.0.1');
+  await once(proxy, 'listening');
+  t.after(() => proxy.close());
+  childProcess.execFile.mock.mockImplementation((_command, _args, options, callback) => {
+    assert.deepEqual(Object.keys(options.env).filter(name => /^(https?|all|no)_proxy$/i.test(name)), []);
+    callback(null, `http://127.0.0.1:${proxy.address().port}/`);
+  });
+  const result = await webTools(() => ({ exaApiKey: 'key' }))[0].execute('call', { query: '测试' });
+  assert.deepEqual(connections, ['api.exa.ai:443']);
+  assert.equal(result.isError, true);
+  assert.equal(result.details.error.type, 'connection_error');
+});
+
+test('Exa reports missing system proxy configuration without trying a direct request', async t => {
+  childProcess.execFile.mock.mockImplementation((_command, _args, _options, callback) => {
+    callback(null, 'https://api.exa.ai/search');
+  });
+  const network = t.mock.method(globalThis, 'fetch', async () => Response.json({ results: [] }));
+  const result = await webTools(() => ({ exaApiKey: 'key' }))[0].execute('call', { query: '测试' });
+  assert.equal(result.details.error.type, 'configuration_error');
+  assert.equal(result.isError, true);
+  assert.equal(network.mock.callCount(), 0);
+});
 
 test('connection errors are concise failures rather than empty search results or stack traces', async t => {
   const network = t.mock.method(globalThis, 'fetch', async () => {

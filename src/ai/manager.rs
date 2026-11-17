@@ -433,6 +433,18 @@ impl AiPane {
         self.ensure_view(window, cx);
         self.focus(window, cx);
     }
+    pub fn dismiss_history(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.drawer {
+            return false;
+        }
+        self.drawer = false;
+        self.renaming = None;
+        self.pending_deletion = None;
+        self.focus(window, cx);
+        cx.notify();
+        true
+    }
+
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         if let Some(id) = self
             .store

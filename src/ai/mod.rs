@@ -35,6 +35,7 @@ use rpc::{RpcClient, RpcImage, RpcInbound};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    io::Write,
     ops::Range,
     path::{Path, PathBuf},
     sync::Arc,
@@ -445,6 +446,28 @@ impl ChatPane {
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         let handle = self.input.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
+    }
+
+    fn export_answer(&mut self, markdown: &str, cx: &mut Context<Self>) {
+        // This view owns its project's cwd, so exports stay with the source conversation.
+        let title: String = self.session_name.as_deref().unwrap_or("AI回答")
+            .chars()
+            .filter(|ch| !ch.is_control() && !r#"<>:"/\|?*"#.contains(*ch))
+            .take(48)
+            .collect();
+        let title = title.trim_matches([' ', '.']);
+        let title = if title.is_empty() { "AI回答" } else { title };
+        let filename = format!("{title}-{}.md", chrono::Local::now().format("%Y%m%d-%H%M%S-%3f"));
+        let path = self.cwd.join(&filename);
+        let result = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)
+            .and_then(|mut file| file.write_all(markdown.as_bytes()));
+        match result {
+            Ok(()) => {
+                self.show_toast(format!("已导出为笔记：{filename}"), false, cx);
+                cx.emit(AiPaneEvent::OpenFile(path));
+            }
+            Err(error) => self.show_toast(format!("导出笔记失败：{error}"), true, cx),
+        }
     }
 
     pub fn set_project_name(&mut self, name: Option<String>, cx: &mut Context<Self>) {
@@ -2434,8 +2457,23 @@ impl ChatPane {
                             SharedString::from(format!("ai-copy-msg-{run_start}")),
                             "复制回答",
                             "已复制",
-                            full_answer,
-                        )),
+                            full_answer.clone(),
+                        ))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("ai-export-note-{run_start}")))
+                                .size(AI_COPY_BUTTON_SIZE)
+                                .rounded(AI_COPY_BUTTON_RADIUS)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .text_color(fg_alpha(palette.text, 0.55))
+                                .hover(move |style| style.bg(fg_alpha(palette.text, 0.06)).text_color(fg_alpha(palette.text, 0.85)))
+                                .child(crate::ui::icon(IconName::NotebookPen).w(AI_COPY_ICON_SIZE).h(AI_COPY_ICON_SIZE))
+                                .tooltip(|window, cx| Tooltip::new("导出为笔记").build(window, cx))
+                                .on_click(cx.listener(move |pane, _, _, cx| pane.export_answer(&full_answer, cx))),
+                        ),
                 )
             })
             .when(is_task_running && all_parts.is_empty(), |root| {

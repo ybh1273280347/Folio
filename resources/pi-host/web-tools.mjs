@@ -1,6 +1,8 @@
 /** Network tools keep credentials and provider failures outside model-visible arguments. */
 import { Type } from '@sinclair/typebox';
 import { spawn } from 'node:child_process';
+import childProcess from 'node:child_process';
+import { ProxyAgent } from 'undici';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -28,10 +30,39 @@ async function toolResult(run, signal) {
 }
 
 async function post(url, headers, body, signal) {
+  // Only Exa is forced through the Windows system proxy. Never fall back to a direct connection.
+  let dispatcher;
+  if (new URL(url).hostname === 'api.exa.ai') {
+    const proxy = await new Promise((resolve, reject) => {
+      childProcess.execFile('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
+        "[System.Net.WebRequest]::GetSystemWebProxy().GetProxy([uri]'https://api.exa.ai/search').AbsoluteUri"],
+      { windowsHide: true, timeout: 10000, signal,
+        // .NET otherwise prefers inherited proxy variables over Windows settings.
+        env: Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(https?|all|no)_proxy$/i.test(name))),
+      }, (error, stdout) => {
+        if (error) reject(new ToolFailure('proxy_error', '读取 Windows 系统代理失败，请检查系统代理设置。', true));
+        else resolve(stdout.trim());
+      });
+    });
+    signal?.throwIfAborted();
+    if (proxy === url) throw new ToolFailure('configuration_error', 'Exa 必须通过系统代理，但系统为该地址返回了直连，请启用系统代理。');
+    if (!/^https?:\/\//i.test(proxy)) throw new ToolFailure('configuration_error', 'Exa 需要系统代理返回有效的 HTTP(S) 代理地址。');
+    dispatcher = new ProxyAgent(proxy);
+  }
+  try {
+    return await postJson(url, headers, body, signal, dispatcher);
+  } finally {
+    // Each request owns its proxy connection, including failures and cancellation.
+    await dispatcher?.destroy();
+  }
+}
+
+async function postJson(url, headers, body, signal, dispatcher) {
   let response;
   try {
     response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers },
-      body: JSON.stringify(body), signal: AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(25000)]) });
+      body: JSON.stringify(body), ...(dispatcher ? { dispatcher } : {}),
+      signal: AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(25000)]) });
   } catch (error) {
     if (signal?.aborted) throw signal.reason;
     if (error.name === 'TimeoutError') throw new ToolFailure('timeout', '连接或读取搜索服务超时。', true);

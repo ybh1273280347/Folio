@@ -53,6 +53,18 @@ pub const SHORTCUT_DEFS: &[ShortcutDef] = &[
         default_key: "ctrl-p",
     },
     ShortcutDef {
+        id: "toggle_ai",
+        category: "工作区与全局",
+        label: "打开 / 收起 AI 助手",
+        default_key: "ctrl-shift-a",
+    },
+    ShortcutDef {
+        id: "toggle_terminal",
+        category: "工作区与全局",
+        label: "打开 / 收起终端",
+        default_key: "ctrl-`",
+    },
+    ShortcutDef {
         id: "close_tab",
         category: "工作区与全局",
         label: "关闭当前标签页",

@@ -53,6 +53,8 @@ actions!(
         OpenFile,
         Compile,
         ToggleSidebar,
+        ToggleAi,
+        ToggleTerminal,
         FindFile,
         CloseTab,
         CopyFilePath,
@@ -141,6 +143,9 @@ pub fn bind_shortcuts(settings: &AppSettings, cx: &mut App) {
     );
     push_key(&mut bindings, settings.key_for("find_file"), FindFile, None);
     push_key(&mut bindings, settings.key_for("close_tab"), CloseTab, None);
+    // Panel shortcuts remain available inside terminal TUIs, unlike document-editing shortcuts.
+    push_key(&mut bindings, settings.key_for("toggle_ai"), ToggleAi, Some("FolioWorkspace"));
+    push_key(&mut bindings, settings.key_for("toggle_terminal"), ToggleTerminal, Some("FolioWorkspace"));
     push_key(
         &mut bindings,
         settings.key_for("toggle_source"),
@@ -305,6 +310,7 @@ pub struct Workspace {
     dialog_open: bool,
     editor_zoom_hud: crate::ui::ZoomHud,
     _tick: Task<()>,
+    _history_escape: Subscription,
 }
 
 impl Workspace {
@@ -458,6 +464,17 @@ impl Workspace {
         })
         .detach();
         cx.subscribe_in(&preferences, window, |app, _, event: &SettingsChanged, window, cx| {
+            // Retire old panel bindings before adding replacements, so remapping takes effect immediately.
+            for (id, action) in [("toggle_ai", ToggleAi.name()), ("toggle_terminal", ToggleTerminal.name())] {
+                let previous = app.settings.key_for(id);
+                if previous != event.0.key_for(id) {
+                    cx.bind_keys([KeyBinding::new(
+                        Box::leak(previous.into_boxed_str()),
+                        Unbind(action.into()),
+                        Some("FolioWorkspace"),
+                    )]);
+                }
+            }
             app.settings = event.0.clone();
             app.terminal.update(cx, |pane, cx| pane.sync(&app.settings.terminal, app.settings.theme.palette, cx));
             app.ai.update(cx, |pane, cx| pane.sync_settings(&app.settings, cx));
@@ -507,6 +524,23 @@ impl Workspace {
                 {
                     break;
                 }
+            }
+        });
+        let this = cx.entity().downgrade();
+        let workspace_window = window.window_handle();
+        // Intercept before input widgets handle Escape, so the history closes even while searching.
+        let history_escape = cx.intercept_keystrokes(move |event, window, cx| {
+            if window.window_handle() == workspace_window
+                && event.keystroke.key == "escape"
+                && event.keystroke.modifiers.number_of_modifiers() == 0
+            {
+                let _ = this.update(cx, |app, cx| {
+                    if !app.show_preferences && app.show_terminal && app.right_drawer_tab == RightDrawerTab::Ai
+                        && app.ai.update(cx, |pane, cx| pane.dismiss_history(window, cx))
+                    {
+                        cx.stop_propagation();
+                    }
+                });
             }
         });
         let mut app = Self {
@@ -586,6 +620,7 @@ impl Workspace {
             dialog_open: false,
             editor_zoom_hud: crate::ui::ZoomHud::default(),
             _tick: tick,
+            _history_escape: history_escape,
         };
         let result = match initial_location {
             WorkspaceLocation::Default => app.select_project("__folio_default", window, cx),
@@ -4829,6 +4864,21 @@ impl Render for Workspace {
                 self.settings.interface_font.clone().into()
             })
             .track_focus(&self.focus)
+            .key_context("FolioWorkspace")
+            .on_action(cx.listener(|app, _: &ToggleAi, window, cx| {
+                if app.show_preferences {
+                    cx.propagate();
+                    return;
+                }
+                app.toggle_right_drawer(RightDrawerTab::Ai, window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &ToggleTerminal, window, cx| {
+                if app.show_preferences {
+                    cx.propagate();
+                    return;
+                }
+                app.toggle_right_drawer(RightDrawerTab::Terminal, window, cx);
+            }))
             .on_action(cx.listener(Self::save_active))
             .on_action(cx.listener(Self::add_project))
             .on_action(
@@ -5037,9 +5087,12 @@ impl Render for Workspace {
                             .when(self.show_terminal && self.right_drawer_tab == RightDrawerTab::Ai, |c| {
                                 c.bg(rgb(0xe8e7e4)).text_color(rgb(0x1f2328))
                             })
-                            .tooltip(|window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new("AI 助手")
-                                    .build(window, cx)
+                            .tooltip({
+                                let key = AppSettings::format_key_badge(&self.settings.key_for("toggle_ai"));
+                                move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(format!("AI 助手 ({key})"))
+                                        .build(window, cx)
+                                }
                             })
                             .on_click(cx.listener(|app, _, window, cx| {
                                 app.toggle_right_drawer(RightDrawerTab::Ai, window, cx);
@@ -5050,9 +5103,12 @@ impl Render for Workspace {
                             .when(self.show_terminal && self.right_drawer_tab == RightDrawerTab::Terminal, |c| {
                                 c.bg(rgb(0xe8e7e4)).text_color(rgb(0x1f2328))
                             })
-                            .tooltip(|window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new("终端")
-                                    .build(window, cx)
+                            .tooltip({
+                                let key = AppSettings::format_key_badge(&self.settings.key_for("toggle_terminal"));
+                                move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(format!("终端 ({key})"))
+                                        .build(window, cx)
+                                }
                             })
                             .on_click(cx.listener(|app, _, window, cx| {
                                 app.toggle_right_drawer(RightDrawerTab::Terminal, window, cx);
