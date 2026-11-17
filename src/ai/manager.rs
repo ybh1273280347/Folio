@@ -67,6 +67,7 @@ pub struct AiPane {
     drawer: bool,
     history_scroll: ScrollHandle,
     pending_focus: Option<(String, String)>,
+    displayed_view: Option<(String, String)>,
     error: Option<String>,
     error_task: Task<()>,
     creating: HashSet<String>,
@@ -148,6 +149,7 @@ impl AiPane {
             drawer: false,
             history_scroll: ScrollHandle::new(),
             pending_focus: None,
+            displayed_view: None,
             error,
             error_task: Task::ready(()),
             creating: HashSet::new(),
@@ -713,6 +715,14 @@ impl Render for AiPane {
             .projects
             .get(&project)
             .and_then(|tabs| tabs.active.clone());
+        let displayed_view = active.as_ref().map(|id| (project.clone(), id.clone()));
+        if self.displayed_view != displayed_view {
+            // A background conversation keeps its draft, but must retire its transient selection UI.
+            if let Some(view) = self.displayed_view.as_ref().and_then(|key| self.views.get(key)) {
+                view.update(cx, |view, cx| view.dismiss_quote(cx));
+            }
+            self.displayed_view = displayed_view;
+        }
         div()
             .id("ai-manager")
             .relative()
