@@ -35,7 +35,7 @@ use gpui_kit::{
         StyledExt as _,
         text::{
             MarkdownExtensions,
-            editor_host::{BlockNode, FlowPosition, collect_leaf_geometry, RenderContext},
+            editor_host::{BlockNode, BlockState, FlowPosition, collect_leaf_geometry, RenderContext},
         },
     },
     component::{Icon, IconName},
@@ -911,6 +911,7 @@ impl RenderOnce for BlockEditor {
             .on_action(window.listener_for(s, BlockEditorState::on_soft_break))
             .on_action(window.listener_for(s, BlockEditorState::on_exit_block))
             .on_action(window.listener_for(s, BlockEditorState::on_exit_code_block_source))
+            .on_action(window.listener_for(s, BlockEditorState::on_move_left))
             .on_action(window.listener_for(s, BlockEditorState::on_move_right))
             .on_action(window.listener_for(s, BlockEditorState::on_move_up))
             .on_action(window.listener_for(s, BlockEditorState::on_move_down))
@@ -978,6 +979,7 @@ impl RenderOnce for BlockEditor {
                 ),
                 content_bounds,
                 atom_bounds,
+                fold_bounds,
                 code_preview_bounds,
                 padding: root_style.padding,
                 typography,
@@ -996,6 +998,7 @@ struct EditorRoot {
     child: Option<AnyElement>,
     backgrounds: Option<LeafBackgrounds>,
     atom_bounds: AtomBounds,
+    fold_bounds: AtomBounds,
     code_preview_bounds: BoundsMap,
     snapshot: Rc<Snapshot>,
     style: BlockEditorStyle,

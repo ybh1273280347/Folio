@@ -267,11 +267,26 @@ fn mix(base: u32, tint: u32, amount: f32) -> Rgba {
     }
 }
 
+/// Sync global gpui-component UI font family with the user's interface font.
+pub fn apply_font(interface_font: &str, cx: &mut App) {
+    let family: SharedString = if interface_font.trim().is_empty() {
+        "Segoe UI".into()
+    } else {
+        interface_font.trim().to_owned().into()
+    };
+    Theme::update(cx, |theme| {
+        if theme.font_family != family {
+            theme.font_family = family;
+        }
+    });
+}
+
 /// Apply only colors. Font families, sizes, spacing and document data are untouched.
 pub fn apply(palette: Palette, cx: &mut App) {
     if ACTIVE.with(|active| active.replace(Some(palette))) == Some(palette) {
         return;
     }
+    let saved_font = Theme::global(cx).font_family.clone();
     let mode = if palette.is_dark() {
         ThemeMode::Dark
     } else {
@@ -284,9 +299,13 @@ pub fn apply(palette: Palette, cx: &mut App) {
     if palette == Palette::light() {
         // Restore the framework's original light colors as well as Folio's tints.
         Theme::change(ThemeMode::Light, None, cx);
+        Theme::update(cx, |theme| {
+            theme.font_family = saved_font;
+        });
         return;
     }
     Theme::update(cx, |theme| {
+        theme.font_family = saved_font;
         let c = &mut theme.colors;
         c.background = rgb(palette.surface).into();
         c.foreground = rgb(palette.text).into();

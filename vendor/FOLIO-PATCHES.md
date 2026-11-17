@@ -7,4 +7,6 @@
 - `rusty-mermaid-gpui`：基于 `base58ed/rusty-mermaid` 修订 `6907e0747822cc2ee7044250a065497ce7d8f3c0` 的 MIT GPUI backend，适配本项目 `gpui-kit 0.9.1`，解析／布局／Scene 与 viewport helper 固定为同一 Git 修订。Scene 通过 `Arc` 共享，绘制准备缓存路径和文本；非零旋转、非均匀缩放及路径准备错误明确上报。无 SVG／PNG／WebView 降级路径。
 - `gpui-kit-markdown-editor`：可选单语言代码块预览接口只改变视图，保留原代码模型与序列化；源码模式复用原编辑几何，预览保留真实源码长度，完整文档导出强制预览且不带工具栏。
 
+Mermaid 适配保留编辑器原有的 `code_ui` 模块、投影缓存和折叠按钮 bounds；自定义节点使用 `editor_host::BlockState`。预览点击在编辑器 entity 的 `update` 内设置焦点，避免通过 `read(cx)` 跨越可变 App 借用。
+
 字体沿用 `resources/fonts`，中文公式缺字时才读取系统微软雅黑。Markdown PDF 使用 `krilla` 写入上述绘制操作；整篇 `.tex` 编译保持 `latexmk` 流程。

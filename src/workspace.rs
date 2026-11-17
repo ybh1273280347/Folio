@@ -467,6 +467,7 @@ impl Workspace {
                 });
             }
             crate::theme::apply(app.settings.theme.palette, cx);
+            crate::theme::apply_font(&app.settings.interface_font, cx);
             bind_shortcuts(&app.settings, cx);
             app.math.update(cx, |renderer, cx| {
                 renderer.set_appearance(&app.settings, cx)
