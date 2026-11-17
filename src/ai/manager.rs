@@ -50,6 +50,7 @@ impl HistoryEntry {
 
 pub struct AiPane {
     cwd: PathBuf,
+    project_key: String,
     project_name: Option<String>,
     settings: AppSettings,
     math: Entity<MathRenderer>,
@@ -126,8 +127,10 @@ impl AiPane {
                 }
             }
         });
+        let project_key = rpc::project_key(&cwd);
         Self {
             cwd,
+            project_key,
             project_name: None,
             settings,
             math,
@@ -157,7 +160,7 @@ impl AiPane {
     }
 
     fn project(&self) -> String {
-        rpc::project_key(&self.cwd)
+        self.project_key.clone()
     }
     fn save(&mut self) {
         let result = (|| -> std::io::Result<()> {
@@ -412,10 +415,16 @@ impl AiPane {
         }
     }
     pub fn set_directory(&mut self, cwd: PathBuf, cx: &mut Context<Self>) {
-        if rpc::project_key(&cwd) == self.project() {
+        // Workspace synchronizes these setters on render; avoid filesystem work and notifications then.
+        if self.cwd == cwd {
+            return;
+        }
+        let project_key = rpc::project_key(&cwd);
+        if project_key == self.project_key {
             return;
         }
         self.cwd = cwd;
+        self.project_key = project_key;
         self.drawer = false;
         self.renaming = None;
         if self.opened {
@@ -432,7 +441,15 @@ impl AiPane {
         cx.notify();
     }
     pub fn set_project_name(&mut self, name: Option<String>, cx: &mut Context<Self>) {
-        self.project_name = name;
+        if self.project_name == name {
+            return;
+        }
+        self.project_name = name.clone();
+        for ((project, _), view) in &self.views {
+            if project == &self.project_key {
+                view.update(cx, |view, cx| view.set_project_name(name.clone(), cx));
+            }
+        }
         cx.notify();
     }
     pub fn sync_settings(&mut self, settings: &AppSettings, cx: &mut Context<Self>) {

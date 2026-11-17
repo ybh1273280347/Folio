@@ -169,7 +169,12 @@ impl Host {
         std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines() {
                 let Ok(line) = line else { break };
-                for route in diagnostic_routes.lock().expect("routes lock").values().filter(|route| route.session.is_none()) {
+                for route in diagnostic_routes
+                    .lock()
+                    .expect("routes lock")
+                    .values()
+                    .filter(|route| route.session.is_none())
+                {
                     // Request errors are routed in responses; a different session's stderr is not a chat error.
                     let _ = route.sender.send(RpcInbound::Stderr(line.clone()));
                 }
