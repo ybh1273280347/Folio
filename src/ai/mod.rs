@@ -4,6 +4,7 @@ mod rpc;
 mod manager;
 mod quote;
 pub use manager::AiPane;
+pub(crate) use rpc::project_key;
 pub use quote::SelectionQuote;
 use quote::{append_quotes, split_injected_prompt};
 
@@ -48,6 +49,7 @@ use std::{
 };
 
 pub enum AiPaneEvent {
+    Annotation(Value),
     OpenFile(PathBuf),
     ToggleMaximize,
     Hide,

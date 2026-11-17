@@ -1,0 +1,2 @@
+# PDF xref offsets and stream bytes must survive checkout without newline conversion.
+tests/fixtures/annotations.pdf binary

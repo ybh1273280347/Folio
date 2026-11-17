@@ -9,6 +9,7 @@ import OpenAI from 'openai';
 import { createAgentSession, SessionManager, DefaultResourceLoader, ModelRuntime, getAgentDir, initTheme,
   createMcpExtension, createCodemodeExtension, createToolSearchExtension } from '@earendil-works/pi-coding-agent';
 import { webTools } from './web-tools.mjs';
+import { AnnotationBridge, annotationTools } from './annotation-tools.mjs';
 
 // stdout is a protocol channel, including while third-party extensions initialize.
 console.log = (...args) => console.error(format(...args));
@@ -17,6 +18,7 @@ initTheme('dark', false);
 const { theme } = await import(new URL('./modes/interactive/theme/theme.js', import.meta.resolve('@earendil-works/pi-coding-agent')));
 const { resolveToCwd } = await import(new URL('./core/tools/path-utils.js', import.meta.resolve('@earendil-works/pi-coding-agent')));
 const send = value => process.stdout.write(`${JSON.stringify(value)}\n`);
+const annotationBridge = new AnnotationBridge(send);
 const root = process.env.FOLIO_USER_DATA ?? path.join(os.homedir(), 'AppData', 'Roaming', 'folio-gpui');
 fs.mkdirSync(root, { recursive: true });
 const metadataPath = path.join(root, 'ai-session-metadata.json');
@@ -123,6 +125,9 @@ async function createRecord(cwd, manager) {
     pending: new Map(), editorText: '', retained: true, models: await ModelRuntime.create() };
   await configureModels(record);
   const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir(),
+    // Prefer the user's shared copy; standalone release packages also carry this Folio-specific skill.
+    additionalSkillPaths: fs.existsSync(path.join(getAgentDir(), 'skills', 'folio-annotations', 'SKILL.md'))
+      ? [] : [path.join(import.meta.dirname, 'skills', 'folio-annotations')],
     // Keep identity/policy fixed; changing a timestamp in the system prefix would invalidate its cache.
     appendSystemPromptOverride: base => [...base, `你是 Folio 中的 AI 助手。Folio 是用户正在使用的桌面笔记与项目工作空间，pi 是你的内部执行引擎。
 你的职责是结合当前项目、用户选区、附件与会话上下文，帮助用户阅读、写作、研究、处理文档和修改代码。默认使用用户的语言，清楚区分已验证的事实、推断和未完成的工作；工具执行成功后才能声称操作已完成。
@@ -146,7 +151,9 @@ async function createRecord(cwd, manager) {
   ] });
   await loader.reload();
   const { session } = await createAgentSession({ cwd, sessionManager: manager, modelRuntime: record.models,
-    resourceLoader: loader, customTools: webTools(() => settings, cwd, root) });
+    resourceLoader: loader, customTools: [...webTools(() => settings, cwd, root),
+      ...annotationTools((operation, params, signal) => annotationBridge.request(
+        { projectKey: project, sessionId: id }, operation, params, signal))] });
   record.session = session;
   record.unsubscribe = session.subscribe(event => {
     if (event.type === 'tool_execution_start' && event.toolName === 'write' && typeof event.args.path === 'string') {
@@ -179,6 +186,7 @@ async function createRecord(cwd, manager) {
 }
 
 function disposeRecord(record) {
+  annotationBridge.dispose({ projectKey: record.project, sessionId: record.id });
   record.unsubscribe();
   record.session.dispose();
   sessions.delete(key(record.project, record.id));
@@ -268,6 +276,10 @@ async function dispatch(command) {
     return response();
   }
   if (command.projectKey !== projectKey(command.cwd)) throw new Error('项目标识不匹配');
+  if (command.type === 'annotation_response') {
+    annotationBridge.respond(command);
+    return response();
+  }
   if (command.type === 'list_sessions') return response({ sessions: await list(command.cwd) });
   if (command.type === 'create_session') {
     const manager = SessionManager.create(command.cwd);

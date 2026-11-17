@@ -57,6 +57,63 @@ function driver(child) {
   };
 }
 
+test('annotation tools cross the real SDK and JSONL request/reply boundary', { timeout: 45000 }, async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'folio-annotation-host-'));
+  const agentDir = path.join(directory, 'agent');
+  const cwd = path.join(directory, 'project');
+  fs.mkdirSync(agentDir); fs.mkdirSync(cwd);
+  const requests = [];
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    request.on('data', chunk => chunks.push(chunk));
+    await once(request, 'end');
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    requests.push(body);
+    const role = body.messages.at(-1).role;
+    const delta = { user: { tool_calls:[{index:0, id:'add-note', type:'function', function:{name:'folio_annotation_create',
+      arguments:JSON.stringify({path:'note.md', quote:'target', comment:'解释'})}}] }, tool:{content:'批注已添加'} }[role];
+    response.setHeader('Content-Type', 'text/event-stream');
+    response.write(`data: ${JSON.stringify({id:'annotation-run', choices:[{index:0, delta, finish_reason:null}]})}\n\n`);
+    response.end(`data: ${JSON.stringify({id:'annotation-run', choices:[{index:0, delta:{}, finish_reason:{user:'tool_calls', tool:'stop'}[role]}]})}\n\ndata: [DONE]\n\n`);
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  fs.writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify({providers:{magpie:{
+    baseUrl:`${baseUrl}/v1`, api:'openai-completions', apiKey:'magpie', models:[{id:'test-model', name:'test-model',
+      reasoning:false, input:['text'], contextWindow:16000, maxTokens:1024,
+      cost:{input:0, output:0, cacheRead:0, cacheWrite:0}}],
+  }}}));
+  fs.writeFileSync(path.join(agentDir, 'settings.json'), JSON.stringify({defaultProvider:'magpie', defaultModel:'test-model'}));
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../host.mjs', import.meta.url))], {
+    env:{...process.env, PI_CODING_AGENT_DIR:agentDir, FOLIO_USER_DATA:directory,
+      FOLIO_AI_SETTINGS:JSON.stringify({baseUrl, titleModelId:''})}, windowsHide:true,
+  });
+  t.after(async () => {
+    const exited = once(child, 'exit');
+    child.stdin.end(); child.kill(); await exited;
+    fs.rmSync(directory, {recursive:true, force:true});
+  });
+  const client = driver(child);
+  const project = {cwd, projectKey:fs.realpathSync.native(cwd).replaceAll('/', '\\').replace(/\\+$/, '').toLowerCase()};
+  const created = await client.request({...project, type:'create_session'});
+  const sessionId = created.data.sessionId;
+  // Prompt replies only after the run settles; service the UI request while that run is pending.
+  const run = client.request({...project, sessionId, type:'prompt', message:'给 target 加批注'});
+  const pending = await client.event(sessionId, 'annotation_request');
+  assert.equal(pending.projectKey, project.projectKey);
+  assert.equal(pending.params.quote, 'target');
+  const result = {status:'ok', created:true, annotation:{id:42, path:'note.md', quote:'target', comment:'解释'}};
+  assert.equal((await client.request({...project, sessionId, type:'annotation_response', id:pending.id, result})).success, true);
+  const ended = await client.event(sessionId, 'tool_execution_end');
+  assert.equal(ended.isError, false);
+  assert.deepEqual(JSON.parse(ended.result.content[0].text), result);
+  await client.event(sessionId, 'agent_settled');
+  assert.equal((await run).success, true);
+  assert.match(JSON.stringify(requests[0].messages), /folio-annotations/);
+  assert.deepEqual(JSON.parse(requests[1].messages.at(-1).content), result);
+});
+
 test('independent SDK sessions keep running across snapshots, closing tabs, and manual rename', { timeout: 45000 }, async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'folio-sdk-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
