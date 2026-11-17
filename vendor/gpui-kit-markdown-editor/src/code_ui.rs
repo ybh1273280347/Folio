@@ -6,9 +6,10 @@ use gpui::{
     Window, div, px,
 };
 use gpui_kit::{
+    assets::IconName,
     base::text::editor_host::RenderContext,
     component::{
-        ActiveTheme as _, Icon, IconName, Sizable,
+        ActiveTheme as _, Icon, Sizable,
         button::{Button, ButtonVariants},
         select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
     },
@@ -152,7 +153,9 @@ pub(crate) fn header(
     if source {
         actions = actions.child(
             Button::new(("code-preview", block.as_u64() as usize))
-                .ghost().compact().small().label("显示图表")
+                .ghost().compact().w(px(28.)).h(px(28.))
+                .icon(Icon::new(IconName::ChartNetwork).w(px(14.)).h(px(14.)))
+                .tooltip("显示图表")
                 .on_click(move |_, _, cx| {
                     source_editor.update(cx, |state, cx| state.exit_code_preview_source(cx));
                 }),

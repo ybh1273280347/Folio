@@ -4441,7 +4441,7 @@ fn code_block_preview_uses_full_leaf_bounds(cx: &mut TestAppContext) {
     editor.update(cx, |editor, cx| {
         editor.set_code_block_preview(
             "MERMAID".into(),
-            |_, _, _, _, _| div().h(px(96.)).into_any_element(),
+            |_, _, _, _, _, _| div().h(px(96.)).into_any_element(),
             cx,
         );
     });
@@ -4466,7 +4466,7 @@ fn code_block_preview_enters_and_exits_source_mode(cx: &mut TestAppContext) {
     editor.update(cx, |editor, cx| {
         editor.set_code_block_preview(
             "mermaid".into(),
-            |_, _, _, _, _| div().h(px(96.)).into_any_element(),
+            |_, _, _, _, _, _| div().h(px(96.)).into_any_element(),
             cx,
         );
     });
@@ -4499,7 +4499,7 @@ fn code_preview_registration_and_shift_selection_keep_preview_state(cx: &mut Tes
     editor.update(cx, |editor, cx| {
         editor.set_code_block_preview(
             "MERMAID".into(),
-            |_, _, _, _, _| div().h(px(96.)).into_any_element(),
+            |_, _, _, _, _, _| div().h(px(96.)).into_any_element(),
             cx,
         );
     });

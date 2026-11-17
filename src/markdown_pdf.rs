@@ -9,6 +9,7 @@ use krilla::{
     paint::Fill,
     text::{Font as PdfFont, GlyphId as PdfGlyphId, KrillaGlyph},
 };
+use krilla_svg::{SurfaceExt, SvgSettings};
 use std::{
     collections::HashMap,
     io,
@@ -212,6 +213,9 @@ fn write(
                 VectorPaint::Mask { bounds, .. } => {
                     (f32::from(bounds.top()), f32::from(bounds.bottom()))
                 }
+                VectorPaint::Svg { bounds, .. } => {
+                    (f32::from(bounds.top()), f32::from(bounds.bottom()))
+                }
                 _ => continue,
             };
             if end <= top || start >= bottom {
@@ -221,7 +225,8 @@ fn write(
                 VectorPaint::Glyph { clip, .. }
                 | VectorPaint::Quad { clip, .. }
                 | VectorPaint::Image { clip, .. }
-                | VectorPaint::Mask { clip, .. } => *clip,
+                | VectorPaint::Mask { clip, .. }
+                | VectorPaint::Svg { clip, .. } => *clip,
                 VectorPaint::Path(path) => path.content_mask.bounds,
                 VectorPaint::Block(_) | VectorPaint::PendingImage => continue,
             };
@@ -389,6 +394,25 @@ fn write(
                         transformation.translation[1],
                     ));
                     draw_image(&mut surface, *bounds, pixels, *size);
+                    surface.pop();
+                }
+                VectorPaint::Svg { bounds, svg, .. } => {
+                    let options = crate::mermaid::usvg_options();
+                    let tree = usvg::Tree::from_str(svg, &options).map_err(|error| {
+                        io::Error::other(format!("Mermaid SVG 解析失败：{error}"))
+                    })?;
+                    let size = krilla::geom::Size::from_wh(
+                        f32::from(bounds.size.width),
+                        f32::from(bounds.size.height),
+                    )
+                    .ok_or_else(|| io::Error::other("Mermaid 图表尺寸无效"))?;
+                    surface.push_transform(&Transform::from_translate(
+                        f32::from(bounds.left()),
+                        f32::from(bounds.top()),
+                    ));
+                    surface
+                        .draw_svg(&tree, size, SvgSettings::default())
+                        .ok_or_else(|| io::Error::other("Mermaid 图表绘制失败"))?;
                     surface.pop();
                 }
                 _ => unreachable!(),

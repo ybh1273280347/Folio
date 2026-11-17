@@ -4466,6 +4466,14 @@ impl Window {
         if let Some(capture) = &mut self.vector_capture { capture.push(VectorPaint::Block(bounds)); }
     }
 
+    /// Record a vector SVG document for PDF publication. Ignored outside vector capture.
+    pub fn paint_svg_document(&mut self, bounds: Bounds<Pixels>, svg: SharedString) {
+        let clip = self.content_mask().bounds.intersect(&bounds);
+        if let Some(capture) = &mut self.vector_capture {
+            capture.push(VectorPaint::Svg { bounds, clip, svg });
+        }
+    }
+
     /// Updates the global element offset relative to the current offset. This is used to implement
     /// scrolling. This method should only be called during the prepaint phase of element drawing.
     pub fn with_element_offset<R>(
@@ -8146,6 +8154,7 @@ pub enum VectorPaint {
     Quad { quad: PaintQuad, clip: Bounds<Pixels> },
     Path(Path<Pixels>),
     Image { bounds: Bounds<Pixels>, clip: Bounds<Pixels>, data: Arc<RenderImage>, frame: usize, grayscale: bool },
+    Svg { bounds: Bounds<Pixels>, clip: Bounds<Pixels>, svg: SharedString },
 }
 
 /// A rectangle passed to the native painter.

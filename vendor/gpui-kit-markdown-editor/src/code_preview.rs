@@ -5,18 +5,19 @@ use gpui::{
     MouseButton, ParentElement, SharedString, Styled, Window, canvas, div, px,
 };
 use gpui_kit::{
+    assets::IconName,
     base::text::{
         editor_host::CodeBlock,
         MarkdownExtensions, MarkdownNode,
     },
-    component::{button::{Button, ButtonVariants}, ActiveTheme as _, Icon, IconName, Sizable},
+    component::{button::{Button, ButtonVariants}, ActiveTheme as _, Icon},
 };
 
 use crate::{BlockEditorState, BlockId};
 
 pub(crate) const NAME: &str = "editor-code-preview";
 pub(crate) type BoundsMap = Arc<Mutex<HashMap<BlockId, gpui::Bounds<gpui::Pixels>>>>;
-pub(crate) type Renderer = Arc<dyn Fn(BlockId, u64, &CodeBlock, &mut Window, &mut App) -> AnyElement + Send + Sync>;
+pub(crate) type Renderer = Arc<dyn Fn(BlockId, u64, &CodeBlock, bool, &mut Window, &mut App) -> AnyElement + Send + Sync>;
 
 #[derive(Clone)]
 pub(crate) struct Registration {
@@ -68,7 +69,7 @@ pub(crate) fn register_renderer(extensions: &mut MarkdownExtensions) {
 }
 
 fn render(data: &Data, window: &mut Window, cx: &mut App) -> AnyElement {
-    let chart = (data.renderer)(data.block, data.revision, &data.code, window, cx);
+    let chart = (data.renderer)(data.block, data.revision, &data.code, data.toolbar, window, cx);
     let block = data.block;
     let chart = div().relative().w_full().child(chart);
     let bounds = data.bounds.clone();
@@ -84,8 +85,9 @@ fn render(data: &Data, window: &mut Window, cx: &mut App) -> AnyElement {
                 Button::new(("editor-code-preview-edit", block.as_u64() as usize))
                     .ghost()
                     .compact()
-                    .small()
-                    .label("编辑源码")
+                    .w(px(28.)).h(px(28.))
+                    .icon(Icon::new(IconName::PencilLine).w(px(14.)).h(px(14.)))
+                    .tooltip("编辑源码")
                     .on_click(move |_, window, cx| {
                         edit_state.update(cx, |state, cx| {
                             state.focus(window, cx);
@@ -98,9 +100,9 @@ fn render(data: &Data, window: &mut Window, cx: &mut App) -> AnyElement {
             Button::new(("editor-code-preview-copy", block.as_u64() as usize))
                 .ghost()
                 .compact()
-                .small()
-                .icon(Icon::new(IconName::Copy).w(px(12.)).h(px(12.)))
-                .label("复制源码")
+                .w(px(28.)).h(px(28.))
+                .icon(Icon::new(IconName::Copy).w(px(14.)).h(px(14.)))
+                .tooltip("复制源码")
                 .on_click(move |_, _, cx| {
                     let code = copy_state.read(cx).model().document().block(block)
                         .and_then(|block| block.text())
@@ -114,10 +116,10 @@ fn render(data: &Data, window: &mut Window, cx: &mut App) -> AnyElement {
             .items_center()
             .justify_between()
             .px(px(8.))
-            .py(px(4.))
+            .h(px(32.))
             .bg(cx.theme().popover.opacity(0.35))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(div().child("Mermaid"))
+            .child(div().text_size(px(12.)).child("Mermaid"))
             .child(actions)
             .into_any_element()
     } else {
@@ -133,11 +135,7 @@ fn render(data: &Data, window: &mut Window, cx: &mut App) -> AnyElement {
             cx.stop_propagation();
             state.update(cx, |state, cx| {
                 state.focus(window, cx);
-                if event.click_count >= 2 {
-                    state.enter_code_preview_source(block, cx);
-                } else {
-                    state.select_code_preview(block, event.modifiers.shift, cx);
-                }
+                state.select_code_preview(block, event.modifiers.shift, cx);
             });
         })
         .child(toolbar)
