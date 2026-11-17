@@ -358,6 +358,29 @@ pub fn create_folder(root: &Path, relative: &str) -> io::Result<()> {
     fs::create_dir_all(target)
 }
 
+/// Move a whole directory within one canonical project root, without merging or replacing a target.
+pub fn move_folder_into(root: &Path, relative: &str, folder: &str) -> io::Result<String> {
+    let root = dunce::canonicalize(root)?;
+    let source = project_path(&root, relative)?;
+    let destination = project_path(&root, if folder.is_empty() { "." } else { folder })?;
+    if source == root || !source.is_dir() || !destination.is_dir() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "请选择项目内的文件夹。"));
+    }
+    if destination.starts_with(&source) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "不能将文件夹移入自身或子文件夹。"));
+    }
+    // Both existing paths were resolved inside root; appending one filename keeps the target inside it too.
+    let target = destination.join(source.file_name().expect("non-root folder has a name"));
+    if source == target {
+        return Ok(relative.to_owned());
+    }
+    if target.try_exists()? {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "目标已存在同名文件或文件夹，未移动。"));
+    }
+    fs::rename(&source, &target)?;
+    Ok(target.strip_prefix(&root).expect("validated project destination").to_string_lossy().replace('\\', "/"))
+}
+
 pub fn rename_folder(root: &Path, relative: &str, name: &str) -> io::Result<String> {
     let name = name.trim();
     if name.is_empty()
