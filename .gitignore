@@ -3,3 +3,6 @@
 /dist/
 /fixtures/smoke/*.pdf
 /fixtures/smoke/*.synctex.gz
+/resources/pi-host/node_modules/
+/resources/pi-host/.venv/
+**/__pycache__/
