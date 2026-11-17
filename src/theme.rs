@@ -334,7 +334,7 @@ pub fn apply(palette: Palette, cx: &mut App) {
         c.link_active = c.link;
         c.ring = rgb(palette.accent).into();
         c.caret = rgb(palette.text).into();
-        c.selection = mix(palette.surface, palette.accent, 0.3).into();
+        c.selection = Hsla::from(rgb(palette.accent)).alpha(0.3);
         c.table = rgb(palette.surface).into();
         c.table_head = rgb(palette.background).into();
         c.table_head_foreground = rgb(palette.text).into();
