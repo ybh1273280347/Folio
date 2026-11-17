@@ -613,6 +613,12 @@ impl Workspace {
             .find(|project| Some(&project.id) == self.config.active_id.as_ref())
     }
 
+    fn active_project_name(&self) -> Option<String> {
+        self.directory_workspace()
+            .filter(|project| project.id != "__folio_default")
+            .map(|project| project.name.clone())
+    }
+
     fn terminal_directory(&self) -> PathBuf {
         self.directory_workspace().map(|project| PathBuf::from(&project.folder))
             .or_else(|| (!self.active.is_empty()).then(|| self.document_path(&self.active)).and_then(|path| path.parent().map(Path::to_path_buf)))
@@ -636,8 +642,10 @@ impl Workspace {
                 }
                 RightDrawerTab::Ai => {
                     self.terminal.update(cx, |pane, _| pane.hide());
+                    let project_name = self.active_project_name();
                     self.ai.update(cx, |pane, cx| {
                         pane.set_directory(directory, cx);
+                        pane.set_project_name(project_name, cx);
                         pane.open(window, cx);
                     });
                 }
@@ -679,8 +687,10 @@ impl Workspace {
                 .unwrap_or_else(|| source.clone()),
             path,
         });
+        let project_name = self.active_project_name();
         self.ai.update(cx, |pane, cx| {
             pane.set_directory(directory, cx);
+            pane.set_project_name(project_name, cx);
             pane.attach_selection(source, attached, text, window, cx);
         });
         cx.notify();
@@ -4706,8 +4716,10 @@ impl Render for Workspace {
         let directory = self.terminal_directory();
         self.terminal.update(cx, |pane, _| pane.set_directory(directory.clone()));
         let active_file = self.focused_attached_file();
+        let project_name = self.active_project_name();
         self.ai.update(cx, |pane, cx| {
             pane.set_directory(directory, cx);
+            pane.set_project_name(project_name, cx);
             pane.set_active_file(active_file, cx);
         });
         let exports: Vec<_> = self

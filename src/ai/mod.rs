@@ -194,8 +194,17 @@ impl AiTypography {
     }
 }
 
+const AI_COMPOSER_MAX_WIDTH: Pixels = px(720.);
+const AI_WELCOME_ICON_SIZE: Pixels = px(40.);
+const AI_WELCOME_ICON_TITLE_GAP: Pixels = px(18.);
+const AI_COPY_BUTTON_SIZE: Pixels = px(20.);
+const AI_COPY_ICON_SIZE: Pixels = px(12.);
+const AI_COPY_BUTTON_RADIUS: Pixels = px(5.);
+const AI_INPUT_PLACEHOLDER: &str = "随心输入，/ 呼出命令…";
+
 pub struct AiPane {
     cwd: PathBuf,
+    project_name: Option<String>,
     settings: AppSettings,
     client: Option<RpcClient>,
     startup_error: Option<String>,
@@ -282,7 +291,6 @@ impl AiPane {
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(2, 7)
-                .placeholder("随心输入，/ 呼出命令…")
                 .submit_on_enter(true)
         });
         let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("输入会话名称"));
@@ -365,6 +373,7 @@ impl AiPane {
 
         let mut pane = Self {
             cwd,
+            project_name: None,
             settings,
             client: None,
             startup_error: None,
@@ -473,6 +482,15 @@ impl AiPane {
             self.client = None;
             self.start_rpc(cx);
         }
+        cx.notify();
+    }
+
+    pub fn set_project_name(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        let name = name.filter(|s| !s.trim().is_empty());
+        if self.project_name == name {
+            return;
+        }
+        self.project_name = name;
         cx.notify();
     }
 
@@ -2095,6 +2113,7 @@ impl AiPane {
         let soft_selection = base.selection().alpha(0.3);
         base.with_inline_code_style(crate::ui::inline_code_style(&self.settings))
             .with_code_block(crate::ui::block_code_style(&self.settings))
+            .with_table(crate::ui::markdown_table_style())
             .with_selection(soft_selection)
     }
 
@@ -3919,6 +3938,773 @@ impl AiPane {
             )
             .into_any_element()
     }
+
+    fn render_welcome(
+        &self,
+        palette: Palette,
+        typo: AiTypography,
+        ui_font: &SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let title_el = if let Some(name) = self
+            .project_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            div()
+                .mt(AI_WELCOME_ICON_TITLE_GAP)
+                .max_w_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(22.))
+                .font_medium()
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(fg_alpha(palette.text, 0.72))
+                        .child("你想在 "),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .font_semibold()
+                        .text_color(gpui_kit::rgb(palette.text))
+                        .child(name.to_owned()),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(fg_alpha(palette.text, 0.72))
+                        .child(" 里做什么？"),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .mt(AI_WELCOME_ICON_TITLE_GAP)
+                .max_w_full()
+                .text_center()
+                .text_size(px(22.))
+                .font_medium()
+                .text_color(gpui_kit::rgb(palette.text))
+                .child("今天想做点什么？")
+                .into_any_element()
+        };
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .px_3()
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(div().flex_grow(2.0).flex_basis(px(0.)))
+            .child(
+                div()
+                    .w_full()
+                    .max_w(AI_COMPOSER_MAX_WIDTH)
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(
+                        gpui::svg()
+                            .path("brand/folio.svg")
+                            .size(AI_WELCOME_ICON_SIZE)
+                            .flex_shrink_0()
+                            .text_color(fg_alpha(palette.text, 0.88)),
+                    )
+                    .child(title_el)
+                    .child(
+                        div()
+                            .w_full()
+                            .mt(px(22.))
+                            .child(self.render_composer(palette, typo, ui_font, window, cx)),
+                    ),
+            )
+            .child(div().flex_grow(3.0).flex_basis(px(0.)))
+            .into_any_element()
+    }
+
+    fn render_composer(
+        &self,
+        palette: Palette,
+        typo: AiTypography,
+        ui_font: &SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let model_label = self
+            .current_model
+            .as_ref()
+            .map(|m| short_model_name(&m.name))
+            .unwrap_or_else(|| "模型".to_owned());
+        let selected_model = self.current_model.as_ref();
+        let supports_thinking = self.current_model.as_ref().is_none_or(|m| m.reasoning);
+        let attached_chip = self.effective_attached_file().cloned();
+        let has_chips = attached_chip.is_some()
+            || self.quoted_selection.is_some()
+            || !self.pasted_images.is_empty();
+        let slash_items = self.current_slash_items(cx);
+        let has_slash_items = !slash_items.is_empty();
+        let input_empty = self.input.read(cx).value().is_empty();
+        let can_send = !self.input.read(cx).value().trim().is_empty()
+            || self.quoted_selection.is_some()
+            || !self.pasted_images.is_empty();
+        let input_focused = self.input.read(cx).focus_handle(cx).is_focused(window);
+        let pane_paste = cx.entity();
+
+        let subtle_btn = |cx: &App| {
+            ButtonCustomVariant::new(cx)
+                .foreground(gpui_kit::rgb(palette.muted).into())
+                .hover(gpui_kit::rgb(palette.hover).into())
+                .active(gpui_kit::rgb(palette.pressed).into())
+        };
+        let quote_bg = mix_color(
+            palette.surface,
+            palette.accent,
+            if palette.is_dark() { 0.15 } else { 0.08 },
+        );
+        let skill_token_bg = mix_color(
+            palette.surface,
+            palette.accent,
+            if palette.is_dark() { 0.22 } else { 0.11 },
+        );
+        let skill_token_border = mix_color(
+            palette.border,
+            palette.accent,
+            if palette.is_dark() { 0.45 } else { 0.35 },
+        );
+        let composer_border = if input_focused {
+            mix_color(
+                palette.border,
+                palette.accent,
+                if palette.is_dark() { 0.65 } else { 0.55 },
+            )
+        } else {
+            subtle_border(palette.border)
+        };
+        let composer_shadow = if input_focused {
+            vec![
+                BoxShadow::new(
+                    px(0.),
+                    px(6.),
+                    hsla(0., 0., 0., if palette.is_dark() { 0.38 } else { 0.08 }),
+                )
+                .blur_radius(px(18.)),
+                BoxShadow::new(px(0.), px(0.), gpui_kit::rgb(palette.accent).into())
+                    .blur_radius(px(0.))
+                    .spread_radius(px(0.5)),
+            ]
+        } else {
+            card_shadow(palette.is_dark())
+        };
+
+        div()
+            .relative()
+            .w_full()
+            .capture_action::<MoveUp>(cx.listener(|pane, _: &MoveUp, _, cx| {
+                let items = pane.current_slash_items(cx);
+                if !items.is_empty() {
+                    let count = items.len();
+                    pane.slash_index = (pane.slash_index.min(count - 1) + count - 1) % count;
+                    pane.slash_scroll.scroll_to_item(pane.slash_index);
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .capture_action::<MoveDown>(cx.listener(|pane, _: &MoveDown, _, cx| {
+                let items = pane.current_slash_items(cx);
+                if !items.is_empty() {
+                    let count = items.len();
+                    pane.slash_index = (pane.slash_index.min(count - 1) + 1) % count;
+                    pane.slash_scroll.scroll_to_item(pane.slash_index);
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .capture_action::<IndentInline>(cx.listener(|pane, _: &IndentInline, window, cx| {
+                let items = pane.current_slash_items(cx);
+                if !items.is_empty() {
+                    let chosen = items[pane.slash_index.min(items.len() - 1)].clone();
+                    cx.stop_propagation();
+                    pane.execute_slash_item(chosen, window, cx);
+                }
+            }))
+            .capture_action::<Enter>(cx.listener(|pane, ev: &Enter, window, cx| {
+                if ev.shift || ev.secondary {
+                    return;
+                }
+                let items = pane.current_slash_items(cx);
+                if !items.is_empty() {
+                    let chosen = items[pane.slash_index.min(items.len() - 1)].clone();
+                    cx.stop_propagation();
+                    pane.execute_slash_item(chosen, window, cx);
+                }
+            }))
+            .capture_action::<Escape>(cx.listener(|pane, _: &Escape, _, cx| {
+                let items = pane.current_slash_items(cx);
+                if !items.is_empty() {
+                    pane.dismissed_slash_text = Some(pane.input.read(cx).value().to_string());
+                    pane.slash_was_open = false;
+                    cx.stop_propagation();
+                    cx.notify();
+                } else if pane.model_popover_open {
+                    pane.model_popover_open = false;
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .when(
+                has_slash_items || self.model_popover_open || self.toast.is_some(),
+                |wrap| {
+                    let toast_item = self.toast.clone();
+                    wrap.child(
+                        deferred(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .bottom_full()
+                                .mb_2()
+                                .flex()
+                                .flex_col()
+                                .gap_1p5()
+                                .when_some(toast_item, |col, (msg, is_err)| {
+                                    col.child(self.render_toast_popover(
+                                        msg,
+                                        is_err,
+                                        palette,
+                                        ui_font.clone(),
+                                        cx,
+                                    ))
+                                })
+                                .when(self.model_popover_open && !has_slash_items, |col| {
+                                    col.child(self.render_model_popover(
+                                        palette,
+                                        ui_font.clone(),
+                                        cx,
+                                    ))
+                                })
+                                .when(has_slash_items, |col| {
+                                    col.child(self.render_slash_popover(
+                                        slash_items,
+                                        palette,
+                                        ui_font.clone(),
+                                        cx,
+                                    ))
+                                }),
+                        )
+                        .with_priority(3),
+                    )
+                },
+            )
+            .child(
+                div()
+                    .rounded(px(16.))
+                    .border_1()
+                    .border_color(composer_border)
+                    .bg(gpui_kit::rgb(palette.surface))
+                    .shadow(composer_shadow)
+                    .px_3()
+                    .pt_2()
+                    .pb_1p5()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .when(has_chips, |card| {
+                        card.child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_1()
+                                .when_some(attached_chip, |row, file| {
+                                    let open_path = file.path.clone();
+                                    row.child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .px_2()
+                                            .py(px(2.))
+                                            .rounded(px(6.))
+                                            .bg(gpui_kit::rgb(palette.background))
+                                            .border_1()
+                                            .border_color(subtle_border(palette.border))
+                                            .text_size(typo.sm)
+                                            .child(
+                                                div()
+                                                    .id("ai-attached-file")
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1()
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                                        cx.emit(AiPaneEvent::OpenFile(
+                                                            open_path.clone(),
+                                                        ));
+                                                    }))
+                                                    .child(
+                                                        crate::ui::icon(IconName::FileText)
+                                                            .w(px(11.))
+                                                            .h(px(11.))
+                                                            .text_color(gpui_kit::rgb(
+                                                                palette.accent,
+                                                            )),
+                                                    )
+                                                    .child(format!("@{}", file.display)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("ai-detach-file")
+                                                    .cursor_pointer()
+                                                    .text_color(gpui_kit::rgb(palette.muted))
+                                                    .on_click(cx.listener(|pane, _, _, cx| {
+                                                        pane.attach_active_file = false;
+                                                        cx.notify();
+                                                    }))
+                                                    .child(
+                                                        crate::ui::icon(IconName::Close)
+                                                            .w(px(11.))
+                                                            .h(px(11.)),
+                                                    ),
+                                            ),
+                                    )
+                                })
+                                .when_some(self.quoted_selection.as_ref(), |row, q| {
+                                    row.child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .max_w(px(260.))
+                                            .px_2()
+                                            .py(px(2.))
+                                            .rounded(px(6.))
+                                            .bg(quote_bg)
+                                            .border_1()
+                                            .border_color(skill_token_border)
+                                            .text_size(typo.sm)
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .text_ellipsis()
+                                                    .child(format!(
+                                                        "引用 {}: {}",
+                                                        q.source,
+                                                        q.text.replace('\n', " ")
+                                                    )),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("ai-clear-quote")
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(|pane, _, _, cx| {
+                                                        pane.quoted_selection = None;
+                                                        cx.notify();
+                                                    }))
+                                                    .child(
+                                                        crate::ui::icon(IconName::Close)
+                                                            .w(px(11.))
+                                                            .h(px(11.)),
+                                                    ),
+                                            ),
+                                    )
+                                })
+                                .children(self.pasted_images.iter().enumerate().map(|(idx, p)| {
+                                    let rm_id = p.id;
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .pl_1()
+                                        .pr_1p5()
+                                        .py(px(2.))
+                                        .rounded(px(7.))
+                                        .bg(gpui_kit::rgb(palette.background))
+                                        .border_1()
+                                        .border_color(subtle_border(palette.border))
+                                        .text_size(typo.xs)
+                                        .child(
+                                            img(p.image.clone())
+                                                .w(px(24.))
+                                                .h(px(24.))
+                                                .rounded(px(5.))
+                                                .object_fit(ObjectFit::Cover),
+                                        )
+                                        .child(
+                                            div()
+                                                .max_w(px(110.))
+                                                .text_ellipsis()
+                                                .text_color(gpui_kit::rgb(palette.muted))
+                                                .child(p.label.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(("ai-rm-img", idx))
+                                                .cursor_pointer()
+                                                .text_color(gpui_kit::rgb(palette.muted))
+                                                .on_click(cx.listener(move |pane, _, _, cx| {
+                                                    pane.pasted_images.retain(|im| im.id != rm_id);
+                                                    cx.notify();
+                                                }))
+                                                .child(
+                                                    crate::ui::icon(IconName::Close)
+                                                        .w(px(11.))
+                                                        .h(px(11.)),
+                                                ),
+                                        )
+                                })),
+                        )
+                    })
+                    .child(
+                        div()
+                            .relative()
+                            .w_full()
+                            .child(
+                                Textarea::new(&self.input)
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .aria_label(AI_INPUT_PLACEHOLDER)
+                                    .font_family(ui_font.clone())
+                                    .text_size(typo.body)
+                                    .on_paste(move |item, window, cx| {
+                                        pane_paste.update(cx, |pane, cx| {
+                                            pane.handle_paste(item, window, cx)
+                                        })
+                                    })
+                                    .token(move |ctx, _, _| {
+                                        let id = ctx.token().id();
+                                        if id.starts_with("skill:") {
+                                            InputToken::new(ctx)
+                                                .icon(IconName::Sparkles)
+                                                .bg(skill_token_bg)
+                                                .border_color(skill_token_border)
+                                                .text_color(gpui_kit::rgb(palette.accent))
+                                        } else if id.starts_with("dir:") {
+                                            InputToken::new(ctx)
+                                                .icon(IconName::FolderOpen)
+                                                .bg(gpui_kit::rgb(palette.background))
+                                                .border_color(subtle_border(palette.border))
+                                                .text_color(gpui_kit::rgb(palette.text))
+                                        } else {
+                                            InputToken::new(ctx)
+                                                .icon(IconName::FileText)
+                                                .bg(gpui_kit::rgb(palette.background))
+                                                .border_color(subtle_border(palette.border))
+                                                .text_color(gpui_kit::rgb(palette.text))
+                                        }
+                                    })
+                                    .on_token_click(cx.listener(
+                                        |pane,
+                                         ev: &gpui_kit::component::input::InlineTokenClickEvent,
+                                         _,
+                                         cx| {
+                                            if let Some(rel) = ev.token().id().strip_prefix("file:") {
+                                                let target = pane.resolve_tool_path(rel);
+                                                cx.emit(AiPaneEvent::OpenFile(target));
+                                            }
+                                        },
+                                    )),
+                            )
+                            .when(input_empty, |box_wrap| {
+                                box_wrap.child(
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .left_0()
+                                        .right_0()
+                                        .px(px(10.))
+                                        .py(px(8.))
+                                        .font_family(ui_font.clone())
+                                        .text_size(typo.body)
+                                        .line_height(rems(1.25))
+                                        .text_color(fg_alpha(palette.text, 0.40))
+                                        .child(AI_INPUT_PLACEHOLDER),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        Button::new("ai-pick-files")
+                                            .custom(subtle_btn(cx))
+                                            .compact()
+                                            .w(px(26.))
+                                            .h(px(26.))
+                                            .icon(crate::ui::icon(IconName::Plus))
+                                            .tooltip("选择文件附加")
+                                            .on_click(cx.listener(|pane, _, window, cx| {
+                                                pane.pick_files(window, cx);
+                                            })),
+                                    )
+                                    .child({
+                                        let has_file = self.active_file.is_some();
+                                        let active_ctx = has_file && self.attach_active_file;
+                                        let ctx_tip = match &self.active_file {
+                                            Some(f) if active_ctx => {
+                                                format!("已附加 @{}（点击取消）", f.display)
+                                            }
+                                            Some(f) => {
+                                                format!("附加当前文件 @{}", f.display)
+                                            }
+                                            None => "当前无打开文件".to_owned(),
+                                        };
+                                        let ctx_bg = if active_ctx {
+                                            mix_color(
+                                                palette.surface,
+                                                palette.accent,
+                                                if palette.is_dark() { 0.22 } else { 0.12 },
+                                            )
+                                        } else {
+                                            gpui_kit::rgb(palette.surface).into()
+                                        };
+                                        div()
+                                            .id("ai-toggle-active-context")
+                                            .size(px(26.))
+                                            .rounded(px(7.))
+                                            .bg(ctx_bg)
+                                            .when(active_ctx, |el| {
+                                                el.border_1().border_color(mix_color(
+                                                    palette.border,
+                                                    palette.accent,
+                                                    0.45,
+                                                ))
+                                            })
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .when(has_file, |el| {
+                                                el.cursor_pointer().hover(move |s| {
+                                                    s.bg(gpui_kit::rgb(palette.hover))
+                                                })
+                                            })
+                                            .when(!has_file, |el| el.opacity(0.42))
+                                            .tooltip(move |window, cx| {
+                                                Tooltip::new(ctx_tip.clone()).build(window, cx)
+                                            })
+                                            .on_click(cx.listener(|pane, _, _, cx| {
+                                                if pane.active_file.is_some() {
+                                                    pane.attach_active_file =
+                                                        !pane.attach_active_file;
+                                                    cx.notify();
+                                                }
+                                            }))
+                                            .child(
+                                                crate::ui::icon(IconName::Paperclip)
+                                                    .w(px(13.))
+                                                    .h(px(13.))
+                                                    .text_color(gpui_kit::rgb(if active_ctx {
+                                                        palette.accent
+                                                    } else {
+                                                        palette.muted
+                                                    })),
+                                            )
+                                    })
+                                    .child(
+                                        div()
+                                            .id("ai-perm-toggle")
+                                            .px_2()
+                                            .h(px(24.))
+                                            .rounded(px(6.))
+                                            .cursor_pointer()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .text_size(typo.sm)
+                                            .text_color(gpui_kit::rgb(
+                                                if self.auto_approve_shell {
+                                                    palette.danger
+                                                } else {
+                                                    palette.muted
+                                                },
+                                            ))
+                                            .hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
+                                            .tooltip(|window, cx| {
+                                                Tooltip::new("切换 Shell 命令确认权限")
+                                                    .build(window, cx)
+                                            })
+                                            .on_click(cx.listener(|pane, _, _, cx| {
+                                                pane.auto_approve_shell = !pane.auto_approve_shell;
+                                                cx.notify();
+                                            }))
+                                            .child(
+                                                crate::ui::icon(if self.auto_approve_shell {
+                                                    IconName::ShieldAlert
+                                                } else {
+                                                    IconName::Shield
+                                                })
+                                                .w(px(13.))
+                                                .h(px(13.)),
+                                            )
+                                            .child(if self.auto_approve_shell {
+                                                "完全访问"
+                                            } else {
+                                                "需确认"
+                                            }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .min_w_0()
+                                    .child(self.render_context_ring(palette))
+                                    .child({
+                                        let open = self.model_popover_open;
+                                        let hover_bg = fg_alpha(palette.text, 0.06);
+                                        div()
+                                            .id("ai-model-effort-pill")
+                                            .group("ai-model-effort-pill")
+                                            .h(px(26.))
+                                            .px_2()
+                                            .rounded(px(8.))
+                                            .when(open, |el| el.bg(hover_bg))
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .cursor_pointer()
+                                            .text_size(typo.sm)
+                                            .text_color(gpui_kit::rgb(palette.text))
+                                            .hover(move |s| s.bg(hover_bg))
+                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                cx.stop_propagation();
+                                            })
+                                            .on_click(cx.listener(|pane, _, window, cx| {
+                                                pane.model_popover_open = !pane.model_popover_open;
+                                                if pane.model_popover_open {
+                                                    pane.model_popover_anim_gen = pane
+                                                        .model_popover_anim_gen
+                                                        .wrapping_add(1);
+                                                    pane.model_search_input.update(
+                                                        cx,
+                                                        |input, cx| {
+                                                            input.set_value(
+                                                                String::new(),
+                                                                window,
+                                                                cx,
+                                                            );
+                                                            input.focus(window, cx);
+                                                        },
+                                                    );
+                                                }
+                                                cx.notify();
+                                            }))
+                                            .child(render_model_icon(
+                                                selected_model,
+                                                px(13.),
+                                                palette.muted,
+                                            ))
+                                            .child(
+                                                div()
+                                                    .max_w(px(140.))
+                                                    .text_ellipsis()
+                                                    .font_medium()
+                                                    .text_color(gpui_kit::rgb(palette.text))
+                                                    .child(model_label),
+                                            )
+                                            .when(supports_thinking, |btn| {
+                                                btn.child(
+                                                    div()
+                                                        .flex_shrink_0()
+                                                        .text_color(fg_alpha(palette.text, 0.40))
+                                                        .child(thinking_short_label(
+                                                            &self.current_thinking,
+                                                        )),
+                                                )
+                                            })
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .flex_shrink_0()
+                                                    .text_color(fg_alpha(
+                                                        palette.text,
+                                                        if open { 0.85 } else { 0.38 },
+                                                    ))
+                                                    .group_hover("ai-model-effort-pill", move |s| {
+                                                        s.text_color(fg_alpha(palette.text, 0.85))
+                                                    })
+                                                    .child(
+                                                        crate::ui::icon(if open {
+                                                            IconName::ChevronUp
+                                                        } else {
+                                                            IconName::ChevronDown
+                                                        })
+                                                        .w(px(12.))
+                                                        .h(px(12.)),
+                                                    ),
+                                            )
+                                    })
+                                    .child(if self.is_streaming {
+                                        div()
+                                            .id("ai-abort")
+                                            .size(px(28.))
+                                            .rounded_full()
+                                            .bg(gpui_kit::rgb(palette.danger))
+                                            .text_color(gpui_kit::rgb(palette.on_accent))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|pane, _, _, cx| {
+                                                pane.abort(cx);
+                                            }))
+                                            .child(
+                                                crate::ui::icon(IconName::Square)
+                                                    .w(px(11.))
+                                                    .h(px(11.)),
+                                            )
+                                            .into_any_element()
+                                    } else {
+                                        div()
+                                            .id("ai-send")
+                                            .size(px(28.))
+                                            .rounded_full()
+                                            .bg(gpui_kit::rgb(if can_send {
+                                                palette.accent
+                                            } else {
+                                                palette.hover
+                                            }))
+                                            .text_color(gpui_kit::rgb(if can_send {
+                                                palette.on_accent
+                                            } else {
+                                                palette.muted
+                                            }))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .when(can_send, |btn| btn.cursor_pointer())
+                                            .on_click(cx.listener(|pane, _, window, cx| {
+                                                pane.send_prompt(window, cx);
+                                            }))
+                                            .child(
+                                                crate::ui::icon(IconName::ArrowUp)
+                                                    .w(px(14.))
+                                                    .h(px(14.)),
+                                            )
+                                            .into_any_element()
+                                    }),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
 }
 
 impl Render for AiPane {
@@ -3950,12 +4736,6 @@ impl Render for AiPane {
         } else {
             self.settings.interface_font.clone().into()
         };
-        let workspace_title = self
-            .cwd
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "工作区".to_owned());
 
         let session_label = self
             .session_name
@@ -3970,22 +4750,6 @@ impl Render for AiPane {
                 }
             });
 
-        let model_label = self
-            .current_model
-            .as_ref()
-            .map(|m| short_model_name(&m.name))
-            .unwrap_or_else(|| "模型".to_owned());
-        let selected_model = self.current_model.as_ref();
-        let supports_thinking = self.current_model.as_ref().is_none_or(|m| m.reasoning);
-        let model_effort_label = if supports_thinking {
-            format!(
-                "{model_label} · {}",
-                thinking_short_label(&self.current_thinking)
-            )
-        } else {
-            model_label
-        };
-
         let subtle_btn = |cx: &App| {
             ButtonCustomVariant::new(cx)
                 .foreground(gpui_kit::rgb(palette.muted).into())
@@ -3993,17 +4757,10 @@ impl Render for AiPane {
                 .active(gpui_kit::rgb(palette.pressed).into())
         };
 
-        let attached_chip = self.effective_attached_file().cloned();
-        let has_chips = attached_chip.is_some()
-            || self.quoted_selection.is_some()
-            || !self.pasted_images.is_empty();
-        let slash_items = self.current_slash_items(cx);
-        let has_slash_items = !slash_items.is_empty();
-        let can_send = !self.input.read(cx).value().trim().is_empty()
-            || self.quoted_selection.is_some()
-            || !self.pasted_images.is_empty();
-        let input_focused = self.input.read(cx).focus_handle(cx).is_focused(window);
-        let pane_paste = cx.entity();
+        let is_welcome = self.messages.is_empty()
+            && self.startup_error.is_none()
+            && self.pending_ui.is_none()
+            && self.ext_widgets.is_empty();
         let md_style = self.md_style(cx);
         let total_msgs = self.messages.len();
 
@@ -4017,50 +4774,11 @@ impl Render for AiPane {
             palette.accent,
             if palette.is_dark() { 0.28 } else { 0.18 },
         );
-        let quote_bg = mix_color(
-            palette.surface,
-            palette.accent,
-            if palette.is_dark() { 0.15 } else { 0.08 },
-        );
-        let skill_token_bg = mix_color(
-            palette.surface,
-            palette.accent,
-            if palette.is_dark() { 0.22 } else { 0.11 },
-        );
-        let skill_token_border = mix_color(
-            palette.border,
-            palette.accent,
-            if palette.is_dark() { 0.45 } else { 0.35 },
-        );
         let drag_tint = mix_color(
             palette.background,
             palette.accent,
             if palette.is_dark() { 0.12 } else { 0.06 },
         );
-        let composer_border = if input_focused {
-            mix_color(
-                palette.border,
-                palette.accent,
-                if palette.is_dark() { 0.65 } else { 0.55 },
-            )
-        } else {
-            subtle_border(palette.border)
-        };
-        let composer_shadow = if input_focused {
-            vec![
-                BoxShadow::new(
-                    px(0.),
-                    px(6.),
-                    hsla(0., 0., 0., if palette.is_dark() { 0.38 } else { 0.08 }),
-                )
-                .blur_radius(px(18.)),
-                BoxShadow::new(px(0.), px(0.), gpui_kit::rgb(palette.accent).into())
-                    .blur_radius(px(0.))
-                    .spread_radius(px(0.5)),
-            ]
-        } else {
-            card_shadow(palette.is_dark())
-        };
 
         div()
             .id("folio-ai-pane")
@@ -4245,7 +4963,10 @@ impl Render for AiPane {
                     .with_priority(4),
                 )
             })
-            .child({
+            .when(is_welcome, |root| {
+                root.child(self.render_welcome(palette, typo, &ui_font, window, cx))
+            })
+            .when(!is_welcome, |root| {
                 if self.is_streaming && self.stick_to_bottom {
                     self.scroll.scroll_to_bottom();
                 }
@@ -4253,108 +4974,59 @@ impl Render for AiPane {
                 let thumb_hover = if palette.is_dark() { 0x5c5f66 } else { 0xbcbcb9 };
                 let thumb_active = if palette.is_dark() { 0x72767f } else { 0xa8a8a5 };
 
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .child(
-                        div()
-                            .id("ai-message-stream")
-                            .track_scroll(&self.scroll)
-                            .size_full()
-                            .overflow_y_scroll()
-                            .on_scroll(cx.listener(|pane, event: &ScrollEvent, _, _| {
-                                let delta_y = f32::from(event.delta.pixel_delta(px(20.)).y);
-                                let max_y = f32::from(pane.scroll.max_offset().y);
-                                let cur_y = -f32::from(pane.scroll.offset().y);
-                                if delta_y > 0.5 {
-                                    pane.stick_to_bottom = false;
-                                } else if cur_y >= (max_y - 28.0).max(0.0) {
-                                    pane.stick_to_bottom = true;
-                                }
-                            }))
-                            .px_3p5()
-                            .py_3p5()
-                            .flex()
-                            .flex_col()
-                            .gap_3p5()
-                    .when_some(self.startup_error.clone(), |stream, err| {
-                        stream.child(
+                root.child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .child(
                             div()
-                                .p_2p5()
-                                .rounded(px(10.))
-                                .bg(gpui_kit::rgb(palette.surface))
-                                .border_1()
-                                .border_color(gpui_kit::rgb(palette.danger))
-                                .shadow(card_shadow(palette.is_dark()))
-                                .text_size(typo.sm)
-                                .text_color(gpui_kit::rgb(palette.danger))
+                                .id("ai-message-stream")
+                                .track_scroll(&self.scroll)
+                                .size_full()
+                                .overflow_y_scroll()
+                                .on_scroll(cx.listener(|pane, event: &ScrollEvent, _, _| {
+                                    let delta_y = f32::from(event.delta.pixel_delta(px(20.)).y);
+                                    let max_y = f32::from(pane.scroll.max_offset().y);
+                                    let cur_y = -f32::from(pane.scroll.offset().y);
+                                    if delta_y > 0.5 {
+                                        pane.stick_to_bottom = false;
+                                    } else if cur_y >= (max_y - 28.0).max(0.0) {
+                                        pane.stick_to_bottom = true;
+                                    }
+                                }))
+                                .px_3p5()
+                                .py_3p5()
                                 .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
-                                .child(err)
-                                .child(
-                                    Button::new("ai-retry-start")
-                                        .ghost()
-                                        .compact()
-                                        .label("重试")
-                                        .on_click(cx.listener(|pane, _, _, cx| {
-                                            pane.start_rpc(cx);
-                                        })),
-                                ),
-                        )
-                    })
-                    .when(
-                        self.messages.is_empty() && self.startup_error.is_none(),
-                        |stream| {
-                            let badge_bg = mix_color(
-                                palette.surface,
-                                palette.accent,
-                                if palette.is_dark() { 0.16 } else { 0.08 },
-                            );
-                            let badge_border = mix_color(
-                                palette.border,
-                                palette.accent,
-                                if palette.is_dark() { 0.35 } else { 0.22 },
-                            );
-                            stream.child(
-                                div()
-                                    .flex_1()
-                                    .min_h(px(240.))
-                                    .flex()
-                                    .flex_col()
-                                    .items_center()
-                                    .justify_center()
-                                    .gap_2p5()
-                                    .child(
+                                .flex_col()
+                                .gap_3p5()
+                                .when_some(self.startup_error.clone(), |stream, err| {
+                                    stream.child(
                                         div()
-                                            .size(px(42.))
-                                            .rounded(px(13.))
-                                            .bg(badge_bg)
+                                            .p_2p5()
+                                            .rounded(px(10.))
+                                            .bg(gpui_kit::rgb(palette.surface))
                                             .border_1()
-                                            .border_color(badge_border)
+                                            .border_color(gpui_kit::rgb(palette.danger))
                                             .shadow(card_shadow(palette.is_dark()))
+                                            .text_size(typo.sm)
+                                            .text_color(gpui_kit::rgb(palette.danger))
                                             .flex()
                                             .items_center()
-                                            .justify_center()
+                                            .justify_between()
+                                            .gap_2()
+                                            .child(err)
                                             .child(
-                                                crate::ui::icon(IconName::Sparkles)
-                                                    .w(px(20.))
-                                                    .h(px(20.))
-                                                    .text_color(gpui_kit::rgb(palette.accent)),
+                                                Button::new("ai-retry-start")
+                                                    .ghost()
+                                                    .compact()
+                                                    .label("重试")
+                                                    .on_click(cx.listener(|pane, _, _, cx| {
+                                                        pane.start_rpc(cx);
+                                                    })),
                                             ),
                                     )
-                                    .child(
-                                        div()
-                                            .text_size(typo.body)
-                                            .font_semibold()
-                                            .text_color(gpui_kit::rgb(palette.text))
-                                            .child(workspace_title.clone()),
-                                    ),
-                            )
-                        },
-                    )
+                                })
                     .children({
                         let mut rendered_messages: Vec<AnyElement> = Vec::new();
                         let mut msg_idx = 0usize;
@@ -4623,7 +5295,8 @@ impl Render for AiPane {
                                             })
                                     }),
                             ),
-                    )
+                    ),
+                )
             })
             .when_some(self.pending_ui.as_ref(), |root, pending| {
                 root.child(self.render_pending_ui(pending, palette, cx))
@@ -4648,619 +5321,25 @@ impl Render for AiPane {
                         ),
                 )
             })
-            .child(
-                div()
-                    .relative()
-                    .flex_shrink_0()
-                    .px_3()
-                    .pb_3()
-                    .pt_1p5()
-                    .capture_action::<MoveUp>(cx.listener(|pane, _: &MoveUp, _, cx| {
-                        let items = pane.current_slash_items(cx);
-                        if !items.is_empty() {
-                            let count = items.len();
-                            pane.slash_index = (pane.slash_index.min(count - 1) + count - 1) % count;
-                            pane.slash_scroll.scroll_to_item(pane.slash_index);
-                            cx.stop_propagation();
-                            cx.notify();
-                        }
-                    }))
-                    .capture_action::<MoveDown>(cx.listener(|pane, _: &MoveDown, _, cx| {
-                        let items = pane.current_slash_items(cx);
-                        if !items.is_empty() {
-                            let count = items.len();
-                            pane.slash_index = (pane.slash_index.min(count - 1) + 1) % count;
-                            pane.slash_scroll.scroll_to_item(pane.slash_index);
-                            cx.stop_propagation();
-                            cx.notify();
-                        }
-                    }))
-                    .capture_action::<IndentInline>(cx.listener(
-                        |pane, _: &IndentInline, window, cx| {
-                            let items = pane.current_slash_items(cx);
-                            if !items.is_empty() {
-                                let chosen =
-                                    items[pane.slash_index.min(items.len() - 1)].clone();
-                                cx.stop_propagation();
-                                pane.execute_slash_item(chosen, window, cx);
-                            }
-                        },
-                    ))
-                    .capture_action::<Enter>(cx.listener(|pane, ev: &Enter, window, cx| {
-                        if ev.shift || ev.secondary {
-                            return;
-                        }
-                        let items = pane.current_slash_items(cx);
-                        if !items.is_empty() {
-                            let chosen = items[pane.slash_index.min(items.len() - 1)].clone();
-                            cx.stop_propagation();
-                            pane.execute_slash_item(chosen, window, cx);
-                        }
-                    }))
-                    .capture_action::<Escape>(cx.listener(|pane, _: &Escape, _, cx| {
-                        let items = pane.current_slash_items(cx);
-                        if !items.is_empty() {
-                            pane.dismissed_slash_text =
-                                Some(pane.input.read(cx).value().to_string());
-                            pane.slash_was_open = false;
-                            cx.stop_propagation();
-                            cx.notify();
-                        } else if pane.model_popover_open {
-                            pane.model_popover_open = false;
-                            cx.stop_propagation();
-                            cx.notify();
-                        }
-                    }))
-                    .when(
-                        has_slash_items || self.model_popover_open || self.toast.is_some(),
-                        |wrap| {
-                            let toast_item = self.toast.clone();
-                            wrap.child(
-                                deferred(
-                                    div()
-                                        .absolute()
-                                        .left_3()
-                                        .right_3()
-                                        .bottom_full()
-                                        .mb_2()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1p5()
-                                        .when_some(toast_item, |col, (msg, is_err)| {
-                                            col.child(self.render_toast_popover(
-                                                msg,
-                                                is_err,
-                                                palette,
-                                                ui_font.clone(),
-                                                cx,
-                                            ))
-                                        })
-                                        .when(self.model_popover_open && !has_slash_items, |col| {
-                                            col.child(self.render_model_popover(
-                                                palette,
-                                                ui_font.clone(),
-                                                cx,
-                                            ))
-                                        })
-                                        .when(has_slash_items, |col| {
-                                            col.child(self.render_slash_popover(
-                                                slash_items,
-                                                palette,
-                                                ui_font.clone(),
-                                                cx,
-                                            ))
-                                        }),
-                                )
-                                .with_priority(3),
-                            )
-                        },
-                    )
-                    .child(
-                        div()
-                            .rounded(px(16.))
-                            .border_1()
-                            .border_color(composer_border)
-                            .bg(gpui_kit::rgb(palette.surface))
-                            .shadow(composer_shadow)
-                            .px_3()
-                            .pt_2()
-                            .pb_1p5()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .when(has_chips, |card| {
-                                card.child(
-                                    div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .items_center()
-                                        .gap_1()
-                                        .when_some(attached_chip, |row, file| {
-                                            let open_path = file.path.clone();
-                                            row.child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_1()
-                                                    .px_2()
-                                                    .py(px(2.))
-                                                    .rounded(px(6.))
-                                                    .bg(gpui_kit::rgb(palette.background))
-                                                    .border_1()
-                                                    .border_color(subtle_border(palette.border))
-                                                    .text_size(typo.sm)
-                                                    .child(
-                                                        div()
-                                                            .id("ai-attached-file")
-                                                            .flex()
-                                                            .items_center()
-                                                            .gap_1()
-                                                            .cursor_pointer()
-                                                            .on_click(cx.listener(
-                                                                move |_, _, _, cx| {
-                                                                    cx.emit(
-                                                                        AiPaneEvent::OpenFile(
-                                                                            open_path.clone(),
-                                                                        ),
-                                                                    );
-                                                                },
-                                                            ))
-                                                            .child(
-                                                                crate::ui::icon(IconName::FileText)
-                                                                    .w(px(11.))
-                                                                    .h(px(11.))
-                                                                    .text_color(gpui_kit::rgb(
-                                                                        palette.accent,
-                                                                    )),
-                                                            )
-                                                            .child(format!("@{}", file.display)),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .id("ai-detach-file")
-                                                            .cursor_pointer()
-                                                            .text_color(gpui_kit::rgb(
-                                                                palette.muted,
-                                                            ))
-                                                            .on_click(cx.listener(
-                                                                |pane, _, _, cx| {
-                                                                    pane.attach_active_file = false;
-                                                                    cx.notify();
-                                                                },
-                                                            ))
-                                                            .child(
-                                                                crate::ui::icon(IconName::Close)
-                                                                    .w(px(11.))
-                                                                    .h(px(11.)),
-                                                            ),
-                                                    ),
-                                            )
-                                        })
-                                        .when_some(self.quoted_selection.as_ref(), |row, q| {
-                                            row.child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_1()
-                                                    .max_w(px(260.))
-                                                    .px_2()
-                                                    .py(px(2.))
-                                                    .rounded(px(6.))
-                                                    .bg(quote_bg)
-                                                    .border_1()
-                                                    .border_color(skill_token_border)
-                                                    .text_size(typo.sm)
-                                                    .child(
-                                                        div()
-                                                            .flex_1()
-                                                            .min_w_0()
-                                                            .text_ellipsis()
-                                                            .child(format!(
-                                                                "引用 {}: {}",
-                                                                q.source,
-                                                                q.text.replace('\n', " ")
-                                                            )),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .id("ai-clear-quote")
-                                                            .cursor_pointer()
-                                                            .on_click(cx.listener(
-                                                                |pane, _, _, cx| {
-                                                                    pane.quoted_selection = None;
-                                                                    cx.notify();
-                                                                },
-                                                            ))
-                                                            .child(
-                                                                crate::ui::icon(IconName::Close)
-                                                                    .w(px(11.))
-                                                                    .h(px(11.)),
-                                                            ),
-                                                    ),
-                                            )
-                                        })
-                                        .children(self.pasted_images.iter().enumerate().map(
-                                            |(idx, p)| {
-                                                let rm_id = p.id;
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_1p5()
-                                                    .pl_1()
-                                                    .pr_1p5()
-                                                    .py(px(2.))
-                                                    .rounded(px(7.))
-                                                    .bg(gpui_kit::rgb(palette.background))
-                                                    .border_1()
-                                                    .border_color(subtle_border(palette.border))
-                                                    .text_size(typo.xs)
-                                                    .child(
-                                                        img(p.image.clone())
-                                                            .w(px(24.))
-                                                            .h(px(24.))
-                                                            .rounded(px(5.))
-                                                            .object_fit(ObjectFit::Cover),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .max_w(px(110.))
-                                                            .text_ellipsis()
-                                                            .text_color(gpui_kit::rgb(palette.muted))
-                                                            .child(p.label.clone()),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .id(("ai-rm-img", idx))
-                                                            .cursor_pointer()
-                                                            .text_color(gpui_kit::rgb(palette.muted))
-                                                            .on_click(cx.listener(
-                                                                move |pane, _, _, cx| {
-                                                                    pane.pasted_images
-                                                                        .retain(|im| im.id != rm_id);
-                                                                    cx.notify();
-                                                                },
-                                                            ))
-                                                            .child(
-                                                                crate::ui::icon(IconName::Close)
-                                                                    .w(px(11.))
-                                                                    .h(px(11.)),
-                                                            ),
-                                                    )
-                                            },
-                                        )),
-                                )
-                            })
-                            .child(
-                                Textarea::new(&self.input)
-                                    .appearance(false)
-                                    .bordered(false)
-                                    .font_family(ui_font.clone())
-                                    .text_size(typo.body)
-                                    .on_paste(move |item, window, cx| {
-                                        pane_paste.update(cx, |pane, cx| {
-                                            pane.handle_paste(item, window, cx)
-                                        })
-                                    })
-                                    .token(move |ctx, _, _| {
-                                        let id = ctx.token().id();
-                                        if id.starts_with("skill:") {
-                                            InputToken::new(ctx)
-                                                .icon(IconName::Sparkles)
-                                                .bg(skill_token_bg)
-                                                .border_color(skill_token_border)
-                                                .text_color(gpui_kit::rgb(palette.accent))
-                                        } else if id.starts_with("dir:") {
-                                            InputToken::new(ctx)
-                                                .icon(IconName::FolderOpen)
-                                                .bg(gpui_kit::rgb(palette.background))
-                                                .border_color(subtle_border(palette.border))
-                                                .text_color(gpui_kit::rgb(palette.text))
-                                        } else {
-                                            InputToken::new(ctx)
-                                                .icon(IconName::FileText)
-                                                .bg(gpui_kit::rgb(palette.background))
-                                                .border_color(subtle_border(palette.border))
-                                                .text_color(gpui_kit::rgb(palette.text))
-                                        }
-                                    })
-                                    .on_token_click(cx.listener(
-                                        |pane,
-                                         ev: &gpui_kit::component::input::InlineTokenClickEvent,
-                                         _,
-                                         cx| {
-                                            if let Some(rel) = ev.token().id().strip_prefix("file:") {
-                                                let target = pane.resolve_tool_path(rel);
-                                                cx.emit(AiPaneEvent::OpenFile(target));
-                                            }
-                                        },
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .child(
-                                                Button::new("ai-pick-files")
-                                                    .custom(subtle_btn(cx))
-                                                    .compact()
-                                                    .w(px(26.))
-                                                    .h(px(26.))
-                                                    .icon(crate::ui::icon(IconName::Plus))
-                                                    .tooltip("选择文件附加")
-                                                    .on_click(cx.listener(
-                                                        |pane, _, window, cx| {
-                                                            pane.pick_files(window, cx);
-                                                        },
-                                                    )),
-                                            )
-                                            .child({
-                                                let has_file = self.active_file.is_some();
-                                                let active_ctx = has_file && self.attach_active_file;
-                                                let ctx_tip = match &self.active_file {
-                                                    Some(f) if active_ctx => {
-                                                        format!("已附加 @{}（点击取消）", f.display)
-                                                    }
-                                                    Some(f) => {
-                                                        format!("附加当前文件 @{}", f.display)
-                                                    }
-                                                    None => "当前无打开文件".to_owned(),
-                                                };
-                                                let ctx_bg = if active_ctx {
-                                                    mix_color(
-                                                        palette.surface,
-                                                        palette.accent,
-                                                        if palette.is_dark() { 0.22 } else { 0.12 },
-                                                    )
-                                                } else {
-                                                    gpui_kit::rgb(palette.surface).into()
-                                                };
-                                                div()
-                                                    .id("ai-toggle-active-context")
-                                                    .size(px(26.))
-                                                    .rounded(px(7.))
-                                                    .bg(ctx_bg)
-                                                    .when(active_ctx, |el| {
-                                                        el.border_1().border_color(mix_color(
-                                                            palette.border,
-                                                            palette.accent,
-                                                            0.45,
-                                                        ))
-                                                    })
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .when(has_file, |el| {
-                                                        el.cursor_pointer().hover(move |s| {
-                                                            s.bg(gpui_kit::rgb(palette.hover))
-                                                        })
-                                                    })
-                                                    .when(!has_file, |el| el.opacity(0.42))
-                                                    .tooltip(move |window, cx| {
-                                                        Tooltip::new(ctx_tip.clone())
-                                                            .build(window, cx)
-                                                    })
-                                                    .on_click(cx.listener(|pane, _, _, cx| {
-                                                        if pane.active_file.is_some() {
-                                                            pane.attach_active_file =
-                                                                !pane.attach_active_file;
-                                                            cx.notify();
-                                                        }
-                                                    }))
-                                                    .child(
-                                                        crate::ui::icon(IconName::Paperclip)
-                                                            .w(px(13.))
-                                                            .h(px(13.))
-                                                            .text_color(gpui_kit::rgb(
-                                                                if active_ctx {
-                                                                    palette.accent
-                                                                } else {
-                                                                    palette.muted
-                                                                },
-                                                            )),
-                                                    )
-                                            })
-                                            .child(
-                                                div()
-                                                    .id("ai-perm-toggle")
-                                                    .px_2()
-                                                    .h(px(24.))
-                                                    .rounded(px(6.))
-                                                    .cursor_pointer()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_1()
-                                                    .text_size(typo.sm)
-                                                    .text_color(gpui_kit::rgb(
-                                                        if self.auto_approve_shell {
-                                                            palette.danger
-                                                        } else {
-                                                            palette.muted
-                                                        },
-                                                    ))
-                                                    .hover(move |s| {
-                                                        s.bg(gpui_kit::rgb(palette.hover))
-                                                    })
-                                                    .tooltip(|window, cx| {
-                                                        Tooltip::new("切换 Shell 命令确认权限")
-                                                            .build(window, cx)
-                                                    })
-                                                    .on_click(cx.listener(|pane, _, _, cx| {
-                                                        pane.auto_approve_shell =
-                                                            !pane.auto_approve_shell;
-                                                        cx.notify();
-                                                    }))
-                                                    .child(
-                                                        crate::ui::icon(
-                                                            if self.auto_approve_shell {
-                                                                IconName::ShieldAlert
-                                                            } else {
-                                                                IconName::Shield
-                                                            },
-                                                        )
-                                                        .w(px(13.))
-                                                        .h(px(13.)),
-                                                    )
-                                                    .child(if self.auto_approve_shell {
-                                                        "完全访问"
-                                                    } else {
-                                                        "需确认"
-                                                    }),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .min_w_0()
-                                            .child(self.render_context_ring(palette))
-                                            .child({
-                                                let open = self.model_popover_open;
-                                                let pill_bg = if open {
-                                                    gpui_kit::rgb(palette.hover)
-                                                } else {
-                                                    mix_color(
-                                                        palette.background,
-                                                        palette.surface,
-                                                        0.5,
-                                                    )
-                                                };
-                                                div()
-                                                    .id("ai-model-effort-pill")
-                                                    .h(px(26.))
-                                                    .px_2()
-                                                    .rounded(px(8.))
-                                                    .bg(pill_bg)
-                                                    .border_1()
-                                                    .border_color(if open {
-                                                        mix_color(
-                                                            palette.border,
-                                                            palette.accent,
-                                                            0.5,
-                                                        )
-                                                    } else {
-                                                        subtle_border(palette.border)
-                                                    })
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_1()
-                                                    .cursor_pointer()
-                                                    .text_size(typo.sm)
-                                                    .text_color(gpui_kit::rgb(palette.text))
-                                                    .hover(move |s| {
-                                                        s.bg(gpui_kit::rgb(palette.hover))
-                                                    })
-                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                        cx.stop_propagation();
-                                                    })
-                                                    .on_click(cx.listener(
-                                                        |pane, _, window, cx| {
-                                                            pane.model_popover_open =
-                                                                !pane.model_popover_open;
-                                                            if pane.model_popover_open {
-                                                                pane.model_popover_anim_gen = pane
-                                                                    .model_popover_anim_gen
-                                                                    .wrapping_add(1);
-                                                                pane.model_search_input.update(
-                                                                    cx,
-                                                                    |input, cx| {
-                                                                        input.set_value(
-                                                                            String::new(),
-                                                                            window,
-                                                                            cx,
-                                                                        );
-                                                                        input.focus(window, cx);
-                                                                    },
-                                                                );
-                                                            }
-                                                            cx.notify();
-                                                        },
-                                                    ))
-                                                    .child(render_model_icon(
-                                                        selected_model,
-                                                        px(13.),
-                                                        palette.muted,
-                                                    ))
-                                                    .child(
-                                                        div()
-                                                            .max_w(px(160.))
-                                                            .text_ellipsis()
-                                                            .font_medium()
-                                                            .child(model_effort_label),
-                                                    )
-                                                    .child(
-                                                        crate::ui::icon(if open {
-                                                            IconName::ChevronUp
-                                                        } else {
-                                                            IconName::ChevronDown
-                                                        })
-                                                        .w(px(12.))
-                                                        .h(px(12.))
-                                                        .text_color(gpui_kit::rgb(palette.muted)),
-                                                    )
-                                            })
-                                            .child(if self.is_streaming {
-                                                div()
-                                                    .id("ai-abort")
-                                                    .size(px(28.))
-                                                    .rounded_full()
-                                                    .bg(gpui_kit::rgb(palette.danger))
-                                                    .text_color(gpui_kit::rgb(palette.on_accent))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .cursor_pointer()
-                                                    .on_click(cx.listener(|pane, _, _, cx| {
-                                                        pane.abort(cx);
-                                                    }))
-                                                    .child(
-                                                        crate::ui::icon(IconName::Square)
-                                                            .w(px(11.))
-                                                            .h(px(11.)),
-                                                    )
-                                                    .into_any_element()
-                                            } else {
-                                                div()
-                                                    .id("ai-send")
-                                                    .size(px(28.))
-                                                    .rounded_full()
-                                                    .bg(gpui_kit::rgb(if can_send {
-                                                        palette.accent
-                                                    } else {
-                                                        palette.hover
-                                                    }))
-                                                    .text_color(gpui_kit::rgb(if can_send {
-                                                        palette.on_accent
-                                                    } else {
-                                                        palette.muted
-                                                    }))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .when(can_send, |btn| btn.cursor_pointer())
-                                                    .on_click(cx.listener(
-                                                        |pane, _, window, cx| {
-                                                            pane.send_prompt(window, cx);
-                                                        },
-                                                    ))
-                                                    .child(
-                                                        crate::ui::icon(IconName::ArrowUp)
-                                                            .w(px(14.))
-                                                            .h(px(14.)),
-                                                    )
-                                                    .into_any_element()
-                                            }),
-                                    ),
-                            ),
-                    ),
-            )
+            .when(!is_welcome, |root| {
+                root.child(
+                    div()
+                        .flex_shrink_0()
+                        .w_full()
+                        .px_3()
+                        .pb_3()
+                        .pt_1p5()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .child(
+                            div()
+                                .w_full()
+                                .max_w(AI_COMPOSER_MAX_WIDTH)
+                                .child(self.render_composer(palette, typo, &ui_font, window, cx)),
+                        ),
+                )
+            })
     }
 }
 
@@ -5994,31 +6073,42 @@ struct AiCopyFeedback {
 
 impl RenderOnce for AiCopyButton {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let palette = active_palette();
         let feedback = window.use_keyed_state(self.id.clone(), cx, |_, _| AiCopyFeedback {
             copied: false,
             reset: Task::ready(()),
         });
         let copied = feedback.read(cx).copied;
         let text = self.text;
-        Button::new(self.id)
-            .ghost()
-            .compact()
-            .w(px(24.))
-            .h(px(24.))
-            .icon(
+        let tip = if copied {
+            self.copied_tip
+        } else {
+            self.idle_tip
+        };
+        let idle_fg = fg_alpha(palette.text, if copied { 0.85 } else { 0.55 });
+        let hover_fg = fg_alpha(palette.text, 0.85);
+        let hover_bg = fg_alpha(palette.text, 0.06);
+
+        div()
+            .id(self.id)
+            .size(AI_COPY_BUTTON_SIZE)
+            .rounded(AI_COPY_BUTTON_RADIUS)
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .text_color(idle_fg)
+            .hover(move |s| s.bg(hover_bg).text_color(hover_fg))
+            .child(
                 crate::ui::icon(if copied {
                     IconName::Check
                 } else {
                     IconName::Copy
                 })
-                .w(px(12.))
-                .h(px(12.)),
+                .w(AI_COPY_ICON_SIZE)
+                .h(AI_COPY_ICON_SIZE),
             )
-            .tooltip(if copied {
-                self.copied_tip
-            } else {
-                self.idle_tip
-            })
+            .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
             .on_click(move |_, _, cx| {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
                 feedback.update(cx, |feedback, cx| {
