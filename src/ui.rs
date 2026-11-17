@@ -247,6 +247,7 @@ icon_assets!(
         Code,
         ChartNetwork,
         PencilLine,
+        Pin,
         NotebookPen,
         Files,
         Trash,

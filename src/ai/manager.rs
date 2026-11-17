@@ -593,13 +593,13 @@ impl AiPane {
                         .child(div().flex().items_center().gap_1()
                             .child(if self.renaming.as_ref() == Some(&id) { div().flex_1().min_w_0().on_mouse_down(MouseButton::Left, |_,_,cx| cx.stop_propagation()).child(Input::new(&self.rename)).into_any_element() }
                                 else { div().flex_1().min_w_0().text_ellipsis().child(title).into_any_element() })
-                            .child(Button::new(SharedString::from(format!("pin-{id}"))).compact().icon(crate::ui::icon(IconName::Pin)).tooltip(if pinned { "取消置顶" } else { "置顶" })
+                            .child(Button::new(SharedString::from(format!("pin-{id}"))).ghost().compact().w(px(24.)).h(px(24.)).icon(crate::ui::icon(IconName::Pin)).tooltip(if pinned { "取消置顶" } else { "置顶" })
                                 .on_click(cx.listener(move |pane, _, _, cx| { cx.stop_propagation(); pane.command(json!({"type":"set_pinned","sessionId":pin,"pinned":!pinned}), cx); })))
-                            .child(Button::new(SharedString::from(format!("rename-{id}"))).compact().icon(crate::ui::icon(IconName::Pencil)).tooltip("重命名")
+                            .child(Button::new(SharedString::from(format!("rename-{id}"))).ghost().compact().w(px(24.)).h(px(24.)).icon(crate::ui::icon(IconName::PencilLine)).tooltip("重命名")
                                 .on_click(cx.listener(move |pane, _, window, cx| { cx.stop_propagation(); pane.renaming = Some(rename.clone()); pane.rename.update(cx, |input,cx| { input.set_value(initial.clone(),window,cx); input.focus(window,cx); }); cx.notify(); })))
-                            .child(Button::new(SharedString::from(format!("title-{id}"))).compact().icon(crate::ui::icon(IconName::RefreshCw)).tooltip("重新生成标题")
+                            .child(Button::new(SharedString::from(format!("title-{id}"))).ghost().compact().w(px(24.)).h(px(24.)).icon(crate::ui::icon(IconName::RefreshCw)).tooltip("重新生成标题")
                                 .on_click(cx.listener(move |pane, _, _, cx| { cx.stop_propagation(); pane.command(json!({"type":"regenerate_title","sessionId":regen}),cx); })))
-                            .child(Button::new(SharedString::from(format!("delete-{id}"))).compact().icon(crate::ui::icon(IconName::Trash)).tooltip("删除会话")
+                            .child(Button::new(SharedString::from(format!("delete-{id}"))).ghost().compact().w(px(24.)).h(px(24.)).icon(crate::ui::icon(IconName::Trash)).tooltip("删除会话")
                                 .on_click(cx.listener(move |pane, _, _, cx| { cx.stop_propagation(); if running || waiting { pane.pending_deletion = Some(delete.clone()); cx.notify(); } else { pane.delete(delete.clone(),false,cx); } }))))
                         .child(div().flex().justify_between().text_xs().text_color(gpui_kit::rgb(palette.muted))
                             .child(format!("{}{} 条 {}", if pinned { "置顶 · " } else { "" }, entry.count, status))
@@ -666,7 +666,10 @@ impl Render for AiPane {
                     .bg(gpui_kit::rgb(palette.surface))
                     .child(
                         Button::new("ai-history")
+                            .ghost()
                             .compact()
+                            .w(px(26.))
+                            .h(px(26.))
                             .icon(crate::ui::icon(IconName::Clock))
                             .tooltip("会话历史")
                             .on_click(cx.listener(|pane, _, _, cx| {
@@ -742,8 +745,11 @@ impl Render for AiPane {
                                     .child(div().min_w_0().text_xs().text_ellipsis().child(title))
                                     .child(
                                         Button::new(SharedString::from(format!("close-{id}")))
+                                            .ghost()
                                             .compact()
-                                            .icon(crate::ui::icon(IconName::X))
+                                            .w(px(20.))
+                                            .h(px(20.))
+                                            .icon(crate::ui::icon(IconName::Close))
                                             .tooltip("关闭标签，任务继续运行")
                                             .on_click(cx.listener(move |pane, _, _, cx| {
                                                 cx.stop_propagation();
@@ -754,14 +760,20 @@ impl Render for AiPane {
                     )
                     .child(
                         Button::new("ai-add-tab")
+                            .ghost()
                             .compact()
+                            .w(px(26.))
+                            .h(px(26.))
                             .icon(crate::ui::icon(IconName::Plus))
                             .tooltip("新建会话")
                             .on_click(cx.listener(|pane, _, _, cx| pane.create(cx))),
                     )
                     .child(
                         Button::new("ai-maximize")
+                            .ghost()
                             .compact()
+                            .w(px(26.))
+                            .h(px(26.))
                             .icon(crate::ui::icon(IconName::Maximize2))
                             .tooltip("最大化 / 还原")
                             .on_click(
@@ -770,7 +782,10 @@ impl Render for AiPane {
                     )
                     .child(
                         Button::new("ai-hide")
+                            .ghost()
                             .compact()
+                            .w(px(26.))
+                            .h(px(26.))
                             .icon(crate::ui::icon(IconName::PanelRightOpen))
                             .tooltip("收起")
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(AiPaneEvent::Hide))),
