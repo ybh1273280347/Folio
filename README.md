@@ -2,7 +2,7 @@
 
 基于 [GPUI](https://www.gpui.rs/) 与 Rust 编写的 Windows 原生 LaTeX / Markdown 个人工作台，另附一个独立的离线 Android 版。
 
-写文档和论文时，希望有一款轻量、启动快、内存占用低的本地编辑工具，于是用 GPUI 做了这套原生工作台。界面、编辑器、公式排版、PDF 预览与导出均在进程内完成；打开 `.html` 文件时才按需调用系统 WebView2。项目另有一个纯前端的 Android 版本（见 [android/README.md](android/README.md)）。这里是个人分享，供有类似需求或对 GPUI 开发感兴趣的朋友参考。
+写文档和论文时，希望有一款轻量、启动快、内存占用低的本地编辑工具，于是用 GPUI 做了这套原生工作台。界面、编辑器、公式排版、PDF 预览与导出均在进程内完成；AI 助手同样是原生 GPUI 面板，只把模型与工具宿主放到独立的 Node 进程；打开 `.html` 文件时才按需调用系统 WebView2。项目另有一个纯前端的 Android 版本（见 [android/README.md](android/README.md)）。这里是个人分享，供有类似需求或对 GPUI 开发感兴趣的朋友参考。
 
 ---
 
@@ -14,6 +14,7 @@
 - **纯 Rust PDF 预览**：通过 vendored `gpui-pdf`（渲染后端 `hayro`）实现页面虚拟化、按需光栅化、目录导航、缩略图与高亮批注；文本层支持搜索、选择与复制。
 - **克制的资源管理**：PDF 仅缓存视口附近页面，缩放或改窗口时丢弃未完成的旧渲染任务，隐藏标签/分屏时释放资源；文件监听（`notify`）只比对当前打开文件，目录结构变动才重扫文件树；编辑器草稿随击键更新，不做定时全量轮询。
 - **可配置快捷键**：所有工作区与 Markdown 快捷键都能在“设置 → 快捷键”里重新录制，工作区键统一附加 `!GpuiXterm` 上下文，避免在终端 TUI 中抢键。
+- **原生 AI 面板**：会话界面由 GPUI 绘制，模型与工具通过独立的 Node SDK 宿主运行；按项目多会话并行，切换标签或项目不打断任务，宿主随 Folio 退出由 Windows 作业对象回收。
 
 ---
 
@@ -22,8 +23,8 @@
 ### 1\. 工作区与文件管理
 
 - 三种空间各自记住标签页与阅读分栏：**默认空间**（用户目录下的 `.Folio` 文件夹）、**项目工作区**（添加文件夹后进入）、**独立文件**（`Ctrl+Shift+O` 打开的外部文件，始终从原路径读写）。
-- 文件树支持新建 Markdown/文件/文件夹、重命名（文件/文件夹/项目）、删除、单击文件夹聚焦（影响新建落点与快捷操作）、`Ctrl+` 点击多选与空白处拖拽框选。
-- **应用内拖拽**：把文件/文件夹拖到终端面板会把路径加引号后粘贴进终端；拖到废纸篓图标直接移入废纸篓。
+- 文件树默认折叠并记忆展开状态，永久忽略 `.pi/`；支持新建 Markdown/文件/文件夹、重命名（文件/文件夹/项目）、删除、单击文件夹聚焦（影响新建落点与快捷操作）、按住 `Ctrl` 点击多选与空白处拖拽框选。
+- **应用内拖拽**：把文件/文件夹拖到终端面板会把路径加引号后粘贴进终端；拖到废纸篓图标直接移入废纸篓；同一项目内可拖拽文件夹移动位置。
 - **快捷路径操作**（焦点在文件树）：`Ctrl+C` 复制选中项（或聚焦文件夹/当前文件）的完整路径，`Delete` 删除，`Ctrl+Z` 撤销删除。
 - **废纸篓**：删除的文件先落盘到废纸篓（保留 7 天，启动时清理过期项），侧栏“废纸篓”面板可单项恢复、彻底删除或清空，误删可用 `Ctrl+Z` 整批撤销。
 - 所有 Markdown 顶部有独立标题输入区：Enter 重命名同目录文件，Escape 取消；标题不写入正文，也不与正文一级标题联动。Windows 打包会将 Folio 加入 PDF / Markdown / LaTeX 的“打开方式”，设为默认应用需在系统“默认应用”设置中选择。
@@ -64,7 +65,17 @@
 - 多会话标签、面板宽度拖动、最大化、隐藏（进程继续运行）；关闭会话或退出 Folio 时按进程树结束；终端使用 Folio 配色，切换明暗主题不重启 shell；复制/粘贴为 `Ctrl+Shift+C/V`，`Ctrl+C` 交给前台程序。
 - 在“设置 → 终端”调整 shell、逐行启动参数与面板宽度；终端字体与字号在“设置 → 外观 → 字体”，即时应用到已有会话。
 
-### 8\. 个性化设置
+### 8\. AI 助手（原生面板）
+
+`Ctrl+Shift+A` 打开 AI 面板。会话基于 Pi SDK 的独立 Node 宿主，按项目隔离、多标签并行；切换项目或关闭标签不会中止正在运行的任务，关闭 Folio 时宿主与子进程树通过 Windows 作业对象一起回收。网关与模型在 `设置 → API 服务 → AI 服务（Magpie 网关）` 配置：Base URL、标题模型 ID（默认 `workbuddy-ai/hy4flash-free`）、Exa API Key 与百度千帆 API Key（掩码存储，不进入工具参数）。
+
+- **会话管理**：每个项目的标签与激活状态单独持久化（应用数据目录下的 `ai-tabs.json`），Pi JSONL 仍是对话与名称的唯一来源，Folio 另存置顶与标题来源（`ai-session-metadata.json`）；恢复的标签只在激活时加载，中断的任务不会自动重投。第一条纯文本消息触发一次自动标题，手动命名优先；会话支持置顶、历史搜索/重命名，左侧消息导航条可跳转到用户消息或某次回答。删除运行中的会话需要二次确认；关闭标签只是释放前台占用、保留后台运行。
+- **输入与输出**：可附加当前文件、引用 WYSIWYG/PDF 选区、粘贴剪贴板图片、挂载技能，并选择模型、思考级别与收藏模型；`/` 呼出命令（开关当前上下文、压缩上下文、挂载技能）。工具调用参数、文件改动 diff、思考过程与耗时分层展示并可展开查看；回答可复制或导出为笔记（同名 Markdown 写入会话所属项目根目录，文件名用标题+时间戳，并自动打开，不覆盖已有文件）。
+- **联网与抓取**：`exa_search`（web/academic、时间与域名过滤）和 `baidu_qianfan_search`（中文来源）是显式工具选择；Exa 通过 PowerShell 7/.NET 读取 Windows 系统代理并用 Undici dispatcher 发起请求，未配置代理时直接报错、不回退直连。`web_fetch` 用 Scrapling 抽取 Markdown，`mode: dynamic` 显式启动临时 Chromium；PDF 支持按 1 开始的页码选取，扫描/混合 PDF 返回待 OCR 页码，交给独立的 `paddleocr` MCP 服务（PaddleOCR-VL-1.6）处理，不是内嵌模型或隐藏下载。
+- **文档选页预览**：可读取 Word / PowerPoint / PDF 的指定页，页码从 1 开始；先用 `scripts/install-document-renderers.ps1` 把渲染脚本装入本机 Magpie 的 `pdf`/`docx`/`pptx` 技能，Office 格式依赖本机 Microsoft Office，结果以 PNG 供模型查看。
+- **隐私**：输入、附件与选区会发送到配置的网关和所选联网服务；每次运行还会追加一条隐藏的本地日期/时间与时区上下文到 Pi JSONL。工具结果区分 `ok` / `empty` / `error` / `cancelled`，凭证不出现在参数或结果里。详见 [docs/ai-runtime.md](docs/ai-runtime.md)。
+
+### 9\. 个性化设置
 
 设置分为“外观（字体 / 主题 / 视图）”“快捷键”“终端”“API 服务”，改动即时应用并落盘：
 
@@ -72,13 +83,13 @@
 - **字体**：统一调整界面、编辑器、代码、数学与终端的字体和字号，均可搜索本机字体；行内代码默认为正文的 87.5%（可调 50%–150%），块级代码、数学字体独立设置，选择同时用于 PDF 导出。
 - **视图**：源码行号、编辑器行宽限制、内部链接打开位置；`Ctrl+滚轮` 调整字号（限制 11–26 px，右下角显示当前值）。
 - **快捷键**：录制/改键，详见下表。
-- **API 服务**：百度翻译 APP ID / API Key（划词翻译在 Google 不可用时回退百度）。
+- **API 服务**：百度翻译 APP ID / API Key（划词翻译在 Google 不可用时回退百度）；AI 网关 Base URL、标题模型 ID、Exa / 千帆 API Key，详见第 8 节 AI 助手。
 
 ---
 
 ## ⌨️ 常用快捷键
 
-以下为**默认**值，均可在“设置 → 快捷键”中修改（`src/model.rs` 的 `SHORTCUT_DEFS`）。工作区快捷键在终端 TUI 内不拦截。
+以下为**默认**值，均可在“设置 → 快捷键”中修改（`src/model.rs` 的 `SHORTCUT_DEFS`）。工作区快捷键在终端 TUI 内不拦截，但 AI 面板与终端开关在终端聚焦时仍可用（见下表）。
 
 | 快捷键 | 功能说明 |
 | :--- | :--- |
@@ -89,6 +100,8 @@
 | `Ctrl + Enter` | 触发 / 停止编译 |
 | `Ctrl + \` | 显示 / 隐藏左侧栏 |
 | `Ctrl + P` | 查找项目内文件 |
+| `Ctrl + Shift + A` | 打开 / 收起 AI 助手 |
+| `` Ctrl + ` `` | 打开 / 收起终端 |
 | `Ctrl + W` | 关闭当前标签页 |
 | `Ctrl + /` | 切换 Markdown 源码 / 所见即所得 |
 | `Ctrl + F` | WYSIWYG 文档内查找 |
@@ -115,6 +128,8 @@
 2. **Rust 工具链**：`edition = 2024` 需 Rust 1.85+；构建脚本把链接器设为 `gcc`，因此必须安装 **GNU 工具链（`stable-x86_64-pc-windows-gnu`）与 MinGW-w64**（`gcc` 在 `PATH` 中），MSVC 工具链不适用。
 3. **WebView2 Runtime**：HTML 预览面板依赖系统 WebView2（Win11 通常已内置），打包脚本会一并带上 `WebView2Loader.dll`。
 4. **TeX Live**（可选）：整篇 `.tex` 编译需要本机 TeX Live；纯 Markdown 编辑、预览与 PDF 导出无需安装。
+5. **AI 助手**（可选功能、打包必需）：系统 `node >= 22.19.0` 在 `PATH` 中，`uv` 可用（`uv venv --python 3.12` 准备隔离的网页抓取环境）；运行时须保留系统 Node 与创建虚拟环境用的 Python 基础解释器。先运行 `scripts/setup-ai.ps1`，否则 AI 面板会提示宿主依赖未安装，`package.ps1` 也会拒绝打包。
+6. **文档选页渲染**（可选）：Word / PPT 的选页预览需要本机 Microsoft Office；运行 `scripts/install-document-renderers.ps1` 把脚本装入 Magpie 技能库（默认 `%USERPROFILE%\.config\magpie\library\skills`）。
 
 ```powershell
 # 编译并以发布模式运行（产物 target\release\folio-gpui-prototype.exe）
@@ -126,11 +141,16 @@ cargo run --release
 # 仅打包到 dist\releases\（可加 -Launch 启动、-SkipBuild 跳过编译）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package.ps1
 
+# 安装 AI 宿主依赖（AI 面板或打包前必须）；-InstallBrowser 安装动态抓取用的 Chromium
+.\scripts\setup-ai.ps1
+# 可选：安装 PDF/Word/PPT 选页渲染脚本到本机 Magpie 技能库
+.\scripts\install-document-renderers.ps1
+
 # 启动稳定目录中的 Folio（参数透传，如 --open <path>）
 .\启动 Folio.cmd
 ```
 
-`scripts/package.ps1` 会把可执行文件、`WebView2Loader.dll`、图标、字体与许可证打包到带时间戳的 `dist\releases\Folio-<时间>\`，同时更新稳定目录 `dist\Folio\`，并在桌面创建“Folio GPUI”快捷方式。文件关联只注册当前用户，可用 `scripts/register-file-associations.ps1 -Unregister` 撤销。仓库内的 `runtime/` 与 PDFium 解包脚本是旧版遗留，当前 PDF 渲染不依赖 PDFium。
+`scripts/package.ps1` 会把可执行文件、`WebView2Loader.dll`、图标、字体与许可证打包到带时间戳的 `dist\releases\Folio-<时间>\`，同时更新稳定目录 `dist\Folio\`，并在桌面创建“Folio GPUI”快捷方式。它还会把 `pi-host/`（含 `node_modules` 与 `.venv`）复制到发布与稳定目录，因此打包前必须先跑 `setup-ai.ps1`；`-KeepRunning` 可在 Folio 仍运行时跳过关闭检查。文件关联只注册当前用户，可用 `scripts/register-file-associations.ps1 -Unregister` 撤销。仓库内的 `runtime/` 与 PDFium 解包脚本是旧版遗留，当前 PDF 渲染不依赖 PDFium。
 
 ### Android 版
 
@@ -147,24 +167,28 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package.ps1
 ```powershell
 cargo test                       # Rust：tests/fold_callouts.rs、tests/appearance.rs
 cd android/web; npm ci; npm test; npm run test:ui; npm run build   # Android 前端
+npm test --prefix resources/pi-host   # AI 宿主 JSONL 协议（受控 OpenAI 兼容服务）
 ```
 
-Rust 集成测试覆盖折叠标注的 Markdown 往返与输入规则、主题/自定义配色持久化及块级代码随正文缩放；Android 前端测试覆盖公式分隔符、转义与浏览器端交互。打包脚本本身不运行测试。
+Rust 集成测试覆盖折叠标注的 Markdown 往返与输入规则、主题/自定义配色持久化及块级代码随正文缩放；AI 宿主测试覆盖多会话并行、实时快照、项目隔离、标题与删除保护、联网工具选项与取消，不使用固定等待；Android 前端测试覆盖公式分隔符、转义与浏览器端交互。打包脚本本身不运行测试。
 
 ---
 
 ## 📁 目录结构
 
 ```text
-├── src/                  # 桌面 Rust 主程序（workspace/markdown/pdf/html/translate/trash/terminal 等 20+ 模块）
+├── src/                  # 桌面 Rust 主程序（workspace/markdown/pdf/html/translate/trash/terminal/ai 等 20+ 模块）
+├── src/ai/               # 原生 AI 会话 UI、宿主 RPC 与工具调用呈现
 ├── vendor/               # vendored 与打补丁的 crate：latex-rust、gpui-pdf、gpui-xterm、
 │                         #   gpui-kit-markdown-editor、gpui-pre(-windows)；补丁见 FOLIO-PATCHES.md
 ├── resources/            # 应用图标、编译期内嵌的数学字体、katex 资源
-├── scripts/              # 打包 / Android 构建 / 文件关联 / PDFium 辅助脚本
+├── resources/pi-host/    # Pi SDK Node 宿主、网页抓取脚本与锁定依赖
+├── resources/pi-skills/  # PDF/Word/PPT 选页渲染脚本与 Windows 说明
+├── scripts/              # 打包 / AI 宿主与文档渲染安装 / Android 构建 / 文件关联 / PDFium 辅助脚本
 ├── runtime/              # PDFium 解包产物（旧版遗留，当前渲染不使用）
 ├── dist/                 # 发布产物（releases/、稳定目录 Folio/、android/ APK）
 ├── android/              # 独立 Android 工程（原生外壳 + web 前端）
-├── docs/                 # 技术调研与规范（公式排版评测、主题、终端方案）
+├── docs/                 # 技术调研与规范（AI 运行时、公式排版评测、主题、终端方案）
 ├── tests/                # Rust 集成测试
 ├── fixtures/             # 冒烟样例（.tex / .md / .pdf）
 ├── 启动 Folio.cmd          # 启动 dist\Folio\Folio.exe
@@ -177,6 +201,6 @@ Rust 集成测试覆盖折叠标注的 Markdown 往返与输入规则、主题/�
 ## 📌 说明
 
 - **自用分享**：按个人写作与排版习惯搭建，主要满足日常 LaTeX 编译与 Markdown 记笔记需求。
-- **数据存储**：配置保存在 `%APPDATA%\folio-gpui`（可用 `FOLIO_USER_DATA` 覆盖），含 `preferences.json`、`projects.json`、`workspace-sessions.json`、废纸篓与 WebView2 缓存；PDF 批注在目标目录下的 `.folio/annotations.json`；文档源文件与编译 PDF 均留在项目本地目录，不改动用户文件结构。
-- **隐私**：划词翻译会把选中文本发送给 Google（或其百度回退）服务；启用前请确认这符合你对相关内容的处理要求。
+- **数据存储**：配置保存在 `%APPDATA%\folio-gpui`（可用 `FOLIO_USER_DATA` 覆盖），含 `preferences.json`、`projects.json`、`workspace-sessions.json`、`ai-tabs.json`、`ai-session-metadata.json`、废纸篓与 WebView2 缓存；AI 对话原文由 Pi JSONL 管理，项目文件树永久忽略 `.pi/`；PDF 批注在目标目录下的 `.folio/annotations.json`；文档源文件与编译 PDF 均留在项目本地目录，不改动用户文件结构。
+- **隐私**：划词翻译会把选中文本发送给 Google（或其百度回退）服务；AI 助手会把输入、附件与选区发送到所配置的网关及启用的联网搜索服务，Exa/千帆凭证只经私有环境变量传给宿主。启用前请确认这符合你对相关内容的处理要求。
 
