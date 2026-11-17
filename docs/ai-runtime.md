@@ -19,15 +19,16 @@ In AI settings, configure the Magpie Base URL, title model ID, Exa API Key, and 
 - Project identity is the canonical project-root path, normalized for Windows. Session discovery and all commands enforce that identity.
 - Pi JSONL remains authoritative for conversations and names. Folio stores pin state and title provenance in `ai-session-metadata.json`, and each project's open tabs and active tab in `ai-tabs.json`, under its user-data directory.
 - Restored tabs load their conversation only when activated. Empty sessions have no JSONL and are removed from the restored layout. Interrupted tasks are never automatically resubmitted.
+- New tabs receive their identity immediately and become active before SDK initialization. The input is focused after mounting; model discovery runs when the view attaches. Tabs compress and overlap inside the available header width, with the new-tab button directly after the last tab.
 - Closing a running tab releases its foreground retention while keeping its conversation entity and host subscription alive until the task settles. Reopening retains it again. Closed, settled sessions are disposed and can later be loaded from JSONL.
-- Manual names take precedence over pending automatic title requests. The first plain user message triggers a separate title request; attachment bodies and quoted context are excluded. A failed title request leaves the preview available; the history menu can regenerate a title explicitly.
+- Manual names take precedence over pending automatic title requests. The first plain user message triggers one separate title request; attachment bodies and quoted context are excluded. A failed title request leaves the preview available and the user can rename the session manually.
 - Running-session deletion requires confirmation, resolves outstanding dialogs, aborts the run, disposes its runtime, and then removes history and Folio metadata. Closing a tab is a distinct operation.
 
 ## Host protocol
 
 `resources/pi-host/host.mjs` accepts one JSON command per stdin line and writes one JSON response/event per stdout line. Diagnostics go to stderr. Requests carry `requestId`, `routeId`, `cwd`, `projectKey`, and, for conversation operations, `sessionId`.
 
-Project commands are `list_sessions`, `create_session`, and `configure`. Conversation commands include `snapshot`, `prompt`, `abort`, `retain`, `release`, `set_session_name`, `delete_session`, `set_pinned`, `regenerate_title`, model/thinking operations, compaction, and extension UI responses. Responses echo request and route IDs and contain either `success: true, data` or `success: false, error`.
+Project commands are `list_sessions`, `create_session`, and `configure`. Conversation commands include `snapshot`, `prompt`, `abort`, `retain`, `release`, `set_session_name`, `delete_session`, `set_pinned`, model/thinking operations, compaction, and extension UI responses. Responses echo request and route IDs and contain either `success: true, data` or `success: false, error`.
 
 Events carry project/session identity and a monotonically increasing sequence within the live session runtime. A `snapshot` includes its sequence boundary and current messages, including an in-progress assistant message. Conversation views discard older events after applying that boundary. `agent_settled`, rather than `agent_end`, marks completion. Outstanding dialogs are scoped to the conversation and displayed one at a time.
 

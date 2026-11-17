@@ -29,6 +29,9 @@ function driver(child) {
       const id = `${value.sessionId}:${value.type}`;
       waiters.get(id)?.resolve(value);
       waiters.delete(id);
+      const subtype = `${id}:${value.assistantMessageEvent?.type}`;
+      waiters.get(subtype)?.resolve(value);
+      waiters.delete(subtype);
     }
   });
   child.on('exit', () => {
@@ -43,11 +46,12 @@ function driver(child) {
       child.stdin.write(`${JSON.stringify({ routeId: 'test', ...command, requestId })}\n`);
       return deferred.promise;
     },
-    event: (sessionId, type) => {
-      const existing = events.find(value => value.sessionId === sessionId && value.type === type);
+    event: (sessionId, type, subtype) => {
+      const existing = events.find(value => value.sessionId === sessionId && value.type === type
+        && (subtype === undefined || value.assistantMessageEvent?.type === subtype));
       if (existing) return Promise.resolve(existing);
       const deferred = Promise.withResolvers();
-      waiters.set(`${sessionId}:${type}`, deferred);
+      waiters.set(`${sessionId}:${type}${subtype === undefined ? '' : `:${subtype}`}`, deferred);
       return deferred.promise;
     },
   };
@@ -177,6 +181,92 @@ test('independent SDK sessions keep running across snapshots, closing tabs, and 
   assert.equal(removed.success, true);
   const afterDelete = await client.request({ ...a, type: 'list_sessions' });
   assert.deepEqual(afterDelete.data.sessions, []);
+});
+
+test('creating a tab returns its identity before model initialization completes', { timeout: 45000 }, async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'folio-new-tab-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const agentDir = path.join(directory, 'agent');
+  const cwd = path.join(directory, 'project');
+  fs.mkdirSync(agentDir); fs.mkdirSync(cwd);
+  fs.writeFileSync(path.join(agentDir, 'settings.json'), JSON.stringify({ defaultProvider: 'magpie', defaultModel: 'test-model' }));
+  const discovery = Promise.withResolvers();
+  const ready = Promise.withResolvers();
+  t.after(() => ready.resolve());
+  const server = http.createServer(async (_request, response) => {
+    discovery.resolve();
+    await ready.promise;
+    response.setHeader('Content-Type', 'application/json');
+    response.end(JSON.stringify({ data: [{ id: 'test-model' }] }));
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../host.mjs', import.meta.url))], {
+    env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, FOLIO_USER_DATA: directory,
+      FOLIO_AI_SETTINGS: JSON.stringify({ baseUrl: `http://127.0.0.1:${server.address().port}`, titleModelId: '' }) }, windowsHide: true,
+  });
+  t.after(() => { child.stdin.end(); child.kill(); });
+  const client = driver(child);
+  const project = { cwd, projectKey: fs.realpathSync.native(cwd).replaceAll('/', '\\').replace(/\\+$/, '').toLowerCase() };
+  const created = await client.request({ ...project, type: 'create_session' });
+  assert.equal(created.success, true, created.error);
+  const sessionId = created.data.sessionId;
+  assert.equal(typeof sessionId, 'string');
+  const snapshot = client.request({ ...project, sessionId, type: 'snapshot' });
+  await discovery.promise;
+  const listed = await client.request({ ...project, type: 'list_sessions' });
+  assert.equal(listed.data.sessions[0].id, sessionId);
+  ready.resolve();
+  const loaded = await snapshot;
+  assert.equal(loaded.success, true, loaded.error);
+  assert.equal(loaded.data.sessionId, sessionId);
+  assert.deepEqual(loaded.data.messages, []);
+});
+
+test('tool argument deltas reach the conversation before generation ends', { timeout: 45000 }, async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'folio-tool-stream-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const agentDir = path.join(directory, 'agent');
+  const cwd = path.join(directory, 'project');
+  fs.mkdirSync(agentDir); fs.mkdirSync(cwd);
+  const finish = Promise.withResolvers();
+  t.after(() => finish.resolve());
+  const server = http.createServer(async (request, response) => {
+    request.resume(); await once(request, 'end');
+    response.setHeader('Content-Type', 'text/event-stream');
+    response.write(`data: ${JSON.stringify({ id: 'tool-run', choices: [{ index: 0, delta: { role: 'assistant', content: '先检查文件。' }, finish_reason: null }] })}\n\n`);
+    response.write(`data: ${JSON.stringify({ id: 'tool-run', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call-read', type: 'function', function: { name: 'read', arguments: '{"path":"README' } }] }, finish_reason: null }] })}\n\n`);
+    await finish.promise;
+    response.end();
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  fs.writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify({ providers: { magpie: {
+    baseUrl: `${baseUrl}/v1`, api: 'openai-completions', apiKey: 'magpie', models: [{ id: 'test-model', name: 'test-model',
+      reasoning: false, input: ['text'], contextWindow: 16000, maxTokens: 1024,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+  } } }));
+  fs.writeFileSync(path.join(agentDir, 'settings.json'), JSON.stringify({ defaultProvider: 'magpie', defaultModel: 'test-model' }));
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../host.mjs', import.meta.url))], {
+    env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, FOLIO_USER_DATA: directory,
+      FOLIO_AI_SETTINGS: JSON.stringify({ baseUrl, titleModelId: '' }) }, windowsHide: true,
+  });
+  t.after(() => { child.stdin.end(); child.kill(); });
+  const client = driver(child);
+  const project = { cwd, projectKey: fs.realpathSync.native(cwd).replaceAll('/', '\\').replace(/\\+$/, '').toLowerCase() };
+  const created = await client.request({ ...project, type: 'create_session' });
+  const sessionId = created.data.sessionId;
+  const run = client.request({ ...project, sessionId, type: 'prompt', message: '检查文件' });
+  const delta = await client.event(sessionId, 'message_update', 'toolcall_delta');
+  assert.equal(delta.assistantMessageEvent.partial.content[1].name, 'read');
+  assert.match(delta.assistantMessageEvent.partial.content[1].arguments.path, /README/);
+  const snapshot = await client.request({ ...project, sessionId, type: 'snapshot' });
+  assert.equal(snapshot.data.isStreaming, true);
+  assert.equal(snapshot.data.messages.at(-1).content[1].name, 'read');
+  const stopped = await client.request({ ...project, sessionId, type: 'abort' });
+  assert.equal(stopped.success, true);
+  assert.equal((await run).success, true);
 });
 
 test('empty Exa results fall back to Baidu with Beijing calendar-day filtering', async () => {
