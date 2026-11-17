@@ -1974,9 +1974,11 @@ impl AiPane {
     }
 
     fn md_style(&self, cx: &App) -> TextViewStyle {
-        TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx))
-            .with_inline_code_style(crate::ui::inline_code_style(&self.settings))
+        let base = TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx));
+        let soft_selection = base.selection().alpha(0.3);
+        base.with_inline_code_style(crate::ui::inline_code_style(&self.settings))
             .with_code_block(crate::ui::block_code_style(&self.settings))
+            .with_selection(soft_selection)
     }
 
     fn render_diff_card(

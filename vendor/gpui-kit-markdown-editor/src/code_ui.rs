@@ -99,8 +99,22 @@ impl CodeTools {
     }
 }
 
+// One surface owns the header and body background and outline.
+pub(crate) fn container(context: &RenderContext) -> gpui::Div {
+    let style = context.style();
+    div()
+        .relative()
+        .w_full()
+        .min_w_0()
+        .bg(style.code_block().background.clone()
+            .unwrap_or_else(|| style.code_background().into()))
+        .border_1()
+        .border_color(style.border())
+        .rounded(px(8.))
+}
+
 pub(crate) fn header(
-    state: &Entity<BlockEditorState>, block: BlockId, context: &RenderContext,
+    state: &Entity<BlockEditorState>, block: BlockId,
     window: &mut Window, cx: &mut App,
 ) -> AnyElement {
     let language = state.read(cx).model().document().block(block)
@@ -146,9 +160,8 @@ pub(crate) fn header(
     }
     div()
         .id(("code-tools", block.as_u64() as usize))
-        .absolute().top(px(4.)).left(px(4.)).right(px(4.))
-        .h(px(32.)).px_2().flex().items_center().justify_between()
-        .bg(context.style().code_background())
+        .w_full().px_2().py_1().flex().items_center().justify_between()
+        .border_b_1().border_color(theme.border.opacity(0.5))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(
             div()
