@@ -269,6 +269,59 @@ test('tool argument deltas reach the conversation before generation ends', { tim
   assert.equal((await run).success, true);
 });
 
+test('write events retain pre-write content for new files and later overwrites', { timeout: 45000 }, async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'folio-write-diff-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const agentDir = path.join(directory, 'agent');
+  const cwd = path.join(directory, 'project');
+  fs.mkdirSync(agentDir); fs.mkdirSync(cwd);
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    request.on('data', chunk => chunks.push(chunk));
+    await once(request, 'end');
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    response.setHeader('Content-Type', 'text/event-stream');
+    const role = body.messages.at(-1).role;
+    const content = body.messages.find(message => message.role === 'user').content[0].text;
+    const delta = { tool: { content: '完成' }, user: { tool_calls: [{ index: 0, id: 'write-call', type: 'function',
+      function: { name: 'write', arguments: JSON.stringify({ path: '新建文件.md', content }) } }] } }[role];
+    response.write(`data: ${JSON.stringify({ id: 'write-run', choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
+    response.end(`data: ${JSON.stringify({ id: 'write-run', choices: [{ index: 0, delta: {}, finish_reason: { tool: 'stop', user: 'tool_calls' }[role] }] })}\n\ndata: [DONE]\n\n`);
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  fs.writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify({ providers: { magpie: {
+    baseUrl: `${baseUrl}/v1`, api: 'openai-completions', apiKey: 'magpie', models: [{ id: 'test-model', name: 'test-model',
+      reasoning: false, input: ['text'], contextWindow: 16000, maxTokens: 1024,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+  } } }));
+  fs.writeFileSync(path.join(agentDir, 'settings.json'), JSON.stringify({ defaultProvider: 'magpie', defaultModel: 'test-model' }));
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../host.mjs', import.meta.url))], {
+    env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, FOLIO_USER_DATA: directory,
+      FOLIO_AI_SETTINGS: JSON.stringify({ baseUrl, titleModelId: '' }) }, windowsHide: true,
+  });
+  t.after(() => { child.stdin.end(); child.kill(); });
+  const client = driver(child);
+  const project = { cwd, projectKey: fs.realpathSync.native(cwd).replaceAll('/', '\\').replace(/\\+$/, '').toLowerCase() };
+  const created = await client.request({ ...project, type: 'create_session' });
+  const sessionId = created.data.sessionId;
+  assert.equal((await client.request({ ...project, sessionId, type: 'prompt', message: '# 新文件\n第一行\n第二行\n' })).success, true);
+  await client.event(sessionId, 'agent_settled');
+  const writeResult = await client.event(sessionId, 'tool_execution_end');
+  assert.equal(writeResult.isError, false, JSON.stringify(writeResult));
+  // Inspect after writing has completed, as a delayed UI consumer would.
+  assert.equal(fs.readFileSync(path.join(cwd, '新建文件.md'), 'utf8'), '# 新文件\n第一行\n第二行\n');
+  assert.equal((await client.event(sessionId, 'tool_execution_start')).writeBefore, '');
+  const second = await client.request({ ...project, type: 'create_session' });
+  const secondId = second.data.sessionId;
+  assert.equal((await client.request({ ...project, sessionId: secondId, type: 'prompt', message: '# 覆盖\n修改后\n' })).success, true);
+  await client.event(secondId, 'agent_settled');
+  assert.equal(fs.readFileSync(path.join(cwd, '新建文件.md'), 'utf8'), '# 覆盖\n修改后\n');
+  assert.equal((await client.event(secondId, 'tool_execution_start')).writeBefore, '# 新文件\n第一行\n第二行\n');
+  assert.equal((await client.event(secondId, 'tool_execution_end')).isError, false);
+});
+
 test('empty Exa results fall back to Baidu with Beijing calendar-day filtering', async () => {
   const calls = [];
   const transport = async (url, headers, body) => {

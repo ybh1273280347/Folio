@@ -15,6 +15,7 @@ console.log = (...args) => console.error(format(...args));
 // SDK exports initialization but not the live theme. The host pins Pi's version for this UI adapter.
 initTheme('dark', false);
 const { theme } = await import(new URL('./modes/interactive/theme/theme.js', import.meta.resolve('@earendil-works/pi-coding-agent')));
+const { resolveToCwd } = await import(new URL('./core/tools/path-utils.js', import.meta.resolve('@earendil-works/pi-coding-agent')));
 const send = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 const root = process.env.FOLIO_USER_DATA ?? path.join(os.homedir(), 'AppData', 'Roaming', 'folio-gpui');
 fs.mkdirSync(root, { recursive: true });
@@ -134,6 +135,13 @@ async function createRecord(cwd, manager) {
     resourceLoader: loader, customTools: webTools(() => settings, cwd, root) });
   record.session = session;
   record.unsubscribe = session.subscribe(event => {
+    if (event.type === 'tool_execution_start' && event.toolName === 'write' && typeof event.args.path === 'string') {
+      // SDK dispatch completes before execution; GPUI may receive this after the file is written.
+      const target = resolveToCwd(event.args.path, cwd);
+      const stat = fs.statSync(target, { throwIfNoEntry: false });
+      const writeBefore = !stat ? '' : stat.isFile() && stat.size <= 512 * 1024 ? fs.readFileSync(target, 'utf8') : undefined;
+      event = { ...event, writeBefore };
+    }
     if (event.type === 'message_update' && event.assistantMessageEvent?.partial) record.partial = event.assistantMessageEvent.partial;
     if (event.type === 'message_end') record.partial = undefined;
     if (event.type === 'agent_start') record.running = true;
