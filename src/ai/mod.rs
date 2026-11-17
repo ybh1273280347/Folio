@@ -2,7 +2,10 @@
 mod diff;
 mod rpc;
 mod manager;
+mod quote;
 pub use manager::AiPane;
+pub use quote::SelectionQuote;
+use quote::{append_quotes, split_injected_prompt};
 
 use crate::math::{MathReady, MathRenderer};
 use crate::mermaid::{MermaidReady, MermaidRenderer};
@@ -17,7 +20,7 @@ use gpui::{
 use gpui_kit::{
     assets::IconName,
     base::{
-        Scrollbar, ScrollbarMode, StyledExt,
+        Scrollbar, ScrollbarMode, StyledExt, TextSelection,
         text::{MarkdownExtensions, TextView, TextViewStyle},
     },
     component::{
@@ -34,10 +37,12 @@ use gpui_kit::{
 use rpc::{RpcClient, RpcImage, RpcInbound};
 use serde_json::Value;
 use std::{
+    cell::Cell,
     collections::{BTreeMap, HashMap, HashSet},
     io::Write,
     ops::Range,
     path::{Path, PathBuf},
+    rc::Rc,
     sync::Arc,
     time::Duration,
 };
@@ -56,10 +61,11 @@ pub struct AttachedFile {
     pub path: PathBuf,
 }
 
-#[derive(Clone, Debug)]
-pub struct SelectionQuote {
-    pub source: String,
-    pub text: String,
+#[derive(Clone)]
+struct AnswerQuotePopover {
+    quote: SelectionQuote,
+    position: Point<Pixels>,
+    scroll_offset: Point<Pixels>,
 }
 
 #[derive(Clone, Debug)]
@@ -125,7 +131,7 @@ enum ChatMessage {
         display_text: String,
         attached_file: Option<String>,
         mounted_skills: Vec<String>,
-        quote: Option<SelectionQuote>,
+        quotes: Vec<SelectionQuote>,
         images: Vec<Arc<gpui::Image>>,
     },
     Assistant {
@@ -234,7 +240,10 @@ struct ChatPane {
     commands: Vec<PiCommandInfo>,
     active_file: Option<AttachedFile>,
     attach_active_file: bool,
-    quoted_selection: Option<SelectionQuote>,
+    quoted_selections: Vec<SelectionQuote>,
+    quote_popover: Option<AnswerQuotePopover>,
+    quote_drag: Option<(usize, usize, Point<Pixels>)>,
+    quote_bounds: Rc<Cell<Bounds<Pixels>>>,
     pasted_images: Vec<PastedImage>,
     next_image_id: u64,
     auto_approve_shell: bool,
@@ -298,6 +307,21 @@ impl ChatPane {
         });
         let sub_mermaid = cx.subscribe(&mermaid, |_, _, _: &MermaidReady, cx| {
             cx.notify();
+        });
+        let quote_view = cx.entity().downgrade();
+        let quote_window = window.window_handle();
+        let sub_quote_escape = cx.intercept_keystrokes(move |event, window, cx| {
+            if window.window_handle() == quote_window
+                && event.keystroke.key == "escape"
+                && event.keystroke.modifiers.number_of_modifiers() == 0
+            {
+                let _ = quote_view.update(cx, |pane, cx| {
+                    if pane.quote_popover.is_some() {
+                        pane.dismiss_quote(cx);
+                        cx.stop_propagation();
+                    }
+                });
+            }
         });
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -395,7 +419,10 @@ impl ChatPane {
             commands: Vec::new(),
             active_file: None,
             attach_active_file: false,
-            quoted_selection: None,
+            quoted_selections: Vec::new(),
+            quote_popover: None,
+            quote_drag: None,
+            quote_bounds: Rc::new(Cell::new(Bounds::default())),
             pasted_images: Vec::new(),
             next_image_id: 1,
             auto_approve_shell: false,
@@ -440,6 +467,7 @@ impl ChatPane {
                 sub_ext,
                 sub_math,
                 sub_mermaid,
+                sub_quote_escape,
             ],
             _poll: poll,
         };
@@ -457,6 +485,61 @@ impl ChatPane {
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         let handle = self.input.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
+    }
+
+    fn dismiss_quote(&mut self, cx: &mut Context<Self>) {
+        self.quote_drag = None;
+        if self.quote_popover.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn quote_popover_bounds(&self, pending: &AnswerQuotePopover) -> Bounds<Pixels> {
+        let bounds = self.quote_bounds.get();
+        let width = px(128.).min(bounds.size.width);
+        let height = px(30.);
+        let x = (pending.position.x - bounds.left()).max(px(4.))
+            .min((bounds.size.width - width - px(4.)).max(px(0.)));
+        let above = pending.position.y - bounds.top() - height - px(8.);
+        let y = if above >= px(4.) { above } else { pending.position.y - bounds.top() + px(20.) };
+        let y = y.max(px(4.)).min((bounds.size.height - height - px(4.)).max(px(0.)));
+        Bounds::new(point(bounds.left() + x, bounds.top() + y), size(width, height))
+    }
+
+    fn render_quote_popover(&self, palette: Palette, typo: AiTypography, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let pending = self.quote_popover.as_ref()?;
+        let bounds = self.quote_popover_bounds(pending);
+        let origin = self.quote_bounds.get().origin;
+        Some(deferred(
+            div()
+                .id("ai-add-selection")
+                .absolute()
+                .left(bounds.left() - origin.x).top(bounds.top() - origin.y)
+                .w(bounds.size.width).h(bounds.size.height)
+                .rounded(px(7.)).shadow_md()
+                .bg(gpui_kit::rgb(palette.surface))
+                .border_1().border_color(subtle_border(palette.border))
+                .flex().items_center().justify_center()
+                .text_size(typo.sm).text_color(gpui_kit::rgb(palette.text))
+                .cursor_pointer()
+                .hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
+                // The window selection may clear on press; the quote was frozen on release.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|pane, _, window, cx| {
+                    let pending = pane.quote_popover.take().expect("visible quote popover");
+                    if pending.scroll_offset == pane.scroll.offset()
+                        && !pane.quoted_selections.iter().any(|quote|
+                            quote.answer == pending.quote.answer && quote.text == pending.quote.text)
+                    {
+                        pane.quoted_selections.push(pending.quote);
+                    }
+                    TextSelection::clear(window, cx);
+                    pane.quote_drag = None;
+                    pane.focus(window, cx);
+                    cx.notify();
+                }))
+                .child("添加到对话"),
+        ).with_priority(4).into_any_element())
     }
 
     fn export_answer(&mut self, markdown: &str, cx: &mut Context<Self>) {
@@ -517,9 +600,10 @@ impl ChatPane {
     ) {
         let trimmed = text.trim();
         if !trimmed.is_empty() {
-            self.quoted_selection = Some(SelectionQuote {
+            self.quoted_selections.push(SelectionQuote {
                 source,
                 text: trimmed.to_owned(),
+                answer: None,
             });
         }
         if let Some(f) = file {
@@ -772,6 +856,8 @@ impl ChatPane {
         self.active_run_start = None;
         self.active_thinking_start = None;
         self.active_part_map.clear();
+        self.quote_popover = None;
+        self.quote_drag = None;
         let mut pending_tool_results: HashMap<String, (String, bool)> = HashMap::new();
         for msg in arr {
             if msg.get("role").and_then(|v| v.as_str()) == Some("toolResult")
@@ -787,13 +873,13 @@ impl ChatPane {
             match msg.get("role").and_then(|v| v.as_str()) {
                 Some("user") => {
                     let raw = extract_text_content(msg.get("content"));
-                    let (attached_file, mounted_skills, quote, display_text) =
+                    let (attached_file, mounted_skills, quotes, display_text) =
                         split_injected_prompt(&raw);
                     self.messages.push(ChatMessage::User {
                         display_text,
                         attached_file,
                         mounted_skills,
-                        quote,
+                        quotes,
                         images: Vec::new(),
                     });
                 }
@@ -1852,7 +1938,7 @@ impl ChatPane {
         let content = self.input.read(cx).content();
         let raw_text = content.text().as_ref();
         let trimmed = raw_text.trim();
-        if trimmed.is_empty() && self.quoted_selection.is_none() && self.pasted_images.is_empty() {
+        if trimmed.is_empty() && self.quoted_selections.is_empty() && self.pasted_images.is_empty() {
             return;
         }
 
@@ -1896,16 +1982,16 @@ impl ChatPane {
         let body_trimmed = clean_body.trim();
 
         let attached = self.effective_attached_file().cloned();
-        let quote = self.quoted_selection.take();
-        let pasted = std::mem::take(&mut self.pasted_images);
-        let rpc_images: Vec<RpcImage> = pasted
+        // Keep all draft attachments until the host accepts the request.
+        let quotes = self.quoted_selections.clone();
+        let rpc_images: Vec<RpcImage> = self.pasted_images
             .iter()
             .map(|p| RpcImage {
                 data: p.data_b64.clone(),
                 mime_type: p.mime_type.clone(),
             })
             .collect();
-        let msg_images: Vec<Arc<gpui::Image>> = pasted.into_iter().map(|p| p.image).collect();
+        let msg_images: Vec<Arc<gpui::Image>> = self.pasted_images.iter().map(|p| p.image.clone()).collect();
 
         let mut payload = String::new();
         if let Some(first_skill) = skills.first() {
@@ -1922,17 +2008,7 @@ impl ChatPane {
             payload.push_str(&rel);
             payload.push_str("\n\n");
         }
-        if let Some(q) = &quote {
-            payload.push_str("> 引用自 ");
-            payload.push_str(&q.source);
-            payload.push('\n');
-            for line in q.text.lines() {
-                payload.push_str("> ");
-                payload.push_str(line);
-                payload.push('\n');
-            }
-            payload.push('\n');
-        }
+        append_quotes(&mut payload, &quotes);
         payload.push_str(body_trimmed);
 
         if let Err(err) = client.prompt_with_images(&payload, &rpc_images, body_trimmed) {
@@ -1944,9 +2020,12 @@ impl ChatPane {
             display_text: body_trimmed.to_owned(),
             attached_file: attached.map(|f| f.display),
             mounted_skills: skills,
-            quote,
+            quotes,
             images: msg_images,
         });
+        self.quoted_selections.clear();
+        self.pasted_images.clear();
+        self.quote_popover = None;
         self.input.update(cx, |input, cx| {
             input.set_value(String::new(), window, cx);
         });
@@ -2270,9 +2349,38 @@ impl ChatPane {
         ui_font: &SharedString,
         palette: Palette,
         typo: AiTypography,
+        answer: usize,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let normalized = markdown_editor::normalize_math(text);
         div()
+            .id(SharedString::from(format!("ai-quote-source-{msg_idx}-{part_idx}")))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |pane, event: &MouseDownEvent, _, _| {
+                // Streaming must not scroll the paragraph away while a selection is being made.
+                pane.stick_to_bottom = false;
+                pane.quote_drag = Some((msg_idx, part_idx, event.position));
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(move |pane, event: &MouseUpEvent, window, cx| {
+                let Some((start_msg, start_part, anchor)) = pane.quote_drag.take() else { return; };
+                if (start_msg, start_part) != (msg_idx, part_idx) { return; }
+                let position = point(anchor.x.min(event.position.x), anchor.y.min(event.position.y));
+                let view = cx.entity().downgrade();
+                // Read after the window's selection layer has completed the mouse-up gesture.
+                window.defer(cx, move |window, cx| {
+                    let text = TextSelection::selected_text(window, cx);
+                    let text = text.trim();
+                    if text.is_empty() { return; }
+                    let _ = view.update(cx, |pane, cx| {
+                        pane.stick_to_bottom = false;
+                        pane.quote_popover = Some(AnswerQuotePopover {
+                            quote: SelectionQuote { source: "AI 回答".into(), text: text.to_owned(), answer: Some(answer) },
+                            position,
+                            scroll_offset: pane.scroll.offset(),
+                        });
+                        cx.notify();
+                    });
+                });
+            }))
             .font_family(ui_font.clone())
             .text_size(typo.body)
             .line_height(relative(1.6))
@@ -2531,6 +2639,8 @@ impl ChatPane {
                             ui_font,
                             palette,
                             typo,
+                            run_start,
+                            cx,
                         ),
                     ).into_any_element());
                 }
@@ -2552,6 +2662,8 @@ impl ChatPane {
                 ui_font,
                 palette,
                 typo,
+                run_start,
+                cx,
             )
         });
 
@@ -3928,13 +4040,13 @@ impl ChatPane {
         let supports_thinking = self.current_model.as_ref().is_none_or(|m| m.reasoning);
         let attached_chip = self.effective_attached_file().cloned();
         let has_chips = attached_chip.is_some()
-            || self.quoted_selection.is_some()
+            || !self.quoted_selections.is_empty()
             || !self.pasted_images.is_empty();
         let slash_items = self.current_slash_items(cx);
         let has_slash_items = !slash_items.is_empty();
         let input_empty = self.input.read(cx).value().is_empty();
         let can_send = !self.input.read(cx).value().trim().is_empty()
-            || self.quoted_selection.is_some()
+            || !self.quoted_selections.is_empty()
             || !self.pasted_images.is_empty();
         let pane_paste = cx.entity();
 
@@ -4134,9 +4246,10 @@ impl ChatPane {
                                             ),
                                     )
                                 })
-                                .when_some(self.quoted_selection.as_ref(), |row, q| {
-                                    row.child(
+                                .children(self.quoted_selections.iter().enumerate().map(|(index, q)| {
+                                    let tip = format!("{}\n{}", q.source, q.text);
                                         div()
+                                            .id(SharedString::from(format!("ai-quote-{index}")))
                                             .flex()
                                             .items_center()
                                             .gap_1()
@@ -4148,6 +4261,7 @@ impl ChatPane {
                                             .border_1()
                                             .border_color(skill_token_border)
                                             .text_size(typo.sm)
+                                            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                                             .child(
                                                 div()
                                                     .flex_1()
@@ -4161,10 +4275,10 @@ impl ChatPane {
                                             )
                                             .child(
                                                 div()
-                                                    .id("ai-clear-quote")
+                                                    .id(SharedString::from(format!("ai-clear-quote-{index}")))
                                                     .cursor_pointer()
-                                                    .on_click(cx.listener(|pane, _, _, cx| {
-                                                        pane.quoted_selection = None;
+                                                    .on_click(cx.listener(move |pane, _, _, cx| {
+                                                        pane.quoted_selections.remove(index);
                                                         cx.notify();
                                                     }))
                                                     .child(
@@ -4172,9 +4286,8 @@ impl ChatPane {
                                                             .w(px(11.))
                                                             .h(px(11.)),
                                                     ),
-                                            ),
-                                    )
-                                })
+                                            )
+                                }))
                                 .children(self.pasted_images.iter().enumerate().map(|(idx, p)| {
                                     let rm_id = p.id;
                                     div()
@@ -4619,6 +4732,13 @@ impl Render for ChatPane {
             if palette.is_dark() { 0.12 } else { 0.06 },
         );
 
+        if self.quote_popover.as_ref().is_some_and(|quote| quote.scroll_offset != self.scroll.offset()) {
+            self.quote_popover = None;
+        }
+        let quote_bounds = self.quote_bounds.clone();
+        let popover_bounds = self.quote_popover.as_ref().map(|quote| self.quote_popover_bounds(quote));
+        let quote_view = cx.entity().downgrade();
+
         div()
             .id("folio-ai-pane")
             .relative()
@@ -4628,6 +4748,13 @@ impl Render for ChatPane {
             .min_w_0()
             .min_h_0()
             .bg(gpui_kit::rgb(palette.background))
+            .capture_any_mouse_down(cx.listener(move |pane, event: &MouseDownEvent, _, cx| {
+                pane.quote_drag = None;
+                // Capture also sees scrollbar/button presses that stop bubbling inside the pane.
+                if !popover_bounds.is_some_and(|bounds| bounds.contains(&event.position)) {
+                    pane.dismiss_quote(cx);
+                }
+            }))
             .text_color(gpui_kit::rgb(palette.text))
             .font_family(ui_font.clone())
             .text_size(typo.body)
@@ -4671,6 +4798,7 @@ impl Render for ChatPane {
                     }
                 }),
             )
+            .on_mouse_down_out(cx.listener(|pane, _, _, cx| pane.dismiss_quote(cx)))
             .when(is_welcome, |root| {
                 root.child(self.render_welcome(palette, typo, &ui_font, window, cx))
             })
@@ -4748,12 +4876,12 @@ impl Render for ChatPane {
                                     display_text,
                                     attached_file,
                                     mounted_skills,
-                                    quote,
+                                    quotes,
                                     images,
                                 } => {
                                     let text = if !display_text.is_empty() {
                                         display_text.as_str()
-                                    } else if let Some(quote) = quote {
+                                    } else if let Some(quote) = quotes.first() {
                                         quote.text.as_str()
                                     } else {
                                         attached_file.as_deref().unwrap_or("图片消息")
@@ -4873,8 +5001,7 @@ impl Render for ChatPane {
                                                 )
                                             },
                                         )
-                                        .when_some(quote.as_ref(), |b, q| {
-                                            b.child(
+                                        .children(quotes.iter().map(|q| {
                                                 div()
                                                     .px_2()
                                                     .py_1()
@@ -4891,9 +5018,8 @@ impl Render for ChatPane {
                                                             .chars()
                                                             .take(160)
                                                             .collect::<String>()
-                                                    )),
-                                            )
-                                        })
+                                                    ))
+                                        }))
                                         .when(!display_text.is_empty(), |b| {
                                             b.child(
                                                 TextView::markdown(
@@ -5077,6 +5203,16 @@ impl Render for ChatPane {
                         ),
                 )
             })
+            .child(canvas(move |bounds, _, _| quote_bounds.set(bounds), move |bounds, (), window, _| {
+                let view = quote_view.clone();
+                window.on_mouse_event(move |event: &ScrollEvent, phase, _, cx| {
+                    if phase.capture() && bounds.contains(&event.position) {
+                        let _ = view.update(cx, |pane, cx| pane.dismiss_quote(cx));
+                    }
+                });
+            })
+                .absolute().inset_0())
+            .children(self.render_quote_popover(palette, typo, cx))
     }
 }
 
@@ -6150,65 +6286,4 @@ fn path_for_prompt(cwd: &Path, file: &Path) -> String {
         return rel.to_string_lossy().replace('\\', "/");
     }
     file.to_string_lossy().replace('\\', "/")
-}
-
-fn split_injected_prompt(
-    raw: &str,
-) -> (Option<String>, Vec<String>, Option<SelectionQuote>, String) {
-    let mut lines = raw.lines().peekable();
-    let mut skills = Vec::new();
-    while let Some(first) = lines.peek() {
-        if let Some(sk) = first.strip_prefix("/skill:") {
-            let trimmed = sk.trim();
-            if !trimmed.is_empty() && !trimmed.contains(' ') {
-                skills.push(format!("skill:{trimmed}"));
-                lines.next();
-                continue;
-            }
-        }
-        break;
-    }
-    while matches!(lines.peek(), Some(l) if l.trim().is_empty()) {
-        lines.next();
-    }
-    let mut attached_file = None;
-    if let Some(first) = lines.peek()
-        && let Some(rest) = first.strip_prefix('@')
-        && !rest.trim().is_empty()
-        && !rest.contains(' ')
-    {
-        attached_file = Some(rest.trim().to_owned());
-        lines.next();
-        while matches!(lines.peek(), Some(l) if l.trim().is_empty()) {
-            lines.next();
-        }
-    }
-    let mut quote = None;
-    if let Some(first) = lines.peek()
-        && let Some(src) = first.strip_prefix("> 引用自 ")
-    {
-        let source = src.trim().to_owned();
-        lines.next();
-        let mut q_lines = Vec::new();
-        while let Some(l) = lines.peek() {
-            if let Some(body) = l.strip_prefix("> ") {
-                q_lines.push(body.to_owned());
-                lines.next();
-            } else if *l == ">" {
-                q_lines.push(String::new());
-                lines.next();
-            } else {
-                break;
-            }
-        }
-        while matches!(lines.peek(), Some(l) if l.trim().is_empty()) {
-            lines.next();
-        }
-        quote = Some(SelectionQuote {
-            source,
-            text: q_lines.join("\n"),
-        });
-    }
-    let body = lines.collect::<Vec<_>>().join("\n");
-    (attached_file, skills, quote, body)
 }
