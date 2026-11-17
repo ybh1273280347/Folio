@@ -13,7 +13,7 @@ use crate::mermaid::{MermaidReady, MermaidRenderer};
 use crate::model::AppSettings;
 use crate::terminal::{DraggedFolder, DraggedPaths};
 use crate::theme::{Palette, color as theme_color, palette as active_palette};
-use diff::{DiffLine, FileDiff, compute_diff};
+use diff::{DiffLine, EditPatch, FileDiff};
 use gpui::{
     ClipboardEntry, EntityInputHandler, ExternalPaths, ImageFormat, MouseButton, ObjectFit,
     ScrollEvent, ScrollHandle, Subscription,
@@ -26,6 +26,7 @@ use gpui_kit::{
     },
     component::{
         button::{Button, ButtonCustomVariant, ButtonVariants},
+        diff::{Diff, DiffChangeIndicator, DiffHunkSeparator, DiffState},
         input::{
             Enter, Escape, IndentInline, InlineToken, Input, InputEvent, InputState, InputToken,
             MoveDown, MoveUp, Textarea, TextareaState,
@@ -872,14 +873,15 @@ impl ChatPane {
         self.active_part_map.clear();
         self.quote_popover = None;
         self.quote_drag = None;
-        let mut pending_tool_results: HashMap<String, (String, bool)> = HashMap::new();
+        let mut pending_tool_results = HashMap::new();
         for msg in arr {
             if msg.get("role").and_then(|v| v.as_str()) == Some("toolResult")
                 && let Some(id) = msg.get("toolCallId").and_then(|v| v.as_str())
             {
                 let text = extract_text_content(msg.get("content"));
                 let is_err = msg.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
-                pending_tool_results.insert(id.to_owned(), (text, is_err));
+                let patch = msg.pointer("/details/patch").and_then(Value::as_str);
+                pending_tool_results.insert(id.to_owned(), (text, is_err, patch));
             }
         }
 
@@ -946,10 +948,10 @@ impl ChatPane {
                                         .cloned()
                                         .unwrap_or(Value::Null);
                                     let done = data["isStreaming"].as_bool() != Some(true) || pending_tool_results.contains_key(&id);
-                                    let (output, is_error) = pending_tool_results
+                                    let (output, is_error, patch) = pending_tool_results
                                         .remove(&id)
                                         .unwrap_or_default();
-                                    let diffs = build_diffs_for_tool(&name, &args, None);
+                                    let diffs = build_diffs_for_tool(&name, &args, None, patch);
                                     let summary = summarize_tool_call(&name, &args, &diffs);
                                     parts.push(AssistantPart::Tool(ToolBlock {
                                         id,
@@ -1211,6 +1213,7 @@ impl ChatPane {
                                 &block_name,
                                 &write_args,
                                 write_before.as_deref(),
+                                None,
                             );
                             (write_args, diffs)
                         })
@@ -1228,6 +1231,11 @@ impl ChatPane {
                     if let Some((write_args, diffs)) = write_new_fallback {
                         block.args = write_args;
                         block.diffs = diffs;
+                    }
+                    if name == "edit" && !is_err
+                        && let Some(patch) = ev.pointer("/result/details/patch").and_then(Value::as_str)
+                    {
+                        block.diffs = build_diffs_for_tool(&name, &block.args, None, Some(patch));
                     }
                     if let Some(first_diff) = block.diffs.first() {
                         let name_only = Path::new(&first_diff.path)
@@ -1358,7 +1366,7 @@ impl ChatPane {
                         .to_owned();
                     let args = tc.get("arguments").cloned().unwrap_or(Value::Null);
                     let diffs = if ty == "toolcall_end" && name == "edit" {
-                        build_diffs_for_tool(&name, &args, None)
+                        build_diffs_for_tool(&name, &args, None, None)
                     } else {
                         Vec::new()
                     };
@@ -1409,7 +1417,7 @@ impl ChatPane {
 
     fn ensure_tool_block(&mut self, call_id: &str, name: &str, args: &Value) {
         let diffs = if name == "edit" {
-            build_diffs_for_tool(name, args, None)
+            build_diffs_for_tool(name, args, None, None)
         } else {
             Vec::new()
         };
@@ -2246,25 +2254,27 @@ impl ChatPane {
 
     fn render_diff_card(
         &self,
+        id: SharedString,
         diff: &FileDiff,
+        code_font: &SharedString,
         palette: Palette,
-        cx: &mut Context<Self>,
     ) -> AnyElement {
+        if let Some(patch) = &diff.patch {
+            return DiffPatchView {
+                id,
+                patch: patch.clone(),
+            }
+            .into_any_element();
+        }
         let add_tint = mix_color(palette.surface, 0x22c55e, 0.14);
         let add_fg = theme_color(0x16a34a);
         let del_tint = mix_color(palette.surface, palette.danger, 0.14);
         let del_fg = gpui_kit::rgb(palette.danger);
-
-        let target = self.resolve_tool_path(&diff.path);
+        let muted = gpui_kit::rgb(palette.muted);
         let typo = AiTypography::from_settings(&self.settings);
-        let code_font = if self.settings.block_code_font.is_empty() {
-            SharedString::from("Consolas")
-        } else {
-            self.settings.block_code_font.clone().into()
-        };
 
         div()
-            .mt_1p5()
+            .min_w_0()
             .rounded(px(6.))
             .border_1()
             .border_color(gpui_kit::rgb(palette.border))
@@ -2272,83 +2282,39 @@ impl ChatPane {
             .on_scroll(|_, _, cx| cx.stop_propagation())
             .child(
                 div()
-                    .id(SharedString::from(format!("diff-open-{}", diff.path)))
-                    .px_2p5()
-                    .py_1()
-                    .bg(gpui_kit::rgb(palette.background))
-                    .border_b_1()
-                    .border_color(gpui_kit::rgb(palette.border))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(AiPaneEvent::OpenFile(target.clone()));
-                    }))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
-                            .min_w_0()
-                            .child(crate::ui::icon(IconName::FileDiff).w(px(12.)).h(px(12.)))
-                            .child(
-                                div()
-                                    .text_size(typo.sm)
-                                    .font_medium()
-                                    .text_ellipsis()
-                                    .child(diff.path.clone()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
-                            .text_size(typo.sm)
-                            .flex_shrink_0()
-                            .when(diff.added > 0, |r| {
-                                r.child(div().text_color(add_fg).child(format!("+{}", diff.added)))
-                            })
-                            .when(diff.removed > 0, |r| {
-                                r.child(div().text_color(del_fg).child(format!("-{}", diff.removed)))
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .id(SharedString::from(format!("diff-body-{}", diff.path)))
-                    .max_h(px(200.))
+                    .id(id)
+                    .max_h(px(280.))
                     .overflow_y_scroll()
-                    .font_family(code_font)
+                    .font_family(code_font.clone())
                     .text_size(typo.sm)
                     .line_height(relative(1.4))
-                    .children(diff.lines.iter().take(120).map(|line| match line {
-                        DiffLine::Context(s) => div()
-                            .px_2()
-                            .text_color(gpui_kit::rgb(palette.muted))
-                            .child(format!("  {s}"))
-                            .into_any_element(),
-                        DiffLine::Removed(s) => div()
-                            .px_2()
-                            .bg(del_tint)
-                            .text_color(del_fg)
-                            .child(format!("- {s}"))
-                            .into_any_element(),
-                        DiffLine::Added(s) => div()
-                            .px_2()
-                            .bg(add_tint)
-                            .text_color(add_fg)
-                            .child(format!("+ {s}"))
-                            .into_any_element(),
-                        DiffLine::Ellipsis => div()
-                            .px_2()
-                            .py_0p5()
-                            .text_color(gpui_kit::rgb(palette.muted))
-                            .child("  …")
-                            .into_any_element(),
-                    })),
+                    .children(diff.lines.iter().take(120).map(|line| {
+                        let (number, text, marker, fg, bg) = match line {
+                            DiffLine::Context(n, s) => (n, s, "", muted, None),
+                            DiffLine::Removed(n, s) => (n, s, "−", del_fg, Some(del_tint)),
+                            DiffLine::Added(n, s) => (n, s, "+", add_fg, Some(add_tint)),
+                            DiffLine::Ellipsis => {
+                                return div().h(px(3.))
+                                    .bg(gpui_kit::rgb(palette.border)).into_any_element();
+                            }
+                        };
+                        div()
+                            .flex()
+                            .min_h(typo.sm * 1.4)
+                            .pr_2()
+                            .text_color(fg)
+                            .when_some(bg, |el, bg| el.bg(bg))
+                            .when_some(*number, |el, n| el.child(
+                                div().w(typo.sm * 4.6).pr_2().flex_shrink_0()
+                                    .text_right().child(n.to_string()),
+                            ))
+                            .child(div().w_5().flex_shrink_0().text_center().child(marker))
+                            .child(div().min_w_0().flex_1().child(text.clone()))
+                            .into_any_element()
+                    }))
+                    .when(diff.lines.len() > 120, |el| el.child(
+                        div().px_2().py_1().text_color(muted).child("仅显示前 120 行预览"),
+                    )),
             )
             .into_any_element()
     }
@@ -3071,7 +3037,7 @@ impl ChatPane {
                     let diff_key = format!("{msg_idx}:{part_idx}:{diff_idx}:{}", diff.path);
                     let unviewed = !self.viewed_diff_files.contains(&diff_key);
                     let is_created = block.name == "write" && diff.removed == 0 && diff.added > 0;
-                    render_file_edit_row(
+                    let row = render_file_edit_row(
                         SharedString::from(format!(
                             "ai-file-row-{msg_idx}-{part_idx}-{diff_idx}"
                         )),
@@ -3105,16 +3071,18 @@ impl ChatPane {
                                 cx.notify();
                             }
                         }),
+                    );
+                    div().min_w_0().flex().flex_col().child(row).when(
+                        block.expanded && (!diff.lines.is_empty()
+                            || diff.patch.as_ref().is_some_and(|patch| patch.line_count > 0)),
+                        |el| el.child(self.render_diff_card(
+                            format!("ai-diff-{msg_idx}-{part_idx}-{diff_idx}-{}", block.id).into(),
+                            diff,
+                            code_font,
+                            palette,
+                        )),
                     )
                 }))
-                .when(block.expanded, |col| {
-                    col.children(
-                        block
-                            .diffs
-                            .iter()
-                            .map(|d| self.render_diff_card(d, palette, cx)),
-                    )
-                })
                 .when(block.expanded && has_input, |col| col.child(input_panel))
                 .into_any_element();
         }
@@ -5709,6 +5677,7 @@ fn render_file_edit_row(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| diff.path.clone());
     let verb = if is_created { "已创建" } else { "已编辑" };
+    let file_path: SharedString = diff.path.clone().into();
 
     div()
         .id(id.clone())
@@ -5758,6 +5727,7 @@ fn render_file_edit_row(
                         .whitespace_nowrap()
                         .overflow_hidden()
                         .text_ellipsis()
+                        .tooltip(move |window, cx| Tooltip::new(file_path.clone()).build(window, cx))
                         .hover(move |s| s.underline().border_color(ps.fg_secondary))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(on_open_file)
@@ -5815,6 +5785,38 @@ fn render_thinking_detail(
         ps,
     }
     .into_any_element()
+}
+
+#[derive(IntoElement)]
+struct DiffPatchView {
+    id: SharedString,
+    patch: EditPatch,
+}
+
+impl RenderOnce for DiffPatchView {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = gpui_kit::component::theme::Theme::global(cx);
+        let rem = window.rem_size();
+        // Match the native diff's row metrics so short edits hug their content.
+        let line_height = rem * (f32::from(theme.mono_font_size) / 16.) * 1.6;
+        let height = line_height * self.patch.line_count + rem * 0.25 * self.patch.hunk_count;
+        let state = window.use_keyed_state(self.id.clone(), cx, |_, cx| {
+            DiffState::new([self.patch.file], cx).with_context_lines(None)
+        });
+        div()
+            .id(self.id)
+            .min_w_0()
+            .rounded(px(6.))
+            .overflow_hidden()
+            .when(height > px(280.), |el| el.on_scroll(|_, _, cx| cx.stop_propagation()))
+            .child(
+                Diff::new(&state)
+                    .header_visible(false)
+                    .hunk_separator(DiffHunkSeparator::Simple)
+                    .change_indicator(DiffChangeIndicator::Bars)
+                    .h((height + px(2.)).min(px(280.))),
+            )
+    }
 }
 
 #[derive(IntoElement)]
@@ -6307,50 +6309,51 @@ fn summarize_tool_call(name: &str, args: &Value, diffs: &[FileDiff]) -> String {
     }
 }
 
-fn build_diffs_for_tool(name: &str, args: &Value, write_before: Option<&str>) -> Vec<FileDiff> {
+fn build_diffs_for_tool(
+    name: &str,
+    args: &Value,
+    write_before: Option<&str>,
+    edit_patch: Option<&str>,
+) -> Vec<FileDiff> {
     let path = extract_path_arg(args).unwrap_or_else(|| "file".to_owned());
     match name {
         "edit" => {
-            let mut out = Vec::new();
-            if let Some(edits) = args.get("edits").and_then(|v| v.as_array()) {
-                for edit in edits {
-                    let old_t = edit
-                        .get("oldText")
-                        .or_else(|| edit.get("old_text"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let new_t = edit
-                        .get("newText")
-                        .or_else(|| edit.get("new_text"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if !old_t.is_empty() || !new_t.is_empty() {
-                        out.push(compute_diff(path.clone(), old_t, new_t));
-                    }
-                }
-            } else {
-                let old_t = args
+            if let Some(patch) = edit_patch
+                && let Some(diff) = FileDiff::from_edit_patch(path.clone(), patch)
+            {
+                return vec![diff];
+            }
+            let edits = args.get("edits").and_then(Value::as_array)
+                .map_or(std::slice::from_ref(args), Vec::as_slice);
+            let mut diff = FileDiff { path, ..Default::default() };
+            for edit in edits {
+                let old_t = edit
                     .get("oldText")
-                    .or_else(|| args.get("old_text"))
+                    .or_else(|| edit.get("old_text"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let new_t = args
+                let new_t = edit
                     .get("newText")
-                    .or_else(|| args.get("new_text"))
+                    .or_else(|| edit.get("new_text"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 if !old_t.is_empty() || !new_t.is_empty() {
-                    out.push(compute_diff(path, old_t, new_t));
+                    if !diff.lines.is_empty() && diff.lines.last() != Some(&DiffLine::Ellipsis) {
+                        diff.lines.push(DiffLine::Ellipsis);
+                    }
+                    diff.append_preview(old_t, new_t, false);
                 }
             }
-            out
+            if diff.lines.is_empty() { Vec::new() } else { vec![diff] }
         }
         "write" => {
             let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
             if content.is_empty() && write_before.is_none() {
                 return Vec::new();
             }
-            vec![compute_diff(path, write_before.unwrap_or(""), content)]
+            let mut diff = FileDiff { path, ..Default::default() };
+            diff.append_preview(write_before.unwrap_or(""), content, true);
+            vec![diff]
         }
         _ => Vec::new(),
     }
