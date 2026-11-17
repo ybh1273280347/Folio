@@ -17,10 +17,10 @@ async function post(url, headers, body, signal) {
 export async function searchWeb(params, settings, signal, request = post) {
   const errors = [];
   let exaResults;
-  if (settings.exa_api_key) {
+  if (settings.exaApiKey) {
     try {
       const days = { day: 1, week: 7, month: 30, year: 365 }[params.recency];
-      const data = await request('https://api.exa.ai/search', { 'x-api-key': settings.exa_api_key }, {
+      const data = await request('https://api.exa.ai/search', { 'x-api-key': settings.exaApiKey }, {
         query: params.query, type: 'auto', numResults: params.max_results ?? 5,
         contents: { highlights: true, text: false, summary: false },
         ...(params.include_domains?.length ? { includeDomains: params.include_domains } : {}),
@@ -36,7 +36,7 @@ export async function searchWeb(params, settings, signal, request = post) {
     }
   } else errors.push('Exa: 未配置 API Key');
   signal?.throwIfAborted();
-  if (!settings.baidu_qianfan_api_key) {
+  if (!settings.baiduQianfanApiKey) {
     if (exaResults) return { provider: 'exa', results: [], fallback: '百度未配置 API Key' };
     throw new Error([...errors, '百度千帆: 未配置 API Key'].join('; '));
   }
@@ -49,7 +49,7 @@ export async function searchWeb(params, settings, signal, request = post) {
   } else if (params.recency) payload.search_recency_filter = params.recency;
   try {
     const data = await request('https://qianfan.baidubce.com/v2/ai_search/web_search',
-      { 'X-Appbuilder-Authorization': `Bearer ${settings.baidu_qianfan_api_key}` }, payload, signal);
+      { 'X-Appbuilder-Authorization': `Bearer ${settings.baiduQianfanApiKey}` }, payload, signal);
     return { provider: 'baidu_qianfan', fallback: errors.join('; '), results: data.references.map(item => ({
       title: item.title, url: item.url, published_date: item.date,
       summary: item.markdown_content ?? item.content ?? item.snippet ?? '', provider: 'baidu_qianfan',
@@ -83,7 +83,8 @@ export function webTools(getSettings, cwd, dataRoot) {
         const python = process.env.FOLIO_FETCH_PYTHON ?? path.join(path.dirname(script), '.venv', 'Scripts', 'python.exe');
         const result = await new Promise((resolve, reject) => {
           const child = spawn(python, [script, '--url', params.url, '--mode', params.mode ?? 'http', '--output', output,
-            ...(params.pages ? ['--pages', params.pages] : [])], { cwd, windowsHide: true });
+            ...(params.pages ? ['--pages', params.pages] : [])], { cwd, windowsHide: true,
+              env: { ...process.env, PYTHONIOENCODING: 'utf-8' } });
           let stdout = '', stderr = '';
           // Killing the Python parent alone can leave its dynamic Chromium child behind on Windows.
           const abort = () => {

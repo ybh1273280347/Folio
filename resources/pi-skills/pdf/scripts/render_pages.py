@@ -41,18 +41,28 @@ def render_pdf(source: Path, selection: str | None, output: Path, dpi: int) -> l
 
 
 def render_office(source: Path, selection: str | None, output: Path, dpi: int) -> list[dict]:
-    """Own a separate COM application and close it even when export or rasterization fails."""
+    """Close the exported copy and preserve other decks in PowerPoint's shared COM instance."""
     import pythoncom
     import win32com.client
+    import win32event
 
     pythoncom.CoInitialize()
     application = None
     document = None
+    powerpoint_mutex = None
+    quit_application = True
+    original_security = None
     try:
         if source.suffix.lower() in {".ppt", ".pptx", ".potx"}:
+            # PowerPoint is a single-instance COM server: serialize our exporters and preserve user decks.
+            mutex = win32event.CreateMutex(None, False, "Local\\FolioPowerPointPageRenderer")
+            win32event.WaitForSingleObject(mutex, win32event.INFINITE)
+            powerpoint_mutex = mutex
             application = win32com.client.DispatchEx("PowerPoint.Application")
+            quit_application = not application.Visible and application.Presentations.Count == 0
+            original_security = application.AutomationSecurity
             application.AutomationSecurity = 3
-            document = application.Presentations.Open(str(source), ReadOnly=-1, Untitled=0, WithWindow=0)
+            document = application.Presentations.Open(str(source), ReadOnly=-1, Untitled=-1, WithWindow=0)
             width = round(document.PageSetup.SlideWidth * dpi / 72)
             height = round(document.PageSetup.SlideHeight * dpi / 72)
             images = []
@@ -80,11 +90,19 @@ def render_office(source: Path, selection: str | None, output: Path, dpi: int) -
         finally:
             try:
                 if application is not None:
-                    application.Quit()
+                    if original_security is not None:
+                        application.AutomationSecurity = original_security
+                        if quit_application and not application.Visible and application.Presentations.Count == 0:
+                            application.Quit()
+                    else:
+                        application.Quit()
             finally:
                 document = None
                 application = None
                 pythoncom.CoUninitialize()
+                if powerpoint_mutex is not None:
+                    win32event.ReleaseMutex(powerpoint_mutex)
+                    powerpoint_mutex.Close()
 
 
 def main() -> None:

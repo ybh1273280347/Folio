@@ -93,7 +93,7 @@ function uiContext(record) {
 }
 
 async function configureModels(record) {
-  const baseUrl = `${settings.base_url.trim().replace(/\/+$/, '').replace(/\/v1$/, '')}/v1`;
+  const baseUrl = `${settings.baseUrl.trim().replace(/\/+$/, '').replace(/\/v1$/, '')}/v1`;
   const modelsFile = path.join(process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), '.pi', 'agent'), 'models.json');
   const configured = fs.existsSync(modelsFile) ? JSON.parse(fs.readFileSync(modelsFile, 'utf8')).providers?.magpie : undefined;
   let models = configured?.models;
@@ -196,9 +196,9 @@ async function generateTitle(record, text) {
   const controller = new AbortController();
   record.titleController = controller;
   try {
-    const client = new OpenAI({ baseURL: `${settings.base_url.replace(/\/+$/, '').replace(/\/v1$/, '')}/v1`,
+    const client = new OpenAI({ baseURL: `${settings.baseUrl.replace(/\/+$/, '').replace(/\/v1$/, '')}/v1`,
       apiKey: 'magpie', timeout: 30000, maxRetries: 0 });
-    const response = await client.chat.completions.create({ model: settings.title_model_id,
+    const response = await client.chat.completions.create({ model: settings.titleModelId,
       messages: [{ role: 'system', content: '为用户内容生成一个简短中文会话标题，最多16个汉字。只输出标题，不加引号。' },
         { role: 'user', content: text.slice(0, 2000) }], stream: false }, { signal: controller.signal });
     const title = [...(response.choices[0].message.content ?? '').trim().replace(/^["“”'「」]+|["“”'「」]+$/g, '').replace(/\s+/g, ' ')].slice(0, 24).join('');
@@ -267,9 +267,17 @@ async function dispatch(command) {
       record.editorText = command.message;
       const first = !session.messages.some(m => m.role === 'user');
       record.preview = command.titleText ?? command.message.slice(0, 48);
-      const task = session.prompt(command.message, { images: command.images });
+      const task = (async () => {
+        // A running request keeps its model object; the next run takes the updated gateway configuration.
+        if (session.model?.provider === 'magpie') {
+          const current = record.models.getModel('magpie', session.model.id);
+          if (!current) throw new Error('当前模型已从 Magpie 网关移除，请重新选择模型');
+          if (current !== session.model) await session.setModel(current);
+        }
+        await session.prompt(command.message, { images: command.images });
+      })();
       record.task = task;
-      if (first && command.titleText?.trim() && settings.title_model_id) {
+      if (first && command.titleText?.trim() && settings.titleModelId) {
         metadata[key(record.project, record.id)] = { ...metadata[key(record.project, record.id)], titleSource: 'pending', titleText: command.titleText.slice(0, 2000) };
         saveMetadata();
         void generateTitle(record, command.titleText);

@@ -106,7 +106,7 @@ test('independent SDK sessions keep running across snapshots, closing tabs, and 
   fs.writeFileSync(path.join(agentDir, 'settings.json'), JSON.stringify({ defaultProvider: 'magpie', defaultModel: 'test-model' }));
   const child = spawn(process.execPath, [fileURLToPath(new URL('../host.mjs', import.meta.url))], {
     env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, FOLIO_USER_DATA: directory,
-      FOLIO_AI_SETTINGS: JSON.stringify({ base_url: base, title_model_id: 'test-model' }) }, windowsHide: true,
+      FOLIO_AI_SETTINGS: JSON.stringify({ baseUrl: base, titleModelId: 'test-model' }) }, windowsHide: true,
   });
   t.after(() => { child.stdin.end(); child.kill(); });
   const client = driver(child);
@@ -186,7 +186,7 @@ test('empty Exa results fall back to Baidu with Beijing calendar-day filtering',
     return url.includes('exa.ai') ? { results: [] } : { references: [{ title: '来源', url: 'https://example.com', snippet: '证据' }] };
   };
   const result = await searchWeb({ query: '查询', recency: 'day', include_domains: ['example.com'] },
-    { exa_api_key: 'exa-secret', baidu_qianfan_api_key: 'baidu-secret' }, new AbortController().signal, transport);
+    { exaApiKey: 'exa-secret', baiduQianfanApiKey: 'baidu-secret' }, new AbortController().signal, transport);
   assert.equal(result.provider, 'baidu_qianfan');
   assert.equal(result.results[0].summary, '证据');
   assert.deepEqual(calls[1].body.search_filter.match.site, ['example.com']);
@@ -197,6 +197,6 @@ test('empty Exa results fall back to Baidu with Beijing calendar-day filtering',
 test('cancelling Exa does not issue a fallback request', async () => {
   const controller = new AbortController();
   const transport = test.mock.fn(async () => { controller.abort(new Error('cancelled')); throw controller.signal.reason; });
-  await assert.rejects(searchWeb({ query: 'query' }, { exa_api_key: 'x', baidu_qianfan_api_key: 'y' }, controller.signal, transport), /cancelled/);
+  await assert.rejects(searchWeb({ query: 'query' }, { exaApiKey: 'x', baiduQianfanApiKey: 'y' }, controller.signal, transport), /cancelled/);
   assert.equal(transport.mock.callCount(), 1);
 });
