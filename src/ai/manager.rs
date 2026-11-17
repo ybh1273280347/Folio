@@ -68,9 +68,10 @@ pub struct AiPane {
     history_scroll: ScrollHandle,
     pending_focus: Option<(String, String)>,
     error: Option<String>,
+    error_task: Task<()>,
     creating: HashSet<String>,
     restoring: HashSet<String>,
-    pending_deletion: Option<String>,
+    pending_deletion: Option<(String, bool)>,
     deleted: HashMap<String, String>,
     attached: Option<AttachedFile>,
     pending_selections: HashMap<String, (String, Option<AttachedFile>, String)>,
@@ -148,6 +149,7 @@ impl AiPane {
             history_scroll: ScrollHandle::new(),
             pending_focus: None,
             error,
+            error_task: Task::ready(()),
             creating: HashSet::new(),
             restoring,
             pending_deletion: None,
@@ -190,10 +192,33 @@ impl AiPane {
         }
         Ok(&self.controls[&project])
     }
+    fn set_error(&mut self, error: impl Into<String>, cx: &mut Context<Self>) {
+        let message = error.into();
+        if self.error.as_deref() == Some(message.as_str()) {
+            return;
+        }
+        self.error = Some(message);
+        self.error_task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_secs(5))
+                .await;
+            let _ = this.update(cx, |pane, cx| {
+                pane.error = None;
+                cx.notify();
+            });
+        });
+    }
+
+    fn clear_error(&mut self, cx: &mut Context<Self>) {
+        self.error = None;
+        self.error_task = Task::ready(());
+        cx.notify();
+    }
+
     fn command(&mut self, value: Value, cx: &mut Context<Self>) {
         match self.control().and_then(|client| client.send(value)) {
             Ok(_) => {}
-            Err(error) => self.error = Some(error),
+            Err(error) => self.set_error(error, cx),
         }
         cx.notify();
     }
@@ -273,7 +298,9 @@ impl AiPane {
                     error,
                 } => {
                     if !success {
-                        self.error = error;
+                        if let Some(error) = error {
+                            self.set_error(error, cx);
+                        }
                         if command == "create_session" {
                             self.creating.remove(&project);
                         }
@@ -312,7 +339,7 @@ impl AiPane {
                                 }
                                 self.histories.insert(project.clone(), history);
                             }
-                            Err(error) => self.error = Some(format!("会话列表格式错误：{error}")),
+                            Err(error) => self.set_error(format!("会话列表格式错误：{error}"), cx),
                         },
                         "create_session" => {
                             self.creating.remove(&project);
@@ -379,8 +406,9 @@ impl AiPane {
                     }
                 }
                 RpcInbound::Exited(_) => {
-                    self.error = Some(
-                        "AI 宿主已退出；重新打开 AI 面板以恢复历史，任务不会自动重发。".into(),
+                    self.set_error(
+                        "AI 宿主已退出；重新打开 AI 面板以恢复历史，任务不会自动重发。",
+                        cx,
                     );
                     self.controls.clear();
                     self.host = None;
@@ -589,7 +617,7 @@ impl AiPane {
             .border_color(subtle_border(palette.border)).bg(gpui_kit::rgb(palette.surface))
             .shadow(popover_shadow(palette.is_dark())).flex().flex_col().gap_1().occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(div().w(px(220.)).max_w_full().child(Input::new(&self.search).small()))
+            .child(div().w_full().px_1().pt_0p5().child(Input::new(&self.search).small().text_size(px(font_size))))
             .child(div().relative().min_h_0().child(div().id("ai-history-list").max_h(px(285.)).overflow_y_scroll().track_scroll(&self.history_scroll)
                 .children(rows.into_iter().map(|(_, entry)| {
                     let id = entry.id.clone(); let open = id.clone(); let pin = id.clone(); let rename = id.clone(); let delete = id.clone();
@@ -603,14 +631,14 @@ impl AiPane {
                             if pane.renaming.as_ref() != Some(&open) { pane.activate(open.clone(), cx); }
                         }))
                         .child(div().flex().items_center().gap_1()
-                            .child(if self.renaming.as_ref() == Some(&id) { div().flex_1().min_w_0().on_mouse_down(MouseButton::Left, |_,_,cx| cx.stop_propagation()).child(Input::new(&self.rename)).into_any_element() }
+                            .child(if self.renaming.as_ref() == Some(&id) { div().flex_1().min_w_0().on_mouse_down(MouseButton::Left, |_,_,cx| cx.stop_propagation()).child(Input::new(&self.rename).small().text_size(px(font_size))).into_any_element() }
                                 else { div().flex_1().min_w_0().text_ellipsis().child(title).into_any_element() })
                             .child(Button::new(SharedString::from(format!("pin-{id}"))).ghost().when(pinned, |button| button.custom(pinned_style)).compact().with_size(px(font_size / 0.75)).w(px(font_size + 6.)).h(px(font_size + 6.)).icon(crate::ui::icon(IconName::Pin)).tooltip(if pinned { "取消置顶" } else { "置顶" })
                                 .on_click(cx.listener(move |pane, _, _, cx| { cx.stop_propagation(); pane.command(json!({"type":"set_pinned","sessionId":pin,"pinned":!pinned}), cx); })))
                             .child(Button::new(SharedString::from(format!("rename-{id}"))).ghost().compact().with_size(px(font_size / 0.75)).w(px(font_size + 6.)).h(px(font_size + 6.)).icon(crate::ui::icon(IconName::PencilLine)).tooltip("重命名")
                                 .on_click(cx.listener(move |pane, _, window, cx| { cx.stop_propagation(); pane.renaming = Some(rename.clone()); pane.rename.update(cx, |input,cx| { input.set_value(initial.clone(),window,cx); input.focus(window,cx); }); cx.notify(); })))
                             .child(Button::new(SharedString::from(format!("delete-{id}"))).ghost().compact().with_size(px(font_size / 0.75)).w(px(font_size + 6.)).h(px(font_size + 6.)).icon(crate::ui::icon(IconName::Trash)).tooltip("删除会话")
-                                .on_click(cx.listener(move |pane, _, _, cx| { cx.stop_propagation(); if running || waiting { pane.pending_deletion = Some(delete.clone()); cx.notify(); } else { pane.delete(delete.clone(),false,cx); } }))))
+                                .on_click(cx.listener(move |pane, _, _, cx| { cx.stop_propagation(); pane.pending_deletion = Some((delete.clone(), running || waiting)); cx.notify(); }))))
                         .child(div().flex().justify_between().text_size(px((font_size - 2.).max(9.))).text_color(metadata_color)
                             .child(format!("{}{} 条 {}", if pinned { "置顶 · " } else { "" }, entry.count, status))
                             .child(chrono::DateTime::parse_from_rfc3339(&entry.modified).map(|t| t.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()).unwrap_or_default()))
@@ -781,6 +809,8 @@ impl Render for AiPane {
                                             .flex_1()
                                             .min_w_0()
                                             .text_xs()
+                                            .whitespace_nowrap()
+                                            .overflow_hidden()
                                             .text_ellipsis()
                                             .child(title),
                                     )
@@ -849,9 +879,26 @@ impl Render for AiPane {
                     div()
                         .px_3()
                         .py_1()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .bg(mix_color(palette.surface, palette.danger, 0.1))
                         .text_xs()
                         .text_color(gpui_kit::rgb(palette.danger))
-                        .child(error),
+                        .child(div().flex_1().min_w_0().child(error))
+                        .child(
+                            Button::new("dismiss-ai-error")
+                                .ghost()
+                                .compact()
+                                .with_size(px(14.))
+                                .w(px(18.))
+                                .h(px(18.))
+                                .flex_shrink_0()
+                                .icon(crate::ui::icon(IconName::Close))
+                                .tooltip("关闭")
+                                .on_click(cx.listener(|pane, _, _, cx| pane.clear_error(cx))),
+                        ),
                 )
             })
             .when_some(
@@ -870,7 +917,13 @@ impl Render for AiPane {
                     .with_priority(5),
                 )
             })
-            .when_some(self.pending_deletion.clone(), |root, id| {
+            .when_some(self.pending_deletion.clone(), |root, (id, active_task)| {
+                let prompt = if active_task {
+                    "停止任务并删除该会话？"
+                } else {
+                    "确认删除该会话？此操作不可恢复。"
+                };
+                let confirm_label = if active_task { "停止并删除" } else { "删除" };
                 root.child(
                     deferred(
                         div()
@@ -879,24 +932,38 @@ impl Render for AiPane {
                             .left_2()
                             .p_3()
                             .rounded(px(10.))
+                            .border_1()
+                            .border_color(subtle_border(palette.border))
                             .bg(gpui_kit::rgb(palette.surface))
                             .shadow(popover_shadow(palette.is_dark()))
-                            .child("停止任务并删除该会话？")
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .text_xs()
+                            .occlude()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(prompt)
                             .child(
                                 div()
                                     .flex()
+                                    .justify_end()
                                     .gap_2()
-                                    .child(Button::new("cancel-ai-delete").label("取消").on_click(
-                                        cx.listener(|pane, _, _, cx| {
-                                            pane.pending_deletion = None;
-                                            cx.notify();
-                                        }),
-                                    ))
+                                    .child(
+                                        Button::new("cancel-ai-delete")
+                                            .small()
+                                            .label("取消")
+                                            .on_click(cx.listener(|pane, _, _, cx| {
+                                                pane.pending_deletion = None;
+                                                cx.notify();
+                                            })),
+                                    )
                                     .child(
                                         Button::new("confirm-ai-delete")
-                                            .label("停止并删除")
+                                            .small()
+                                            .danger()
+                                            .label(confirm_label)
                                             .on_click(cx.listener(move |pane, _, _, cx| {
-                                                pane.delete(id.clone(), true, cx)
+                                                pane.delete(id.clone(), active_task, cx)
                                             })),
                                     ),
                             ),
