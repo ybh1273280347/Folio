@@ -362,7 +362,7 @@ impl ChatPane {
             }
         });
 
-        let mut pane = Self {
+        let pane = Self {
             host,
             runtime_id,
             last_sequence: 0,
@@ -734,6 +734,7 @@ impl ChatPane {
         self.viewed_diff_files.clear();
         self.active_run_start = None;
         self.active_thinking_start = None;
+        self.active_part_map.clear();
         let mut pending_tool_results: HashMap<String, (String, bool)> = HashMap::new();
         for msg in arr {
             if msg.get("role").and_then(|v| v.as_str()) == Some("toolResult")
@@ -745,7 +746,7 @@ impl ChatPane {
             }
         }
 
-        for msg in arr {
+        for (message_index, msg) in arr.iter().enumerate() {
             match msg.get("role").and_then(|v| v.as_str()) {
                 Some("user") => {
                     let raw = extract_text_content(msg.get("content"));
@@ -760,9 +761,12 @@ impl ChatPane {
                     });
                 }
                 Some("assistant") => {
+                    // A live snapshot must continue the same content blocks when subsequent deltas arrive.
+                    let active = data["partial"].as_bool() == Some(true) && message_index + 1 == arr.len();
                     let mut parts = Vec::new();
                     if let Some(blocks) = msg.get("content").and_then(|v| v.as_array()) {
-                        for block in blocks {
+                        for (content_index, block) in blocks.iter().enumerate() {
+                            let part_index = parts.len();
                             match block.get("type").and_then(|v| v.as_str()) {
                                 Some("thinking") => {
                                     let t = block
@@ -770,12 +774,12 @@ impl ChatPane {
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("")
                                         .to_owned();
-                                    if !t.is_empty() {
+                                    if !t.is_empty() || active {
                                         parts.push(AssistantPart::Thinking {
                                             text: t,
-                                            collapsed: true,
+                                            collapsed: !(active && content_index + 1 == blocks.len()),
                                             duration_ms: None,
-                                            streaming: false,
+                                            streaming: active && content_index + 1 == blocks.len(),
                                         });
                                     }
                                 }
@@ -785,7 +789,7 @@ impl ChatPane {
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("")
                                         .to_owned();
-                                    if !t.is_empty() {
+                                    if !t.is_empty() || active {
                                         parts.push(AssistantPart::Text(t));
                                     }
                                 }
@@ -804,6 +808,7 @@ impl ChatPane {
                                         .get("arguments")
                                         .cloned()
                                         .unwrap_or(Value::Null);
+                                    let done = data["isStreaming"].as_bool() != Some(true) || pending_tool_results.contains_key(&id);
                                     let (output, is_error) = pending_tool_results
                                         .remove(&id)
                                         .unwrap_or_default();
@@ -816,13 +821,16 @@ impl ChatPane {
                                         summary,
                                         output,
                                         is_error,
-                                        done: true,
+                                        done,
                                         duration_ms: None,
                                         diffs,
                                         expanded: false,
                                     }));
                                 }
                                 _ => {}
+                            }
+                            if active && parts.len() > part_index {
+                                self.active_part_map.insert(content_index, part_index);
                             }
                         }
                     }
@@ -834,7 +842,7 @@ impl ChatPane {
                     self.messages.push(ChatMessage::Assistant {
                         parts,
                         error,
-                        streaming: false,
+                        streaming: active,
                         duration_ms: None,
                     });
                 }
