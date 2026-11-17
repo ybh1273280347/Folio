@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug)]
 pub struct ShortcutDef {
@@ -216,6 +216,8 @@ pub struct WorkspaceSession {
     pub tabs: Vec<String>,
     pub active: String,
     pub reading_panes: Vec<String>,
+    #[serde(default)]
+    pub collapsed_folders: Option<BTreeSet<String>>,
 }
 
 impl Default for ProjectConfig {

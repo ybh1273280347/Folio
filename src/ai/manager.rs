@@ -756,8 +756,9 @@ impl Render for AiPane {
                             .min_w_0()
                             .flex()
                             .items_center()
+                            .gap_1()
                             .overflow_hidden()
-                            .children(tabs.into_iter().enumerate().map(|(index, id)| {
+                            .children(tabs.into_iter().map(|id| {
                                 let entry = self
                                     .histories
                                     .get(&project)
@@ -779,14 +780,13 @@ impl Render for AiPane {
                                 let current = active.as_ref() == Some(&id);
                                 let open = id.clone();
                                 let close = id.clone();
-                                // Inactive tabs shrink and overlap; the selected tab stays readable above the stack.
+                                // Selected tab stays wider via flex_shrink_0; keep all tabs inside the clipped tab strip.
                                 let tab = div()
                                     .id(SharedString::from(format!("tab-{id}")))
                                     .w(px(150.))
                                     .min_w_0()
                                     .flex_shrink(1.)
                                     .when(current, |tab| tab.flex_shrink_0().max_w(relative(0.65)))
-                                    .when(index > 0, |tab| tab.ml(px(-4.)))
                                     .h(px(26.))
                                     .px_2()
                                     .rounded(px(6.))
@@ -841,11 +841,7 @@ impl Render for AiPane {
                                                 pane.close(&close, cx);
                                             })),
                                     );
-                                if current {
-                                    deferred(tab).with_priority(1).into_any_element()
-                                } else {
-                                    tab.into_any_element()
-                                }
+                                tab.into_any_element()
                             }))
                             .child(
                                 Button::new("ai-add-tab")

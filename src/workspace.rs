@@ -792,6 +792,7 @@ impl Workspace {
                 tabs: self.tabs.clone(),
                 active: self.active.clone(),
                 reading_panes: self.reading_panes.clone(),
+                collapsed_folders: Some(self.collapsed_folders.clone()),
             },
         );
         storage::save_workspace_sessions(&self.workspace_sessions)
@@ -945,7 +946,6 @@ impl Workspace {
         self.notice = None;
         self.preview = None;
         self.clear_open_documents(window, cx);
-        self.collapsed_folders.clear();
         self.focused_folder = None;
         self.selected_files.clear();
         let previous_pdf = storage::data_directory()?
@@ -957,6 +957,10 @@ impl Workspace {
             self.preview = Some(previous_pdf);
         }
         let session = self.workspace_sessions.get(id).cloned().unwrap_or_default();
+        self.collapsed_folders = session
+            .collapsed_folders
+            .clone()
+            .unwrap_or_else(|| self.folders.iter().cloned().collect());
         for path in &session.tabs {
             if let Some(file) = self.files.iter().find(|file| &file.path == path).cloned() {
                 self.open_file(&file, window, cx)?;
@@ -3696,6 +3700,7 @@ impl Workspace {
                             if !app.collapsed_folders.remove(&toggled) {
                                 app.collapsed_folders.insert(toggled.clone());
                             }
+                            let _ = app.remember_session();
                             app.file_tree_focus.focus(window, cx);
                             cx.notify();
                         }))
@@ -5297,50 +5302,52 @@ impl Render for Workspace {
         }
         if self.show_preferences {
             app = app.child(
-                div()
-                    .id("preferences-overlay")
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(rgba(0x00000030))
-                    // Occlude background hitboxes while leaving the dialog's
-                    // child inputs and scroll container interactive.
-                    .occlude()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_scroll(|_, _, cx| cx.stop_propagation())
-                    .child(
-                        div()
-                            .relative()
-                            .w(px(680.))
-                            .max_h(relative(0.92))
-                            .p_7()
-                            .rounded(px(8.))
-                            .border_1()
-                            .border_color(rgb(0xe6e5e1))
-                            .shadow_lg()
-                            .bg(rgb(0xffffff))
-                            .child(
-                                crate::ui::control("close-preferences", IconName::Close)
-                                    .absolute()
-                                    .top_3()
-                                    .right_3()
-                                    .on_click(cx.listener(|app, _, _, cx| {
-                                        app.show_preferences = false;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .id("preferences-content")
-                                    .max_h(
-                                        px(f32::from(window.viewport_size().height) * 0.92 - 56.),
-                                    )
-                                    .overflow_y_scroll()
-                                    .child(self.preferences.clone()),
-                            ),
-                    ),
+                deferred(
+                    div()
+                        .id("preferences-overlay")
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(rgba(0x00000030))
+                        // Occlude background hitboxes while leaving the dialog's
+                        // child inputs and scroll container interactive.
+                        .occlude()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_scroll(|_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .relative()
+                                .w(px(680.))
+                                .max_h(relative(0.92))
+                                .p_7()
+                                .rounded(px(8.))
+                                .border_1()
+                                .border_color(rgb(0xe6e5e1))
+                                .shadow_lg()
+                                .bg(rgb(0xffffff))
+                                .child(
+                                    crate::ui::control("close-preferences", IconName::Close)
+                                        .absolute()
+                                        .top_3()
+                                        .right_3()
+                                        .on_click(cx.listener(|app, _, _, cx| {
+                                            app.show_preferences = false;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .id("preferences-content")
+                                        .max_h(px(f32::from(window.viewport_size().height) * 0.92
+                                            - 56.))
+                                        .overflow_y_scroll()
+                                        .child(self.preferences.clone()),
+                                ),
+                        ),
+                )
+                .with_priority(10),
             );
         }
         if let Some(prompt) = self.dialog_prompt.clone() {

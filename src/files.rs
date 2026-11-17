@@ -16,6 +16,7 @@ const TEXT_EXTENSIONS: &[&str] = &[
 const ASSET_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "pdf", "html", "htm"];
 pub const EXCLUDED_DIRECTORIES: &[&str] = &[
     ".git",
+    ".pi",
     "node_modules",
     ".idea",
     ".vscode",
