@@ -1,78 +1,17 @@
-//! Subprocess and JSONL RPC bridge for `pi --mode rpc`.
+//! Multiplexed JSONL bridge to one SDK host. Dropping a view never kills another session.
+use crate::model::AiSettings;
 use serde_json::{Value, json};
 use std::{
-    fs,
+    collections::HashMap,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, OnceLock, Weak,
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
 };
-
-const FOLIO_RPC_EXT_JS: &str = r#"import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-
-export default async function (pi) {
-  const rawBase = (process.env.FOLIO_MAGPIE_BASE_URL ?? "").trim().replace(/\/+$/, "");
-  if (rawBase) {
-    const apiBase = rawBase.endsWith("/v1") ? rawBase : `${rawBase}/v1`;
-    const modelsPath = path.join(os.homedir(), ".pi", "agent", "models.json");
-    let registered = false;
-    try {
-      if (fs.existsSync(modelsPath)) {
-        const parsed = JSON.parse(fs.readFileSync(modelsPath, "utf8"));
-        const magpie = parsed?.providers?.magpie;
-        if (magpie && Array.isArray(magpie.models)) {
-          if (String(magpie.baseUrl ?? "").replace(/\/+$/, "") !== apiBase) {
-            pi.registerProvider("magpie", { ...magpie, baseUrl: apiBase });
-          }
-          registered = true;
-        }
-      }
-    } catch {}
-    if (!registered) {
-      try {
-        const res = await fetch(`${apiBase}/models`);
-        if (res.ok) {
-          const payload = await res.json();
-          const models = (payload.data ?? []).map((m) => ({
-            id: m.id,
-            name: m.name ?? m.id,
-            reasoning: true,
-            input: ["text", "image"],
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            contextWindow: m.context_window ?? 200000,
-            maxTokens: m.max_tokens ?? 32768,
-          }));
-          if (models.length > 0) {
-            pi.registerProvider("magpie", {
-              baseUrl: apiBase,
-              apiKey: "magpie",
-              api: "openai-completions",
-              models,
-            });
-          }
-        }
-      } catch {}
-    }
-  }
-
-  pi.on("tool_call", async (event, ctx) => {
-    if (event.toolName !== "bash" && event.toolName !== "powershell") return undefined;
-    if (!ctx.hasUI) return undefined;
-    const command = String(event.input?.command ?? "");
-    const ok = await ctx.ui.confirm(`执行 ${event.toolName} 命令`, command);
-    if (!ok) {
-      return { block: true, reason: "用户拒绝执行命令" };
-    }
-    return undefined;
-  });
-}
-"#;
 
 #[derive(Debug, Clone)]
 pub enum RpcInbound {
@@ -87,424 +26,310 @@ pub enum RpcInbound {
     Stderr(String),
     Exited(Option<i32>),
 }
-
 #[derive(Clone, Debug)]
 pub struct RpcImage {
     pub data: String,
     pub mime_type: String,
 }
-
-pub struct RpcClient {
-    stdin_tx: mpsc::Sender<String>,
-    pub inbound: mpsc::Receiver<RpcInbound>,
-    next_req_id: AtomicU64,
-    child: Arc<Mutex<Option<Child>>>,
-    #[cfg(windows)]
-    _job: Option<ProcessJob>,
+struct Route {
+    project: String,
+    session: Option<String>,
+    sender: mpsc::Sender<RpcInbound>,
 }
 
-impl RpcClient {
-    pub fn spawn(cwd: &Path, magpie_base_url: &str) -> Result<Self, String> {
-        let ext_path = ensure_extension_file()?;
-        let launch = resolve_pi_launch()?;
+pub struct Host {
+    stdin: mpsc::Sender<String>,
+    routes: Arc<Mutex<HashMap<String, Route>>>,
+    child: Arc<Mutex<Child>>,
+    alive: Arc<AtomicBool>,
+    next: AtomicU64,
+    #[cfg(windows)]
+    _job: ProcessJob,
+}
 
-        let mut cmd = Command::new(&launch.program);
-        cmd.args(&launch.prefix_args);
-        cmd.args(["--mode", "rpc", "-e"]);
-        cmd.arg(&ext_path);
-        cmd.current_dir(cwd);
-        cmd.stdin(Stdio::piped());
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-        cmd.env("FOLIO_MAGPIE_BASE_URL", magpie_base_url.trim());
-        cmd.env_remove("NO_COLOR");
+pub fn project_key(cwd: &Path) -> String {
+    dunce::canonicalize(cwd)
+        .expect("workspace directory exists")
+        .to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_lowercase()
+}
 
+impl Host {
+    pub fn shared(settings: &AiSettings) -> Result<Arc<Self>, String> {
+        static SHARED: OnceLock<Mutex<Weak<Host>>> = OnceLock::new();
+        let mut shared = SHARED
+            .get_or_init(|| Mutex::new(Weak::new()))
+            .lock()
+            .expect("host lock");
+        if let Some(host) = shared
+            .upgrade()
+            .filter(|host| host.alive.load(Ordering::Acquire))
+        {
+            return Ok(host);
+        }
+        let packaged = std::env::current_exe()
+            .map_err(|e| e.to_string())?
+            .parent()
+            .expect("executable parent")
+            .join("pi-host/host.mjs");
+        let script = if packaged.is_file() {
+            packaged
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/pi-host/host.mjs")
+        };
+        if !script
+            .parent()
+            .expect("host directory")
+            .join("node_modules")
+            .is_dir()
+        {
+            return Err("SDK 宿主依赖未安装，请运行 scripts/setup-ai.ps1".into());
+        }
+        let mut command = Command::new("node");
+        command
+            .arg(script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env(
+                "FOLIO_USER_DATA",
+                crate::storage::data_directory().map_err(|e| e.to_string())?,
+            )
+            .env(
+                "FOLIO_AI_SETTINGS",
+                serde_json::to_string(settings).map_err(|e| e.to_string())?,
+            );
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
+            command.creation_flags(0x08000000);
         }
-
-        let mut child = cmd
+        let mut child = command
             .spawn()
-            .map_err(|e| format!("无法启动 pi RPC 进程：{e}"))?;
-
+            .map_err(|e| format!("启动 SDK 宿主失败：{e}"))?;
         #[cfg(windows)]
-        let job = ProcessJob::attach(&child).ok();
-
-        let mut stdin = child.stdin.take().ok_or("无法获取 pi stdin")?;
-        let stdout = child.stdout.take().ok_or("无法获取 pi stdout")?;
-        let stderr = child.stderr.take().ok_or("无法获取 pi stderr")?;
-
-        let (stdin_tx, stdin_rx) = mpsc::channel::<String>();
-        let (inbound_tx, inbound_rx) = mpsc::channel::<RpcInbound>();
-
-        // Writer thread
+        let job = ProcessJob::attach(&child).map_err(|e| e.to_string())?;
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
+        let (tx, rx) = mpsc::channel::<String>();
         std::thread::spawn(move || {
-            while let Ok(line) = stdin_rx.recv() {
-                if stdin.write_all(line.as_bytes()).is_err() {
-                    break;
-                }
-                if !line.ends_with('\n') && stdin.write_all(b"\n").is_err() {
-                    break;
-                }
-                if stdin.flush().is_err() {
+            for line in rx {
+                if writeln!(stdin, "{line}")
+                    .and_then(|_| stdin.flush())
+                    .is_err()
+                {
                     break;
                 }
             }
         });
-
-        // Stdout JSONL reader thread (strict LF framing per pi RPC spec)
-        let tx_out = inbound_tx.clone();
+        let routes: Arc<Mutex<HashMap<String, Route>>> = Arc::default();
+        let dispatch = Arc::clone(&routes);
         std::thread::spawn(move || {
-            let mut reader = BufReader::new(stdout);
-            let mut buf = Vec::with_capacity(4096);
-            loop {
-                buf.clear();
-                match reader.read_until(b'\n', &mut buf) {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        if buf.last() == Some(&b'\n') {
-                            buf.pop();
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                let value: Value = match serde_json::from_str(&line) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        for route in dispatch.lock().expect("routes lock").values() {
+                            let _ = route
+                                .sender
+                                .send(RpcInbound::Stderr(format!("宿主协议错误：{error}")));
                         }
-                        if buf.last() == Some(&b'\r') {
-                            buf.pop();
-                        }
-                        if buf.is_empty() {
-                            continue;
-                        }
-                        let Ok(val) = serde_json::from_slice::<Value>(&buf) else {
-                            continue;
-                        };
-                        let kind = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                        let msg = match kind {
-                            "response" => RpcInbound::Response {
-                                command: val
-                                    .get("command")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_owned(),
-                                success: val
-                                    .get("success")
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or(false),
-                                data: val.get("data").cloned(),
-                                error: val
-                                    .get("error")
-                                    .and_then(|v| v.as_str())
-                                    .map(str::to_owned),
-                            },
-                            "extension_ui_request" => RpcInbound::ExtensionUiRequest(val),
-                            _ => RpcInbound::Event(val),
-                        };
-                        if tx_out.send(msg).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        // Stderr diagnostic reader thread
-        let tx_err = inbound_tx.clone();
-        std::thread::spawn(move || {
-            let mut reader = BufReader::new(stderr);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {
-                        let trimmed = line.trim();
-                        if !trimmed.is_empty() {
-                            let _ = tx_err.send(RpcInbound::Stderr(trimmed.to_owned()));
-                        }
-                    }
-                }
-            }
-        });
-
-        let child_arc = Arc::new(Mutex::new(Some(child)));
-        let child_wait = Arc::clone(&child_arc);
-        std::thread::spawn(move || {
-            let code = loop {
-                let status = {
-                    let mut guard = child_wait.lock().expect("child lock");
-                    match guard.as_mut() {
-                        Some(c) => match c.try_wait() {
-                            Ok(Some(st)) => Some(st.code()),
-                            Ok(None) => None,
-                            Err(_) => Some(None),
-                        },
-                        None => Some(None),
+                        continue;
                     }
                 };
-                if let Some(code) = status {
-                    break code;
+                let message = match value["type"].as_str().unwrap_or("") {
+                    "response" => RpcInbound::Response {
+                        command: value["command"].as_str().unwrap_or("").into(),
+                        success: value["success"].as_bool() == Some(true),
+                        data: value.get("data").cloned(),
+                        error: value["error"].as_str().map(str::to_owned),
+                    },
+                    "extension_ui_request" => RpcInbound::ExtensionUiRequest(value.clone()),
+                    _ => RpcInbound::Event(value.clone()),
+                };
+                for (id, route) in dispatch.lock().expect("routes lock").iter() {
+                    let addressed = if let Some(target) = value["routeId"].as_str() {
+                        target == id
+                    } else {
+                        value["projectKey"].as_str() == Some(route.project.as_str())
+                            && (route.session.is_none()
+                                || value["sessionId"].as_str() == route.session.as_deref())
+                    };
+                    if addressed {
+                        let _ = route.sender.send(message.clone());
+                    }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(120));
-            };
-            let _ = inbound_tx.send(RpcInbound::Exited(code));
+            }
         });
-
-        Ok(Self {
-            stdin_tx,
-            inbound: inbound_rx,
-            next_req_id: AtomicU64::new(1),
-            child: child_arc,
+        let diagnostic_routes = Arc::clone(&routes);
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                let Ok(line) = line else { break };
+                for route in diagnostic_routes.lock().expect("routes lock").values() {
+                    let _ = route.sender.send(RpcInbound::Stderr(line.clone()));
+                }
+            }
+        });
+        let alive = Arc::new(AtomicBool::new(true));
+        let child = Arc::new(Mutex::new(child));
+        let wait_child = Arc::clone(&child);
+        let wait_alive = Arc::clone(&alive);
+        let wait_routes = Arc::clone(&routes);
+        std::thread::spawn(move || {
+            loop {
+                let status = wait_child.lock().expect("child lock").try_wait();
+                match status {
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                    status => {
+                        wait_alive.store(false, Ordering::Release);
+                        let code = status.ok().flatten().and_then(|status| status.code());
+                        for route in wait_routes.lock().expect("routes lock").values() {
+                            let _ = route.sender.send(RpcInbound::Exited(code));
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+        let host = Arc::new(Self {
+            stdin: tx,
+            routes,
+            child,
+            alive,
+            next: AtomicU64::new(1),
             #[cfg(windows)]
             _job: job,
-        })
+        });
+        *shared = Arc::downgrade(&host);
+        Ok(host)
     }
+}
+impl Drop for Host {
+    fn drop(&mut self) {
+        let _ = self.child.lock().expect("child lock").kill();
+    }
+}
 
-    pub fn send(&self, mut payload: Value) -> Result<String, String> {
-        let id = format!("req-{}", self.next_req_id.fetch_add(1, Ordering::Relaxed));
-        if let Some(obj) = payload.as_object_mut() {
-            obj.entry("id").or_insert_with(|| Value::String(id.clone()));
+pub struct RpcClient {
+    host: Arc<Host>,
+    route: String,
+    cwd: PathBuf,
+    session: Option<String>,
+    pub inbound: mpsc::Receiver<RpcInbound>,
+}
+impl RpcClient {
+    pub fn connect(host: Arc<Host>, cwd: &Path, session: Option<String>) -> Self {
+        let route = uuid::Uuid::new_v4().to_string();
+        let (sender, inbound) = mpsc::channel();
+        host.routes.lock().expect("routes lock").insert(
+            route.clone(),
+            Route {
+                project: project_key(cwd),
+                session: session.clone(),
+                sender,
+            },
+        );
+        Self {
+            host,
+            route,
+            cwd: cwd.into(),
+            session,
+            inbound,
         }
-        let line = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
-        self.stdin_tx
-            .send(line)
-            .map_err(|_| "pi RPC 进程输入通道已关闭".to_owned())?;
+    }
+    pub fn send(&self, mut payload: Value) -> Result<String, String> {
+        let id = format!("req-{}", self.host.next.fetch_add(1, Ordering::Relaxed));
+        let obj = payload.as_object_mut().expect("host command object");
+        obj.insert("requestId".into(), json!(id));
+        obj.insert("routeId".into(), json!(self.route));
+        obj.insert("cwd".into(), json!(self.cwd));
+        obj.insert("projectKey".into(), json!(project_key(&self.cwd)));
+        obj.entry("sessionId")
+            .or_insert_with(|| json!(self.session));
+        if !self.host.alive.load(Ordering::Acquire) {
+            return Err("SDK 宿主已退出，重新打开会话以恢复历史".into());
+        }
+        self.host
+            .stdin
+            .send(serde_json::to_string(&payload).map_err(|e| e.to_string())?)
+            .map_err(|_| "SDK 宿主输入通道已关闭".to_owned())?;
         Ok(id)
     }
-
     pub fn send_raw(&self, payload: Value) -> Result<(), String> {
-        let line = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
-        self.stdin_tx
-            .send(line)
-            .map_err(|_| "pi RPC 进程输入通道已关闭".to_owned())
+        self.send(payload).map(|_| ())
     }
-
     pub fn prompt_with_images(
         &self,
         message: &str,
         images: &[RpcImage],
+        title: &str,
     ) -> Result<String, String> {
-        if images.is_empty() {
-            return self.send(json!({
-                "type": "prompt",
-                "message": message,
-            }));
-        }
-        let encoded: Vec<Value> = images
-            .iter()
-            .map(|img| {
-                json!({
-                    "type": "image",
-                    "data": img.data,
-                    "mimeType": img.mime_type,
-                })
-            })
-            .collect();
-        self.send(json!({
-            "type": "prompt",
-            "message": message,
-            "images": encoded,
-        }))
+        self.send(json!({ "type": "prompt", "message": message, "titleText": title,
+            "images": images.iter().map(|img| json!({ "type": "image", "data": img.data, "mimeType": img.mime_type })).collect::<Vec<_>>() }))
     }
-
     pub fn abort(&self) -> Result<String, String> {
-        self.send(json!({ "type": "abort" }))
+        self.send(json!({"type":"abort"}))
     }
-
     pub fn get_state(&self) -> Result<String, String> {
-        self.send(json!({ "type": "get_state" }))
+        self.send(json!({"type":"get_state"}))
     }
-
     pub fn get_messages(&self) -> Result<String, String> {
-        self.send(json!({ "type": "get_messages" }))
+        self.send(json!({"type":"get_messages"}))
     }
-
     pub fn get_available_models(&self) -> Result<String, String> {
-        self.send(json!({ "type": "get_available_models" }))
+        self.send(json!({"type":"get_available_models"}))
     }
-
     pub fn get_available_thinking_levels(&self) -> Result<String, String> {
-        self.send(json!({ "type": "get_available_thinking_levels" }))
+        self.send(json!({"type":"get_available_thinking_levels"}))
     }
-
     pub fn get_session_stats(&self) -> Result<String, String> {
-        self.send(json!({ "type": "get_session_stats" }))
+        self.send(json!({"type":"get_session_stats"}))
     }
-
-    pub fn set_model(&self, provider: &str, model_id: &str) -> Result<String, String> {
-        self.send(json!({
-            "type": "set_model",
-            "provider": provider,
-            "modelId": model_id,
-        }))
-    }
-
-    pub fn set_thinking_level(&self, level: &str) -> Result<String, String> {
-        self.send(json!({
-            "type": "set_thinking_level",
-            "level": level,
-        }))
-    }
-
-    pub fn new_session(&self) -> Result<String, String> {
-        self.send(json!({ "type": "new_session" }))
-    }
-
-    pub fn switch_session(&self, path: &str) -> Result<String, String> {
-        self.send(json!({
-            "type": "switch_session",
-            "sessionPath": path,
-        }))
-    }
-
-    pub fn set_session_name(&self, name: &str) -> Result<String, String> {
-        self.send(json!({
-            "type": "set_session_name",
-            "name": name,
-        }))
-    }
-
-    pub fn compact(&self) -> Result<String, String> {
-        self.send(json!({ "type": "compact" }))
-    }
-
     pub fn get_commands(&self) -> Result<String, String> {
-        self.send(json!({ "type": "get_commands" }))
+        self.send(json!({"type":"get_commands"}))
     }
-
+    pub fn set_model(&self, provider: &str, model_id: &str) -> Result<String, String> {
+        self.send(json!({"type":"set_model", "provider":provider,"modelId":model_id}))
+    }
+    pub fn set_thinking_level(&self, level: &str) -> Result<String, String> {
+        self.send(json!({"type":"set_thinking_level","level":level}))
+    }
+    pub fn set_session_name(&self, name: &str) -> Result<String, String> {
+        self.send(json!({"type":"set_session_name","name":name}))
+    }
+    pub fn compact(&self) -> Result<String, String> {
+        self.send(json!({"type":"compact"}))
+    }
     pub fn respond_extension_confirm(&self, id: &str, confirmed: bool) -> Result<(), String> {
-        self.send_raw(json!({
-            "type": "extension_ui_response",
-            "id": id,
-            "confirmed": confirmed,
-        }))
+        self.send_raw(json!({"type":"extension_ui_response","id":id,"confirmed":confirmed}))
     }
-
     pub fn respond_extension_value(&self, id: &str, value: &str) -> Result<(), String> {
-        self.send_raw(json!({
-            "type": "extension_ui_response",
-            "id": id,
-            "value": value,
-        }))
+        self.send_raw(json!({"type":"extension_ui_response","id":id,"value":value}))
     }
-
     pub fn respond_extension_cancelled(&self, id: &str) -> Result<(), String> {
-        self.send_raw(json!({
-            "type": "extension_ui_response",
-            "id": id,
-            "cancelled": true,
-        }))
+        self.send_raw(json!({"type":"extension_ui_response","id":id,"cancelled":true}))
     }
 }
-
 impl Drop for RpcClient {
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.child.lock()
-            && let Some(mut child) = guard.take()
-        {
-            let _ = child.kill();
-        }
+        self.host
+            .routes
+            .lock()
+            .expect("routes lock")
+            .remove(&self.route);
     }
-}
-
-struct PiLaunch {
-    program: PathBuf,
-    prefix_args: Vec<String>,
-}
-
-fn ensure_extension_file() -> Result<PathBuf, String> {
-    let dir = crate::storage::data_directory()
-        .map_err(|e| format!("无法获取数据目录：{e}"))?
-        .join("pi");
-    fs::create_dir_all(&dir).map_err(|e| format!("无法创建 pi 扩展目录：{e}"))?;
-    let path = dir.join("folio-rpc-ext.ts");
-    let needs_write = fs::read_to_string(&path).ok().as_deref() != Some(FOLIO_RPC_EXT_JS);
-    if needs_write {
-        fs::write(&path, FOLIO_RPC_EXT_JS).map_err(|e| format!("写入 pi 扩展失败：{e}"))?;
-    }
-    Ok(path)
-}
-
-fn find_on_path(names: &[&str]) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        for name in names {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-fn resolve_pi_launch() -> Result<PiLaunch, String> {
-    let node = find_on_path(&["node.exe", "node"]);
-    let candidates = [
-        dirs::data_dir().map(|d| {
-            d.join("npm")
-                .join("node_modules")
-                .join("@earendil-works")
-                .join("pi-coding-agent")
-                .join("dist")
-                .join("bundle")
-                .join("cli.js")
-        }),
-        dirs::data_dir().map(|d| {
-            d.join("npm")
-                .join("node_modules")
-                .join("@earendil-works")
-                .join("pi-coding-agent")
-                .join("dist")
-                .join("cli.js")
-        }),
-    ];
-    if let Some(node_exe) = &node {
-        for candidate in candidates.into_iter().flatten() {
-            if candidate.is_file() {
-                return Ok(PiLaunch {
-                    program: node_exe.clone(),
-                    prefix_args: vec![candidate.to_string_lossy().into_owned()],
-                });
-            }
-        }
-    }
-    if let Some(pi_exe) = find_on_path(&["pi.exe", "pi"]) {
-        return Ok(PiLaunch {
-            program: pi_exe,
-            prefix_args: Vec::new(),
-        });
-    }
-    if let Some(pi_cmd) = find_on_path(&["pi.cmd", "pi.bat"]) {
-        if let Some(parent) = pi_cmd.parent() {
-            let bundle = parent
-                .join("node_modules")
-                .join("@earendil-works")
-                .join("pi-coding-agent")
-                .join("dist")
-                .join("bundle")
-                .join("cli.js");
-            if bundle.is_file()
-                && let Some(node_exe) = node
-            {
-                return Ok(PiLaunch {
-                    program: node_exe,
-                    prefix_args: vec![bundle.to_string_lossy().into_owned()],
-                });
-            }
-        }
-        return Ok(PiLaunch {
-            program: PathBuf::from("cmd.exe"),
-            prefix_args: vec!["/C".into(), pi_cmd.to_string_lossy().into_owned()],
-        });
-    }
-    Err("未找到 pi CLI，请确认已全局安装 @earendil-works/pi-coding-agent".into())
 }
 
 #[cfg(windows)]
 struct ProcessJob(windows::Win32::Foundation::HANDLE);
 #[cfg(windows)]
 unsafe impl Send for ProcessJob {}
-
+#[cfg(windows)]
+unsafe impl Sync for ProcessJob {}
 #[cfg(windows)]
 impl ProcessJob {
     fn attach(child: &Child) -> windows::core::Result<Self> {
@@ -525,7 +350,6 @@ impl ProcessJob {
         }
     }
 }
-
 #[cfg(windows)]
 impl Drop for ProcessJob {
     fn drop(&mut self) {

@@ -54,6 +54,9 @@ pub struct Preferences {
     baidu_app_id: Entity<InputState>,
     baidu_api_key: Entity<InputState>,
     ai_base_url: Entity<InputState>,
+    ai_title_model: Entity<InputState>,
+    ai_exa_key: Entity<InputState>,
+    ai_qianfan_key: Entity<InputState>,
     copied_api_field: Option<&'static str>,
     copied_api_task: Task<()>,
     editing_theme: bool,
@@ -405,6 +408,21 @@ impl Preferences {
             }
         })
         .detach();
+        let ai_title_model = cx.new(|cx| InputState::new(window, cx).placeholder("workbuddy-ai/hy4flash-free"));
+        ai_title_model.update(cx, |input,cx| input.set_value(settings.ai.title_model_id.clone(),window,cx));
+        cx.subscribe(&ai_title_model, |panel,input,event: &InputEvent,cx| {
+            if matches!(event,InputEvent::Change) { panel.settings.ai.title_model_id=input.read(cx).value().trim().to_owned(); panel.changed(cx); }
+        }).detach();
+        let ai_exa_key = cx.new(|cx| InputState::new(window, cx).placeholder("Exa API Key").masked(true));
+        ai_exa_key.update(cx, |input,cx| input.set_value(settings.ai.exa_api_key.clone(),window,cx));
+        cx.subscribe(&ai_exa_key, |panel,input,event: &InputEvent,cx| {
+            if matches!(event,InputEvent::Change) { panel.settings.ai.exa_api_key=input.read(cx).value().trim().to_owned(); panel.changed(cx); }
+        }).detach();
+        let ai_qianfan_key = cx.new(|cx| InputState::new(window, cx).placeholder("百度千帆 API Key").masked(true));
+        ai_qianfan_key.update(cx, |input,cx| input.set_value(settings.ai.baidu_qianfan_api_key.clone(),window,cx));
+        cx.subscribe(&ai_qianfan_key, |panel,input,event: &InputEvent,cx| {
+            if matches!(event,InputEvent::Change) { panel.settings.ai.baidu_qianfan_api_key=input.read(cx).value().trim().to_owned(); panel.changed(cx); }
+        }).detach();
         Self {
             settings,
             tab: PreferencesTab::Fonts,
@@ -430,6 +448,9 @@ impl Preferences {
             baidu_app_id,
             baidu_api_key,
             ai_base_url,
+            ai_title_model,
+            ai_exa_key,
+            ai_qianfan_key,
             copied_api_field: None,
             copied_api_task: Task::ready(()),
             editing_theme: false,
@@ -509,6 +530,9 @@ impl Preferences {
         self.ai_base_url.update(cx, |input, cx| {
             input.set_value(settings.ai.base_url.clone(), window, cx);
         });
+        self.ai_title_model.update(cx, |input,cx| input.set_value(settings.ai.title_model_id.clone(),window,cx));
+        self.ai_exa_key.update(cx, |input,cx| input.set_value(settings.ai.exa_api_key.clone(),window,cx));
+        self.ai_qianfan_key.update(cx, |input,cx| input.set_value(settings.ai.baidu_qianfan_api_key.clone(),window,cx));
     }
     fn changed(&mut self, cx: &mut Context<Self>) {
         crate::theme::apply(self.settings.theme.palette, cx);
@@ -1063,7 +1087,7 @@ impl Preferences {
                                         div()
                                             .text_xs()
                                             .text_color(rgb(0x787774))
-                                            .child("原生 AI 界面经由 pi RPC 调用本地 Magpie 统一网关（免密钥）"),
+                                    .child("原生 AI 界面经由 pi SDK 宿主调用本地 Magpie 统一网关（免密钥）"),
                                     ),
                             )
                             .child(
@@ -1120,7 +1144,16 @@ impl Preferences {
                                         panel.changed(cx);
                                     })),
                             ),
-                    ),
+                    )
+                    .child(div().flex().items_center().gap_2()
+                        .child(div().w(px(96.)).text_xs().child("标题模型 ID"))
+                        .child(div().flex_1().min_w_0().child(Input::new(&self.ai_title_model))))
+                    .child(div().flex().items_center().gap_2()
+                        .child(div().w(px(96.)).text_xs().child("Exa API Key"))
+                        .child(div().flex_1().min_w_0().child(Input::new(&self.ai_exa_key).mask_toggle())))
+                    .child(div().flex().items_center().gap_2()
+                        .child(div().w(px(96.)).text_xs().child("千帆 API Key"))
+                        .child(div().flex_1().min_w_0().child(Input::new(&self.ai_qianfan_key).mask_toggle()))),
             )
             .child(
                 div()

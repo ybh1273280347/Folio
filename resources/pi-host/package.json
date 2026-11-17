@@ -1,0 +1,12 @@
+{
+  "name": "folio-pi-host",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.19.0" },
+  "scripts": { "test": "node --test --test-force-exit test/*.test.mjs" },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@sinclair/typebox": "0.34.49",
+    "openai": "6.32.0"
+  }
+}

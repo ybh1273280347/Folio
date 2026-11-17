@@ -1,7 +1,8 @@
-//! Native GPUI AI interface backed by `pi --mode rpc`.
+//! Native GPUI conversation view; the manager owns project tabs and the shared SDK host.
 mod diff;
 mod rpc;
-mod sessions;
+mod manager;
+pub use manager::AiPane;
 
 use crate::math::{MathReady, MathRenderer};
 use crate::mermaid::{MermaidReady, MermaidRenderer};
@@ -32,7 +33,6 @@ use gpui_kit::{
 };
 use rpc::{RpcClient, RpcImage, RpcInbound};
 use serde_json::Value;
-use sessions::SessionSummary;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ops::Range,
@@ -47,6 +47,7 @@ pub enum AiPaneEvent {
     Hide,
 }
 impl EventEmitter<AiPaneEvent> for AiPane {}
+impl EventEmitter<AiPaneEvent> for ChatPane {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttachedFile {
@@ -202,7 +203,10 @@ const AI_COPY_ICON_SIZE: Pixels = px(12.);
 const AI_COPY_BUTTON_RADIUS: Pixels = px(5.);
 const AI_INPUT_PLACEHOLDER: &str = "随心输入，/ 呼出命令…";
 
-pub struct AiPane {
+struct ChatPane {
+    host: Arc<rpc::Host>,
+    runtime_id: String,
+    last_sequence: u64,
     cwd: PathBuf,
     project_name: Option<String>,
     settings: AppSettings,
@@ -214,10 +218,6 @@ pub struct AiPane {
     session_file: Option<PathBuf>,
     session_id: Option<String>,
     session_name: Option<String>,
-    sessions: Vec<SessionSummary>,
-    session_drawer_open: bool,
-    renaming_session: Option<PathBuf>,
-    rename_input: Entity<InputState>,
     available_models: Vec<ModelInfo>,
     current_model: Option<ModelInfo>,
     thinking_levels: Vec<String>,
@@ -244,7 +244,6 @@ pub struct AiPane {
     model_popover_anim_gen: u64,
     model_search_input: Entity<InputState>,
     favorite_models: HashSet<String>,
-    history_anim_gen: u64,
     slash_anim_gen: u64,
     slash_was_open: bool,
     slash_index: usize,
@@ -268,11 +267,13 @@ pub struct AiPane {
     _poll: Task<()>,
 }
 
-impl AiPane {
+impl ChatPane {
     pub fn new(
         cwd: PathBuf,
         settings: AppSettings,
         math: Entity<MathRenderer>,
+        host: Arc<rpc::Host>,
+        runtime_id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -293,7 +294,6 @@ impl AiPane {
                 .auto_grow(2, 7)
                 .submit_on_enter(true)
         });
-        let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("输入会话名称"));
         let model_search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search models..."));
         let ext_input = cx.new(|cx| InputState::new(window, cx).placeholder("输入内容…"));
         let ext_textarea = cx.new(|cx| TextareaState::new(window, cx).placeholder("编辑文本…"));
@@ -336,15 +336,6 @@ impl AiPane {
                 cx.notify();
             }
         });
-        let sub_rename = cx.subscribe_in(
-            &rename_input,
-            window,
-            |pane, _, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    pane.commit_rename(window, cx);
-                }
-            },
-        );
         let sub_ext = cx.subscribe_in(
             &ext_input,
             window,
@@ -372,6 +363,9 @@ impl AiPane {
         });
 
         let mut pane = Self {
+            host,
+            runtime_id,
+            last_sequence: 0,
             cwd,
             project_name: None,
             settings,
@@ -383,10 +377,6 @@ impl AiPane {
             session_file: None,
             session_id: None,
             session_name: None,
-            sessions: Vec::new(),
-            session_drawer_open: false,
-            renaming_session: None,
-            rename_input,
             available_models: Vec::new(),
             current_model: None,
             thinking_levels: vec!["off".into(), "low".into(), "medium".into(), "high".into()],
@@ -413,7 +403,6 @@ impl AiPane {
             model_popover_anim_gen: 0,
             model_search_input,
             favorite_models: load_favorite_models(),
-            history_anim_gen: 0,
             slash_anim_gen: 0,
             slash_was_open: false,
             slash_index: 0,
@@ -436,14 +425,12 @@ impl AiPane {
             _subscriptions: vec![
                 sub_input,
                 sub_model_search,
-                sub_rename,
                 sub_ext,
                 sub_math,
                 sub_mermaid,
             ],
             _poll: poll,
         };
-        pane.refresh_sessions();
         pane
     }
 
@@ -460,31 +447,6 @@ impl AiPane {
         window.focus(&handle, cx);
     }
 
-    pub fn set_directory(&mut self, cwd: PathBuf, cx: &mut Context<Self>) {
-        if self.cwd == cwd {
-            return;
-        }
-        self.cwd = cwd;
-        self.messages.clear();
-        self.collapsed_tool_groups.clear();
-        self.expanded_task_processes.clear();
-        self.viewed_diff_files.clear();
-        self.active_run_start = None;
-        self.active_thinking_start = None;
-        self.session_file = None;
-        self.session_id = None;
-        self.session_name = None;
-        self.context_usage = None;
-        self.pending_ui = None;
-        self.is_streaming = false;
-        self.refresh_sessions();
-        if self.client.is_some() {
-            self.client = None;
-            self.start_rpc(cx);
-        }
-        cx.notify();
-    }
-
     pub fn set_project_name(&mut self, name: Option<String>, cx: &mut Context<Self>) {
         let name = name.filter(|s| !s.trim().is_empty());
         if self.project_name == name {
@@ -495,13 +457,8 @@ impl AiPane {
     }
 
     pub fn sync_settings(&mut self, settings: &AppSettings, cx: &mut Context<Self>) {
-        let base_changed = self.settings.ai.base_url != settings.ai.base_url;
         self.settings = settings.clone();
         crate::theme::apply_font(&self.settings.interface_font, cx);
-        if base_changed && self.client.is_some() {
-            self.client = None;
-            self.start_rpc(cx);
-        }
         cx.notify();
     }
 
@@ -546,9 +503,9 @@ impl AiPane {
 
     fn start_rpc(&mut self, cx: &mut Context<Self>) {
         self.startup_error = None;
-        match RpcClient::spawn(&self.cwd, &self.settings.ai.base_url) {
-            Ok(client) => {
-                let _ = client.get_state();
+        let client = RpcClient::connect(self.host.clone(), &self.cwd, Some(self.runtime_id.clone()));
+        match client.send(serde_json::json!({"type":"snapshot"})) {
+            Ok(_) => {
                 let _ = client.get_available_models();
                 let _ = client.get_available_thinking_levels();
                 let _ = client.get_session_stats();
@@ -560,10 +517,6 @@ impl AiPane {
             }
         }
         cx.notify();
-    }
-
-    fn refresh_sessions(&mut self) {
-        self.sessions = sessions::list_sessions_for_cwd(&self.cwd);
     }
 
     fn show_toast(&mut self, text: String, is_error: bool, cx: &mut Context<Self>) {
@@ -592,6 +545,12 @@ impl AiPane {
             return;
         }
         for item in batch {
+            if let RpcInbound::Event(ev) | RpcInbound::ExtensionUiRequest(ev) = &item {
+                if let Some(sequence) = ev["sequence"].as_u64() {
+                    if sequence <= self.last_sequence { continue; }
+                    self.last_sequence = sequence;
+                }
+            }
             self.handle_inbound(item, cx);
         }
         cx.notify();
@@ -624,6 +583,11 @@ impl AiPane {
                     return;
                 };
                 match command.as_str() {
+                    "snapshot" => {
+                        self.apply_messages(&data);
+                        self.apply_state(&data);
+                        self.last_sequence = data["sequence"].as_u64().unwrap_or(0);
+                    }
                     "get_state" => self.apply_state(&data),
                     "get_available_models" => self.apply_models(&data),
                     "get_available_thinking_levels" => self.apply_thinking_levels(&data),
@@ -636,47 +600,6 @@ impl AiPane {
                         }
                         if let Some(client) = &self.client {
                             let _ = client.get_available_thinking_levels();
-                        }
-                    }
-                    "new_session" | "clone" => {
-                        if !data.get("cancelled").and_then(|v| v.as_bool()).unwrap_or(false) {
-                            if command == "new_session" {
-                                self.messages.clear();
-                                self.collapsed_tool_groups.clear();
-                                self.expanded_task_processes.clear();
-                                self.viewed_diff_files.clear();
-                                self.active_run_start = None;
-                                self.active_thinking_start = None;
-                                self.context_usage = None;
-                            } else {
-                                self.show_toast("已从当前位置创建分支会话".into(), false, cx);
-                            }
-                            self.active_part_map.clear();
-                            self.pending_ui = None;
-                            self.is_streaming = false;
-                            if let Some(client) = &self.client {
-                                let _ = client.get_state();
-                            }
-                            self.refresh_sessions();
-                        }
-                    }
-                    "switch_session" => {
-                        if !data.get("cancelled").and_then(|v| v.as_bool()).unwrap_or(false) {
-                            self.messages.clear();
-                            self.collapsed_tool_groups.clear();
-                            self.expanded_task_processes.clear();
-                            self.viewed_diff_files.clear();
-                            self.active_run_start = None;
-                            self.active_thinking_start = None;
-                            self.active_part_map.clear();
-                            self.pending_ui = None;
-                            self.is_streaming = false;
-                            self.session_drawer_open = false;
-                            if let Some(client) = &self.client {
-                                let _ = client.get_state();
-                                let _ = client.get_messages();
-                                let _ = client.get_session_stats();
-                            }
                         }
                     }
                     "compact" => {
@@ -702,7 +625,7 @@ impl AiPane {
                 self.pending_ui = None;
                 self.messages.push(ChatMessage::Notice {
                     text: format!(
-                        "pi 进程已退出{}",
+                        "AI 宿主已退出{}",
                         code.map(|c| format!(" (code {c})")).unwrap_or_default()
                     ),
                     is_error: true,
@@ -731,7 +654,6 @@ impl AiPane {
         {
             self.current_model = Some(m);
         }
-        self.refresh_sessions();
     }
 
     fn apply_models(&mut self, data: &Value) {
@@ -972,7 +894,6 @@ impl AiPane {
                     }
                 }
                 self.pending_ui = None;
-                self.refresh_sessions();
                 if let Some(client) = &self.client {
                     let _ = client.get_session_stats();
                 }
@@ -987,7 +908,9 @@ impl AiPane {
                     .get("name")
                     .and_then(|v| v.as_str())
                     .map(str::to_owned);
-                self.refresh_sessions();
+            }
+            "title_error" => {
+                self.show_toast(format!("标题生成失败，可在会话历史中重试：{}", ev["error"].as_str().unwrap_or("请求失败")), true, cx);
             }
             "compaction_start" => {
                 self.is_compacting = true;
@@ -1980,7 +1903,7 @@ impl AiPane {
         }
         payload.push_str(body_trimmed);
 
-        if let Err(err) = client.prompt_with_images(&payload, &rpc_images) {
+        if let Err(err) = client.prompt_with_images(&payload, &rpc_images, body_trimmed) {
             self.show_toast(format!("发送失败：{err}"), true, cx);
             return;
         }
@@ -2006,80 +1929,6 @@ impl AiPane {
         if let Some(client) = &self.client {
             let _ = client.abort();
         }
-        cx.notify();
-    }
-
-    fn new_session(&mut self, cx: &mut Context<Self>) {
-        self.stick_to_bottom = true;
-        if let Some(client) = &self.client {
-            let _ = client.new_session();
-        } else {
-            self.messages.clear();
-            self.collapsed_tool_groups.clear();
-            self.expanded_task_processes.clear();
-            self.viewed_diff_files.clear();
-            self.active_run_start = None;
-            self.active_thinking_start = None;
-            self.start_rpc(cx);
-        }
-        self.session_drawer_open = false;
-        cx.notify();
-    }
-
-    fn switch_session(&mut self, path: &Path, cx: &mut Context<Self>) {
-        self.stick_to_bottom = true;
-        if let Some(client) = &self.client {
-            let _ = client.switch_session(&path.to_string_lossy());
-        }
-        self.session_drawer_open = false;
-        cx.notify();
-    }
-
-    fn delete_session(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let is_current = self.session_file.as_ref() == Some(&path);
-        if is_current {
-            self.new_session(cx);
-        }
-        if let Err(err) = sessions::delete_session_file(&path) {
-            self.show_toast(err, true, cx);
-        }
-        self.refresh_sessions();
-        cx.notify();
-    }
-
-    fn start_rename(
-        &mut self,
-        path: PathBuf,
-        current: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.renaming_session = Some(path);
-        self.rename_input.update(cx, |input, cx| {
-            input.set_value(current, window, cx);
-            input.focus(window, cx);
-        });
-        cx.notify();
-    }
-
-    fn commit_rename(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(target_path) = self.renaming_session.take() else {
-            return;
-        };
-        let new_name = self.rename_input.read(cx).value().trim().to_owned();
-        if new_name.is_empty() {
-            cx.notify();
-            return;
-        }
-        if self.session_file.as_ref() == Some(&target_path) {
-            if let Some(client) = &self.client {
-                let _ = client.set_session_name(&new_name);
-            }
-        } else if let Some(client) = &self.client {
-            let _ = client.switch_session(&target_path.to_string_lossy());
-            let _ = client.set_session_name(&new_name);
-        }
-        self.refresh_sessions();
         cx.notify();
     }
 
@@ -3175,197 +3024,6 @@ impl AiPane {
             }
         }
         card.into_any_element()
-    }
-
-    fn render_sessions_popover(
-        &self,
-        palette: Palette,
-        ui_font: SharedString,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let typo = AiTypography::from_settings(&self.settings);
-        let active_bg = mix_color(palette.surface, palette.accent, if palette.is_dark() { 0.16 } else { 0.08 });
-        div()
-            .id("ai-sessions-popover")
-            .w(px(308.))
-            .max_h(px(360.))
-            .rounded(px(12.))
-            .border_1()
-            .border_color(subtle_border(palette.border))
-            .bg(gpui_kit::rgb(palette.surface))
-            .shadow(popover_shadow(palette.is_dark()))
-            .font_family(ui_font)
-            .p_1p5()
-            .flex()
-            .flex_col()
-            .overflow_y_scroll()
-            .gap_1()
-            .occlude()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .when(self.sessions.is_empty(), |list| {
-                list.child(
-                    div()
-                        .px_3()
-                        .py_4()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .gap_1p5()
-                        .text_size(typo.sm)
-                        .text_color(gpui_kit::rgb(palette.muted))
-                        .child(crate::ui::icon(IconName::Clock).w(px(13.)).h(px(13.)))
-                        .child("暂无历史会话"),
-                )
-            })
-            .children(self.sessions.iter().enumerate().map(|(idx, s)| {
-                let is_active = self.session_file.as_ref() == Some(&s.path)
-                    || self.session_id.as_deref() == Some(s.id.as_str());
-                let is_renaming = self.renaming_session.as_ref() == Some(&s.path);
-                let switch_path = s.path.clone();
-                let rename_path = s.path.clone();
-                let delete_path = s.path.clone();
-                let current_title = s.display_title().to_owned();
-                div()
-                    .id(("ai-session-row", idx))
-                    .px_2p5()
-                    .py_2()
-                    .rounded(px(8.))
-                    .when(is_active, |row| row.bg(active_bg))
-                    .when(!is_active, |row| {
-                        row.hover(move |st| st.bg(gpui_kit::rgb(palette.hover)))
-                    })
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |pane, _, _, cx| {
-                        if pane.renaming_session.is_none() {
-                            pane.switch_session(&switch_path, cx);
-                        }
-                    }))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .child(if is_renaming {
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .child(Input::new(&self.rename_input))
-                                    .into_any_element()
-                            } else {
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .child(
-                                        div()
-                                            .size(px(6.))
-                                            .rounded_full()
-                                            .flex_shrink_0()
-                                            .bg(gpui_kit::rgb(if is_active {
-                                                palette.accent
-                                            } else {
-                                                palette.border
-                                            })),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_size(typo.sm)
-                                            .font_medium()
-                                            .text_color(gpui_kit::rgb(palette.text))
-                                            .text_ellipsis()
-                                            .child(current_title.clone()),
-                                    )
-                                    .into_any_element()
-                            })
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_0p5()
-                                    .flex_shrink_0()
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .child(
-                                        div()
-                                            .id(("ai-sess-ren", idx))
-                                            .size(px(22.))
-                                            .rounded(px(5.))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .text_color(gpui_kit::rgb(palette.muted))
-                                            .hover(move |st| {
-                                                st.bg(gpui_kit::rgb(palette.pressed))
-                                                    .text_color(gpui_kit::rgb(palette.text))
-                                            })
-                                            .child(
-                                                crate::ui::icon(IconName::PencilLine)
-                                                    .w(px(12.))
-                                                    .h(px(12.)),
-                                            )
-                                            .on_click(cx.listener(move |pane, _, window, cx| {
-                                                pane.start_rename(
-                                                    rename_path.clone(),
-                                                    current_title.clone(),
-                                                    window,
-                                                    cx,
-                                                );
-                                                cx.stop_propagation();
-                                            })),
-                                    )
-                                    .child(
-                                        div()
-                                            .id(("ai-sess-del", idx))
-                                            .size(px(22.))
-                                            .rounded(px(5.))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .text_color(gpui_kit::rgb(palette.muted))
-                                            .hover(move |st| {
-                                                st.bg(gpui_kit::rgb(palette.pressed))
-                                                    .text_color(gpui_kit::rgb(palette.danger))
-                                            })
-                                            .child(
-                                                crate::ui::icon(IconName::Trash)
-                                                    .w(px(12.))
-                                                    .h(px(12.)),
-                                            )
-                                            .on_click(cx.listener(move |pane, _, _, cx| {
-                                                pane.delete_session(delete_path.clone(), cx);
-                                                cx.stop_propagation();
-                                            })),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .mt_0p5()
-                            .pl_3()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .text_size(typo.xs)
-                            .text_color(gpui_kit::rgb(palette.muted))
-                            .child(format!("{} 条", s.message_count))
-                            .child(s.timestamp_label.clone()),
-                    )
-            }))
-            .with_animation(
-                ("ai-history-pop", self.history_anim_gen),
-                Animation::new(Duration::from_millis(150)).with_easing(ease_out_quint()),
-                |el, t| el.opacity(t).mt(px((1. - t) * -6.)),
-            )
-            .into_any_element()
     }
 
     fn render_context_ring(&self, palette: Palette) -> AnyElement {
@@ -4683,7 +4341,7 @@ impl AiPane {
     }
 }
 
-impl Render for AiPane {
+impl Render for ChatPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some((text, multiline)) = self.pending_ext_prefill.take() {
             if multiline {
@@ -4711,26 +4369,6 @@ impl Render for AiPane {
             "Segoe UI".into()
         } else {
             self.settings.interface_font.clone().into()
-        };
-
-        let session_label = self
-            .session_name
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                if self.messages.is_empty() {
-                    "新会话".to_owned()
-                } else {
-                    "当前会话".to_owned()
-                }
-            });
-
-        let subtle_btn = |cx: &App| {
-            ButtonCustomVariant::new(cx)
-                .foreground(gpui_kit::rgb(palette.muted).into())
-                .hover(gpui_kit::rgb(palette.hover).into())
-                .active(gpui_kit::rgb(palette.pressed).into())
         };
 
         let is_welcome = self.messages.is_empty()
@@ -4799,11 +4437,6 @@ impl Render for AiPane {
                 MouseButton::Left,
                 cx.listener(|pane, _, _, cx| {
                     let mut changed = false;
-                    if pane.session_drawer_open {
-                        pane.session_drawer_open = false;
-                        pane.renaming_session = None;
-                        changed = true;
-                    }
                     if pane.model_popover_open {
                         pane.model_popover_open = false;
                         changed = true;
@@ -4813,132 +4446,6 @@ impl Render for AiPane {
                     }
                 }),
             )
-            .child(
-                div()
-                    .h(px(36.))
-                    .px_2p5()
-                    .flex_shrink_0()
-                    .bg(gpui_kit::rgb(palette.surface))
-                    .border_b_1()
-                    .border_color(subtle_border(palette.border))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_1()
-                    .child(
-                        div()
-                            .id("ai-sessions-toggle")
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
-                            .px_2()
-                            .h(px(26.))
-                            .rounded(px(7.))
-                            .cursor_pointer()
-                            .min_w_0()
-                            .when(self.session_drawer_open, |el| {
-                                el.bg(gpui_kit::rgb(palette.hover))
-                            })
-                            .hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(|pane, _, _, cx| {
-                                pane.session_drawer_open = !pane.session_drawer_open;
-                                if pane.session_drawer_open {
-                                    pane.history_anim_gen = pane.history_anim_gen.wrapping_add(1);
-                                    pane.refresh_sessions();
-                                } else {
-                                    pane.renaming_session = None;
-                                }
-                                cx.notify();
-                            }))
-                            .child(
-                                crate::ui::icon(IconName::Clock)
-                                    .w(px(13.))
-                                    .h(px(13.))
-                                    .text_color(gpui_kit::rgb(if self.session_drawer_open {
-                                        palette.accent
-                                    } else {
-                                        palette.muted
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .text_size(typo.sm)
-                                    .font_medium()
-                                    .text_ellipsis()
-                                    .child(session_label),
-                            )
-                            .child(
-                                crate::ui::icon(if self.session_drawer_open {
-                                    IconName::ChevronUp
-                                } else {
-                                    IconName::ChevronDown
-                                })
-                                .w(px(12.))
-                                .h(px(12.))
-                                .text_color(gpui_kit::rgb(palette.muted)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_0p5()
-                            .flex_shrink_0()
-                            .child(
-                                Button::new("ai-new-session")
-                                    .custom(subtle_btn(cx))
-                                    .compact()
-                                    .w(px(26.))
-                                    .h(px(26.))
-                                    .icon(crate::ui::icon(IconName::Plus))
-                                    .tooltip("新建会话")
-                                    .on_click(cx.listener(|pane, _, _, cx| {
-                                        pane.new_session(cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("ai-maximize")
-                                    .custom(subtle_btn(cx))
-                                    .compact()
-                                    .w(px(26.))
-                                    .h(px(26.))
-                                    .icon(crate::ui::icon(IconName::Maximize2))
-                                    .tooltip("最大化 / 还原")
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        cx.emit(AiPaneEvent::ToggleMaximize);
-                                    })),
-                            )
-                            .child(
-                                Button::new("ai-hide")
-                                    .custom(subtle_btn(cx))
-                                    .compact()
-                                    .w(px(26.))
-                                    .h(px(26.))
-                                    .icon(crate::ui::icon(IconName::PanelRightOpen))
-                                    .tooltip("收起")
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        cx.emit(AiPaneEvent::Hide);
-                                    })),
-                            ),
-                    ),
-            )
-            .when(self.session_drawer_open, |root| {
-                root.child(
-                    deferred(
-                        div()
-                            .absolute()
-                            .top(px(40.))
-                            .left_2()
-                            .child(self.render_sessions_popover(
-                                palette,
-                                ui_font.clone(),
-                                cx,
-                            )),
-                    )
-                    .with_priority(4),
-                )
-            })
             .when(is_welcome, |root| {
                 root.child(self.render_welcome(palette, typo, &ui_font, window, cx))
             })

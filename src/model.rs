@@ -365,12 +365,23 @@ impl Default for TranslateSettings {
 #[serde(default, rename_all = "camelCase")]
 pub struct AiSettings {
     pub base_url: String,
+    #[serde(default = "default_title_model")]
+    pub title_model_id: String,
+    #[serde(default)]
+    pub exa_api_key: String,
+    #[serde(default)]
+    pub baidu_qianfan_api_key: String,
 }
+
+fn default_title_model() -> String { "workbuddy-ai/hy4flash-free".into() }
 
 impl Default for AiSettings {
     fn default() -> Self {
         Self {
             base_url: "http://127.0.0.1:3425".into(),
+            title_model_id: default_title_model(),
+            exa_api_key: String::new(),
+            baidu_qianfan_api_key: String::new(),
         }
     }
 }
