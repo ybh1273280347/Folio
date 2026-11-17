@@ -490,8 +490,8 @@ impl MarkdownPane {
             editor.set_scroll_handle(scroll.clone());
             editor.set_code_styles(crate::ui::inline_code_style(&settings), crate::ui::block_code_style(&settings), cx);
             let renderer = mermaid.downgrade();
-            editor.set_code_block_preview("mermaid".into(), move |id, revision, code, window, cx| {
-                renderer.update(cx, |renderer, cx| renderer.element(id, revision, code, window, cx))
+            editor.set_code_block_preview("mermaid".into(), move |id, revision, code, interactive, window, cx| {
+                renderer.update(cx, |renderer, cx| renderer.element(id, revision, code, interactive, window, cx))
                     .expect("Mermaid renderer lives with its Markdown pane")
             }, cx);
             editor

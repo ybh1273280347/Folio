@@ -4471,7 +4471,6 @@ impl Workspace {
                             .ghost()
                             .compact()
                             .icon(crate::ui::icon(IconName::Sparkles))
-                            .label("问 AI")
                             .tooltip("将当前选中内容（或当前文件）发送到 AI 助手")
                             .on_click(cx.listener(move |app, _, window, cx| {
                                 let selected = ask_editor.read(cx).selected_text().to_string();
@@ -4747,20 +4746,6 @@ impl Render for Workspace {
             .filter(|file| file.path.to_lowercase().ends_with(".tex"))
             .map(|file| file.path.clone())
             .collect();
-        let save_status = self
-            .documents
-            .get(self.focused_markdown.as_deref().unwrap_or(&self.active))
-            .map(|document| {
-                if document.buffer.deleted {
-                    "自动保存已暂停：文件已删除"
-                } else if document.buffer.conflict.is_some() {
-                    "自动保存已暂停：文件冲突"
-                } else if document.buffer.is_dirty() {
-                    "等待自动保存…"
-                } else {
-                    "已保存 · 自动保存"
-                }
-            });
         let resize_app = cx.entity();
         let area_width = f32::from(window.viewport_size().width)
             - if self.show_terminal && !self.terminal_maximized { self.settings.terminal.panel_width } else { 0. }
@@ -5195,8 +5180,7 @@ impl Render for Workspace {
                     ),
             )
             .child(
-                // The resize group asks for 100% height. Constrain it to the
-                // space between the title/status bars so the settings footer stays visible.
+                // Constrain the resize group to the space below the title bar.
                 div().flex_1().min_h_0().overflow_hidden().child(
                     h_resizable(if self.settings.sidebar_open {
                         "workspace-with-sidebar"
@@ -5229,25 +5213,6 @@ impl Render for Workspace {
                     })
                     .child(resizable_panel().child(if self.show_trash { self.render_trash(cx) } else { editor_with_terminal.into_any_element() })),
                 ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .h(px(24.))
-                    .px_4()
-                    .text_xs()
-                    .text_color(rgb(MUTED))
-                    .border_t_1()
-                    .border_color(rgb(BORDER))
-                    .child(
-                        self.directory_workspace()
-                            .map(|project| project.folder.clone())
-                            .unwrap_or_else(|| format!("独立文件 · {} 个文件", self.tabs.len())),
-                    )
-                    .children(save_status)
-                    .child("Ctrl+S 保存  ·  Ctrl+Shift+O 打开文件  ·  Ctrl+Enter 编译"),
             )
             .when_some(self.notice.clone(), |app, notice| {
                 app.child(

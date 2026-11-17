@@ -236,6 +236,7 @@ icon_assets!(
         Image,
         CodeXml,
         Code,
+        ChartNetwork,
         PencilLine,
         NotebookPen,
         Files,

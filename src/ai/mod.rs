@@ -5886,10 +5886,8 @@ fn model_brand_icon_path(model: &ModelInfo) -> Option<&'static str> {
             return Some("brand/gemini.svg");
         }
         if s.contains("hunyuan")
-            || s == "hy"
-            || s.starts_with("hy-")
-            || s.starts_with("hy_")
-            || s.contains("Hy")
+            || s.starts_with("hy")
+            || s.starts_with("Hy")
         {
             return Some("brand/hunyuan.svg");
         }

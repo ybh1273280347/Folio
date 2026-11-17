@@ -619,8 +619,7 @@ impl RenderOnce for BlockEditor {
             });
         }
         register_fold_surfaces(&mut extensions, self.state.read(cx), Some(&fold_bounds), &theme);
-        // Code surfaces own the background and outline, including for nested/source
-        // blocks. Refine the native body after its default background and border.
+        // The outer surface paints the shared header and code background.
         let code_body_style = text_style.code_block().clone()
             .bg(gpui::transparent_black())
             .border_0();
@@ -794,8 +793,6 @@ impl RenderOnce for BlockEditor {
                         )
                     }
                     (_, BlockNode::CodeBlock(_)) => {
-                        // Keep the header and body in one measured container so
-                        // virtual scrolling includes the controls' actual height.
                         let code = node.render(node_ix, flow.last(is_last_node), &node_cx, window, cx);
                         super::code_ui::container(&render_cx)
                             .child(super::code_ui::header(&self.state, unit.id, window, cx))
@@ -1365,6 +1362,7 @@ impl Element for EditorRoot {
         // Mouse: handlers update the entity at event time, never in paint.
         let hitbox = prepaint.hitbox.clone();
         let grip_hitbox = prepaint.grip_hitbox.clone();
+        let preview_bounds = self.code_preview_bounds.clone();
         let entity = self.state.clone();
         window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
@@ -1373,6 +1371,13 @@ impl Element for EditorRoot {
             let in_editor = hitbox.is_hovered(window);
             let in_grip_gutter = grip_hitbox.is_hovered(window);
             if !in_editor && !in_grip_gutter {
+                return;
+            }
+            // Preview controls and selection handle their own clicks; hit-testing
+            // their synthetic text leaf would otherwise open the source editor.
+            if preview_bounds.lock().expect("code preview bounds")
+                .values().any(|bounds| bounds.contains(&event.position))
+            {
                 return;
             }
             if let Some((fold, _)) = fold_buttons.iter().find(|(_, bounds)| bounds.contains(&event.position)) {

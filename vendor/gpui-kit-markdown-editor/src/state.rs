@@ -605,6 +605,7 @@ impl BlockEditorState {
                 BlockId,
                 u64,
                 &CodeBlock,
+                bool,
                 &mut Window,
                 &mut App,
             ) -> AnyElement
@@ -699,7 +700,8 @@ impl BlockEditorState {
             }
         };
         let _ = self.model.set_selection(selection);
-        self.dragging = true;
+        // The preview is an interactive surface, not a text-selection drag origin.
+        self.dragging = false;
         self.block_drag = None;
         self.selection_changed(cx);
     }
