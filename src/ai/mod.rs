@@ -107,7 +107,12 @@ struct ToolBlock {
 
 #[derive(Clone, Debug)]
 enum AssistantPart {
-    Thinking { text: String, collapsed: bool },
+    Thinking {
+        text: String,
+        collapsed: bool,
+        duration_ms: Option<u64>,
+        streaming: bool,
+    },
     Text(String),
     Tool(ToolBlock),
 }
@@ -125,6 +130,7 @@ enum ChatMessage {
         parts: Vec<AssistantPart>,
         error: Option<String>,
         streaming: bool,
+        duration_ms: Option<u64>,
     },
     Notice {
         text: String,
@@ -236,7 +242,11 @@ pub struct AiPane {
     slash_scroll: ScrollHandle,
     last_input_text: String,
     dismissed_slash_text: Option<String>,
-    expanded_tool_groups: HashSet<(usize, usize)>,
+    collapsed_tool_groups: HashSet<(usize, usize)>,
+    expanded_task_processes: HashSet<usize>,
+    viewed_diff_files: HashSet<String>,
+    active_run_start: Option<std::time::Instant>,
+    active_thinking_start: Option<std::time::Instant>,
     write_snapshots: HashMap<String, String>,
     active_part_map: HashMap<usize, usize>,
     input: Entity<TextareaState>,
@@ -401,7 +411,11 @@ impl AiPane {
             slash_scroll: ScrollHandle::new(),
             last_input_text: String::new(),
             dismissed_slash_text: None,
-            expanded_tool_groups: HashSet::new(),
+            collapsed_tool_groups: HashSet::new(),
+            expanded_task_processes: HashSet::new(),
+            viewed_diff_files: HashSet::new(),
+            active_run_start: None,
+            active_thinking_start: None,
             write_snapshots: HashMap::new(),
             active_part_map: HashMap::new(),
             input,
@@ -443,7 +457,11 @@ impl AiPane {
         }
         self.cwd = cwd;
         self.messages.clear();
-        self.expanded_tool_groups.clear();
+        self.collapsed_tool_groups.clear();
+        self.expanded_task_processes.clear();
+        self.viewed_diff_files.clear();
+        self.active_run_start = None;
+        self.active_thinking_start = None;
         self.session_file = None;
         self.session_id = None;
         self.session_name = None;
@@ -606,7 +624,11 @@ impl AiPane {
                         if !data.get("cancelled").and_then(|v| v.as_bool()).unwrap_or(false) {
                             if command == "new_session" {
                                 self.messages.clear();
-                                self.expanded_tool_groups.clear();
+                                self.collapsed_tool_groups.clear();
+                                self.expanded_task_processes.clear();
+                                self.viewed_diff_files.clear();
+                                self.active_run_start = None;
+                                self.active_thinking_start = None;
                                 self.context_usage = None;
                             } else {
                                 self.show_toast("已从当前位置创建分支会话".into(), false, cx);
@@ -623,7 +645,11 @@ impl AiPane {
                     "switch_session" => {
                         if !data.get("cancelled").and_then(|v| v.as_bool()).unwrap_or(false) {
                             self.messages.clear();
-                            self.expanded_tool_groups.clear();
+                            self.collapsed_tool_groups.clear();
+                            self.expanded_task_processes.clear();
+                            self.viewed_diff_files.clear();
+                            self.active_run_start = None;
+                            self.active_thinking_start = None;
                             self.active_part_map.clear();
                             self.pending_ui = None;
                             self.is_streaming = false;
@@ -763,7 +789,11 @@ impl AiPane {
             return;
         };
         self.messages.clear();
-        self.expanded_tool_groups.clear();
+        self.collapsed_tool_groups.clear();
+        self.expanded_task_processes.clear();
+        self.viewed_diff_files.clear();
+        self.active_run_start = None;
+        self.active_thinking_start = None;
         let mut pending_tool_results: HashMap<String, (String, bool)> = HashMap::new();
         for msg in arr {
             if msg.get("role").and_then(|v| v.as_str()) == Some("toolResult")
@@ -804,6 +834,8 @@ impl AiPane {
                                         parts.push(AssistantPart::Thinking {
                                             text: t,
                                             collapsed: true,
+                                            duration_ms: None,
+                                            streaming: false,
                                         });
                                     }
                                 }
@@ -863,6 +895,7 @@ impl AiPane {
                         parts,
                         error,
                         streaming: false,
+                        duration_ms: None,
                     });
                 }
                 _ => {}
@@ -876,9 +909,50 @@ impl AiPane {
         match kind {
             "agent_start" => {
                 self.is_streaming = true;
+                if self.active_run_start.is_none() {
+                    self.active_run_start = Some(std::time::Instant::now());
+                }
             }
             "agent_settled" => {
                 self.is_streaming = false;
+                let elapsed = self
+                    .active_run_start
+                    .take()
+                    .map(|t| t.elapsed().as_millis() as u64);
+                let think_elapsed = self
+                    .active_thinking_start
+                    .take()
+                    .map(|t| t.elapsed().as_millis() as u64);
+                for msg in self.messages.iter_mut().rev() {
+                    if let ChatMessage::Assistant {
+                        parts,
+                        streaming,
+                        duration_ms,
+                        ..
+                    } = msg
+                    {
+                        *streaming = false;
+                        if duration_ms.is_none() {
+                            *duration_ms = elapsed;
+                        }
+                        for p in parts.iter_mut() {
+                            if let AssistantPart::Thinking {
+                                collapsed,
+                                streaming: p_stream,
+                                duration_ms: p_dur,
+                                ..
+                            } = p
+                            {
+                                *p_stream = false;
+                                *collapsed = true;
+                                if p_dur.is_none() {
+                                    *p_dur = think_elapsed;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
                 self.pending_ui = None;
                 self.refresh_sessions();
                 if let Some(client) = &self.client {
@@ -927,6 +1001,7 @@ impl AiPane {
                         parts: Vec::new(),
                         error: None,
                         streaming: true,
+                        duration_ms: None,
                     });
                     self.scroll_to_bottom();
                 }
@@ -937,12 +1012,17 @@ impl AiPane {
                 }
             }
             "message_end" => {
+                let think_elapsed = self
+                    .active_thinking_start
+                    .take()
+                    .map(|t| t.elapsed().as_millis() as u64);
                 if let Some(msg) = ev.get("message")
                     && msg.get("role").and_then(|v| v.as_str()) == Some("assistant")
                     && let Some(ChatMessage::Assistant {
                         parts,
                         error,
                         streaming,
+                        ..
                     }) = self.messages.last_mut()
                 {
                     *streaming = false;
@@ -953,13 +1033,18 @@ impl AiPane {
                     {
                         *error = Some(err.to_owned());
                     }
-                    let has_text = parts
-                        .iter()
-                        .any(|p| matches!(p, AssistantPart::Text(t) if !t.trim().is_empty()));
-                    if has_text {
-                        for p in parts.iter_mut() {
-                            if let AssistantPart::Thinking { collapsed, .. } = p {
-                                *collapsed = true;
+                    for p in parts.iter_mut() {
+                        if let AssistantPart::Thinking {
+                            collapsed,
+                            streaming: p_stream,
+                            duration_ms,
+                            ..
+                        } = p
+                        {
+                            *p_stream = false;
+                            *collapsed = true;
+                            if duration_ms.is_none() {
+                                *duration_ms = think_elapsed;
                             }
                         }
                     }
@@ -1085,37 +1170,64 @@ impl AiPane {
                 parts: Vec::new(),
                 error: None,
                 streaming: true,
+                duration_ms: None,
             });
         }
 
         match ty {
             "thinking_start" => {
+                self.active_thinking_start = Some(std::time::Instant::now());
                 let idx = self.push_assistant_part(AssistantPart::Thinking {
                     text: String::new(),
                     collapsed: false,
+                    duration_ms: None,
+                    streaming: true,
                 });
                 self.active_part_map.insert(content_index, idx);
             }
             "thinking_delta" => {
                 let delta = ame.get("delta").and_then(|v| v.as_str()).unwrap_or("");
+                if self.active_thinking_start.is_none() {
+                    self.active_thinking_start = Some(std::time::Instant::now());
+                }
                 let idx = self.get_or_create_part(content_index, || AssistantPart::Thinking {
                     text: String::new(),
                     collapsed: false,
+                    duration_ms: None,
+                    streaming: true,
                 });
                 if let Some(ChatMessage::Assistant { parts, .. }) = self.messages.last_mut()
-                    && let Some(AssistantPart::Thinking { text, .. }) = parts.get_mut(idx)
+                    && let Some(AssistantPart::Thinking {
+                        text, streaming, ..
+                    }) = parts.get_mut(idx)
                 {
                     text.push_str(delta);
+                    *streaming = true;
                 }
                 self.scroll_to_bottom();
             }
             "thinking_end" => {
-                if let Some(content) = ame.get("content").and_then(|v| v.as_str())
-                    && let Some(&idx) = self.active_part_map.get(&content_index)
+                let elapsed = self
+                    .active_thinking_start
+                    .take()
+                    .map(|t| t.elapsed().as_millis() as u64);
+                if let Some(&idx) = self.active_part_map.get(&content_index)
                     && let Some(ChatMessage::Assistant { parts, .. }) = self.messages.last_mut()
-                    && let Some(AssistantPart::Thinking { text, .. }) = parts.get_mut(idx)
+                    && let Some(AssistantPart::Thinking {
+                        text,
+                        collapsed,
+                        duration_ms,
+                        streaming,
+                    }) = parts.get_mut(idx)
                 {
-                    *text = content.to_owned();
+                    if let Some(content) = ame.get("content").and_then(|v| v.as_str()) {
+                        *text = content.to_owned();
+                    }
+                    *streaming = false;
+                    *collapsed = true;
+                    if duration_ms.is_none() {
+                        *duration_ms = elapsed;
+                    }
                 }
                 self.scroll_to_bottom();
             }
@@ -1866,6 +1978,7 @@ impl AiPane {
             input.set_value(String::new(), window, cx);
         });
         self.is_streaming = true;
+        self.active_run_start = Some(std::time::Instant::now());
         self.stick_to_bottom = true;
         self.scroll_to_bottom();
         cx.notify();
@@ -1884,7 +1997,11 @@ impl AiPane {
             let _ = client.new_session();
         } else {
             self.messages.clear();
-            self.expanded_tool_groups.clear();
+            self.collapsed_tool_groups.clear();
+            self.expanded_task_processes.clear();
+            self.viewed_diff_files.clear();
+            self.active_run_start = None;
+            self.active_thinking_start = None;
             self.start_rpc(cx);
         }
         self.session_drawer_open = false;
@@ -2090,245 +2207,786 @@ impl AiPane {
             .into_any_element()
     }
 
-    fn render_tool_group(
+    fn render_markdown_block(
         &self,
+        id: SharedString,
+        text: &str,
         msg_idx: usize,
-        start_idx: usize,
-        blocks: &[(usize, &ToolBlock)],
+        part_idx: usize,
+        md_style: &TextViewStyle,
+        ui_font: &SharedString,
         palette: Palette,
-        cx: &mut Context<Self>,
+        typo: AiTypography,
     ) -> AnyElement {
-        let group_key = (msg_idx, start_idx);
-        let group_expanded = self.expanded_tool_groups.contains(&group_key);
-
-        let any_running = blocks.iter().any(|(_, b)| !b.done);
-        let any_error = blocks.iter().any(|(_, b)| b.is_error);
-        let has_edit = blocks
-            .iter()
-            .any(|(_, b)| b.name == "edit" || b.name == "write");
-        let has_other = blocks
-            .iter()
-            .any(|(_, b)| b.name != "edit" && b.name != "write");
-
-        let group_label = if any_running {
-            if has_edit && !has_other {
-                "正在编辑文件…"
-            } else {
-                "正在调用工具…"
-            }
-        } else {
-            match (has_edit, has_other) {
-                (true, true) => "编辑了文件，调用了工具",
-                (true, false) => "编辑了文件",
-                _ => "调用了工具",
-            }
-        };
-
-        let header_icon = if has_edit && !has_other {
-            IconName::PencilLine
-        } else {
-            IconName::Terminal
-        };
-        let pill_bg = mix_color(palette.background, palette.surface, 0.72);
-        let pill_hover = mix_color(palette.hover, palette.surface, 0.35);
-        let typo = AiTypography::from_settings(&self.settings);
-        let dot_color = if any_error {
-            gpui_kit::rgb(palette.danger)
-        } else if any_running {
-            gpui_kit::rgb(palette.accent)
-        } else {
-            theme_color(0x16a34a)
-        };
-
-        let status_dot = if any_running {
-            div()
-                .size(px(6.))
-                .rounded_full()
-                .bg(dot_color)
-                .with_animation(
-                    ("tool-pulse", msg_idx * 1000 + start_idx),
-                    Animation::new(Duration::from_millis(1000)).repeat(),
-                    |el, t| {
-                        let a = 0.35 + 0.65 * (0.5 - 0.5 * (t * std::f32::consts::TAU).cos());
-                        el.opacity(a)
-                    },
-                )
-                .into_any_element()
-        } else {
-            div()
-                .size(px(6.))
-                .rounded_full()
-                .bg(dot_color)
-                .opacity(0.85)
-                .into_any_element()
-        };
-
+        let normalized = markdown_editor::normalize_math(text);
         div()
-            .my_0p5()
-            .flex()
-            .flex_col()
-            .gap_1()
+            .font_family(ui_font.clone())
+            .text_size(typo.body)
+            .line_height(relative(1.6))
+            .text_color(gpui_kit::rgb(palette.text))
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .child(
+                TextView::markdown(id, normalized)
+                    .selectable(true)
+                    .markdown_extensions(self.md_extensions.clone())
+                    .style(md_style.clone())
+                    .font_family(ui_font.clone())
+                    .text_size(typo.body)
+                    .code_block_actions(move |block, _, _| {
+                        let code = block.code().to_string();
+                        let lang = block.lang().filter(|l| !l.is_empty());
+                        let span_start = block.span.as_ref().map(|s| s.start).unwrap_or(0);
                         div()
-                            .id(("tool-group", msg_idx * 1000 + start_idx))
-                            .px_2p5()
-                            .py_1()
-                            .rounded(px(8.))
-                            .bg(pill_bg)
-                            .border_1()
-                            .border_color(subtle_border(palette.border))
                             .flex()
                             .items_center()
-                            .gap_1p5()
-                            .cursor_pointer()
-                            .text_size(typo.sm)
-                            .text_color(gpui_kit::rgb(palette.muted))
-                            .hover(move |s| {
-                                s.bg(pill_hover).text_color(gpui_kit::rgb(palette.text))
+                            .gap_1()
+                            .when_some(lang, |row, lang| {
+                                row.child(
+                                    div()
+                                        .pl_1p5()
+                                        .text_size(typo.xs)
+                                        .text_color(gpui_kit::rgb(palette.muted))
+                                        .child(lang),
+                                )
                             })
-                            .on_click(cx.listener(move |pane, _, _, cx| {
-                                if !pane.expanded_tool_groups.remove(&group_key) {
-                                    pane.expanded_tool_groups.insert(group_key);
-                                }
-                                cx.notify();
-                            }))
-                            .child(status_dot)
-                            .child(crate::ui::icon(header_icon).w(px(12.)).h(px(12.)))
-                            .child(div().font_medium().child(group_label))
-                            .child(
-                                crate::ui::icon(if group_expanded {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                })
-                                .w(px(12.))
-                                .h(px(12.)),
-                            ),
-                    ),
+                            .child(ai_copy_button(
+                                SharedString::from(format!(
+                                    "ai-copy-code-{msg_idx}-{part_idx}-{span_start}"
+                                )),
+                                "复制代码",
+                                "已复制",
+                                code,
+                            ))
+                    })
+                    .table_actions(move |table, _, _| {
+                        let md = table.markdown.clone();
+                        let span_start = table.span.as_ref().map(|s| s.start).unwrap_or(0);
+                        div()
+                            .w_full()
+                            .flex()
+                            .justify_end()
+                            .child(ai_copy_button(
+                                SharedString::from(format!(
+                                    "ai-copy-table-{msg_idx}-{part_idx}-{span_start}"
+                                )),
+                                "复制表格",
+                                "已复制",
+                                md,
+                            ))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn render_assistant_run(
+        &self,
+        run_start: usize,
+        run_end: usize,
+        total_msgs: usize,
+        md_style: &TextViewStyle,
+        ui_font: &SharedString,
+        palette: Palette,
+        typo: AiTypography,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ps = ProcessStyle::from_theme(palette, typo);
+        let code_font: SharedString = if self.settings.block_code_font.is_empty() {
+            "Consolas".into()
+        } else {
+            self.settings.block_code_font.clone().into()
+        };
+
+        let mut all_parts: Vec<(usize, usize, &AssistantPart)> = Vec::new();
+        let mut run_streaming = false;
+        let mut errors: Vec<String> = Vec::new();
+        let mut recorded_duration_ms: Option<u64> = None;
+
+        for (m_idx, msg) in self.messages[run_start..run_end].iter().enumerate() {
+            let abs_msg_idx = run_start + m_idx;
+            if let ChatMessage::Assistant {
+                parts,
+                error,
+                streaming,
+                duration_ms,
+            } = msg
+            {
+                if *streaming {
+                    run_streaming = true;
+                }
+                if let Some(err) = error.as_ref().filter(|e| !e.is_empty()) {
+                    errors.push(err.clone());
+                }
+                if let Some(ms) = *duration_ms {
+                    recorded_duration_ms = Some(recorded_duration_ms.unwrap_or(0).saturating_add(ms));
+                }
+                for (p_idx, part) in parts.iter().enumerate() {
+                    all_parts.push((abs_msg_idx, p_idx, part));
+                }
+            }
+        }
+
+        let is_last_run = run_end == total_msgs;
+        let any_tool_running = all_parts
+            .iter()
+            .any(|(_, _, p)| matches!(p, AssistantPart::Tool(b) if !b.done));
+        let any_thinking_running = all_parts
+            .iter()
+            .any(|(_, _, p)| matches!(p, AssistantPart::Thinking { streaming, .. } if *streaming));
+        let is_task_running =
+            run_streaming || any_tool_running || any_thinking_running || (is_last_run && self.is_streaming);
+
+        let run_has_error = !errors.is_empty()
+            || all_parts
+                .iter()
+                .any(|(_, _, p)| matches!(p, AssistantPart::Tool(b) if b.is_error));
+
+        let final_text_pos = all_parts
+            .iter()
+            .rposition(|(_, _, p)| matches!(p, AssistantPart::Text(t) if !t.trim().is_empty()));
+
+        enum TimelineNode<'a> {
+            Group(Vec<ProcessStep<'a>>),
+            Prose {
+                msg_idx: usize,
+                part_idx: usize,
+                text: &'a str,
+            },
+        }
+
+        let split_at = final_text_pos.unwrap_or(all_parts.len());
+        let process_slice = &all_parts[..split_at];
+        let mut timeline: Vec<TimelineNode<'_>> = Vec::new();
+        let mut pending_steps: Vec<ProcessStep<'_>> = Vec::new();
+        let mut process_step_count = 0usize;
+        let mut sum_tool_ms = 0u64;
+        let mut sum_think_ms = 0u64;
+        let mut tool_step_count = 0usize;
+        let mut thinking_step_count = 0usize;
+
+        for &(m_idx, p_idx, part) in process_slice {
+            match part {
+                AssistantPart::Thinking {
+                    text,
+                    collapsed,
+                    duration_ms,
+                    streaming,
+                } => {
+                    if text.trim().is_empty() && !*streaming {
+                        continue;
+                    }
+                    process_step_count += 1;
+                    thinking_step_count += 1;
+                    if let Some(ms) = *duration_ms {
+                        sum_think_ms = sum_think_ms.saturating_add(ms);
+                    }
+                    pending_steps.push(ProcessStep::Thinking {
+                        msg_idx: m_idx,
+                        part_idx: p_idx,
+                        text,
+                        collapsed: *collapsed,
+                        duration_ms: *duration_ms,
+                        streaming: *streaming,
+                    });
+                }
+                AssistantPart::Tool(block) => {
+                    process_step_count += 1;
+                    tool_step_count += 1;
+                    if let Some(ms) = block.duration_ms {
+                        sum_tool_ms = sum_tool_ms.saturating_add(ms);
+                    }
+                    pending_steps.push(ProcessStep::Tool {
+                        msg_idx: m_idx,
+                        part_idx: p_idx,
+                        block,
+                    });
+                }
+                AssistantPart::Text(text) => {
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    if !pending_steps.is_empty() {
+                        timeline.push(TimelineNode::Group(std::mem::take(&mut pending_steps)));
+                    }
+                    timeline.push(TimelineNode::Prose {
+                        msg_idx: m_idx,
+                        part_idx: p_idx,
+                        text,
+                    });
+                }
+            }
+        }
+        if !pending_steps.is_empty() {
+            timeline.push(TimelineNode::Group(pending_steps));
+        }
+
+        // If task finished cleanly and has intermediate steps before final text (or pure process),
+        // allow collapsing the entire process area into one sleek single line ("用时 1m 58s").
+        let has_process_area = !timeline.is_empty();
+        let collapse_eligible = !is_task_running && !run_has_error && has_process_area;
+        let task_expanded =
+            !collapse_eligible || self.expanded_task_processes.contains(&run_start);
+
+        let total_elapsed_ms = recorded_duration_ms.or_else(|| {
+            if is_last_run && self.is_streaming {
+                self.active_run_start
+                    .map(|t| t.elapsed().as_millis() as u64)
+            } else {
+                let summed = sum_tool_ms.saturating_add(sum_think_ms);
+                (summed > 0).then_some(summed)
+            }
+        });
+
+        let task_summary_label = if thinking_step_count == 1
+            && tool_step_count == 0
+            && timeline.len() == 1
+        {
+            match total_elapsed_ms {
+                Some(ms) => format!("思考了 {}", format_thinking_duration(ms)),
+                None => "思考过程".to_owned(),
+            }
+        } else if let Some(ms) = total_elapsed_ms {
+            format!("用时 {}", format_duration_compact(ms))
+        } else {
+            format!("已完成 {process_step_count} 个步骤")
+        };
+
+        let mut rendered_process: Vec<AnyElement> = Vec::new();
+        for node in timeline {
+            match node {
+                TimelineNode::Group(steps) => {
+                    rendered_process.push(self.render_process_group(
+                        &steps,
+                        ui_font,
+                        &code_font,
+                        palette,
+                        ps,
+                        cx,
+                    ));
+                }
+                TimelineNode::Prose {
+                    msg_idx,
+                    part_idx,
+                    text,
+                } => {
+                    rendered_process.push(div().pt(px(2.)).pb(px(4.)).child(
+                        self.render_markdown_block(
+                            SharedString::from(format!("ai-assistant-mid-{msg_idx}-{part_idx}")),
+                            text,
+                            msg_idx,
+                            part_idx,
+                            md_style,
+                            ui_font,
+                            palette,
+                            typo,
+                        ),
+                    ).into_any_element());
+                }
+            }
+        }
+
+        let final_answer_el = final_text_pos.map(|pos| {
+            let (m_idx, p_idx, part) = all_parts[pos];
+            let text = match part {
+                AssistantPart::Text(t) => t.as_str(),
+                _ => "",
+            };
+            self.render_markdown_block(
+                SharedString::from(format!("ai-assistant-md-{m_idx}-{p_idx}")),
+                text,
+                m_idx,
+                p_idx,
+                md_style,
+                ui_font,
+                palette,
+                typo,
+            )
+        });
+
+        let full_answer = all_parts
+            .iter()
+            .filter_map(|(_, _, p)| match p {
+                AssistantPart::Text(t) if !t.trim().is_empty() => Some(t.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        div()
+            .flex()
+            .flex_col()
+            .when(has_process_area, |root| {
+                root.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(ps.row_gap)
+                        .when(collapse_eligible, |col| {
+                            col.child(
+                                render_process_header(
+                                    SharedString::from(format!("ai-task-toggle-{run_start}")),
+                                    None,
+                                    task_summary_label,
+                                    false,
+                                    false,
+                                    task_expanded,
+                                    ps,
+                                )
+                                .on_click(cx.listener(move |pane, _, _, cx| {
+                                    if !pane.expanded_task_processes.remove(&run_start) {
+                                        pane.expanded_task_processes.insert(run_start);
+                                    }
+                                    cx.notify();
+                                })),
+                            )
+                        })
+                        .when(task_expanded, |col| {
+                            col.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(ps.row_gap)
+                                    .children(rendered_process),
+                            )
+                        }),
+                )
+            })
+            .when_some(final_answer_el, |root, answer| {
+                root.child(
+                    div()
+                        .when(has_process_area, |el| el.mt(ps.section_gap))
+                        .child(answer),
+                )
+            })
+            .when(!is_task_running && !full_answer.is_empty(), |root| {
+                root.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_start()
+                        .pt_1()
+                        .child(ai_copy_button(
+                            SharedString::from(format!("ai-copy-msg-{run_start}")),
+                            "复制回答",
+                            "已复制",
+                            full_answer,
+                        )),
+                )
+            })
+            .when(is_task_running && all_parts.is_empty(), |root| {
+                root.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .py_1()
+                        .min_h(px(24.))
+                        .child(
+                            crate::ui::icon(IconName::RefreshCw)
+                                .w(ps.icon_size)
+                                .h(ps.icon_size)
+                                .text_color(ps.fg_secondary)
+                                .with_animation(
+                                    ("ai-stream-spin", run_start),
+                                    Animation::new(Duration::from_millis(900)).repeat(),
+                                    |icon, t| {
+                                        icon.rotate(gpui::radians(t * std::f32::consts::TAU))
+                                    },
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(ps.header_size)
+                                .text_color(ps.fg_secondary)
+                                .with_animation(
+                                    ("ai-stream-breathe", run_start),
+                                    Animation::new(Duration::from_millis(1200)).repeat(),
+                                    |el, t| {
+                                        let a = 0.55
+                                            + 0.45
+                                                * (0.5
+                                                    - 0.5
+                                                        * (t * std::f32::consts::TAU).cos());
+                                        el.opacity(a)
+                                    },
+                                )
+                                .child("思考中…"),
+                        ),
+                )
+            })
+            .children(errors.into_iter().map(|err| {
+                div()
+                    .mt_2()
+                    .px_2p5()
+                    .py_2()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(ps.error_fg)
+                    .text_size(ps.detail_size)
+                    .text_color(ps.error_fg)
+                    .child(err)
+            }))
+            .into_any_element()
+    }
+
+    fn render_process_group(
+        &self,
+        steps: &[ProcessStep<'_>],
+        ui_font: &SharedString,
+        code_font: &SharedString,
+        palette: Palette,
+        ps: ProcessStyle,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(first) = steps.first() else {
+            return div().into_any_element();
+        };
+        let (first_msg, first_part) = first.ids();
+        let group_key = (first_msg, first_part);
+
+        // Single standalone thinking step renders cleanly as one line without double nesting.
+        if steps.len() == 1
+            && let ProcessStep::Thinking {
+                msg_idx,
+                part_idx,
+                text,
+                collapsed,
+                duration_ms,
+                streaming,
+            } = first
+        {
+            let title = if *streaming {
+                "正在思考…".to_owned()
+            } else if let Some(ms) = *duration_ms {
+                format!("思考了 {}", format_thinking_duration(ms))
+            } else {
+                "思考过程".to_owned()
+            };
+            let msg_idx = *msg_idx;
+            let part_idx = *part_idx;
+            let expanded = !*collapsed || *streaming;
+            return div()
+                .flex()
+                .flex_col()
+                .gap(ps.row_gap)
+                .child(
+                    render_process_header(
+                        SharedString::from(format!("ai-think-hdr-{msg_idx}-{part_idx}")),
+                        Some(IconName::Brain),
+                        title,
+                        *streaming,
+                        false,
+                        expanded,
+                        ps,
+                    )
+                    .on_click(cx.listener(move |pane, _, _, cx| {
+                        if let Some(ChatMessage::Assistant { parts, .. }) =
+                            pane.messages.get_mut(msg_idx)
+                            && let Some(AssistantPart::Thinking { collapsed, .. }) =
+                                parts.get_mut(part_idx)
+                        {
+                            *collapsed = !*collapsed;
+                            cx.notify();
+                        }
+                    })),
+                )
+                .when(expanded && !text.trim().is_empty(), |col| {
+                    col.child(
+                        div()
+                            .ml(px(12.))
+                            .pl_3()
+                            .border_l_1()
+                            .border_color(ps.guide_line)
+                            .child(render_thinking_detail(
+                                SharedString::from(format!("ai-think-body-{msg_idx}-{part_idx}")),
+                                (*text).to_owned(),
+                                *streaming,
+                                ui_font,
+                                ps,
+                            )),
+                    )
+                })
+                .into_any_element();
+        }
+
+        let any_running = steps.iter().any(|s| match s {
+            ProcessStep::Thinking { streaming, .. } => *streaming,
+            ProcessStep::Tool { block, .. } => !block.done,
+        });
+        let any_error = steps.iter().any(|s| match s {
+            ProcessStep::Thinking { .. } => false,
+            ProcessStep::Tool { block, .. } => block.is_error,
+        });
+        let group_expanded = !self.collapsed_tool_groups.contains(&group_key);
+        let title = process_group_title(steps, any_running);
+        let header_icon = process_group_icon(steps);
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(ps.row_gap)
+            .child(
+                render_process_header(
+                    SharedString::from(format!("ai-proc-grp-{first_msg}-{first_part}")),
+                    Some(header_icon),
+                    title,
+                    any_running,
+                    any_error,
+                    group_expanded,
+                    ps,
+                )
+                .on_click(cx.listener(move |pane, _, _, cx| {
+                    if !pane.collapsed_tool_groups.remove(&group_key) {
+                        pane.collapsed_tool_groups.insert(group_key);
+                    }
+                    cx.notify();
+                })),
             )
             .when(group_expanded, |col| {
                 col.child(
                     div()
-                        .ml_2p5()
+                        .ml(px(12.))
                         .pl_3()
-                        .border_l_2()
-                        .border_color(subtle_border(palette.border))
+                        .border_l_1()
+                        .border_color(ps.guide_line)
                         .flex()
                         .flex_col()
-                        .gap_1()
-                        .children(blocks.iter().map(|&(part_idx, block)| {
-                            let step_icon = match block.name.as_str() {
-                                "edit" | "write" => IconName::PencilLine,
-                                "bash" | "powershell" => IconName::Terminal,
-                                _ => IconName::Wrench,
-                            };
-                            let has_detail =
-                                !block.diffs.is_empty() || !block.output.trim().is_empty();
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .id(("tool-step", msg_idx * 1000 + part_idx))
-                                        .px_2()
-                                        .py_1()
-                                        .rounded(px(6.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap_2()
-                                        .when(has_detail, |row| {
-                                            row.cursor_pointer()
-                                                .hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
-                                        })
+                        .gap(ps.row_gap)
+                        .children(steps.iter().map(|step| match step {
+                            ProcessStep::Thinking {
+                                msg_idx,
+                                part_idx,
+                                text,
+                                collapsed,
+                                duration_ms,
+                                streaming,
+                            } => {
+                                let msg_idx = *msg_idx;
+                                let part_idx = *part_idx;
+                                let expanded = !*collapsed || *streaming;
+                                let label = if *streaming {
+                                    "正在思考…".to_owned()
+                                } else if let Some(ms) = *duration_ms {
+                                    format!("思考了 {}", format_thinking_duration(ms))
+                                } else {
+                                    "思考过程".to_owned()
+                                };
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(ps.row_gap)
+                                    .child(
+                                        render_process_header(
+                                            SharedString::from(format!(
+                                                "ai-think-sub-{msg_idx}-{part_idx}"
+                                            )),
+                                            Some(IconName::Brain),
+                                            label,
+                                            *streaming,
+                                            false,
+                                            expanded,
+                                            ps,
+                                        )
                                         .on_click(cx.listener(move |pane, _, _, cx| {
-                                            if !has_detail {
-                                                return;
-                                            }
                                             if let Some(ChatMessage::Assistant { parts, .. }) =
                                                 pane.messages.get_mut(msg_idx)
-                                                && let Some(AssistantPart::Tool(b)) =
-                                                    parts.get_mut(part_idx)
+                                                && let Some(AssistantPart::Thinking {
+                                                    collapsed,
+                                                    ..
+                                                }) = parts.get_mut(part_idx)
                                             {
-                                                b.expanded = !b.expanded;
+                                                *collapsed = !*collapsed;
                                                 cx.notify();
                                             }
-                                        }))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap_1p5()
-                                                .min_w_0()
-                                                .text_size(typo.sm)
-                                                .text_color(gpui_kit::rgb(if block.is_error {
-                                                    palette.danger
-                                                } else {
-                                                    palette.muted
-                                                }))
-                                                .child(
-                                                    crate::ui::icon(step_icon)
-                                                        .w(px(12.))
-                                                        .h(px(12.)),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_ellipsis()
-                                                        .child(block.summary.clone()),
-                                                ),
-                                        )
-                                        .when_some(block.duration_ms, |row, ms| {
-                                            row.child(
-                                                div()
-                                                    .text_size(typo.xs)
-                                                    .text_color(gpui_kit::rgb(palette.muted))
-                                                    .flex_shrink_0()
-                                                    .child(format!("{ms}ms")),
-                                            )
-                                        }),
-                                )
-                                .when(block.expanded, |step| {
-                                    step.when(!block.diffs.is_empty(), |s| {
-                                        s.children(
-                                            block
-                                                .diffs
-                                                .iter()
-                                                .map(|d| self.render_diff_card(d, palette, cx)),
-                                        )
+                                        })),
+                                    )
+                                    .when(expanded && !text.trim().is_empty(), |box_| {
+                                        box_.child(render_thinking_detail(
+                                            SharedString::from(format!(
+                                                "ai-think-subbody-{msg_idx}-{part_idx}"
+                                            )),
+                                            (*text).to_owned(),
+                                            *streaming,
+                                            ui_font,
+                                            ps,
+                                        ))
                                     })
-                                    .when(!block.output.trim().is_empty(), |s| {
-                                        s.child(
-                                            div()
-                                                .on_scroll(|_, _, cx| cx.stop_propagation())
-                                                .child(
-                                                    div()
-                                                        .id(("tool-output", msg_idx * 1000 + part_idx))
-                                                        .p_2p5()
-                                                        .max_h(px(180.))
-                                                        .overflow_y_scroll()
-                                                        .rounded(px(8.))
-                                                        .border_1()
-                                                        .border_color(subtle_border(palette.border))
-                                                        .bg(gpui_kit::rgb(palette.code_background))
-                                                        .font_family("Consolas")
-                                                        .text_size(typo.sm)
-                                                        .text_color(gpui_kit::rgb(palette.text))
-                                                        .child(block.output.clone()),
-                                                ),
-                                        )
-                                    })
+                                    .into_any_element()
+                            }
+                            ProcessStep::Tool {
+                                msg_idx,
+                                part_idx,
+                                block,
+                            } => self.render_tool_step_detail(
+                                *msg_idx,
+                                *part_idx,
+                                block,
+                                ui_font,
+                                code_font,
+                                palette,
+                                ps,
+                                cx,
+                            ),
+                        })),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_tool_step_detail(
+        &self,
+        msg_idx: usize,
+        part_idx: usize,
+        block: &ToolBlock,
+        ui_font: &SharedString,
+        code_font: &SharedString,
+        palette: Palette,
+        ps: ProcessStyle,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let is_file_edit = block.name == "edit" || block.name == "write";
+        let is_cmd = block.name == "bash" || block.name == "powershell";
+
+        if is_file_edit && !block.diffs.is_empty() {
+            return div()
+                .flex()
+                .flex_col()
+                .gap(ps.row_gap)
+                .children(block.diffs.iter().enumerate().map(|(diff_idx, diff)| {
+                    let target = self.resolve_tool_path(&diff.path);
+                    let diff_key = format!("{msg_idx}:{part_idx}:{diff_idx}:{}", diff.path);
+                    let unviewed = !self.viewed_diff_files.contains(&diff_key);
+                    let is_created = block.name == "write" && diff.removed == 0 && diff.added > 0;
+                    render_file_edit_row(
+                        SharedString::from(format!(
+                            "ai-file-row-{msg_idx}-{part_idx}-{diff_idx}"
+                        )),
+                        diff,
+                        is_created,
+                        block.is_error,
+                        unviewed,
+                        code_font,
+                        palette,
+                        ps,
+                        cx.listener({
+                            let diff_key = diff_key.clone();
+                            let target = target.clone();
+                            move |pane, _, _, cx| {
+                                pane.viewed_diff_files.insert(diff_key.clone());
+                                cx.emit(AiPaneEvent::OpenFile(target.clone()));
+                                cx.stop_propagation();
+                                cx.notify();
+                            }
+                        }),
+                        cx.listener({
+                            let diff_key = diff_key.clone();
+                            move |pane, _, _, cx| {
+                                pane.viewed_diff_files.insert(diff_key.clone());
+                                if let Some(ChatMessage::Assistant { parts, .. }) =
+                                    pane.messages.get_mut(msg_idx)
+                                    && let Some(AssistantPart::Tool(b)) = parts.get_mut(part_idx)
+                                {
+                                    b.expanded = !b.expanded;
+                                }
+                                cx.notify();
+                            }
+                        }),
+                    )
+                }))
+                .when(block.expanded, |col| {
+                    col.children(
+                        block
+                            .diffs
+                            .iter()
+                            .map(|d| self.render_diff_card(d, palette, cx)),
+                    )
+                })
+                .into_any_element();
+        }
+
+        let icon = if is_cmd {
+            IconName::Terminal
+        } else if is_file_edit {
+            IconName::PencilLine
+        } else if block.name == "read" {
+            IconName::FileText
+        } else {
+            IconName::Wrench
+        };
+
+        let text = if is_cmd {
+            let raw = block
+                .args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .map(|c| c.lines().next().unwrap_or(c).trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| block.summary.clone());
+            if block.is_error {
+                format!("Command failed ({raw})")
+            } else {
+                raw
+            }
+        } else {
+            block.summary.clone()
+        };
+
+        let has_output = !block.output.trim().is_empty();
+        let detail_font = if is_cmd { code_font } else { ui_font };
+        let row_id = SharedString::from(format!("ai-cmd-row-{msg_idx}-{part_idx}"));
+        let row = render_command_detail_row(
+            row_id.clone(),
+            icon,
+            text,
+            block.done,
+            block.is_error,
+            block.duration_ms,
+            has_output,
+            detail_font,
+            code_font,
+            ps,
+        )
+        .when(has_output, |r| {
+            r.on_click(cx.listener(move |pane, _, _, cx| {
+                if let Some(ChatMessage::Assistant { parts, .. }) = pane.messages.get_mut(msg_idx)
+                    && let Some(AssistantPart::Tool(b)) = parts.get_mut(part_idx)
+                {
+                    b.expanded = !b.expanded;
+                    cx.notify();
+                }
+            }))
+        })
+        .with_animation(
+            (row_id, 2usize),
+            Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()),
+            |el, t| el.opacity(t).top(px(4.0 * (1.0 - t))),
+        );
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(ps.row_gap)
+            .child(row)
+            .when(block.expanded && has_output, |col| {
+                col.child(
+                    div()
+                        .on_scroll(|_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .id(("tool-output", msg_idx * 1000 + part_idx))
+                                .p_2()
+                                .max_h(px(180.))
+                                .overflow_y_scroll()
+                                .rounded(px(6.))
+                                .border_1()
+                                .border_color(ps.guide_line)
+                                .bg(gpui_kit::rgb(palette.code_background))
+                                .font_family(code_font.clone())
+                                .text_size(ps.detail_size)
+                                .text_color(if block.is_error {
+                                    ps.error_fg
+                                } else {
+                                    ps.fg_secondary
                                 })
-                                .into_any_element()
-                        }))
-                        .with_animation(
-                            ("tool-group-open", msg_idx * 1000 + start_idx),
-                            Animation::new(Duration::from_millis(140)).with_easing(ease_out_quint()),
-                            |el, t| el.opacity(t),
+                                .child(block.output.clone()),
                         ),
                 )
             })
@@ -3697,15 +4355,20 @@ impl Render for AiPane {
                             )
                         },
                     )
-                    .children(self.messages.iter().enumerate().map(|(msg_idx, msg)| {
-                        match msg {
-                            ChatMessage::User {
-                                display_text,
-                                attached_file,
-                                mounted_skills,
-                                quote,
-                                images,
-                            } => div()
+                    .children({
+                        let mut rendered_messages: Vec<AnyElement> = Vec::new();
+                        let mut msg_idx = 0usize;
+                        while msg_idx < total_msgs {
+                            match &self.messages[msg_idx] {
+                                ChatMessage::User {
+                                    display_text,
+                                    attached_file,
+                                    mounted_skills,
+                                    quote,
+                                    images,
+                                } => {
+                                    rendered_messages.push(
+                                        div()
                                 .w_full()
                                 .flex()
                                 .flex_col()
@@ -3870,354 +4533,59 @@ impl Render for AiPane {
                                             )),
                                     )
                                 })
-                                .into_any_element(),
-                            ChatMessage::Assistant {
-                                parts,
-                                error,
-                                streaming,
-                            } => {
-                                let mut rendered_parts: Vec<AnyElement> = Vec::new();
-                                let mut idx = 0usize;
-                                let think_pill_bg =
-                                    mix_color(palette.background, palette.surface, 0.72);
-                                while idx < parts.len() {
-                                    match &parts[idx] {
-                                        AssistantPart::Thinking { text, collapsed } => {
-                                            let is_collapsed = *collapsed;
-                                            let part_idx = idx;
-                                            rendered_parts.push(
-                                                div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap_1()
-                                                    .child(
-                                                        div().flex().items_center().child(
-                                                            div()
-                                                                .id((
-                                                                    "ai-think-toggle",
-                                                                    msg_idx * 1000 + part_idx,
-                                                                ))
-                                                                .px_2p5()
-                                                                .py_1()
-                                                                .rounded(px(8.))
-                                                                .bg(think_pill_bg)
-                                                                .border_1()
-                                                                .border_color(subtle_border(
-                                                                    palette.border,
-                                                                ))
-                                                                .flex()
-                                                                .items_center()
-                                                                .gap_1p5()
-                                                                .cursor_pointer()
-                                                                .text_size(typo.sm)
-                                                                .text_color(gpui_kit::rgb(
-                                                                    palette.muted,
-                                                                ))
-                                                                .hover(move |s| {
-                                                                    s.bg(gpui_kit::rgb(
-                                                                        palette.hover,
-                                                                    ))
-                                                                    .text_color(gpui_kit::rgb(
-                                                                        palette.text,
-                                                                    ))
-                                                                })
-                                                                .on_click(cx.listener(
-                                                                    move |pane, _, _, cx| {
-                                                                        if let Some(
-                                                                            ChatMessage::Assistant {
-                                                                                parts,
-                                                                                ..
-                                                                            },
-                                                                        ) = pane
-                                                                            .messages
-                                                                            .get_mut(msg_idx)
-                                                                            && let Some(
-                                                                                AssistantPart::Thinking {
-                                                                                    collapsed,
-                                                                                    ..
-                                                                                },
-                                                                            ) = parts
-                                                                                .get_mut(part_idx)
-                                                                        {
-                                                                            *collapsed =
-                                                                                !*collapsed;
-                                                                            cx.notify();
-                                                                        }
-                                                                    },
-                                                                ))
-                                                                .child(
-                                                                    crate::ui::icon(IconName::Brain)
-                                                                        .w(px(12.))
-                                                                        .h(px(12.))
-                                                                        .text_color(gpui_kit::rgb(
-                                                                            palette.accent,
-                                                                        )),
-                                                                )
-                                                                .child(
-                                                                    div()
-                                                                        .font_medium()
-                                                                        .child("思考过程"),
-                                                                )
-                                                                .child(
-                                                                    crate::ui::icon(
-                                                                        if is_collapsed {
-                                                                            IconName::ChevronRight
-                                                                        } else {
-                                                                            IconName::ChevronDown
-                                                                        },
-                                                                    )
-                                                                    .w(px(12.))
-                                                                    .h(px(12.)),
-                                                                ),
-                                                        ),
-                                                    )
-                                                    .when(
-                                                        !is_collapsed && !text.is_empty(),
-                                                        |box_| {
-                                                            box_.child(
-                                                                div()
-                                                                    .ml_2p5()
-                                                                    .pl_3()
-                                                                    .border_l_2()
-                                                                    .border_color(subtle_border(
-                                                                        palette.border,
-                                                                    ))
-                                                                    .text_size(typo.sm)
-                                                                    .line_height(relative(1.5))
-                                                                    .text_color(gpui_kit::rgb(
-                                                                        palette.muted,
-                                                                    ))
-                                                                    .child(text.clone()),
-                                                            )
-                                                        },
-                                                    )
-                                                    .into_any_element(),
-                                            );
-                                            idx += 1;
-                                        }
-                                        AssistantPart::Text(text) => {
-                                            let part_idx = idx;
-                                            let normalized = markdown_editor::normalize_math(text);
-                                            rendered_parts.push(
-                                                div()
-                                                    .font_family(ui_font.clone())
-                                                    .text_size(typo.body)
-                                                    .line_height(relative(1.6))
-                                                    .child(
-                                                        TextView::markdown(
-                                                            SharedString::from(format!(
-                                                                "ai-assistant-md-{msg_idx}-{part_idx}"
-                                                            )),
-                                                            normalized,
-                                                        )
-                                                        .selectable(true)
-                                                            .markdown_extensions(
-                                                                self.md_extensions.clone(),
-                                                            )
-                                                            .style(md_style.clone())
-                                                            .font_family(ui_font.clone())
-                                                            .text_size(typo.body)
-                                                            .code_block_actions(move |block, _, _| {
-                                                                let code = block.code().to_string();
-                                                                let lang = block
-                                                                    .lang()
-                                                                    .filter(|l| !l.is_empty());
-                                                                let span_start = block
-                                                                    .span
-                                                                    .as_ref()
-                                                                    .map(|s| s.start)
-                                                                    .unwrap_or(0);
-                                                                div()
-                                                                    .flex()
-                                                                    .items_center()
-                                                                    .gap_1()
-                                                                    .when_some(lang, |row, lang| {
-                                                                        row.child(
-                                                                            div()
-                                                                                .pl_1p5()
-                                                                                .text_size(typo.xs)
-                                                                                .text_color(
-                                                                                    gpui_kit::rgb(
-                                                                                        palette
-                                                                                            .muted,
-                                                                                    ),
-                                                                                )
-                                                                                .child(lang),
-                                                                        )
-                                                                    })
-                                                                    .child(ai_copy_button(
-                                                                        SharedString::from(format!(
-                                                                            "ai-copy-code-{msg_idx}-{part_idx}-{span_start}"
-                                                                        )),
-                                                                        "复制代码",
-                                                                        "已复制",
-                                                                        code,
-                                                                    ))
-                                                            })
-                                                            .table_actions(move |table, _, _| {
-                                                                let md = table.markdown.clone();
-                                                                let span_start = table
-                                                                    .span
-                                                                    .as_ref()
-                                                                    .map(|s| s.start)
-                                                                    .unwrap_or(0);
-                                                                div()
-                                                                    .w_full()
-                                                                    .flex()
-                                                                    .justify_end()
-                                                                    .child(ai_copy_button(
-                                                                        SharedString::from(format!(
-                                                                            "ai-copy-table-{msg_idx}-{part_idx}-{span_start}"
-                                                                        )),
-                                                                        "复制表格",
-                                                                        "已复制",
-                                                                        md,
-                                                                    ))
-                                                            }),
-                                                    )
-                                                    .into_any_element(),
-                                            );
-                                            idx += 1;
-                                        }
-                                        AssistantPart::Tool(_) => {
-                                            let start = idx;
-                                            let mut group: Vec<(usize, &ToolBlock)> = Vec::new();
-                                            while idx < parts.len() {
-                                                if let AssistantPart::Tool(b) = &parts[idx] {
-                                                    group.push((idx, b));
-                                                    idx += 1;
-                                                } else {
-                                                    break;
-                                                }
-                                            }
-                                            rendered_parts.push(self.render_tool_group(
-                                                msg_idx,
-                                                start,
-                                                &group,
-                                                palette,
-                                                cx,
-                                            ));
-                                        }
-                                    }
+                                            .into_any_element(),
+                                    );
+                                    msg_idx += 1;
                                 }
-
-                                let full_answer = parts
-                                    .iter()
-                                    .filter_map(|p| match p {
-                                        AssistantPart::Text(t) if !t.trim().is_empty() => {
-                                            Some(t.as_str())
-                                        }
-                                        _ => None,
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join("\n\n");
-
-                                let is_last_msg = msg_idx + 1 == total_msgs;
-                                let any_tool_running = parts
-                                    .iter()
-                                    .any(|p| matches!(p, AssistantPart::Tool(b) if !b.done));
-
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .children(rendered_parts)
-                                    .when(
-                                        !*streaming
-                                            && !any_tool_running
-                                            && !(is_last_msg && self.is_streaming)
-                                            && !full_answer.is_empty(),
-                                        |box_| {
-                                        box_.child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .justify_start()
-                                                .pt_0p5()
-                                                .child(ai_copy_button(
-                                                    SharedString::from(format!(
-                                                        "ai-copy-msg-{msg_idx}"
-                                                    )),
-                                                    "复制回答",
-                                                    "已复制",
-                                                    full_answer,
-                                                )),
-                                        )
-                                    })
-                                    .when(*streaming && parts.is_empty(), |box_| {
-                                        box_.child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap_1p5()
-                                                .py_1()
-                                                .child(
-                                                    div()
-                                                        .size(px(7.))
-                                                        .rounded_full()
-                                                        .bg(gpui_kit::rgb(palette.accent))
-                                                        .with_animation(
-                                                            ("ai-stream-pulse", msg_idx),
-                                                            Animation::new(Duration::from_millis(
-                                                                950,
-                                                            ))
-                                                            .repeat(),
-                                                            |el, t| {
-                                                                let a = 0.3
-                                                                    + 0.7
-                                                                        * (0.5
-                                                                            - 0.5
-                                                                                * (t
-                                                                                    * std::f32::consts::TAU)
-                                                                                    .cos());
-                                                                el.opacity(a)
-                                                            },
-                                                        ),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_size(typo.sm)
-                                                        .text_color(gpui_kit::rgb(palette.muted))
-                                                        .child("思考中…"),
-                                                ),
-                                        )
-                                    })
-                                    .when_some(error.clone(), |box_, err| {
-                                        box_.child(
-                                            div()
-                                                .p_2p5()
-                                                .rounded(px(10.))
-                                                .bg(gpui_kit::rgb(palette.surface))
-                                                .border_1()
-                                                .border_color(gpui_kit::rgb(palette.danger))
-                                                .text_size(typo.sm)
-                                                .text_color(gpui_kit::rgb(palette.danger))
-                                                .child(err),
-                                        )
-                                    })
-                                    .into_any_element()
+                                ChatMessage::Assistant { .. } => {
+                                    let run_start = msg_idx;
+                                    let mut run_end = msg_idx + 1;
+                                    while matches!(
+                                        self.messages.get(run_end),
+                                        Some(ChatMessage::Assistant { .. })
+                                    ) {
+                                        run_end += 1;
+                                    }
+                                    rendered_messages.push(self.render_assistant_run(
+                                        run_start,
+                                        run_end,
+                                        total_msgs,
+                                        &md_style,
+                                        &ui_font,
+                                        palette,
+                                        typo,
+                                        cx,
+                                    ));
+                                    msg_idx = run_end;
+                                }
+                                ChatMessage::Notice { text, is_error } => {
+                                    rendered_messages.push(
+                                        div()
+                                            .px_3()
+                                            .py_1p5()
+                                            .rounded(px(9.))
+                                            .bg(gpui_kit::rgb(palette.surface))
+                                            .border_1()
+                                            .border_color(if *is_error {
+                                                gpui_kit::rgb(palette.danger)
+                                            } else {
+                                                subtle_border(palette.border)
+                                            })
+                                            .text_size(typo.sm)
+                                            .text_color(gpui_kit::rgb(if *is_error {
+                                                palette.danger
+                                            } else {
+                                                palette.muted
+                                            }))
+                                            .child(text.clone())
+                                            .into_any_element(),
+                                    );
+                                    msg_idx += 1;
+                                }
                             }
-                            ChatMessage::Notice { text, is_error } => div()
-                                .px_3()
-                                .py_1p5()
-                                .rounded(px(9.))
-                                .bg(gpui_kit::rgb(palette.surface))
-                                .border_1()
-                                .border_color(if *is_error {
-                                    gpui_kit::rgb(palette.danger)
-                                } else {
-                                    subtle_border(palette.border)
-                                })
-                                .text_size(typo.sm)
-                                .text_color(gpui_kit::rgb(if *is_error {
-                                    palette.danger
-                                } else {
-                                    palette.muted
-                                }))
-                                .child(text.clone())
-                                .into_any_element(),
                         }
-                    })),
+                        rendered_messages
+                    }),
                     )
                     .child(
                         div()
@@ -4926,6 +5294,539 @@ fn subtle_border(border: u32) -> Rgba {
     c
 }
 
+fn fg_alpha(hex: u32, alpha: f32) -> Rgba {
+    let mut c = gpui_kit::rgb(hex);
+    c.a = alpha;
+    c
+}
+
+#[derive(Clone, Copy)]
+struct ProcessStyle {
+    fg_secondary: Rgba,
+    fg_tertiary: Rgba,
+    hover_bg: Rgba,
+    guide_line: Rgba,
+    diff_add: Rgba,
+    diff_del: Rgba,
+    error_fg: Rgba,
+    unviewed_dot: Rgba,
+    header_size: Pixels,
+    detail_size: Pixels,
+    meta_size: Pixels,
+    icon_size: Pixels,
+    row_gap: Pixels,
+    section_gap: Pixels,
+}
+
+impl ProcessStyle {
+    fn from_theme(palette: Palette, typo: AiTypography) -> Self {
+        let dark = palette.is_dark();
+        Self {
+            fg_secondary: fg_alpha(palette.text, 0.60),
+            fg_tertiary: fg_alpha(palette.text, 0.42),
+            hover_bg: fg_alpha(palette.text, 0.06),
+            guide_line: fg_alpha(palette.text, 0.10),
+            diff_add: mix_color(palette.muted, 0x16a34a, if dark { 0.50 } else { 0.58 }),
+            diff_del: mix_color(palette.muted, palette.danger, if dark { 0.50 } else { 0.58 }),
+            error_fg: mix_color(palette.text, palette.danger, 0.80),
+            unviewed_dot: gpui_kit::rgb(palette.accent),
+            header_size: px(f32::from(typo.sm).clamp(12.5, 14.0)),
+            detail_size: typo.sm,
+            meta_size: typo.xs,
+            icon_size: px(13.),
+            row_gap: px(4.),
+            section_gap: px(16.),
+        }
+    }
+}
+
+enum ProcessStep<'a> {
+    Thinking {
+        msg_idx: usize,
+        part_idx: usize,
+        text: &'a str,
+        collapsed: bool,
+        duration_ms: Option<u64>,
+        streaming: bool,
+    },
+    Tool {
+        msg_idx: usize,
+        part_idx: usize,
+        block: &'a ToolBlock,
+    },
+}
+
+impl ProcessStep<'_> {
+    fn ids(&self) -> (usize, usize) {
+        match self {
+            ProcessStep::Thinking {
+                msg_idx, part_idx, ..
+            }
+            | ProcessStep::Tool {
+                msg_idx, part_idx, ..
+            } => (*msg_idx, *part_idx),
+        }
+    }
+}
+
+fn format_duration_compact(ms: u64) -> String {
+    if ms < 1000 {
+        return format!("{ms}ms");
+    }
+    let total_secs = (ms / 1000).max(1);
+    if total_secs < 60 {
+        format!("{total_secs}s")
+    } else {
+        format!("{}m {}s", total_secs / 60, total_secs % 60)
+    }
+}
+
+fn format_thinking_duration(ms: u64) -> String {
+    let total_secs = (ms / 1000).max(1);
+    if total_secs < 60 {
+        format!("{total_secs} 秒")
+    } else {
+        format!("{} 分 {} 秒", total_secs / 60, total_secs % 60)
+    }
+}
+
+fn process_group_title(steps: &[ProcessStep<'_>], is_running: bool) -> String {
+    let mut has_edit = false;
+    let mut has_cmd = false;
+    let mut has_read = false;
+    let mut has_other = false;
+    let mut has_thinking = false;
+
+    for step in steps {
+        match step {
+            ProcessStep::Thinking { .. } => has_thinking = true,
+            ProcessStep::Tool { block, .. } => match block.name.as_str() {
+                "edit" | "write" => has_edit = true,
+                "bash" | "powershell" => has_cmd = true,
+                "read" | "grep" | "find" | "ls" => has_read = true,
+                _ => has_other = true,
+            },
+        }
+    }
+
+    let mut verbs: Vec<&'static str> = Vec::new();
+    if is_running {
+        if has_edit {
+            verbs.push("正在编辑文件");
+        }
+        if has_cmd {
+            verbs.push("正在运行命令");
+        }
+        if has_read && verbs.is_empty() {
+            verbs.push("正在查阅文件");
+        }
+        if has_other && verbs.is_empty() {
+            verbs.push("正在调用工具");
+        }
+        if verbs.is_empty() && has_thinking {
+            return "正在思考…".to_owned();
+        }
+        return format!("{}…", verbs.join(" · "));
+    }
+
+    if has_edit {
+        verbs.push("编辑了文件");
+    }
+    if has_cmd {
+        verbs.push("运行了命令");
+    }
+    if has_read && !has_edit && !has_cmd {
+        verbs.push("查阅了文件");
+    } else if has_read && verbs.len() < 2 {
+        verbs.push("查阅了文件");
+    }
+    if has_other {
+        verbs.push("调用了工具");
+    }
+    if verbs.is_empty() && has_thinking {
+        return "思考过程".to_owned();
+    }
+    verbs.join(" · ")
+}
+
+fn process_group_icon(steps: &[ProcessStep<'_>]) -> IconName {
+    let has_edit = steps
+        .iter()
+        .any(|s| matches!(s, ProcessStep::Tool { block, .. } if block.name == "edit" || block.name == "write"));
+    let has_cmd = steps
+        .iter()
+        .any(|s| matches!(s, ProcessStep::Tool { block, .. } if block.name == "bash" || block.name == "powershell"));
+    let has_read = steps
+        .iter()
+        .any(|s| matches!(s, ProcessStep::Tool { block, .. } if matches!(block.name.as_str(), "read" | "grep" | "find" | "ls")));
+    let has_tool = steps
+        .iter()
+        .any(|s| matches!(s, ProcessStep::Tool { .. }));
+    if has_edit {
+        IconName::PencilLine
+    } else if has_cmd {
+        IconName::Terminal
+    } else if has_read {
+        IconName::FileText
+    } else if has_tool {
+        IconName::Wrench
+    } else {
+        IconName::Brain
+    }
+}
+
+fn render_process_header(
+    id: SharedString,
+    icon: Option<IconName>,
+    label: String,
+    is_running: bool,
+    is_error: bool,
+    expanded: bool,
+    ps: ProcessStyle,
+) -> Stateful<Div> {
+    let fg = if is_error { ps.error_fg } else { ps.fg_secondary };
+    let chevron = div()
+        .opacity(0.38)
+        .group_hover(id.clone(), |s| s.opacity(0.85))
+        .child(
+            crate::ui::icon(IconName::ChevronRight)
+                .w(px(12.))
+                .h(px(12.))
+                .text_color(fg)
+                .with_animation(
+                    (id.clone(), expanded as usize),
+                    Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()),
+                    move |ic, t| {
+                        let angle = if expanded {
+                            t * std::f32::consts::FRAC_PI_2
+                        } else {
+                            (1.0 - t) * std::f32::consts::FRAC_PI_2
+                        };
+                        ic.rotate(gpui::radians(angle))
+                    },
+                ),
+        );
+
+    let title_el = if is_running {
+        div()
+            .text_size(ps.header_size)
+            .text_color(fg)
+            .with_animation(
+                (id.clone(), 91usize),
+                Animation::new(Duration::from_millis(1200)).repeat(),
+                |el, t| {
+                    let a = 0.55 + 0.45 * (0.5 - 0.5 * (t * std::f32::consts::TAU).cos());
+                    el.opacity(a)
+                },
+            )
+            .child(label)
+            .into_any_element()
+    } else {
+        div()
+            .text_size(ps.header_size)
+            .text_color(fg)
+            .child(label)
+            .into_any_element()
+    };
+
+    div()
+        .id(id.clone())
+        .group(id.clone())
+        .px_1p5()
+        .py_1()
+        .min_h(px(24.))
+        .rounded(px(6.))
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .cursor_pointer()
+        .hover(move |s| s.bg(ps.hover_bg))
+        .when_some(icon, |row, ic| {
+            let icon_el = if is_running {
+                crate::ui::icon(IconName::RefreshCw)
+                    .w(ps.icon_size)
+                    .h(ps.icon_size)
+                    .flex_shrink_0()
+                    .text_color(fg)
+                    .with_animation(
+                        (id.clone(), 77usize),
+                        Animation::new(Duration::from_millis(900)).repeat(),
+                        |svg, t| svg.rotate(gpui::radians(t * std::f32::consts::TAU)),
+                    )
+                    .into_any_element()
+            } else {
+                crate::ui::icon(if is_error { IconName::ShieldAlert } else { ic })
+                    .w(ps.icon_size)
+                    .h(ps.icon_size)
+                    .flex_shrink_0()
+                    .text_color(fg)
+                    .into_any_element()
+            };
+            row.child(icon_el)
+        })
+        .child(title_el)
+        .child(chevron)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_command_detail_row(
+    id: SharedString,
+    icon: IconName,
+    text: String,
+    done: bool,
+    is_error: bool,
+    duration_ms: Option<u64>,
+    interactive: bool,
+    text_font: &SharedString,
+    meta_font: &SharedString,
+    ps: ProcessStyle,
+) -> Stateful<Div> {
+    let fg = if is_error {
+        ps.error_fg
+    } else {
+        ps.fg_tertiary
+    };
+    let icon_el = if !done {
+        crate::ui::icon(IconName::RefreshCw)
+            .w(ps.icon_size)
+            .h(ps.icon_size)
+            .flex_shrink_0()
+            .text_color(fg)
+            .with_animation(
+                (id.clone(), 1usize),
+                Animation::new(Duration::from_millis(900)).repeat(),
+                |svg, t| svg.rotate(gpui::radians(t * std::f32::consts::TAU)),
+            )
+            .into_any_element()
+    } else {
+        crate::ui::icon(if is_error { IconName::ShieldAlert } else { icon })
+            .w(ps.icon_size)
+            .h(ps.icon_size)
+            .flex_shrink_0()
+            .text_color(fg)
+            .into_any_element()
+    };
+
+    div()
+        .id(id.clone())
+        .relative()
+        .px_1p5()
+        .py_1()
+        .min_h(px(24.))
+        .rounded(px(6.))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .when(interactive, |r| {
+            r.cursor_pointer().hover(move |s| s.bg(ps.hover_bg))
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .flex_1()
+                .min_w_0()
+                .child(icon_el)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .font_family(text_font.clone())
+                        .text_size(ps.detail_size)
+                        .text_color(fg)
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(text),
+                ),
+        )
+        .when_some(duration_ms, |r, ms| {
+            r.child(
+                div()
+                    .flex_shrink_0()
+                    .font_family(meta_font.clone())
+                    .text_size(ps.meta_size)
+                    .text_color(ps.fg_tertiary)
+                    .child(format_duration_compact(ms)),
+            )
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_file_edit_row(
+    id: SharedString,
+    diff: &FileDiff,
+    is_created: bool,
+    is_error: bool,
+    unviewed: bool,
+    code_font: &SharedString,
+    _palette: Palette,
+    ps: ProcessStyle,
+    on_open_file: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_toggle_diff: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let fg = if is_error {
+        ps.error_fg
+    } else {
+        ps.fg_tertiary
+    };
+    let name_fg = if is_error {
+        ps.error_fg
+    } else {
+        ps.fg_secondary
+    };
+    let file_name = Path::new(&diff.path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| diff.path.clone());
+    let verb = if is_created { "已创建" } else { "已编辑" };
+
+    div()
+        .id(id.clone())
+        .relative()
+        .px_1p5()
+        .py_1()
+        .min_h(px(24.))
+        .rounded(px(6.))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .cursor_pointer()
+        .hover(move |s| s.bg(ps.hover_bg))
+        .on_click(on_toggle_diff)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    crate::ui::icon(IconName::PencilLine)
+                        .w(ps.icon_size)
+                        .h(ps.icon_size)
+                        .flex_shrink_0()
+                        .text_color(fg),
+                )
+                .child(
+                    div()
+                        .text_size(ps.detail_size)
+                        .text_color(fg)
+                        .flex_shrink_0()
+                        .child(verb),
+                )
+                .child(
+                    div()
+                        .id((id.clone(), 9usize))
+                        .min_w_0()
+                        .cursor_pointer()
+                        .border_b_1()
+                        .border_dashed()
+                        .border_color(ps.guide_line)
+                        .text_size(ps.detail_size)
+                        .text_color(name_fg)
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .hover(move |s| s.underline().border_color(ps.fg_secondary))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(on_open_file)
+                        .child(file_name),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .flex_shrink_0()
+                        .font_family(code_font.clone())
+                        .text_size(ps.meta_size)
+                        .child(
+                            div()
+                                .text_color(ps.diff_add)
+                                .child(format!("+{}", diff.added)),
+                        )
+                        .child(
+                            div()
+                                .text_color(ps.diff_del)
+                                .child(format!("-{}", diff.removed)),
+                        ),
+                ),
+        )
+        .when(unviewed, |row| {
+            row.child(
+                div()
+                    .size(px(5.))
+                    .rounded_full()
+                    .flex_shrink_0()
+                    .bg(ps.unviewed_dot),
+            )
+        })
+        .with_animation(
+            (id, 3usize),
+            Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()),
+            |el, t| el.opacity(t).top(px(4.0 * (1.0 - t))),
+        )
+        .into_any_element()
+}
+
+fn render_thinking_detail(
+    id: SharedString,
+    text: String,
+    streaming: bool,
+    ui_font: &SharedString,
+    ps: ProcessStyle,
+) -> AnyElement {
+    ThinkingScrollBox {
+        id,
+        text,
+        streaming,
+        ui_font: ui_font.clone(),
+        ps,
+    }
+    .into_any_element()
+}
+
+#[derive(IntoElement)]
+struct ThinkingScrollBox {
+    id: SharedString,
+    text: String,
+    streaming: bool,
+    ui_font: SharedString,
+    ps: ProcessStyle,
+}
+
+impl RenderOnce for ThinkingScrollBox {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let scroll = window
+            .use_keyed_state((self.id.clone(), 44usize), cx, |_, _| ScrollHandle::default())
+            .read(cx)
+            .clone();
+        if self.streaming {
+            scroll.scroll_to_bottom();
+        }
+        div()
+            .on_scroll(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .id(self.id)
+                    .track_scroll(&scroll)
+                    .px_1p5()
+                    .py_1()
+                    .max_h(px(160.))
+                    .overflow_y_scroll()
+                    .font_family(self.ui_font)
+                    .text_size(self.ps.detail_size)
+                    .line_height(relative(1.55))
+                    .text_color(self.ps.fg_secondary)
+                    .child(self.text),
+            )
+    }
+}
+
 fn card_shadow(dark: bool) -> Vec<BoxShadow> {
     vec![
         BoxShadow::new(px(0.), px(4.), hsla(0., 0., 0., if dark { 0.34 } else { 0.06 }))
@@ -4985,10 +5886,10 @@ fn model_brand_icon_path(model: &ModelInfo) -> Option<&'static str> {
             return Some("brand/gemini.svg");
         }
         if s.contains("hunyuan")
-            || s.contains("tencent")
             || s == "hy"
             || s.starts_with("hy-")
             || s.starts_with("hy_")
+            || s.contains("Hy")
         {
             return Some("brand/hunyuan.svg");
         }
