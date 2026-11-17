@@ -72,7 +72,7 @@ pub struct AiPane {
     pending_deletion: Option<String>,
     deleted: HashMap<String, String>,
     attached: Option<AttachedFile>,
-    pending_selection: Option<(String, Option<AttachedFile>, String)>,
+    pending_selections: HashMap<String, (String, Option<AttachedFile>, String)>,
     opened: bool,
     _poll: Task<()>,
     _inputs: Vec<Subscription>,
@@ -152,7 +152,7 @@ impl AiPane {
             pending_deletion: None,
             deleted: HashMap::new(),
             attached: None,
-            pending_selection: None,
+            pending_selections: HashMap::new(),
             opened: false,
             _poll: poll,
             _inputs: vec![search_sub, rename_sub],
@@ -427,6 +427,7 @@ impl AiPane {
         self.project_key = project_key;
         self.drawer = false;
         self.renaming = None;
+        self.pending_deletion = None;
         if self.opened {
             self.refresh(cx);
             if !self
@@ -482,7 +483,9 @@ impl AiPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.pending_selection = Some((source, file, text));
+        // SDK initialization is asynchronous; a project switch must not move its queued quote elsewhere.
+        self.pending_selections
+            .insert(self.project(), (source, file, text));
         self.open(window, cx);
     }
     fn ensure_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -510,7 +513,7 @@ impl AiPane {
                     view.open(window, cx);
                 });
             }
-            if let Some((source, file, text)) = self.pending_selection.take() {
+            if let Some((source, file, text)) = self.pending_selections.remove(&identity.0) {
                 view.update(cx, |view, cx| {
                     view.attach_selection(source, file, text, window, cx)
                 });
@@ -533,7 +536,7 @@ impl AiPane {
             view.set_active_file(self.attached.clone(), cx);
             view.open(window, cx);
         });
-        if let Some((source, file, text)) = self.pending_selection.take() {
+        if let Some((source, file, text)) = self.pending_selections.remove(&identity.0) {
             view.update(cx, |view, cx| {
                 view.attach_selection(source, file, text, window, cx)
             });
