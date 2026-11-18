@@ -3757,8 +3757,11 @@ impl Workspace {
                         .join(path);
                     let deleted = path.clone();
                     let app = cx.entity();
-                    let folder_drag = crate::terminal::DraggedFolder(path.clone(), self.directory_workspace().expect("folder has project").id.clone());
-                    let folder_path = full.clone();
+                    let folder_drag = crate::terminal::DraggedFolder(
+                        path.clone(),
+                        self.directory_workspace().expect("folder has project").id.clone(),
+                        full.clone(),
+                    );
                     let folder_font: SharedString = if self.settings.interface_font.is_empty() { "Segoe UI".into() } else { self.settings.interface_font.clone().into() };
                     let folder_font_size = self.settings.interface_font_size;
                     let trash_bounds = self.trash_bounds.clone();
@@ -3773,7 +3776,7 @@ impl Workspace {
                         .id(SharedString::from(format!("folder-{path}")))
                         .on_drag(folder_drag, move |dragged, offset, _, cx| {
                             dragging.store(true, Ordering::Relaxed);
-                            cx.new(|_| crate::terminal::PathsPreview { paths: vec![folder_path.clone()], offset, font: folder_font.clone(), font_size: folder_font_size, trash_bounds: trash_bounds.clone(), is_folder: true, source_folder: Some(dragged.0.clone()), can_trash: true, folder_bounds: folder_bounds.clone() })
+                            cx.new(|_| crate::terminal::PathsPreview { paths: vec![dragged.2.clone()], offset, font: folder_font.clone(), font_size: folder_font_size, trash_bounds: trash_bounds.clone(), is_folder: true, source_folder: Some(dragged.0.clone()), can_trash: true, folder_bounds: folder_bounds.clone() })
                         })
                         .drag_over::<crate::terminal::DraggedPaths>(move |style, dragged, _, _| {
                             if dragged.1.as_deref() == Some(drop_project.as_str()) { style.bg(rgb(0xdde9f6)) } else { style }
