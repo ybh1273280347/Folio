@@ -1,8 +1,10 @@
 //! Workspace orchestration: disk-backed drafts, project actions and asynchronous builds.
 //! Disk revisions arbitrate external edits; conflicted drafts never autosave over them.
 mod annotations;
+mod agent_tags;
 mod tags;
 use crate::ai::{AiPane, AiPaneEvent, AttachedFile};
+use gpui_kit::component::Sizable;
 use crate::theme::color as rgb;
 use crate::html::{HtmlPane, HtmlPaneEvent};
 use crate::markdown::{MarkdownEvent, MarkdownPane};
@@ -237,6 +239,7 @@ struct DialogPrompt {
 
 pub struct Workspace {
     annotation_requests: BTreeSet<String>,
+    tag_proposals: agent_tags::TagProposals,
     default_workspace: Project,
     config: ProjectConfig,
     workspace_sessions: BTreeMap<String, WorkspaceSession>,
@@ -454,6 +457,7 @@ impl Workspace {
         let ai = cx.new(|cx| AiPane::new(initial_dir, settings.clone(), math.clone(), window, cx));
         cx.subscribe_in(&ai, window, |app, _, event: &AiPaneEvent, window, cx| match event {
             AiPaneEvent::Annotation(request) => app.annotation_request(request, window, cx),
+            AiPaneEvent::TagRequest(request) => app.tag_request(request, cx),
             AiPaneEvent::OpenFile(path) => {
                 app.open_path_from_ai(path, window, cx);
             }
@@ -556,6 +560,7 @@ impl Workspace {
         });
         let mut app = Self {
             annotation_requests: BTreeSet::new(),
+            tag_proposals: Default::default(),
             default_workspace,
             config,
             workspace_sessions,
@@ -842,6 +847,7 @@ impl Workspace {
         self.show_trash = false;
         self.remember_session()?;
         self.tags.reset();
+        self.tag_proposals.clear();
         self.watcher = None;
         self.watch_events = None;
         self.watch_paths.clear();
@@ -929,6 +935,7 @@ impl Workspace {
         self.show_trash = false;
         self.remember_session()?;
         self.tags.reset();
+        self.tag_proposals.clear();
         self.watcher = None;
         self.watch_events = None;
         self.active_session = Some(id.to_owned());
@@ -4272,14 +4279,21 @@ impl Workspace {
                         .gap_1()
                         .px_3()
                         .pb_2()
-                        .child(Input::new(&self.search_input).flex_1().min_w_0())
                         .child(
-                            crate::ui::control("close-file-search", IconName::Close).on_click(
-                                cx.listener(|app, _, _, cx| {
+                            Input::new(&self.search_input)
+                                .xsmall()
+                                .h(px(22.))
+                                .text_size(px(12.))
+                                .flex_1()
+                                .min_w_0(),
+                        )
+                        .child(
+                            crate::ui::control("close-file-search", IconName::Close)
+                                .size(px(20.))
+                                .on_click(cx.listener(|app, _, _, cx| {
                                     app.searching = false;
                                     cx.notify();
-                                }),
-                            ),
+                                })),
                         ),
                 )
             })

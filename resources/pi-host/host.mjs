@@ -9,7 +9,9 @@ import OpenAI from 'openai';
 import { createAgentSession, SessionManager, DefaultResourceLoader, ModelRuntime, getAgentDir, initTheme,
   createMcpExtension, createCodemodeExtension, createToolSearchExtension } from '@earendil-works/pi-coding-agent';
 import { webTools } from './web-tools.mjs';
-import { AnnotationBridge, annotationTools } from './annotation-tools.mjs';
+import { annotationTools } from './annotation-tools.mjs';
+import { tagTools } from './tag-tools.mjs';
+import { WorkspaceToolBridge } from './workspace-tool-bridge.mjs';
 
 // stdout is a protocol channel, including while third-party extensions initialize.
 console.log = (...args) => console.error(format(...args));
@@ -18,7 +20,8 @@ initTheme('dark', false);
 const { theme } = await import(new URL('./modes/interactive/theme/theme.js', import.meta.resolve('@earendil-works/pi-coding-agent')));
 const { resolveToCwd } = await import(new URL('./core/tools/path-utils.js', import.meta.resolve('@earendil-works/pi-coding-agent')));
 const send = value => process.stdout.write(`${JSON.stringify(value)}\n`);
-const annotationBridge = new AnnotationBridge(send);
+const annotationBridge = new WorkspaceToolBridge(send, 'annotation');
+const tagBridge = new WorkspaceToolBridge(send, 'tag');
 const root = process.env.FOLIO_USER_DATA ?? path.join(os.homedir(), 'AppData', 'Roaming', 'folio-gpui');
 fs.mkdirSync(root, { recursive: true });
 const metadataPath = path.join(root, 'ai-session-metadata.json');
@@ -153,7 +156,10 @@ async function createRecord(cwd, manager) {
   const { session } = await createAgentSession({ cwd, sessionManager: manager, modelRuntime: record.models,
     resourceLoader: loader, customTools: [...webTools(() => settings, cwd, root),
       ...annotationTools((operation, params, signal) => annotationBridge.request(
-        { projectKey: project, sessionId: id }, operation, params, signal))] });
+        { projectKey: project, sessionId: id }, operation, params, signal)),
+      ...tagTools((operation, params, signal) => tagBridge.request(
+        { projectKey: project, sessionId: id }, operation, params, signal),
+      (title, message, opts) => uiContext(record).confirm(title, message, opts))] });
   record.session = session;
   record.unsubscribe = session.subscribe(event => {
     if (event.type === 'tool_execution_start' && event.toolName === 'write' && typeof event.args.path === 'string') {
@@ -187,6 +193,7 @@ async function createRecord(cwd, manager) {
 
 function disposeRecord(record) {
   annotationBridge.dispose({ projectKey: record.project, sessionId: record.id });
+  tagBridge.dispose({ projectKey: record.project, sessionId: record.id });
   record.unsubscribe();
   record.session.dispose();
   sessions.delete(key(record.project, record.id));
@@ -278,6 +285,10 @@ async function dispatch(command) {
   if (command.projectKey !== projectKey(command.cwd)) throw new Error('项目标识不匹配');
   if (command.type === 'annotation_response') {
     annotationBridge.respond(command);
+    return response();
+  }
+  if (command.type === 'tag_response') {
+    tagBridge.respond(command);
     return response();
   }
   if (command.type === 'list_sessions') return response({ sessions: await list(command.cwd) });

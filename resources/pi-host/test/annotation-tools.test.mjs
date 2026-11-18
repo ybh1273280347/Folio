@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AnnotationBridge, annotationTools } from '../annotation-tools.mjs';
+import { annotationTools } from '../annotation-tools.mjs';
+import { WorkspaceToolBridge } from '../workspace-tool-bridge.mjs';
 
 test('annotation replies stay with their originating session', async () => {
   const sent = [];
-  const bridge = new AnnotationBridge(event => sent.push(event));
+  const bridge = new WorkspaceToolBridge(event => sent.push(event), 'annotation');
   const a = { projectKey:'project-a', sessionId:'a' };
   const b = { projectKey:'project-b', sessionId:'b' };
   const first = bridge.request(a, 'create', { path:'a.md', quote:'first', comment:'note' });
@@ -18,7 +19,7 @@ test('annotation replies stay with their originating session', async () => {
 
 test('cancelling an annotation notifies Folio and retires its pending reply', async () => {
   const sent = [];
-  const bridge = new AnnotationBridge(event => sent.push(event));
+  const bridge = new WorkspaceToolBridge(event => sent.push(event), 'annotation');
   const signal = new AbortController();
   const owner = {projectKey:'project', sessionId:'session'};
   const result = bridge.request(owner, 'create', {path:'note.md'}, signal.signal);

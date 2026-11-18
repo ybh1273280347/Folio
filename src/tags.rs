@@ -1,6 +1,8 @@
 //! Folio-owned file tags. Directory inventories and filesystem identity are
 //! inputs to reconciliation, while this database owns tag membership.
 
+pub mod agent;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
@@ -13,7 +15,7 @@ use uuid::Uuid;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tag {
     pub id: String,
     pub name: String,
@@ -190,23 +192,31 @@ impl Store {
             .open(matches!(change, Change::Create { .. }))?
             .ok_or_else(|| io::Error::other("找不到标签数据库。"))?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        self.apply_change(&tx, change)?;
+        let result = snapshot_after_changes(&tx)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// Both the sidebar and an approved AI batch use these same write rules.
+    fn apply_change(&self, db: &Connection, change: Change<'_>) -> Result<()> {
         match change {
             Change::Create { name, paths } => {
                 let name = label(name)?;
                 let key = name_key(name);
-                tx.execute("INSERT INTO tags (id, name, name_key) VALUES (?1, ?2, ?3) ON CONFLICT(name_key) DO NOTHING",
+                db.execute("INSERT INTO tags (id, name, name_key) VALUES (?1, ?2, ?3) ON CONFLICT(name_key) DO NOTHING",
                     params![Uuid::new_v4().to_string(), name, key])?;
                 let id: String =
-                    tx.query_row("SELECT id FROM tags WHERE name_key = ?1", [key], |row| {
+                    db.query_row("SELECT id FROM tags WHERE name_key = ?1", [key], |row| {
                         row.get(0)
                     })?;
-                self.assign(&tx, &id, paths, true)?;
+                self.assign(db, &id, paths, true)?;
             }
-            Change::Assign { tag, paths, add } => self.assign(&tx, tag, paths, add)?,
+            Change::Assign { tag, paths, add } => self.assign(db, tag, paths, add)?,
             Change::Rename { tag, name } => {
                 let name = label(name)?;
                 let key = name_key(name);
-                if tx
+                if db
                     .query_row(
                         "SELECT 1 FROM tags WHERE name_key = ?1 AND id <> ?2",
                         params![key, tag],
@@ -217,42 +227,34 @@ impl Store {
                 {
                     return Err(io::Error::other("已存在同名标签。").into());
                 }
-                tx.execute(
+                db.execute(
                     "UPDATE tags SET name = ?1, name_key = ?2 WHERE id = ?3",
                     params![name, key, tag],
                 )?;
             }
             Change::Color { tag, color } => {
-                tx.execute(
+                db.execute(
                     "UPDATE tags SET color = ?1 WHERE id = ?2",
                     params![color, tag],
                 )?;
             }
             Change::Delete(tag) => {
-                tx.execute("DELETE FROM tags WHERE id = ?1", [tag])?;
+                db.execute("DELETE FROM tags WHERE id = ?1", [tag])?;
             }
             Change::Rebind { missing, target } => {
-                tx.query_row(
+                db.query_row(
                     "SELECT 1 FROM files WHERE id = ?1 AND missing = 1 AND trash IS NULL",
                     [missing],
                     |_| Ok(()),
                 )?;
-                let id = self.bind(&tx, target, Some(missing))?;
+                let id = self.bind(db, target, Some(missing))?;
                 if id != missing {
-                    tx.execute("INSERT OR IGNORE INTO file_tags SELECT ?1, tag_id FROM file_tags WHERE file_id = ?2", params![id, missing])?;
-                    tx.execute("DELETE FROM files WHERE id = ?1", [missing])?;
+                    db.execute("INSERT OR IGNORE INTO file_tags SELECT ?1, tag_id FROM file_tags WHERE file_id = ?2", params![id, missing])?;
+                    db.execute("DELETE FROM files WHERE id = ?1", [missing])?;
                 }
             }
         }
-        // Only records with tag assignments need filesystem reconciliation.
-        tx.execute(
-            "DELETE FROM files WHERE NOT EXISTS
-                    (SELECT 1 FROM file_tags WHERE file_id = files.id)",
-            [],
-        )?;
-        let result = snapshot(&tx)?;
-        tx.commit()?;
-        Ok(result)
+        Ok(())
     }
 
     fn assign(&self, db: &Connection, tag: &str, paths: &[String], add: bool) -> Result<()> {
@@ -614,6 +616,13 @@ fn records(db: &Connection) -> rusqlite::Result<Vec<FileRecord>> {
 fn active_file(db: &Connection, path: &str) -> rusqlite::Result<Option<FileRecord>> {
     db.query_row("SELECT id, path, disk, missing, trash FROM files WHERE path = ?1 AND missing = 0 AND trash IS NULL",
         [path], file_record).optional()
+}
+
+fn snapshot_after_changes(db: &Connection) -> Result<Snapshot> {
+    // Only records with tag assignments need filesystem reconciliation.
+    db.execute("DELETE FROM files WHERE NOT EXISTS
+                (SELECT 1 FROM file_tags WHERE file_id = files.id)", [])?;
+    snapshot(db)
 }
 
 fn snapshot(db: &Connection) -> Result<Snapshot> {
