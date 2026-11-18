@@ -124,29 +124,46 @@ test('annotation tools cross the real SDK and JSONL request/reply boundary', { t
 });
 
 test('the tag tool commits the exact preview approved in the originating SDK session', {timeout:45000}, async t => {
-  const args = {paths:['note.md', 'sheet.pdf'], add:['已掌握'], remove:['待复习'], create_missing:true};
+  const args = {under_directory:'Notes', add:['已掌握'], remove:['待复习'], create_missing:true,
+    tag_colors:[{tag:'已掌握', color:'green'}]};
   const {client, project, sessionId, requests, run} = await runWorkspaceTool(t, {
-    name:'folio_file_tags_update', args, message:'把这两份资料改为已掌握',
+    name:'folio_file_tags_update', args, message:'把 Notes 里的资料改为已掌握',
   });
   const owner = {...project, sessionId};
   const preview = await client.event(sessionId, 'tag_request', 'preview_files');
   const proposal_id = preview.params.proposal_id;
   assert.deepEqual(preview.params.edit, args);
-  const confirmation = '将更新 2 个文件的标签\n\nnote.md\n  ＋已掌握  －待复习\n\nsheet.pdf\n  ＋已掌握  －待复习';
+  const confirmation = {
+    kind: 'files',
+    created_tags: ['已掌握'],
+    color_changes: [{tag:'已掌握', from:null, to:2, affected:2}],
+    label_colors: {'已掌握':2},
+    files: [
+      {path:'Notes/note.md', add:['已掌握'], remove:['待复习']},
+      {path:'Notes/sheet.pdf', add:['已掌握'], remove:['待复习']},
+    ],
+  };
   assert.equal((await client.request({...owner, type:'tag_response', id:preview.id, result:{status:'ok', confirmation}})).success, true);
   const card = await client.event(sessionId, 'extension_ui_request');
   assert.equal(card.method, 'confirm');
-  assert.equal(card.message, confirmation);
+  assert.deepEqual(card.tagPreview, confirmation);
   assert.equal((await client.request({...owner, type:'extension_ui_response', id:card.id, confirmed:true})).success, true);
 
   const commit = await client.event(sessionId, 'tag_request', 'commit');
   assert.deepEqual(commit.params, {proposal_id});
-  const result = {status:'ok', updated:2, paths:['note.md', 'sheet.pdf'], created_tags:['已掌握']};
+  const result = {status:'ok', updated:2, paths:['Notes/note.md', 'Notes/sheet.pdf'], created_tags:['已掌握'],
+    tag_colors:[{tag:'已掌握', color:'green'}]};
   assert.equal((await client.request({...owner, type:'tag_response', id:commit.id, result})).success, true);
   const discard = await client.event(sessionId, 'tag_request', 'discard');
   assert.equal((await client.request({...owner, type:'tag_response', id:discard.id, result:{status:'ok'}})).success, true);
+  const ended = await client.event(sessionId, 'tool_execution_end');
+  assert.equal(ended.toolCallId, card.toolCallId);
+  assert.deepEqual(ended.result.details.tagApproval, confirmation);
   assert.equal((await run).success, true);
   assert.deepEqual(JSON.parse(requests[1].messages.at(-1).content), result);
+  const history = await client.request({...owner, type:'get_messages'});
+  const receipt = history.data.messages.find(message => message.role === 'toolResult' && message.toolCallId === card.toolCallId);
+  assert.deepEqual(receipt.details.tagApproval, confirmation);
 });
 
 test('independent SDK sessions keep running across snapshots, closing tabs, and manual rename', { timeout: 45000 }, async t => {

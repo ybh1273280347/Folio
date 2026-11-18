@@ -70,7 +70,7 @@ fn extension_in(path: &Path, extensions: &[&str]) -> bool {
         })
 }
 
-fn is_text(path: &Path) -> bool {
+pub(crate) fn is_text(path: &Path) -> bool {
     path.file_name().is_some_and(|name| name == ".latexmkrc") || extension_in(path, TEXT_EXTENSIONS)
 }
 

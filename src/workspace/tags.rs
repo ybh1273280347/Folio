@@ -2,18 +2,8 @@
 
 use super::*;
 use crate::tags::{self, Change, Snapshot, Store};
+use crate::ui::TAG_COLORS as COLORS;
 use gpui_kit::component::tooltip::Tooltip;
-
-// Each pair follows the same small, low-contrast surface treatment as the
-// file tree while keeping long names and selection states readable.
-const COLORS: [(&str, u32, u32); 6] = [
-    ("灰色", 0xefeeeb, 0x56524b),
-    ("蓝色", 0xe3edf8, 0x2d5377),
-    ("绿色", 0xe2f0e8, 0x2e5c46),
-    ("橙色", 0xf5ead8, 0x704915),
-    ("红色", 0xf5e4e4, 0x803f45),
-    ("紫色", 0xebe5f5, 0x624785),
-];
 
 pub(super) struct TagPanel {
     pub snapshot: Snapshot,
@@ -28,13 +18,20 @@ pub(super) struct TagPanel {
 enum Mode {
     #[default]
     Browse,
-    Edit(Vec<String>),
+    Edit {
+        paths: Vec<String>,
+        folder: Option<String>,
+    },
     Rename(String),
     Colors(String),
     Recover(String),
 }
 
 impl TagPanel {
+    pub(super) fn is_editing(&self) -> bool {
+        self.open && matches!(self.mode, Mode::Edit { .. })
+    }
+
     pub(super) fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索…"));
         cx.subscribe_in(&input, window, |app, _, event: &InputEvent, window, cx| {
@@ -224,19 +221,10 @@ impl Workspace {
                             .is_some_and(|suffix| suffix.starts_with('/'))
                     }))
         });
-        if let Mode::Edit(paths) = &self.tags.mode
-            && paths.len() > 1
-            && paths.iter().any(|path| !self.selected_files.contains(path))
-        {
-            self.tags.mode = Mode::Browse;
-        }
     }
 
     fn select_tag(&mut self, filter: Option<String>, cx: &mut Context<Self>) {
         self.tags.filter = filter;
-        if matches!(&self.tags.mode, Mode::Edit(paths) if paths.len() > 1) {
-            self.tags.mode = Mode::Browse;
-        }
         self.tree_drag = None;
         self.focused_folder = None;
         self.prune_tag_selection(cx);
@@ -256,8 +244,10 @@ impl Workspace {
         self.tags.input.update(cx, |input, cx| {
             input.set_value(value.to_owned(), window, cx)
         });
-        self.sidebar_scroll
-            .scroll_to_top_of_item(self.config.projects.len() + 2);
+        if !self.tags.is_editing() {
+            self.sidebar_scroll
+                .scroll_to_top_of_item(self.config.projects.len() + 2);
+        }
         if focus {
             let input = self.tags.input.clone();
             window.defer(cx, move |window, cx| {
@@ -273,7 +263,69 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.show_tag_panel(Mode::Edit(paths), "", window, cx);
+        if !paths.is_empty() {
+            self.show_tag_panel(
+                Mode::Edit {
+                    paths,
+                    folder: None,
+                },
+                "",
+                window,
+                cx,
+            );
+        }
+    }
+
+    pub(super) fn edit_folder_tags(
+        &mut self,
+        folder: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let paths: Vec<_> = self
+            .files
+            .iter()
+            .filter(|file| Path::new(&file.path).starts_with(folder))
+            .map(|file| file.path.clone())
+            .collect();
+        if paths.is_empty() {
+            self.report("此文件夹及其子文件夹中没有受支持的文件。", cx);
+            return;
+        }
+        self.show_tag_panel(
+            Mode::Edit {
+                paths,
+                folder: Some(folder.to_owned()),
+            },
+            "",
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn edit_tags_from_tree(
+        &mut self,
+        _: &EditTags,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.selected_files.is_empty() {
+            self.edit_file_tags(self.selected_files.iter().cloned().collect(), window, cx);
+        } else if let Some(folder) = self.focused_folder.clone() {
+            self.edit_folder_tags(&folder, window, cx);
+        } else if self.tabs.contains(&self.active)
+            || self.files.iter().any(|file| file.path == self.active)
+        {
+            self.edit_file_tags(vec![self.active.clone()], window, cx);
+        }
+    }
+
+    pub(super) fn close_tag_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tags.is_editing() {
+            self.file_tree_focus.focus(window, cx);
+        }
+        self.tags.open = false;
+        cx.notify();
     }
 
     fn submit_tag_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -292,7 +344,7 @@ impl Workspace {
                 },
                 false,
             ),
-            Mode::Edit(paths) => (
+            Mode::Edit { paths, .. } => (
                 Change::Create {
                     name: &value,
                     paths,
@@ -476,25 +528,51 @@ impl Workspace {
         Some(chips.into_any_element())
     }
 
+    pub(super) fn render_tag_editor(&self, cx: &Context<Self>) -> AnyElement {
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000030))
+            .occlude()
+            .child(
+                div()
+                    .w(px(420.))
+                    .max_w_full()
+                    .children(self.render_tag_panel(cx)),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn render_tag_panel(&self, cx: &Context<Self>) -> Option<AnyElement> {
         if !self.tags.open {
             return None;
         }
         let input = self.tags.input.read(cx).value().trim().to_owned();
         let query = tags::name_key(&input);
+        let editing = self.tags.is_editing();
         let header = match &self.tags.mode {
             Mode::Browse => "标签".to_owned(),
-            Mode::Edit(paths) if paths.len() == 1 => Path::new(&paths[0])
+            Mode::Edit {
+                paths,
+                folder: None,
+            } if paths.len() == 1 => Path::new(&paths[0])
                 .file_name()
                 .expect("file has name")
                 .to_string_lossy()
                 .into_owned(),
-            Mode::Edit(paths) => format!("编辑 {} 个文件的标签", paths.len()),
+            Mode::Edit { paths, .. } => format!("编辑 {} 个文件的标签", paths.len()),
             Mode::Rename(_) => "重命名标签".into(),
             Mode::Colors(_) => "标签颜色".into(),
             Mode::Recover(_) => "选择新的关联文件".into(),
         };
-        let in_detail = !matches!(self.tags.mode, Mode::Browse);
+        let in_detail = !editing && !matches!(self.tags.mode, Mode::Browse);
+        let folder = match &self.tags.mode {
+            Mode::Edit { folder, .. } => folder.as_deref(),
+            _ => None,
+        };
         let mut panel = div()
             .flex()
             .flex_col()
@@ -507,6 +585,14 @@ impl Workspace {
             .border_color(rgb(BORDER))
             .rounded(px(6.))
             .bg(rgb(BG))
+            .when(editing, |panel| {
+                panel
+                    .p_4()
+                    .gap_2()
+                    .rounded(px(8.))
+                    .bg(rgb(0xffffff))
+                    .shadow_lg()
+            })
             .child(
                 div()
                     .flex()
@@ -521,16 +607,41 @@ impl Workspace {
                                 })),
                         )
                     })
-                    .child(div().flex_1().min_w_0().text_ellipsis().child(header))
                     .child(
-                        tag_control("tags-close", IconName::Close, "收起标签面板").on_click(
-                            cx.listener(|app, _, _, cx| {
-                                app.tags.open = false;
-                                cx.notify();
-                            }),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_ellipsis()
+                            .when(editing, |title| title.text_sm().font_semibold())
+                            .child(header),
+                    )
+                    .child(
+                        tag_control(
+                            "tags-close",
+                            IconName::Close,
+                            if editing {
+                                "关闭标签编辑"
+                            } else {
+                                "收起标签面板"
+                            },
+                        )
+                        .on_click(
+                            cx.listener(|app, _, window, cx| app.close_tag_panel(window, cx)),
                         ),
                     ),
-            );
+            )
+            .when_some(folder, |panel, folder| {
+                let scope = SharedString::from(format!("{folder}（含子文件夹）"));
+                panel.child(
+                    div()
+                        .id("tag-folder-scope")
+                        .text_xs()
+                        .text_ellipsis()
+                        .text_color(rgb(MUTED))
+                        .child(scope.clone())
+                        .tooltip(move |window, cx| Tooltip::new(scope.clone()).build(window, cx)),
+                )
+            });
 
         match &self.tags.mode {
             Mode::Rename(_) => {
@@ -652,7 +763,7 @@ impl Workspace {
                             ),
                     );
             }
-            Mode::Browse | Mode::Edit(_) => {
+            Mode::Browse | Mode::Edit { .. } => {
                 let exact = self
                     .tags
                     .snapshot
@@ -660,7 +771,7 @@ impl Workspace {
                     .iter()
                     .any(|tag| tags::name_key(&tag.name) == query);
                 let paths = match &self.tags.mode {
-                    Mode::Edit(paths) => Some(paths.as_slice()),
+                    Mode::Edit { paths, .. } => Some(paths.as_slice()),
                     _ => None,
                 };
                 let list = self
@@ -676,13 +787,13 @@ impl Workspace {
                             .items_center()
                             .gap_1()
                             .child(
-                            Input::new(&self.tags.input)
-                                .xsmall()
-                                .h(px(22.))
-                                .text_size(px(12.))
-                                .flex_1()
-                                .min_w_0(),
-                        )
+                                Input::new(&self.tags.input)
+                                    .xsmall()
+                                    .h(px(22.))
+                                    .text_size(px(12.))
+                                    .flex_1()
+                                    .min_w_0(),
+                            )
                             .child(
                                 tag_control("create-tag", IconName::Plus, "新建输入的标签")
                                     .when(query.is_empty() || exact, |control| {
@@ -874,7 +985,7 @@ impl Workspace {
     }
 
     fn assign_tag(&mut self, tag: &str, add: bool, cx: &mut Context<Self>) {
-        if let Mode::Edit(paths) = &self.tags.mode {
+        if let Mode::Edit { paths, .. } = &self.tags.mode {
             let paths = paths.clone();
             self.change_tags(
                 Change::Assign {

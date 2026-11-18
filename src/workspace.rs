@@ -62,6 +62,7 @@ actions!(
         FindFile,
         CloseTab,
         CopyFilePath,
+        EditTags,
         DeleteFileTreeItem,
         UndoFileDelete,
         Dismiss
@@ -111,6 +112,7 @@ pub fn bind_shortcuts(settings: &AppSettings, cx: &mut App) {
     let mut bindings = vec![
         KeyBinding::new("ctrl-c", gpui_kit::component::input::Copy, Some("FolioPdf")),
         KeyBinding::new("ctrl-c", CopyFilePath, Some("FolioFileTree")),
+        KeyBinding::new("alt-t", EditTags, Some("FolioFileTree")),
         KeyBinding::new("delete", DeleteFileTreeItem, Some("FolioFileTree")),
         KeyBinding::new("ctrl-z", UndoFileDelete, Some("FolioFileTree")),
         KeyBinding::new("escape", Dismiss, Some("!GpuiXterm")),
@@ -543,13 +545,18 @@ impl Workspace {
         });
         let this = cx.entity().downgrade();
         let workspace_window = window.window_handle();
-        // Intercept before input widgets handle Escape, so the history closes even while searching.
+        // Handle Escape for overlays before their focused inputs consume it.
         let history_escape = cx.intercept_keystrokes(move |event, window, cx| {
             if window.window_handle() == workspace_window
                 && event.keystroke.key == "escape"
                 && event.keystroke.modifiers.number_of_modifiers() == 0
             {
                 let _ = this.update(cx, |app, cx| {
+                    if app.tags.is_editing() {
+                        app.close_tag_panel(window, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
                     if !app.show_preferences && app.show_terminal && app.right_drawer_tab == RightDrawerTab::Ai
                         && app.ai.update(cx, |pane, cx| pane.dismiss_history(window, cx))
                     {
@@ -3839,6 +3846,8 @@ impl Workspace {
                             let new_md_app = app.clone();
                             let create_file_app = app.clone();
                             let create_folder_app = app.clone();
+                            let tag_folder = deleted.clone();
+                            let tags_app = app.clone();
                             menu.item(PopupMenuItem::new("新建 Markdown").on_click(
                                 move |_, window, cx| {
                                     new_md_app.update(cx, |app, cx| {
@@ -3882,6 +3891,11 @@ impl Workspace {
                                 PopupMenuItem::new("在资源管理器中显示")
                                     .on_click(move |_, _, cx| reveal_path(&full, cx)),
                             )
+                            .item(PopupMenuItem::new("批量编辑文件夹标签…")
+                                .icon(crate::ui::icon(IconName::Tag))
+                                .on_click(move |_, window, cx| {
+                                    tags_app.update(cx, |app, cx| app.edit_folder_tags(&tag_folder, window, cx));
+                                }))
                             .separator()
                             .item(
                                 PopupMenuItem::new("重命名…").on_click(move |_, window, cx| {
@@ -3927,6 +3941,7 @@ impl Workspace {
                     .to_string_lossy()
                     .to_string();
                 let is_selected = self.selected_files.contains(path);
+                let batch_tags = is_selected && self.selected_files.len() > 1;
                 let dragged_paths = if is_selected {
                     self.selected_files.iter().map(|path| self.document_path(path)).collect()
                 } else {
@@ -4068,6 +4083,7 @@ impl Workspace {
                         let split = split.clone();
                         let split_app = app.clone();
                         let tags_app = app.clone();
+                        let batch_tags_app = app.clone();
                         let tag_path = rename.clone();
                         menu.item(
                             PopupMenuItem::new("在资源管理器中显示")
@@ -4078,7 +4094,17 @@ impl Workspace {
                                 cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))
                             }),
                         )
-                        .item(PopupMenuItem::new("编辑标签…").on_click(move |_, window, cx| {
+                        .when(batch_tags, |menu| {
+                            menu.item(PopupMenuItem::new("批量编辑标签…")
+                                .icon(crate::ui::icon(IconName::Tag))
+                                .on_click(move |_, window, cx| {
+                                    batch_tags_app.update(cx, |app, cx| {
+                                        let paths = app.selected_files.iter().cloned().collect();
+                                        app.edit_file_tags(paths, window, cx);
+                                    });
+                                }))
+                        })
+                        .item(PopupMenuItem::new("编辑此文件的标签…").on_click(move |_, window, cx| {
                             tags_app.update(cx, |app, cx| app.edit_file_tags(vec![tag_path.clone()], window, cx));
                         }))
                         .when(
@@ -4298,7 +4324,7 @@ impl Workspace {
                 )
             })
             .children(self.render_tag_filter(cx))
-            .children(self.render_tag_panel(cx))
+            .when(!self.tags.is_editing(), |sidebar| sidebar.children(self.render_tag_panel(cx)))
             .when(!self.selected_files.is_empty(), |sidebar| {
                 let sel_count = self.selected_files.len();
                 sidebar.child(
@@ -4329,7 +4355,7 @@ impl Workspace {
                                 .items_center()
                                 .gap_1()
                                 .child(crate::ui::control("batch-tags", IconName::Tag)
-                                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("批量编辑标签").build(window, cx))
+                                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("批量编辑标签（Alt+T）").build(window, cx))
                                     .on_click(cx.listener(|app, _, window, cx| {
                                         app.edit_file_tags(app.selected_files.iter().cloned().collect(), window, cx);
                                     })))
@@ -4375,6 +4401,7 @@ impl Workspace {
                     .key_context("FolioFileTree")
                     .track_focus(&self.file_tree_focus)
                     .on_action(cx.listener(Self::copy_file_path))
+                    .on_action(cx.listener(Self::edit_tags_from_tree))
                     .on_action(cx.listener(Self::delete_file_tree_item))
                     .on_action(cx.listener(Self::undo_file_delete))
                     .on_mouse_down(MouseButton::Left, cx.listener(|app, event: &MouseDownEvent, _, cx| {
@@ -4825,6 +4852,7 @@ impl Render for Workspace {
             pane.update(cx, |pane, cx| pane.set_visible(visible, window, cx));
         }
         let modal_open = self.show_trash || self.show_preferences
+            || self.tags.is_editing()
             || self.name_action.is_some()
             || self.dialog_prompt.is_some()
             || self.dialog_open;
@@ -5340,6 +5368,7 @@ impl Render for Workspace {
                     .child(resizable_panel().child(if self.show_trash { self.render_trash(cx) } else { editor_with_terminal.into_any_element() })),
                 ),
             )
+            .when(self.tags.is_editing(), |app| app.child(self.render_tag_editor(cx)))
             .when_some(self.notice.clone(), |app, notice| {
                 app.child(
                     div()

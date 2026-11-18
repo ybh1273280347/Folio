@@ -601,6 +601,16 @@ pub fn button_danger_soft(id: impl Into<ElementId>, text: impl Into<SharedString
 
 pub const MAIN_TEX_COLOR: u32 = 0x5c7f9f;
 
+/// Tag surfaces and their matching text colors in picker order.
+pub const TAG_COLORS: [(&str, u32, u32); 6] = [
+    ("灰色", 0xefeeeb, 0x56524b),
+    ("蓝色", 0xe3edf8, 0x2d5377),
+    ("绿色", 0xe2f0e8, 0x2e5c46),
+    ("橙色", 0xf5ead8, 0x704915),
+    ("红色", 0xf5e4e4, 0x803f45),
+    ("紫色", 0xebe5f5, 0x624785),
+];
+
 pub fn file_icon(path: &str, asset: bool, main: bool) -> AnyElement {
     let lower = path.to_lowercase();
     if lower.ends_with(".pdf") {

@@ -76,7 +76,9 @@ function uiContext(record) {
   const notice = (method, fields) => publish(record, { type: 'extension_ui_request', id: randomUUID(), method, ...fields });
   return {
     select: (title, options, opts) => request('select', { title, options }, opts),
-    confirm: async (title, message, opts) => Boolean(await request('confirm', { title, message }, opts)),
+    confirm: async (title, message, opts) => Boolean(await request('confirm', {
+      title, message, tagPreview: opts?.tagPreview, toolCallId: opts?.toolCallId,
+    }, opts)),
     input: (title, placeholder, opts) => request('input', { title, placeholder }, opts),
     editor: (title, prefill) => request('editor', { title, prefill }),
     notify: (message, notifyType) => notice('notify', { message, notifyType }),
