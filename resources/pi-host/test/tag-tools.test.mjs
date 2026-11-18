@@ -2,9 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { tagTools } from '../tag-tools.mjs';
 
+const confirmation = {
+  kind:'files', created_tags:[], files:[{path:'note.md', add:['重点'], remove:[]}],
+};
+
 test('refusing the tag confirmation discards the proposal without a commit', async t => {
   const request = t.mock.fn(async () => ({status:'ok'}));
-  request.mock.mockImplementationOnce(async () => ({status:'ok', confirmation:'note.md  ＋重点'}));
+  request.mock.mockImplementationOnce(async () => ({status:'ok', confirmation}));
   const confirm = t.mock.fn(async () => false);
   const tool = tagTools(request, confirm).find(tool => tool.name === 'folio_file_tags_update');
 
@@ -18,7 +22,7 @@ test('refusing the tag confirmation discards the proposal without a commit', asy
 test('stopping during tag confirmation discards the proposal and reports cancellation', async t => {
   const stop = new AbortController();
   const request = t.mock.fn(async () => ({status:'ok'}));
-  request.mock.mockImplementationOnce(async () => ({status:'ok', confirmation:'note.md  ＋重点'}));
+  request.mock.mockImplementationOnce(async () => ({status:'ok', confirmation}));
   const tool = tagTools(request, async () => { stop.abort(); return false; })
     .find(tool => tool.name === 'folio_file_tags_update');
 

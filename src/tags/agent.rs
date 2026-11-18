@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::model::ProjectFile;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::time::SystemTime;
 
@@ -69,6 +69,7 @@ pub struct List {
 #[serde(deny_unknown_fields)]
 pub struct Query {
     paths: Option<Vec<String>>,
+    under_directory: Option<String>,
     tags: Option<Vec<String>>,
     #[serde(default, rename = "match")]
     match_kind: Match,
@@ -99,13 +100,23 @@ impl Match {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileEdit {
-    paths: Vec<String>,
+    paths: Option<Vec<String>>,
+    under_directory: Option<String>,
     #[serde(default)]
     add: Vec<String>,
     #[serde(default)]
     remove: Vec<String>,
     #[serde(default)]
     create_missing: bool,
+    #[serde(default)]
+    tag_colors: Vec<RequestedColor>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestedColor {
+    tag: String,
+    color: Color,
 }
 
 #[derive(Deserialize)]
@@ -115,7 +126,7 @@ pub enum DefinitionEdit {
     SetColor { tag: String, color: Color },
 }
 
-#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Color {
     Gray,
@@ -127,14 +138,7 @@ pub enum Color {
 }
 
 // Indexes match the palette already persisted by the desktop tag picker.
-const COLORS: [(&str, &str); 6] = [
-    ("gray", "灰色"),
-    ("blue", "蓝色"),
-    ("green", "绿色"),
-    ("orange", "橙色"),
-    ("red", "红色"),
-    ("purple", "紫色"),
-];
+const COLORS: [&str; 6] = ["gray", "blue", "green", "orange", "red", "purple"];
 
 pub enum Edit {
     Files(FileEdit),
@@ -148,7 +152,10 @@ pub struct Proposal {
 
 #[derive(PartialEq, Eq)]
 enum Plan {
-    Files(Vec<FileChange>),
+    Files {
+        files: Vec<FileChange>,
+        colors: Vec<PlannedColor>,
+    },
     Definition {
         tag: Tag,
         change: DefinitionChange,
@@ -186,6 +193,13 @@ struct FileChange {
     remove: Vec<Tag>,
 }
 
+#[derive(PartialEq, Eq)]
+struct PlannedColor {
+    label: AddedLabel,
+    color: Color,
+    members: Vec<String>,
+}
+
 impl FileChange {
     fn changed(&self) -> bool {
         !self.add.is_empty() || !self.remove.is_empty()
@@ -202,52 +216,139 @@ enum Identity {
     },
 }
 
+/// Display data for the exact proposal that the user is being asked to approve.
+/// The approval transport keeps the proposal ID and the actual write plan separate.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TagConfirmation {
+    Files {
+        files: Vec<FileTagDelta>,
+        created_tags: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        color_changes: Vec<TagColorDelta>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        label_colors: BTreeMap<String, u8>,
+    },
+    Rename {
+        from: String,
+        to: String,
+        affected: usize,
+    },
+    Color {
+        tag: String,
+        from: u8,
+        to: u8,
+        affected: usize,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FileTagDelta {
+    pub path: String,
+    pub add: Vec<String>,
+    pub remove: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct TagColorDelta {
+    pub tag: String,
+    pub from: Option<u8>,
+    pub to: u8,
+    pub affected: usize,
+}
+
 impl Proposal {
-    pub fn confirmation(&self) -> Option<String> {
+    pub fn confirmation(&self) -> Option<TagConfirmation> {
         match &self.plan {
-            Plan::Files(files) => {
-                let mut lines = Vec::new();
-                let mut created = BTreeSet::new();
-                for file in files.iter().filter(|file| file.changed()) {
-                    let mut effects = Vec::new();
-                    for label in &file.add {
-                        if let AddedLabel::New(name) = label {
-                            created.insert(name.as_str());
-                        }
-                        effects.push(format!("＋{}", label.name()));
-                    }
-                    for label in &file.remove {
-                        effects.push(format!("－{}", label.name));
-                    }
-                    lines.push(format!("{}\n  {}", file.path, effects.join("  ")));
-                }
-                if lines.is_empty() {
-                    return None;
-                }
-                let mut header = format!("将更新 {} 个文件的标签", lines.len());
-                if !created.is_empty() {
-                    header.push_str(&format!(
-                        "\n新建标签　{}",
-                        created.into_iter().collect::<Vec<_>>().join("、")
-                    ));
-                }
-                Some(format!("{header}\n\n{}", lines.join("\n\n")))
+            Plan::Files { files, colors } => {
+                let mut label_colors: BTreeMap<_, _> = files
+                    .iter()
+                    .flat_map(|file| &file.add)
+                    .map(|label| {
+                        (
+                            label.name().to_owned(),
+                            match label {
+                                AddedLabel::Existing(tag) => tag.color,
+                                AddedLabel::New(_) => Color::Gray as u8,
+                            },
+                        )
+                    })
+                    .collect();
+                label_colors.extend(
+                    colors
+                        .iter()
+                        .map(|change| (change.label.name().to_owned(), change.color as u8)),
+                );
+                let color_changes = colors
+                    .iter()
+                    .map(|change| TagColorDelta {
+                        tag: change.label.name().to_owned(),
+                        from: match &change.label {
+                            AddedLabel::Existing(tag) => Some(tag.color),
+                            AddedLabel::New(_) => None,
+                        },
+                        to: change.color as u8,
+                        affected: change.members.len()
+                            + files
+                                .iter()
+                                .filter(|file| file.add.contains(&change.label))
+                                .count(),
+                    })
+                    .collect();
+                let created_tags = files
+                    .iter()
+                    .flat_map(|file| &file.add)
+                    .filter_map(|label| match label {
+                        AddedLabel::New(name) => Some(name.clone()),
+                        AddedLabel::Existing(_) => None,
+                    })
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                let files: Vec<_> = files
+                    .iter()
+                    .filter(|file| file.changed())
+                    .map(|file| FileTagDelta {
+                        path: file.path.clone(),
+                        add: file
+                            .add
+                            .iter()
+                            .map(|label| label.name().to_owned())
+                            .collect(),
+                        remove: file.remove.iter().map(|label| label.name.clone()).collect(),
+                    })
+                    .collect();
+                (!files.is_empty() || !colors.is_empty()).then_some(TagConfirmation::Files {
+                    files,
+                    created_tags,
+                    color_changes,
+                    label_colors,
+                })
             }
             Plan::Definition {
                 tag,
                 change,
                 members,
             } => {
-                let summary = match change {
+                let affected = members.len();
+                match change {
                     DefinitionChange::Name(name) if name != &tag.name => {
-                        format!("将「{}」重命名为「{name}」", tag.name)
+                        Some(TagConfirmation::Rename {
+                            from: tag.name.clone(),
+                            to: name.clone(),
+                            affected,
+                        })
                     }
                     DefinitionChange::Color(color) if *color as u8 != tag.color => {
-                        format!("将「{}」改为{}", tag.name, COLORS[*color as usize].1)
+                        Some(TagConfirmation::Color {
+                            tag: tag.name.clone(),
+                            from: tag.color,
+                            to: *color as u8,
+                            affected,
+                        })
                     }
-                    _ => return None,
-                };
-                Some(format!("{summary}\n影响 {} 个关联文件", members.len()))
+                    _ => None,
+                }
             }
         }
     }
@@ -281,6 +382,11 @@ impl Store {
             .as_ref()
             .map(|paths| self.targets(paths, visible))
             .transpose()?;
+        let directory = request
+            .under_directory
+            .as_deref()
+            .map(|folder| self.directory(folder))
+            .transpose()?;
         let names = request.tags.as_deref().unwrap_or_default();
         if names.len() > 20 {
             return Err(Failure::new("invalid_request", "每次最多查询 20 个标签。"));
@@ -295,10 +401,15 @@ impl Store {
             .as_deref()
             .map(|value| value.trim().trim_start_matches('.').to_ascii_lowercase())
             .filter(|value| !value.is_empty());
-        if paths.is_none() && names.is_empty() && name.is_none() && extension.is_none() {
+        if paths.is_none()
+            && directory.is_none()
+            && names.is_empty()
+            && name.is_none()
+            && extension.is_none()
+        {
             return Err(Failure::new(
                 "invalid_request",
-                "请指定文件、标签、文件名或扩展名。",
+                "请至少指定 paths、under_directory、tags、name_contains 或 extension。",
             ));
         }
         let mut db = self.open(false).map_err(Failure::storage)?;
@@ -320,6 +431,9 @@ impl Store {
                     && paths
                         .as_ref()
                         .is_none_or(|paths| paths.contains(&file.path))
+                    && directory
+                        .as_ref()
+                        .is_none_or(|folder| Path::new(&file.path).starts_with(folder))
             })
             .collect();
         candidates.sort_unstable_by(|a, b| a.path.cmp(&b.path));
@@ -409,7 +523,7 @@ impl Store {
         visible: &[ProjectFile],
         proposal: Proposal,
     ) -> ToolResult<(Snapshot, Value)> {
-        let create = matches!(&proposal.plan, Plan::Files(files) if files.iter().any(|file| {
+        let create = matches!(&proposal.plan, Plan::Files { files, .. } if files.iter().any(|file| {
             file.add.iter().any(|tag| matches!(tag, AddedLabel::New(_)))
         }));
         let mut db = self
@@ -482,11 +596,59 @@ impl Store {
                     }
                     remove.insert(key, tag);
                 }
+                if edit.tag_colors.len() > 20 {
+                    return Err(Failure::new(
+                        "invalid_request",
+                        "一次最多指定 20 个标签颜色。",
+                    ));
+                }
+                let mut colors = BTreeMap::new();
+                for request in &edit.tag_colors {
+                    let key = name_key(&request.tag);
+                    let label = add.get(&key).ok_or_else(|| {
+                        Failure::new(
+                            "invalid_request",
+                            format!("tag_colors 中的「{}」也需要出现在 add 中。", request.tag),
+                        )
+                    })?;
+                    if colors.insert(key, (label, request.color)).is_some() {
+                        return Err(Failure::new(
+                            "invalid_request",
+                            format!("重复指定了「{}」的颜色。", label.name()),
+                        ));
+                    }
+                }
 
-                let targets = self.targets(&edit.paths, visible)?;
+                // Rebuild the directory's target set at commit as well. A
+                // file added during confirmation must never widen an approval.
+                let targets = match (&edit.paths, &edit.under_directory) {
+                    (Some(paths), None) => self.targets(paths, visible)?,
+                    (None, Some(folder)) => {
+                        let folder = self.directory(folder)?;
+                        visible
+                            .iter()
+                            .filter(|file| Path::new(&file.path).starts_with(&folder))
+                            .map(|file| file.path.clone())
+                            .collect()
+                    }
+                    _ => {
+                        return Err(Failure::new(
+                            "invalid_request",
+                            "请在 paths 和 under_directory 中二选一。",
+                        ));
+                    }
+                };
                 let mut result = Vec::with_capacity(targets.len());
                 for path in targets {
-                    let full = self.absolute(&path);
+                    let full = crate::files::project_path(self.project_root(), &path).map_err(
+                        |error| Failure::new("file_unavailable", format!("{path}：{error}")),
+                    )?;
+                    if full != self.absolute(&path) || !full.is_file() {
+                        return Err(Failure::new(
+                            "file_unavailable",
+                            format!("文件路径已变化：{path}"),
+                        ));
+                    }
                     let metadata = fs::metadata(&full).map_err(Failure::storage)?;
                     let disk = disk_identity(&full);
                     let identity = match &disk {
@@ -529,7 +691,29 @@ impl Store {
                         remove,
                     });
                 }
-                Ok(Plan::Files(result))
+                let mut planned_colors = Vec::new();
+                if !result.is_empty() {
+                    // Changing an existing definition affects all of its
+                    // references, including files outside this selection.
+                    for (label, color) in colors.into_values() {
+                        let members = match label {
+                            AddedLabel::Existing(tag) if tag.color == color as u8 => continue,
+                            AddedLabel::Existing(tag) => {
+                                tag_members(db.expect("existing tag has a store"), &tag.id)?
+                            }
+                            AddedLabel::New(_) => Vec::new(),
+                        };
+                        planned_colors.push(PlannedColor {
+                            label: label.clone(),
+                            color,
+                            members,
+                        });
+                    }
+                }
+                Ok(Plan::Files {
+                    files: result,
+                    colors: planned_colors,
+                })
             }
             Edit::Definition(edit) => {
                 let (name, change) = match edit {
@@ -552,13 +736,8 @@ impl Store {
                 let tag = tag_named(&data, name)?.clone();
                 // Renaming a definition affects references in the trash and in
                 // missing-file records as well as references in the live tree.
-                let members = db
-                    .expect("tag definitions come from the database")
-                    .prepare("SELECT file_id FROM file_tags WHERE tag_id = ?1 ORDER BY file_id")
-                    .and_then(|mut statement| {
-                        statement.query_map([&tag.id], |row| row.get(0))?.collect()
-                    })
-                    .map_err(Failure::storage)?;
+                let members =
+                    tag_members(db.expect("tag definitions come from the database"), &tag.id)?;
                 Ok(Plan::Definition {
                     tag,
                     change,
@@ -570,7 +749,7 @@ impl Store {
 
     fn apply_agent_edit(&self, db: &Connection, plan: &Plan) -> Result<Value> {
         match plan {
-            Plan::Files(files) => {
+            Plan::Files { files, colors } => {
                 let mut create: BTreeMap<&str, Vec<String>> = BTreeMap::new();
                 let mut add: BTreeMap<&str, Vec<String>> = BTreeMap::new();
                 let mut remove: BTreeMap<&str, Vec<String>> = BTreeMap::new();
@@ -611,9 +790,36 @@ impl Store {
                         },
                     )?;
                 }
-                Ok(
-                    json!({ "status": "ok", "updated": changed.len(), "paths": changed, "created_tags": create.keys().collect::<Vec<_>>() }),
-                )
+                for change in colors {
+                    let id = match &change.label {
+                        AddedLabel::Existing(tag) => tag.id.clone(),
+                        // The same transaction has already created all planned labels.
+                        AddedLabel::New(name) => db.query_row(
+                            "SELECT id FROM tags WHERE name_key = ?1",
+                            [name_key(name)],
+                            |row| row.get(0),
+                        )?,
+                    };
+                    self.apply_change(
+                        db,
+                        Change::Color {
+                            tag: &id,
+                            color: change.color as u8,
+                        },
+                    )?;
+                }
+                let mut result = json!({ "status": "ok", "updated": changed.len(), "paths": changed, "created_tags": create.keys().collect::<Vec<_>>() });
+                if !colors.is_empty() {
+                    result["tag_colors"] = json!(
+                        colors
+                            .iter()
+                            .map(|change| json!({
+                                "tag": change.label.name(), "color": change.color,
+                            }))
+                            .collect::<Vec<_>>()
+                    );
+                }
+                Ok(result)
             }
             Plan::Definition {
                 tag,
@@ -637,6 +843,34 @@ impl Store {
         self.root
             .as_deref()
             .expect("agent tools require a directory workspace")
+    }
+
+    fn directory(&self, input: &str) -> ToolResult<PathBuf> {
+        let root = self.project_root();
+        let full = crate::files::project_path(root, input).map_err(|error| {
+            let code = if error.kind() == io::ErrorKind::PermissionDenied {
+                "invalid_path"
+            } else {
+                "directory_not_found"
+            };
+            Failure::new(code, format!("无法打开目录 {input}：{error}"))
+        })?;
+        let relative = full
+            .strip_prefix(root)
+            .expect("validated project directory");
+        if !full.is_dir()
+            || relative.components().any(|component| {
+                crate::files::EXCLUDED_DIRECTORIES
+                    .iter()
+                    .any(|name| component.as_os_str() == *name)
+            })
+        {
+            return Err(Failure::new(
+                "directory_not_found",
+                format!("工作区中没有此可访问目录：{input}"),
+            ));
+        }
+        Ok(relative.to_owned())
     }
 
     fn targets(&self, input: &[String], visible: &[ProjectFile]) -> ToolResult<BTreeSet<String>> {
@@ -663,6 +897,12 @@ impl Store {
                 .expect("validated project path")
                 .to_string_lossy()
                 .replace('\\', "/");
+            if full.is_dir() {
+                return Err(Failure::new(
+                    "file_not_found",
+                    format!("paths 仅接受文件。查询或处理目录 {path} 时请使用 under_directory。"),
+                ));
+            }
             if !inventory.contains(relative.as_str()) || !full.is_file() {
                 return Err(Failure::new(
                     "file_not_found",
@@ -679,6 +919,12 @@ fn read_snapshot(db: Option<&Connection>) -> ToolResult<Snapshot> {
     db.map(snapshot)
         .transpose()
         .map(Option::unwrap_or_default)
+        .map_err(Failure::storage)
+}
+
+fn tag_members(db: &Connection, tag: &str) -> ToolResult<Vec<String>> {
+    db.prepare("SELECT file_id FROM file_tags WHERE tag_id = ?1 ORDER BY file_id")
+        .and_then(|mut statement| statement.query_map([tag], |row| row.get(0))?.collect())
         .map_err(Failure::storage)
 }
 
@@ -710,7 +956,7 @@ fn tag_named<'a>(data: &'a Snapshot, name: &str) -> ToolResult<&'a Tag> {
 }
 
 fn tag_value(tag: &Tag) -> Value {
-    let color = COLORS.get(tag.color as usize).unwrap_or(&COLORS[0]).0;
+    let color = COLORS.get(tag.color as usize).unwrap_or(&COLORS[0]);
     json!({ "name": tag.name, "color": color })
 }
 
@@ -749,6 +995,131 @@ fn stale() -> Failure {
 mod tests {
     use super::*;
     use crate::files::list_files;
+
+    #[test]
+    fn directory_queries_recurse_by_path_component_and_keep_other_selectors_distinct() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = "Notes/C++特性解读";
+        let nested = "Notes/C++特性解读/子目录";
+        let sibling = "Notes/C++特性解读存档";
+        fs::create_dir_all(root.path().join(nested)).unwrap();
+        fs::create_dir(root.path().join(sibling)).unwrap();
+        fs::write(root.path().join(folder).join("a.md"), "a").unwrap();
+        fs::write(root.path().join(nested).join("b.pdf"), "b").unwrap();
+        fs::write(root.path().join(sibling).join("c.md"), "c").unwrap();
+        let store = Store::project(root.path());
+        let inventory = list_files(root.path()).unwrap();
+
+        let query = serde_json::from_value(json!({ "under_directory": folder })).unwrap();
+        let result = store.agent_query(&inventory, query).unwrap();
+        assert_eq!(
+            result["files"],
+            json!([
+                { "path": "Notes/C++特性解读/a.md", "extension": "md", "tags": [] },
+                { "path": "Notes/C++特性解读/子目录/b.pdf", "extension": "pdf", "tags": [] },
+            ])
+        );
+        let query = serde_json::from_value(json!({ "name_contains": "C++特性解读" })).unwrap();
+        assert_eq!(
+            store.agent_query(&inventory, query).unwrap()["files"],
+            json!([])
+        );
+        let query = serde_json::from_value(json!({ "paths": [folder] })).unwrap();
+        let error = store.agent_query(&inventory, query).unwrap_err();
+        assert_eq!(error.code, "file_not_found");
+        assert!(error.message.contains("under_directory"));
+        let query = serde_json::from_value(json!({ "limit": 100 })).unwrap();
+        assert_eq!(
+            store.agent_query(&inventory, query).unwrap_err().code,
+            "invalid_request"
+        );
+        let query =
+            serde_json::from_value(json!({ "under_directory": ".", "limit": 100 })).unwrap();
+        assert_eq!(
+            store.agent_query(&inventory, query).unwrap()["files"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn directory_approval_requires_a_fresh_preview_when_its_file_set_changes() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("Notes/Sub")).unwrap();
+        fs::create_dir(root.path().join("NotesBackup")).unwrap();
+        fs::write(root.path().join("Notes/a.md"), "a").unwrap();
+        fs::write(root.path().join("Notes/Sub/b.pdf"), "b").unwrap();
+        fs::write(root.path().join("NotesBackup/c.md"), "c").unwrap();
+        let store = Store::project(root.path());
+        let edit = || {
+            Edit::Files(
+                serde_json::from_value(json!({
+                    "under_directory": "Notes", "add": ["重点"], "create_missing": true,
+                    "tag_colors": [{ "tag": "重点", "color": "red" }],
+                }))
+                .unwrap(),
+            )
+        };
+        let inventory = list_files(root.path()).unwrap();
+        let proposal = store.agent_preview(&inventory, edit()).unwrap();
+        fs::write(root.path().join("Notes/late.md"), "late").unwrap();
+        let inventory = list_files(root.path()).unwrap();
+
+        let error = store.agent_commit(&inventory, proposal).unwrap_err();
+        assert_eq!(error.code, "stale_preview");
+        assert!(store.snapshot().unwrap().tags.is_empty());
+
+        let proposal = store.agent_preview(&inventory, edit()).unwrap();
+        let (snapshot, result) = store.agent_commit(&inventory, proposal).unwrap();
+        assert_eq!(result["updated"], 3);
+        assert_eq!(
+            result["tag_colors"],
+            json!([{ "tag": "重点", "color": "red" }])
+        );
+        assert_eq!(snapshot.tags[0].color, Color::Red as u8);
+        let tag = &snapshot.tags[0].id;
+        assert!(snapshot.has("Notes/a.md", tag));
+        assert!(snapshot.has("Notes/Sub/b.pdf", tag));
+        assert!(snapshot.has("Notes/late.md", tag));
+        assert!(!snapshot.has("NotesBackup/c.md", tag));
+    }
+
+    #[test]
+    fn sharing_an_existing_color_change_with_file_assignment_previews_the_global_impact() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("target.md"), "target").unwrap();
+        fs::write(root.path().join("outside.md"), "outside").unwrap();
+        let store = Store::project(root.path());
+        let original = store
+            .change(Change::Create {
+                name: "重点",
+                paths: &["outside.md".into()],
+            })
+            .unwrap();
+        let id = &original.tags[0].id;
+        let edit = serde_json::from_value(json!({
+            "paths": ["target.md"], "add": ["重点"],
+            "tag_colors": [{ "tag": "重点", "color": "blue" }],
+        }))
+        .unwrap();
+        let inventory = list_files(root.path()).unwrap();
+        let proposal = store.agent_preview(&inventory, Edit::Files(edit)).unwrap();
+        let preview = serde_json::to_value(proposal.confirmation()).unwrap();
+        assert_eq!(
+            preview["color_changes"],
+            json!([
+                { "tag": "重点", "from": 0, "to": 1, "affected": 2 },
+            ])
+        );
+        assert_eq!(preview["label_colors"]["重点"], 1);
+        let (snapshot, result) = store.agent_commit(&inventory, proposal).unwrap();
+        assert_eq!(result["updated"], 1);
+        assert_eq!(snapshot.tags[0].color, Color::Blue as u8);
+        assert!(snapshot.has("target.md", id));
+        assert!(snapshot.has("outside.md", id));
+    }
 
     #[test]
     fn queries_intersect_or_union_labels_and_page_by_project_path() {
@@ -820,11 +1191,17 @@ mod tests {
         })).unwrap();
 
         let proposal = store.agent_preview(&inventory, Edit::Files(edit)).unwrap();
-        assert!(
-            proposal
-                .confirmation()
-                .unwrap()
-                .contains("b.pdf\n  ＋已掌握  －待复习")
+        assert_eq!(
+            serde_json::to_value(proposal.confirmation()).unwrap(),
+            json!({
+                "kind": "files",
+                "files": [
+                    { "path": "a.md", "add": ["已掌握"], "remove": ["待复习"] },
+                    { "path": "b.pdf", "add": ["已掌握"], "remove": ["待复习"] },
+                ],
+                "created_tags": ["已掌握"],
+                "label_colors": { "已掌握": 0 },
+            }),
         );
         assert!(tag_named(&store.snapshot().unwrap(), "已掌握").is_err());
         let (snapshot, result) = store.agent_commit(&inventory, proposal).unwrap();
@@ -879,11 +1256,9 @@ mod tests {
             })
         };
         let proposal = store.agent_preview(&[], edit()).unwrap();
-        assert!(
-            proposal
-                .confirmation()
-                .unwrap()
-                .contains("影响 1 个关联文件")
+        assert_eq!(
+            serde_json::to_value(proposal.confirmation()).unwrap(),
+            json!({ "kind": "rename", "from": "待复习", "to": "待回顾", "affected": 1 }),
         );
         store
             .change(Change::Assign {
