@@ -743,7 +743,7 @@ impl Render for AiPane {
             .flex_col()
             .min_w_0()
             .min_h_0()
-            .bg(gpui_kit::rgb(palette.background))
+            .bg(gpui_kit::rgb(palette.surface))
             .text_color(gpui_kit::rgb(palette.text))
             .child(
                 div()

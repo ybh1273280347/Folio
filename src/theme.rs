@@ -267,22 +267,31 @@ fn mix(base: u32, tint: u32, amount: f32) -> Rgba {
     }
 }
 
-/// Sync global gpui-component UI font family with the user's interface font.
-pub fn apply_font(interface_font: &str, cx: &mut App) {
-    let family: SharedString = if interface_font.trim().is_empty() {
+pub fn apply_settings(settings: &crate::model::AppSettings, cx: &mut App) {
+    let document_typography = gpui_kit::base::Theme::global(cx).tokens.typography;
+    apply(settings.theme.palette, cx);
+
+    let family: SharedString = if settings.interface_font.trim().is_empty() {
         "Segoe UI".into()
     } else {
-        interface_font.trim().to_owned().into()
+        settings.interface_font.trim().to_owned().into()
     };
+    let (tool_font, tool_size) = crate::ai::tool_typography(settings);
     Theme::update(cx, |theme| {
-        if theme.font_family != family {
-            theme.font_family = family;
-        }
+        theme.font_family = family;
+        // Native Diff reads the component monospace font at row layout time.
+        theme.mono_font_family = tool_font;
+        theme.mono_font_size = tool_size;
     });
+    // The Base projection also serves Markdown and PDF. Keep their independent
+    // code typography when syncing the native component theme for AI tools.
+    let base = gpui_kit::base::Theme::global_mut(cx);
+    base.tokens.typography.mono = document_typography.mono;
+    base.tokens.typography.mono_md = document_typography.mono_md;
 }
 
 /// Apply only colors. Font families, sizes, spacing and document data are untouched.
-pub fn apply(palette: Palette, cx: &mut App) {
+fn apply(palette: Palette, cx: &mut App) {
     if ACTIVE.with(|active| active.replace(Some(palette))) == Some(palette) {
         return;
     }

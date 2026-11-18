@@ -486,8 +486,7 @@ impl Workspace {
                     editor.set_line_number(app.settings.show_line_numbers, window, cx);
                 });
             }
-            crate::theme::apply(app.settings.theme.palette, cx);
-            crate::theme::apply_font(&app.settings.interface_font, cx);
+            crate::theme::apply_settings(&app.settings, cx);
             bind_shortcuts(&app.settings, cx);
             app.math.update(cx, |renderer, cx| {
                 renderer.set_appearance(&app.settings, cx)

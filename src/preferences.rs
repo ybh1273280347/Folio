@@ -1,7 +1,7 @@
 //! Appearance and shortcut preferences are persisted independently of project files and PDF typesetting.
 use crate::theme::color as rgb;
 use crate::{
-    model::{AppSettings, InternalLinkOpenTarget, MathFont, SHORTCUT_DEFS},
+    model::{AppSettings, InternalLinkOpenTarget, MathFont, SHORTCUT_DEFS, ToolExecutionView},
     storage,
     theme::ColorRole,
 };
@@ -11,6 +11,7 @@ use gpui_kit::{
     component::{
         color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState},
         input::{Input, InputEvent, InputState, Textarea, TextareaState},
+        radio::{Radio, RadioGroup},
         select::{SearchableVec, Select, SelectEvent, SelectState},
         slider::{Slider, SliderEvent, SliderState},
     },
@@ -535,7 +536,6 @@ impl Preferences {
         self.ai_qianfan_key.update(cx, |input,cx| input.set_value(settings.ai.baidu_qianfan_api_key.clone(),window,cx));
     }
     fn changed(&mut self, cx: &mut Context<Self>) {
-        crate::theme::apply(self.settings.theme.palette, cx);
         self.error = storage::save_settings(&self.settings)
             .err()
             .map(|error| error.to_string());
@@ -855,11 +855,30 @@ impl Preferences {
     }
 
     fn render_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tool_views = [
+            (ToolExecutionView::Minimal, "极简模式"),
+            (ToolExecutionView::Standard, "标准模式"),
+            (ToolExecutionView::Detailed, "详细模式"),
+        ];
         div()
             .flex()
             .flex_col()
             .gap_5()
             .child(div().text_lg().font_semibold().child("外观 / 视图"))
+            .child(
+                div().flex().items_center().justify_between().gap_3()
+                    .child("工具执行视图")
+                    .child(
+                        RadioGroup::horizontal("tool-execution-view")
+                            .flex_none()
+                            .children(tool_views.iter().map(|&(_, label)| Radio::new(label).label(label)))
+                            .selected_index(tool_views.iter().position(|&(mode, _)| mode == self.settings.tool_execution_view))
+                            .on_change(cx.listener(move |panel, index: &usize, _, cx| {
+                                panel.settings.tool_execution_view = tool_views[*index].0;
+                                panel.changed(cx);
+                            })),
+                    ),
+            )
             .child(
                 div()
                     .flex()

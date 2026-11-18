@@ -10,7 +10,7 @@ use quote::{append_quotes, split_injected_prompt};
 
 use crate::math::{MathReady, MathRenderer};
 use crate::mermaid::{MermaidReady, MermaidRenderer};
-use crate::model::AppSettings;
+use crate::model::{AppSettings, ToolExecutionView};
 use crate::terminal::{DraggedFolder, DraggedPaths};
 use crate::theme::{Palette, color as theme_color, palette as active_palette};
 use diff::{DiffLine, EditPatch, FileDiff};
@@ -212,6 +212,15 @@ impl AiTypography {
     }
 }
 
+pub(crate) fn tool_typography(settings: &AppSettings) -> (SharedString, Pixels) {
+    let code_font = if settings.block_code_font.is_empty() {
+        "Consolas".into()
+    } else {
+        settings.block_code_font.clone().into()
+    };
+    (code_font, AiTypography::from_settings(settings).sm)
+}
+
 const AI_COMPOSER_MAX_WIDTH: Pixels = px(720.);
 const AI_WELCOME_ICON_SIZE: Pixels = px(64.);
 const AI_WELCOME_ICON_TITLE_GAP: Pixels = px(18.);
@@ -273,7 +282,7 @@ struct ChatPane {
     last_input_text: String,
     dismissed_slash_text: Option<String>,
     collapsed_tool_groups: HashSet<(usize, usize)>,
-    expanded_task_processes: HashSet<usize>,
+    toggled_task_processes: HashSet<usize>,
     viewed_diff_files: HashSet<String>,
     active_run_start: Option<std::time::Instant>,
     active_thinking_start: Option<std::time::Instant>,
@@ -299,7 +308,6 @@ impl ChatPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        crate::theme::apply_font(&settings.interface_font, cx);
         let mermaid = cx.new(MermaidRenderer::new);
         let md_extensions = crate::markdown::markdown_extensions(&math, cx)
             .plugin(mermaid.read(cx).plugin(mermaid.downgrade()));
@@ -452,7 +460,7 @@ impl ChatPane {
             last_input_text: String::new(),
             dismissed_slash_text: None,
             collapsed_tool_groups: HashSet::new(),
-            expanded_task_processes: HashSet::new(),
+            toggled_task_processes: HashSet::new(),
             viewed_diff_files: HashSet::new(),
             active_run_start: None,
             active_thinking_start: None,
@@ -577,8 +585,13 @@ impl ChatPane {
     }
 
     pub fn sync_settings(&mut self, settings: &AppSettings, cx: &mut Context<Self>) {
+        if self.settings.tool_execution_view != settings.tool_execution_view {
+            self.toggled_task_processes.clear();
+            if settings.tool_execution_view == ToolExecutionView::Detailed {
+                self.collapsed_tool_groups.clear();
+            }
+        }
         self.settings = settings.clone();
-        crate::theme::apply_font(&self.settings.interface_font, cx);
         cx.notify();
     }
 
@@ -866,7 +879,7 @@ impl ChatPane {
         };
         self.messages.clear();
         self.collapsed_tool_groups.clear();
-        self.expanded_task_processes.clear();
+        self.toggled_task_processes.clear();
         self.viewed_diff_files.clear();
         self.active_run_start = None;
         self.active_thinking_start = None;
@@ -2430,11 +2443,7 @@ impl ChatPane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ps = ProcessStyle::from_theme(palette, typo);
-        let code_font: SharedString = if self.settings.block_code_font.is_empty() {
-            "Consolas".into()
-        } else {
-            self.settings.block_code_font.clone().into()
-        };
+        let (code_font, _) = tool_typography(&self.settings);
 
         let mut all_parts: Vec<(usize, usize, &AssistantPart)> = Vec::new();
         let mut run_streaming = false;
@@ -2563,9 +2572,12 @@ impl ChatPane {
         // If task finished cleanly and has intermediate steps before final text (or pure process),
         // allow collapsing the entire process area into one sleek single line ("用时 1m 58s").
         let has_process_area = !timeline.is_empty();
+        let show_tool_details = self.settings.tool_execution_view == ToolExecutionView::Detailed
+            && tool_step_count > 0;
         let collapse_eligible = !is_task_running && !run_has_error && has_process_area;
-        let task_expanded =
-            !collapse_eligible || self.expanded_task_processes.contains(&run_start);
+        // A manual toggle reverses the current mode's expansion default.
+        let task_expanded = !collapse_eligible
+            || (show_tool_details != self.toggled_task_processes.contains(&run_start));
 
         let total_elapsed_ms = recorded_duration_ms.or_else(|| {
             if is_last_run && self.is_streaming {
@@ -2592,7 +2604,7 @@ impl ChatPane {
         };
 
         let mut rendered_process: Vec<AnyElement> = Vec::new();
-        for node in timeline {
+        for node in timeline.into_iter().filter(|_| task_expanded) {
             match node {
                 TimelineNode::Group(steps) => {
                     rendered_process.push(self.render_process_group(
@@ -2677,8 +2689,8 @@ impl ChatPane {
                                     ps,
                                 )
                                 .on_click(cx.listener(move |pane, _, _, cx| {
-                                    if !pane.expanded_task_processes.remove(&run_start) {
-                                        pane.expanded_task_processes.insert(run_start);
+                                    if !pane.toggled_task_processes.remove(&run_start) {
+                                        pane.toggled_task_processes.insert(run_start);
                                     }
                                     cx.notify();
                                 })),
@@ -3005,27 +3017,58 @@ impl ChatPane {
     ) -> AnyElement {
         let is_file_edit = block.name == "edit" || block.name == "write";
         let is_cmd = block.name == "bash" || block.name == "powershell";
-        let has_input = block.args.as_object().is_some_and(|args| !args.is_empty());
-        // Show the model's actual arguments, including partial arguments while it is still generating.
-        let input_panel = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(div().text_size(ps.meta_size).text_color(ps.fg_tertiary).child("输入参数"))
-            .child(
-                div()
-                    .id(("tool-input", msg_idx * 1000 + part_idx))
-                    .p_2()
-                    .max_h(px(180.))
-                    .overflow_y_scroll()
-                    .on_scroll(|_, _, cx| cx.stop_propagation())
-                    .rounded(px(6.))
-                    .bg(gpui_kit::rgb(palette.code_background))
-                    .font_family(code_font.clone())
-                    .text_size(ps.detail_size)
-                    .text_color(ps.fg_secondary)
-                    .child(serde_json::to_string_pretty(&block.args).expect("tool arguments are JSON")),
-            );
+        let mode = self.settings.tool_execution_view;
+        let icon = if is_cmd {
+            IconName::Terminal
+        } else if is_file_edit {
+            IconName::PencilLine
+        } else if block.name == "read" {
+            IconName::FileText
+        } else {
+            IconName::Wrench
+        };
+        let row_id = SharedString::from(format!("ai-cmd-row-{msg_idx}-{part_idx}"));
+        if mode == ToolExecutionView::Minimal {
+            let text = match (block.name.as_str(), block.done, block.is_error) {
+                ("edit" | "write", _, true) => "编辑文件失败".into(),
+                ("edit" | "write", true, false) => "编辑了文件".into(),
+                ("edit" | "write", false, false) => "正在编辑文件".into(),
+                ("bash" | "powershell", _, true) => "命令执行失败".into(),
+                ("bash" | "powershell", true, false) => "执行了命令".into(),
+                ("bash" | "powershell", false, false) => "正在执行命令".into(),
+                (name, _, true) => format!("{name} 执行失败"),
+                (name, true, false) => format!("已执行 {name}"),
+                (name, false, false) => format!("正在执行 {name}"),
+            };
+            return render_command_detail_row(
+                row_id, icon, text, block.done, block.is_error, None, ui_font, code_font, ps,
+            ).into_any_element();
+        }
+
+        // The two payloads belong to the tool call, even when its summary is a file diff.
+        let details = (mode == ToolExecutionView::Detailed
+            && (!block.args.is_null() || !block.output.is_empty())).then(|| {
+            div().flex().flex_col().gap(ps.row_gap).children(
+                [
+                    ("input", "输入参数", (!block.args.is_null()).then(|| {
+                        serde_json::to_string_pretty(&block.args).expect("tool arguments are JSON")
+                    }), ps.fg_secondary),
+                    ("output", "输出", (!block.output.is_empty()).then(|| block.output.clone()),
+                        if block.is_error { ps.error_fg } else { ps.fg_secondary }),
+                ].into_iter().filter_map(|(kind, title, text, color)| {
+                    let text = text?;
+                    Some(div().flex().flex_col().gap_1()
+                        .child(div().text_size(ps.meta_size).text_color(ps.fg_tertiary).child(title))
+                        .child(div().on_scroll(|_, _, cx| cx.stop_propagation()).child(
+                            div().id(SharedString::from(format!("tool-{kind}-{msg_idx}-{part_idx}")))
+                                .p_2().max_h(px(180.)).overflow_y_scroll().rounded(px(6.))
+                                .bg(gpui_kit::rgb(palette.code_background))
+                                .font_family(code_font.clone()).text_size(ps.detail_size)
+                                .text_color(color).child(text),
+                        )))
+                }),
+            )
+        });
 
         if is_file_edit && !block.diffs.is_empty() {
             return div()
@@ -3074,7 +3117,7 @@ impl ChatPane {
                     );
                     div().min_w_0().flex().flex_col().child(row).when(
                         block.expanded && (!diff.lines.is_empty()
-                            || diff.patch.as_ref().is_some_and(|patch| patch.line_count > 0)),
+                            || diff.patch.as_ref().is_some_and(|patch| !patch.line_numbers.is_empty())),
                         |el| el.child(self.render_diff_card(
                             format!("ai-diff-{msg_idx}-{part_idx}-{diff_idx}-{}", block.id).into(),
                             diff,
@@ -3083,19 +3126,9 @@ impl ChatPane {
                         )),
                     )
                 }))
-                .when(block.expanded && has_input, |col| col.child(input_panel))
+                .children(details)
                 .into_any_element();
         }
-
-        let icon = if is_cmd {
-            IconName::Terminal
-        } else if is_file_edit {
-            IconName::PencilLine
-        } else if block.name == "read" {
-            IconName::FileText
-        } else {
-            IconName::Wrench
-        };
 
         let text = if is_cmd {
             let raw = block
@@ -3114,10 +3147,7 @@ impl ChatPane {
             block.summary.clone()
         };
 
-        let has_output = !block.output.trim().is_empty();
-        let has_detail = has_input || has_output;
         let detail_font = if is_cmd { code_font } else { ui_font };
-        let row_id = SharedString::from(format!("ai-cmd-row-{msg_idx}-{part_idx}"));
         let row = render_command_detail_row(
             row_id.clone(),
             icon,
@@ -3125,21 +3155,10 @@ impl ChatPane {
             block.done,
             block.is_error,
             block.duration_ms,
-            has_detail,
             detail_font,
             code_font,
             ps,
         )
-        .when(has_detail, |r| {
-            r.on_click(cx.listener(move |pane, _, _, cx| {
-                if let Some(ChatMessage::Assistant { parts, .. }) = pane.messages.get_mut(msg_idx)
-                    && let Some(AssistantPart::Tool(b)) = parts.get_mut(part_idx)
-                {
-                    b.expanded = !b.expanded;
-                    cx.notify();
-                }
-            }))
-        })
         .with_animation(
             (row_id, 2usize),
             Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()),
@@ -3151,32 +3170,7 @@ impl ChatPane {
             .flex_col()
             .gap(ps.row_gap)
             .child(row)
-            .when(has_input && (block.expanded || !block.done), |col| col.child(input_panel))
-            .when(block.expanded && has_output, |col| {
-                col.child(
-                    div()
-                        .on_scroll(|_, _, cx| cx.stop_propagation())
-                        .child(
-                            div()
-                                .id(("tool-output", msg_idx * 1000 + part_idx))
-                                .p_2()
-                                .max_h(px(180.))
-                                .overflow_y_scroll()
-                                .rounded(px(6.))
-                                .border_1()
-                                .border_color(ps.guide_line)
-                                .bg(gpui_kit::rgb(palette.code_background))
-                                .font_family(code_font.clone())
-                                .text_size(ps.detail_size)
-                                .text_color(if block.is_error {
-                                    ps.error_fg
-                                } else {
-                                    ps.fg_secondary
-                                })
-                                .child(block.output.clone()),
-                        ),
-                )
-            })
+            .children(details)
             .into_any_element()
     }
 
@@ -4715,7 +4709,7 @@ impl Render for ChatPane {
             if palette.is_dark() { 0.28 } else { 0.18 },
         );
         let drag_tint = mix_color(
-            palette.background,
+            palette.surface,
             palette.accent,
             if palette.is_dark() { 0.12 } else { 0.06 },
         );
@@ -4735,7 +4729,7 @@ impl Render for ChatPane {
             .flex_col()
             .min_w_0()
             .min_h_0()
-            .bg(gpui_kit::rgb(palette.background))
+            .bg(gpui_kit::rgb(palette.surface))
             .capture_any_mouse_down(cx.listener(move |pane, event: &MouseDownEvent, _, cx| {
                 pane.quote_drag = None;
                 // Capture also sees scrollbar/button presses that stop bubbling inside the pane.
@@ -5571,7 +5565,6 @@ fn render_command_detail_row(
     done: bool,
     is_error: bool,
     duration_ms: Option<u64>,
-    interactive: bool,
     text_font: &SharedString,
     meta_font: &SharedString,
     ps: ProcessStyle,
@@ -5613,9 +5606,6 @@ fn render_command_detail_row(
         .items_center()
         .justify_between()
         .gap_2()
-        .when(interactive, |r| {
-            r.cursor_pointer().hover(move |s| s.bg(ps.hover_bg))
-        })
         .child(
             div()
                 .flex()
@@ -5798,8 +5788,16 @@ impl RenderOnce for DiffPatchView {
         let theme = gpui_kit::component::theme::Theme::global(cx);
         let rem = window.rem_size();
         // Match the native diff's row metrics so short edits hug their content.
-        let line_height = rem * (f32::from(theme.mono_font_size) / 16.) * 1.6;
-        let height = line_height * self.patch.line_count + rem * 0.25 * self.patch.hunk_count;
+        let font_size = rem * (f32::from(theme.mono_font_size) / 16.);
+        let line_height = font_size * 1.6;
+        let height = line_height * self.patch.line_numbers.len() + rem * 0.25 * self.patch.hunk_count;
+        // The native marker lane is one row wide. Include the row's left
+        // padding so multi-digit numbers stay inside the scroll viewport.
+        let left_inset = rem * 0.5;
+        let number_size = font_size.min(
+            (line_height + left_inset - px(2.)) / (self.patch.line_number_digits as f32 * 0.65),
+        );
+        let number_color = theme.muted_foreground;
         let state = window.use_keyed_state(self.id.clone(), cx, |_, cx| {
             DiffState::new([self.patch.file], cx).with_context_lines(None)
         });
@@ -5812,6 +5810,23 @@ impl RenderOnce for DiffPatchView {
             .child(
                 Diff::new(&state)
                     .header_visible(false)
+                    .line_number(false)
+                    .gutter_markers(self.patch.line_numbers.iter().cloned())
+                    .render_gutter_marker(move |marker, _, _| {
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left(-left_inset)
+                            .right_0()
+                            .pr(px(2.))
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .text_size(number_size)
+                            .text_color(number_color)
+                            .child(marker.position().line().to_string())
+                    })
                     .hunk_separator(DiffHunkSeparator::Simple)
                     .change_indicator(DiffChangeIndicator::Bars)
                     .h((height + px(2.)).min(px(280.))),

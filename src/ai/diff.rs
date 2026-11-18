@@ -1,6 +1,7 @@
 //! File diff summaries and previews for native GPUI diff cards.
 
-use gpui_kit::component::diff::DiffFile;
+use gpui_kit::component::diff::{DiffFile, DiffGutterMarker, DiffLinePosition, DiffSide};
+use std::rc::Rc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiffLine {
@@ -22,7 +23,8 @@ pub struct FileDiff {
 #[derive(Clone)]
 pub struct EditPatch {
     pub file: DiffFile,
-    pub line_count: usize,
+    pub line_numbers: Rc<[DiffGutterMarker]>,
+    pub line_number_digits: u32,
     pub hunk_count: usize,
 }
 
@@ -40,22 +42,51 @@ impl FileDiff {
     /// Pi's result describes the actual file. Tool arguments alone contain only snippets.
     pub fn from_edit_patch(path: String, patch: &str) -> Option<Self> {
         let [file]: [DiffFile; 1] = DiffFile::parse(patch).ok()?.try_into().ok()?;
-        let mut line_count = 0;
+        let mut line_numbers = Vec::new();
+        let mut largest_number = 1;
         let mut hunk_count = 0;
+        let (mut old, mut new) = (0usize, 0usize);
         // Pi emits two file headers followed by unified diff hunks.
         for line in patch.lines().skip(2) {
-            match line.as_bytes().first() {
-                Some(b'@') => hunk_count += 1,
-                Some(b' ' | b'+' | b'-') => line_count += 1,
-                _ => {}
-            }
+            let (side, number) = match line.as_bytes().first() {
+                Some(b'@') => {
+                    let mut ranges = line.split_ascii_whitespace().skip(1);
+                    old = ranges.next()?.strip_prefix('-')?.split(',').next()?.parse().ok()?;
+                    new = ranges.next()?.strip_prefix('+')?.split(',').next()?.parse().ok()?;
+                    hunk_count += 1;
+                    continue;
+                }
+                Some(b'-') => {
+                    let number = old;
+                    old += 1;
+                    (DiffSide::Original, number)
+                }
+                Some(b'+' | b' ') => {
+                    // Context advances both versions but displays the modified line number.
+                    old += usize::from(line.starts_with(' '));
+                    let number = new;
+                    new += 1;
+                    (DiffSide::Modified, number)
+                }
+                _ => continue,
+            };
+            largest_number = largest_number.max(number);
+            line_numbers.push(DiffGutterMarker::new(
+                ("ai-diff-number", line_numbers.len()),
+                DiffLinePosition::new(file.path().clone(), side, number),
+            ));
         }
         Some(Self {
             path,
             added: file.additions(),
             removed: file.deletions(),
             lines: Vec::new(),
-            patch: Some(EditPatch { file, line_count, hunk_count }),
+            patch: Some(EditPatch {
+                file,
+                line_numbers: line_numbers.into(),
+                line_number_digits: largest_number.ilog10() + 1,
+                hunk_count,
+            }),
         })
     }
     /// Only whole-file inputs can supply absolute line numbers for a preview.
