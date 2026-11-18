@@ -55,6 +55,7 @@ use std::{
 pub enum AiPaneEvent {
     Annotation(Value),
     TagRequest(Value),
+    UndoTags(Vec<crate::tags::agent::TagConfirmation>),
     OpenFile(PathBuf),
     ToggleMaximize,
     Hide,
@@ -284,6 +285,7 @@ struct ChatPane {
     last_input_text: String,
     dismissed_slash_text: Option<String>,
     collapsed_tool_groups: HashSet<(usize, usize)>,
+    expanded_approval_groups: HashSet<String>,
     toggled_task_processes: HashSet<usize>,
     viewed_diff_files: HashSet<String>,
     active_run_start: Option<std::time::Instant>,
@@ -462,6 +464,7 @@ impl ChatPane {
             last_input_text: String::new(),
             dismissed_slash_text: None,
             collapsed_tool_groups: HashSet::new(),
+            expanded_approval_groups: HashSet::new(),
             toggled_task_processes: HashSet::new(),
             viewed_diff_files: HashSet::new(),
             active_run_start: None,
@@ -591,6 +594,7 @@ impl ChatPane {
             self.toggled_task_processes.clear();
             if settings.tool_execution_view == ToolExecutionView::Detailed {
                 self.collapsed_tool_groups.clear();
+                self.expanded_approval_groups.clear();
             }
         }
         self.settings = settings.clone();
@@ -762,7 +766,6 @@ impl ChatPane {
                 self.client = None;
                 self.is_streaming = false;
                 self.pending_ui = None;
-                self.expire_tag_approvals();
                 self.messages.push(ChatMessage::Notice {
                     text: format!(
                         "AI 宿主已退出{}",
@@ -882,6 +885,7 @@ impl ChatPane {
         };
         self.messages.clear();
         self.collapsed_tool_groups.clear();
+        self.expanded_approval_groups.clear();
         self.toggled_task_processes.clear();
         self.viewed_diff_files.clear();
         self.active_run_start = None;
@@ -1006,7 +1010,6 @@ impl ChatPane {
                 _ => {}
             }
         }
-        self.restore_pending_tag_approval();
         self.scroll_to_bottom();
     }
 
@@ -1067,7 +1070,6 @@ impl ChatPane {
                     }
                 }
                 self.pending_ui = None;
-                self.expire_tag_approvals();
                 if let Some(client) = &self.client {
                     let _ = client.get_session_stats();
                 }
@@ -1245,10 +1247,7 @@ impl ChatPane {
                     block.done = true;
                     block.is_error = is_err;
                     block.duration_ms = duration_ms;
-                    if let Some(mut approval) = ev.pointer("/result/details").and_then(TagApproval::from_result) {
-                        if approval.state == ApprovalState::Applied {
-                            approval.settled_at = Some(std::time::Instant::now());
-                        }
+                    if let Some(approval) = ev.pointer("/result/details").and_then(TagApproval::from_result) {
                         block.approval = Some(approval);
                     }
                     if !output.is_empty() {
@@ -1273,9 +1272,6 @@ impl ChatPane {
                             name_only, first_diff.added, first_diff.removed
                         );
                     }
-                }
-                if self.pending_tag_call() == Some(call_id) {
-                    self.pending_ui = None;
                 }
                 self.scroll_to_bottom();
             }
@@ -1504,27 +1500,7 @@ impl ChatPane {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_owned();
-                let content = if let Some(preview) = req.get("tagPreview") {
-                    match serde_json::from_value::<crate::tags::agent::TagConfirmation>(preview.clone()) {
-                        Ok(preview) => {
-                            let call_id = req["toolCallId"].as_str().unwrap_or_default().to_owned();
-                            let attached = self.find_tool_mut(&call_id).map(|block| {
-                                block.approval = Some(TagApproval::pending(preview.clone()));
-                            }).is_some();
-                            ConfirmationContent::Tags {
-                                call_id: attached.then_some(call_id),
-                                preview,
-                            }
-                        }
-                        Err(_) => {
-                            // A damaged preview cannot stand in for the user's review of the write.
-                            if let Some(client) = &self.client {
-                                let _ = client.respond_extension_confirm(&id, false);
-                            }
-                            return;
-                        }
-                    }
-                } else if title.contains("bash") || title.contains("powershell") {
+                let content = if title.contains("bash") || title.contains("powershell") {
                     ConfirmationContent::Command(message)
                 } else {
                     ConfirmationContent::Message(message)
@@ -1667,14 +1643,6 @@ impl ChatPane {
         let Some(pending) = self.pending_ui.take_if(|pending| pending.id == id) else {
             return;
         };
-        if let PendingUiKind::Confirm(ConfirmationContent::Tags { call_id: Some(call_id), .. }) = &pending.kind
-            && let Some(approval) = self.find_tool_mut(call_id).and_then(|block| block.approval.as_mut())
-        {
-            approval.state = if confirmed { ApprovalState::Applying } else { ApprovalState::Declined };
-            if !confirmed {
-                approval.expanded = false;
-            }
-        }
         self.auto_approve_shell |= auto_allow_shell;
         if let Some(client) = &self.client {
             let _ = client.respond_extension_confirm(&pending.id, confirmed);
@@ -2664,12 +2632,39 @@ impl ChatPane {
         };
 
         let mut rendered_process: Vec<AnyElement> = Vec::new();
-        for node in timeline.into_iter().filter(|node| task_expanded || matches!(node, TimelineNode::Approval(_))) {
+        let mut applied_run: Vec<&ToolBlock> = Vec::new();
+        let flush_applied = |this: &Self,
+                             run: &mut Vec<&ToolBlock>,
+                             out: &mut Vec<AnyElement>,
+                             cx: &Context<Self>| {
+            if run.is_empty() {
+                return;
+            }
+            if run.len() == 1 {
+                out.push(this.render_tag_approval(run[0], palette, typo, ui_font, cx));
+            } else {
+                out.push(this.render_applied_approval_group(run, palette, typo, ui_font, cx));
+            }
+            run.clear();
+        };
+        for node in timeline
+            .into_iter()
+            .filter(|node| task_expanded || matches!(node, TimelineNode::Approval(_)))
+        {
             match node {
+                TimelineNode::Approval(block)
+                    if block.approval.as_ref().is_some_and(|a| {
+                        matches!(a.state, ApprovalState::Applied | ApprovalState::Undone)
+                    }) =>
+                {
+                    applied_run.push(block);
+                }
                 TimelineNode::Approval(block) => {
+                    flush_applied(self, &mut applied_run, &mut rendered_process, cx);
                     rendered_process.push(self.render_tag_approval(block, palette, typo, ui_font, cx));
                 }
                 TimelineNode::Group(steps) => {
+                    flush_applied(self, &mut applied_run, &mut rendered_process, cx);
                     rendered_process.push(self.render_process_group(
                         &steps,
                         ui_font,
@@ -2684,6 +2679,7 @@ impl ChatPane {
                     part_idx,
                     text,
                 } => {
+                    flush_applied(self, &mut applied_run, &mut rendered_process, cx);
                     rendered_process.push(div().pt(px(2.)).pb(px(4.)).child(
                         self.render_markdown_block(
                             SharedString::from(format!("ai-assistant-mid-{msg_idx}-{part_idx}")),
@@ -2701,6 +2697,7 @@ impl ChatPane {
                 }
             }
         }
+        flush_applied(self, &mut applied_run, &mut rendered_process, cx);
 
         let final_answer_el = final_text_pos.map(|pos| {
             let (m_idx, p_idx, part) = all_parts[pos];
@@ -4089,10 +4086,6 @@ impl ChatPane {
                 if ev.shift || ev.secondary {
                     return;
                 }
-                if pane.respond_to_tag_confirmation(true, cx) {
-                    cx.stop_propagation();
-                    return;
-                }
                 let items = pane.current_slash_items(cx);
                 if !items.is_empty() {
                     let chosen = items[pane.slash_index.min(items.len() - 1)].clone();
@@ -4101,10 +4094,6 @@ impl ChatPane {
                 }
             }))
             .capture_action::<Escape>(cx.listener(|pane, _: &Escape, _, cx| {
-                if pane.respond_to_tag_confirmation(false, cx) {
-                    cx.stop_propagation();
-                    return;
-                }
                 let items = pane.current_slash_items(cx);
                 if !items.is_empty() {
                     pane.dismissed_slash_text = Some(pane.input.read(cx).value().to_string());
@@ -5199,7 +5188,7 @@ impl Render for ChatPane {
                     ),
                 )
             })
-            .when_some(self.pending_ui.as_ref().filter(|_| self.pending_tag_call().is_none()), |root, pending| {
+            .when_some(self.pending_ui.as_ref(), |root, pending| {
                 root.child(self.render_pending_ui(pending, palette, cx))
             })
             .when(!self.ext_widgets.is_empty(), |root| {
@@ -5237,10 +5226,6 @@ impl Render for ChatPane {
                             div()
                                 .w_full()
                                 .max_w(AI_COMPOSER_MAX_WIDTH)
-                                .when(self.pending_tag_call().is_some(), |composer| {
-                                    composer.child(div().px_1().pb_1().text_size(typo.xs)
-                                        .text_color(gpui_kit::rgb(palette.muted)).child("等待你确认…"))
-                                })
                                 .child(self.render_composer(palette, typo, &ui_font, window, cx)),
                         ),
                 )

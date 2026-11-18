@@ -172,7 +172,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn change_tags(&mut self, change: Change<'_>, cx: &mut Context<Self>) -> bool {
+    pub(super) fn change_tags(&mut self, change: Change<'_>, cx: &mut Context<Self>) -> bool {
         match self
             .tag_store()
             .map_err(Into::into)
