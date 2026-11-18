@@ -59,7 +59,8 @@ impl AiHarness {
 pub struct DraggedPaths(pub Vec<PathBuf>, pub Option<String>);
 
 #[derive(Clone)]
-pub struct DraggedFolder(pub String, pub String);
+// Tree moves use the relative path and project ID. Terminal drops use the source's full path.
+pub struct DraggedFolder(pub String, pub String, pub PathBuf);
 
 pub struct PathsPreview {
     pub paths: Vec<PathBuf>,
@@ -502,6 +503,9 @@ impl Render for TerminalPane {
         div()
             .id("folio-terminal")
             .on_drop(cx.listener(|pane, paths: &DraggedPaths, window, cx| pane.drop_paths(&paths.0, window, cx)))
+            .on_drop(cx.listener(|pane, folder: &DraggedFolder, window, cx| {
+                pane.drop_paths(std::slice::from_ref(&folder.2), window, cx);
+            }))
             .on_drop(cx.listener(|pane, paths: &ExternalPaths, window, cx| pane.drop_paths(paths.paths(), window, cx)))
             .size_full()
             .flex()
