@@ -1,7 +1,6 @@
-/** Folio prepares an exact change set before the SDK asks its user for approval. */
+/** Folio prepares an exact change set and commits it directly without blocking for approval. */
 import { randomUUID } from 'node:crypto';
 import { Type } from '@sinclair/typebox';
-import { cancelled } from './workspace-tool-bridge.mjs';
 
 const text = Type.String({ minLength: 1 });
 const paths = Type.Array(text, { minItems: 1, maxItems: 100,
@@ -23,20 +22,14 @@ const resultForModel = (result, tagApproval) => ({
   isError: result.status !== 'ok',
 });
 
-export function tagTools(request, confirm) {
+export function tagTools(request) {
   const read = operation => async (_id, params, signal) => resultForModel(await request(operation, params, signal));
-  const write = operation => async (toolCallId, params, signal) => {
+  const write = operation => async (_toolCallId, params, signal) => {
     const proposal_id = randomUUID();
     try {
       const preview = await request(operation, { proposal_id, edit: params }, signal);
       if (preview.status !== 'ok' || !preview.confirmation) return resultForModel(preview);
-      const tagPreview = preview.confirmation;
-      const allowed = await confirm('修改 Folio 标签', '', { signal, tagPreview, toolCallId });
-      if (signal?.aborted) return resultForModel(cancelled(), tagPreview);
-      if (!allowed) return resultForModel({
-        status: 'declined', error: { code: 'declined', message: '用户拒绝了这批标签修改。' },
-      }, tagPreview);
-      return resultForModel(await request('commit', { proposal_id }, signal), tagPreview);
+      return resultForModel(await request('commit', { proposal_id }, signal), preview.confirmation);
     } finally {
       // This also clears a proposal if cancellation raced its preview reply.
       await request('discard', { proposal_id });
@@ -55,7 +48,7 @@ export function tagTools(request, confirm) {
         name_contains: Type.Optional(Type.String({ minLength: 1, description: '仅匹配文件名，不匹配目录名或完整路径。' })),
         extension: Type.Optional(text), ...page }), execute: read('query') },
     { name: 'folio_file_tags_update', label: '编辑 Folio 文件标签',
-      description: '在 paths 和 under_directory 中二选一。paths 指定具体文件，under_directory 递归处理目录内所有受支持的文件。可在同一次调用里用 tag_colors 为 add 中的标签指定颜色。给新标签指定颜色时启用 create_missing。已有标签的颜色在当前空间全局生效，Folio 会一并展示影响范围并要求确认。提交成功后才报告已更改。',
+      description: '在 paths 和 under_directory 中二选一。paths 指定具体文件，under_directory 递归处理目录内所有受支持的文件。可在同一次调用里用 tag_colors 为 add 中的标签指定颜色。给新标签指定颜色时启用 create_missing。已有标签的颜色在当前空间全局生效。',
       parameters: schema({ paths: Type.Optional(paths), under_directory: Type.Optional(directory),
         add: Type.Optional(labels), remove: Type.Optional(labels),
         tag_colors: Type.Optional(Type.Array(schema({ tag: text, color }), {

@@ -610,6 +610,7 @@ impl AiPane {
         let subscription = cx.subscribe(&view, |_, _, event: &AiPaneEvent, cx| match event {
             AiPaneEvent::Annotation(_) | AiPaneEvent::TagRequest(_) =>
                 unreachable!("workspace tool requests use the project control route"),
+            AiPaneEvent::UndoTags(items) => cx.emit(AiPaneEvent::UndoTags(items.clone())),
             AiPaneEvent::OpenFile(path) => cx.emit(AiPaneEvent::OpenFile(path.clone())),
             AiPaneEvent::Hide => cx.emit(AiPaneEvent::Hide),
             AiPaneEvent::ToggleMaximize => cx.emit(AiPaneEvent::ToggleMaximize),

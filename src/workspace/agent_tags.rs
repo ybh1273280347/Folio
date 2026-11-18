@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::tags::{
-    Store,
-    agent::{Edit, Failure, Proposal, Request, ToolResult},
+    self, Change, Store,
+    agent::{Edit, Failure, Proposal, Request, TagConfirmation, ToolResult},
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -107,6 +107,162 @@ impl Workspace {
         Ok(Some(
             json!({ "status": "ok", "confirmation": confirmation }),
         ))
+    }
+
+    pub(super) fn undo_tag_confirmations(
+        &mut self,
+        items: &[TagConfirmation],
+        cx: &mut Context<Self>,
+    ) {
+        for item in items {
+            match item {
+                TagConfirmation::Files {
+                    files,
+                    created_tags,
+                    color_changes,
+                    ..
+                } => {
+                    let mut remove_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+                    let mut add_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+                    for delta in files {
+                        for tag in &delta.add {
+                            remove_map
+                                .entry(tag.clone())
+                                .or_default()
+                                .push(delta.path.clone());
+                        }
+                        for tag in &delta.remove {
+                            add_map
+                                .entry(tag.clone())
+                                .or_default()
+                                .push(delta.path.clone());
+                        }
+                    }
+                    for (tag_name, paths) in remove_map {
+                        let key = tags::name_key(&tag_name);
+                        if let Some(id) = self
+                            .tags
+                            .snapshot
+                            .tags
+                            .iter()
+                            .find(|t| tags::name_key(&t.name) == key)
+                            .map(|t| t.id.clone())
+                        {
+                            self.change_tags(
+                                Change::Assign {
+                                    tag: &id,
+                                    paths: &paths,
+                                    add: false,
+                                },
+                                cx,
+                            );
+                        }
+                    }
+                    for (tag_name, paths) in add_map {
+                        let key = tags::name_key(&tag_name);
+                        if let Some(id) = self
+                            .tags
+                            .snapshot
+                            .tags
+                            .iter()
+                            .find(|t| tags::name_key(&t.name) == key)
+                            .map(|t| t.id.clone())
+                        {
+                            self.change_tags(
+                                Change::Assign {
+                                    tag: &id,
+                                    paths: &paths,
+                                    add: true,
+                                },
+                                cx,
+                            );
+                        } else {
+                            self.change_tags(
+                                Change::Create {
+                                    name: &tag_name,
+                                    paths: &paths,
+                                },
+                                cx,
+                            );
+                        }
+                    }
+                    for change in color_changes {
+                        if let Some(old_color) = change.from {
+                            let key = tags::name_key(&change.tag);
+                            if let Some(id) = self
+                                .tags
+                                .snapshot
+                                .tags
+                                .iter()
+                                .find(|t| tags::name_key(&t.name) == key)
+                                .map(|t| t.id.clone())
+                            {
+                                self.change_tags(
+                                    Change::Color {
+                                        tag: &id,
+                                        color: old_color,
+                                    },
+                                    cx,
+                                );
+                            }
+                        }
+                    }
+                    for created_name in created_tags {
+                        let key = tags::name_key(created_name);
+                        if let Some(id) = self
+                            .tags
+                            .snapshot
+                            .tags
+                            .iter()
+                            .find(|t| tags::name_key(&t.name) == key)
+                            .map(|t| t.id.clone())
+                        {
+                            let still_used = self
+                                .tags
+                                .snapshot
+                                .assigned
+                                .values()
+                                .any(|ids| ids.iter().any(|assigned| assigned == &id));
+                            if !still_used {
+                                self.change_tags(Change::Delete(&id), cx);
+                            }
+                        }
+                    }
+                }
+                TagConfirmation::Rename { from, to, .. } => {
+                    let key = tags::name_key(to);
+                    if let Some(id) = self
+                        .tags
+                        .snapshot
+                        .tags
+                        .iter()
+                        .find(|t| tags::name_key(&t.name) == key)
+                        .map(|t| t.id.clone())
+                    {
+                        self.change_tags(Change::Rename { tag: &id, name: from }, cx);
+                    }
+                }
+                TagConfirmation::Color { tag, from, .. } => {
+                    let key = tags::name_key(tag);
+                    if let Some(id) = self
+                        .tags
+                        .snapshot
+                        .tags
+                        .iter()
+                        .find(|t| tags::name_key(&t.name) == key)
+                        .map(|t| t.id.clone())
+                    {
+                        self.change_tags(
+                            Change::Color {
+                                tag: &id,
+                                color: *from,
+                            },
+                            cx,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn run_tag_query(

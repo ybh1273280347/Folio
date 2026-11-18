@@ -460,6 +460,7 @@ impl Workspace {
         cx.subscribe_in(&ai, window, |app, _, event: &AiPaneEvent, window, cx| match event {
             AiPaneEvent::Annotation(request) => app.annotation_request(request, window, cx),
             AiPaneEvent::TagRequest(request) => app.tag_request(request, cx),
+            AiPaneEvent::UndoTags(items) => app.undo_tag_confirmations(items, cx),
             AiPaneEvent::OpenFile(path) => {
                 app.open_path_from_ai(path, window, cx);
             }
@@ -3530,29 +3531,30 @@ impl Workspace {
                     let app = app.clone();
                     let remove_app = app.clone();
                     let remove_id = id.clone();
-                    menu.item(
-                        PopupMenuItem::new("在资源管理器中显示")
-                            .on_click(move |_, _, cx| reveal_path(&root, cx)),
-                    )
-                    .item(
-                        PopupMenuItem::new("重命名项目…").on_click(move |_, window, cx| {
-                            app.update(cx, |app, cx| {
-                                app.start_name(
-                                    NameAction::RenameProject(id.clone()),
-                                    &name,
-                                    window,
-                                    cx,
-                                )
-                            })
-                        }),
-                    )
-                    .separator()
-                    .item(
-                        PopupMenuItem::new("移除项目…").on_click(move |_, window, cx| {
-                            remove_app
-                                .update(cx, |app, cx| app.remove_project(&remove_id, window, cx))
-                        }),
-                    )
+                    menu.min_w(px(90.))
+                        .item(
+                            compact_menu_item("在资源管理器中显示")
+                                .on_click(move |_, _, cx| reveal_path(&root, cx)),
+                        )
+                        .item(
+                            compact_menu_item("重命名项目…").on_click(move |_, window, cx| {
+                                app.update(cx, |app, cx| {
+                                    app.start_name(
+                                        NameAction::RenameProject(id.clone()),
+                                        &name,
+                                        window,
+                                        cx,
+                                    )
+                                })
+                            }),
+                        )
+                        .separator()
+                        .item(
+                            compact_menu_item("移除项目…").on_click(move |_, window, cx| {
+                                remove_app
+                                    .update(cx, |app, cx| app.remove_project(&remove_id, window, cx))
+                            }),
+                        )
                 })
         });
         let query = if self.searching {
@@ -3732,18 +3734,19 @@ impl Workspace {
                             let copy = copy.clone();
                             let tags_app = tags_app.clone();
                             let tag_path = tag_path.clone();
-                            menu.item(PopupMenuItem::new("在资源管理器中显示").on_click(move |_, _, cx| reveal_path(&reveal, cx)))
-                            .item(PopupMenuItem::new("复制完整路径").on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(copy.to_string_lossy().into_owned()));
-                            }))
-                            .item(PopupMenuItem::new("编辑标签…").on_click(move |_, window, cx| {
-                                tags_app.update(cx, |app, cx| app.edit_file_tags(vec![tag_path.clone()], window, cx));
-                            }))
-                            .when(path.to_lowercase().ends_with(".md"), |menu| {
-                                menu.item(PopupMenuItem::new("重命名…").on_click(move |_, window, cx| {
-                                    app.update(cx, |app, cx| app.start_name(NameAction::RenameFile(path.clone()), &name, window, cx));
+                            menu.min_w(px(90.))
+                                .item(compact_menu_item("在资源管理器中显示").on_click(move |_, _, cx| reveal_path(&reveal, cx)))
+                                .item(compact_menu_item("复制完整路径").on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(copy.to_string_lossy().into_owned()));
                                 }))
-                            })
+                                .item(compact_menu_item("编辑标签…").on_click(move |_, window, cx| {
+                                    tags_app.update(cx, |app, cx| app.edit_file_tags(vec![tag_path.clone()], window, cx));
+                                }))
+                                .when(path.to_lowercase().ends_with(".md"), |menu| {
+                                    menu.item(compact_menu_item("重命名…").on_click(move |_, window, cx| {
+                                        app.update(cx, |app, cx| app.start_name(NameAction::RenameFile(path.clone()), &name, window, cx));
+                                    }))
+                                })
                         })
                         .into_any_element();
                 }
@@ -3848,74 +3851,74 @@ impl Workspace {
                             let create_folder_app = app.clone();
                             let tag_folder = deleted.clone();
                             let tags_app = app.clone();
-                            menu.item(PopupMenuItem::new("新建 Markdown").on_click(
-                                move |_, window, cx| {
-                                    new_md_app.update(cx, |app, cx| {
-                                        app.focused_folder = Some(new_md_folder.clone());
-                                        if let Err(error) = app.new_markdown_in(
-                                            Some(&new_md_folder),
-                                            window,
-                                            cx,
-                                        ) {
-                                            app.report(error, cx);
-                                        }
-                                    })
-                                },
-                            ))
-                            .item(PopupMenuItem::new("新建文件…").on_click(
-                                move |_, window, cx| {
-                                    create_file_app.update(cx, |app, cx| {
-                                        app.start_name(
-                                            NameAction::Create,
-                                            &folder_prefix,
-                                            window,
-                                            cx,
-                                        )
-                                    })
-                                },
-                            ))
-                            .item(PopupMenuItem::new("新建文件夹…").on_click(
-                                move |_, window, cx| {
-                                    create_folder_app.update(cx, |app, cx| {
-                                        app.start_name(
-                                            NameAction::CreateFolder,
-                                            &folder_prefix_dir,
-                                            window,
-                                            cx,
-                                        )
-                                    })
-                                },
-                            ))
-                            .separator()
-                            .item(
-                                PopupMenuItem::new("在资源管理器中显示")
-                                    .on_click(move |_, _, cx| reveal_path(&full, cx)),
-                            )
-                            .item(PopupMenuItem::new("批量编辑文件夹标签…")
-                                .icon(crate::ui::icon(IconName::Tag))
-                                .on_click(move |_, window, cx| {
-                                    tags_app.update(cx, |app, cx| app.edit_folder_tags(&tag_folder, window, cx));
-                                }))
-                            .separator()
-                            .item(
-                                PopupMenuItem::new("重命名…").on_click(move |_, window, cx| {
-                                    rename_app.update(cx, |app, cx| {
-                                        app.start_name(
-                                            NameAction::RenameFolder(renamed_path.clone()),
-                                            &renamed_name,
-                                            window,
-                                            cx,
-                                        )
-                                    })
-                                }),
-                            )
-                            .item(
-                                PopupMenuItem::new("删除文件夹…").on_click(move |_, window, cx| {
-                                    app.update(cx, |app, cx| {
-                                        app.delete_folder(&deleted, window, cx)
-                                    })
-                                }),
-                            )
+                            menu.min_w(px(90.))
+                                .item(compact_menu_item("新建 Markdown").on_click(
+                                    move |_, window, cx| {
+                                        new_md_app.update(cx, |app, cx| {
+                                            app.focused_folder = Some(new_md_folder.clone());
+                                            if let Err(error) = app.new_markdown_in(
+                                                Some(&new_md_folder),
+                                                window,
+                                                cx,
+                                            ) {
+                                                app.report(error, cx);
+                                            }
+                                        })
+                                    },
+                                ))
+                                .item(compact_menu_item("新建文件…").on_click(
+                                    move |_, window, cx| {
+                                        create_file_app.update(cx, |app, cx| {
+                                            app.start_name(
+                                                NameAction::Create,
+                                                &folder_prefix,
+                                                window,
+                                                cx,
+                                            )
+                                        })
+                                    },
+                                ))
+                                .item(compact_menu_item("新建文件夹…").on_click(
+                                    move |_, window, cx| {
+                                        create_folder_app.update(cx, |app, cx| {
+                                            app.start_name(
+                                                NameAction::CreateFolder,
+                                                &folder_prefix_dir,
+                                                window,
+                                                cx,
+                                            )
+                                        })
+                                    },
+                                ))
+                                .separator()
+                                .item(
+                                    compact_menu_item("在资源管理器中显示")
+                                        .on_click(move |_, _, cx| reveal_path(&full, cx)),
+                                )
+                                .item(compact_menu_icon_item(IconName::Tag, "批量编辑文件夹标签…")
+                                    .on_click(move |_, window, cx| {
+                                        tags_app.update(cx, |app, cx| app.edit_folder_tags(&tag_folder, window, cx));
+                                    }))
+                                .separator()
+                                .item(
+                                    compact_menu_item("重命名…").on_click(move |_, window, cx| {
+                                        rename_app.update(cx, |app, cx| {
+                                            app.start_name(
+                                                NameAction::RenameFolder(renamed_path.clone()),
+                                                &renamed_name,
+                                                window,
+                                                cx,
+                                            )
+                                        })
+                                    }),
+                                )
+                                .item(
+                                    compact_menu_item("删除文件夹…").on_click(move |_, window, cx| {
+                                        app.update(cx, |app, cx| {
+                                            app.delete_folder(&deleted, window, cx)
+                                        })
+                                    }),
+                                )
                         })
                         .into_any_element();
                 }
@@ -4085,81 +4088,81 @@ impl Workspace {
                         let tags_app = app.clone();
                         let batch_tags_app = app.clone();
                         let tag_path = rename.clone();
-                        menu.item(
-                            PopupMenuItem::new("在资源管理器中显示")
-                                .on_click(move |_, _, cx| reveal_path(&reveal, cx)),
-                        )
-                        .item(
-                            PopupMenuItem::new("复制完整路径").on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))
-                            }),
-                        )
-                        .when(batch_tags, |menu| {
-                            menu.item(PopupMenuItem::new("批量编辑标签…")
-                                .icon(crate::ui::icon(IconName::Tag))
-                                .on_click(move |_, window, cx| {
-                                    batch_tags_app.update(cx, |app, cx| {
-                                        let paths = app.selected_files.iter().cloned().collect();
-                                        app.edit_file_tags(paths, window, cx);
-                                    });
-                                }))
-                        })
-                        .item(PopupMenuItem::new("编辑此文件的标签…").on_click(move |_, window, cx| {
-                            tags_app.update(cx, |app, cx| app.edit_file_tags(vec![tag_path.clone()], window, cx));
-                        }))
-                        .when(
-                            split.path.to_lowercase().ends_with(".pdf")
-                                || Self::is_html_path(&split.path)
-                                || split.path.to_lowercase().ends_with(".md"),
-                            |menu| {
-                                menu.item(PopupMenuItem::new("在分屏中打开").on_click(
-                                    move |_, window, cx| {
-                                        split_app.update(cx, |app, cx| {
-                                            app.open_reading_pane(&split, window, cx)
+                        menu.min_w(px(90.))
+                            .item(
+                                compact_menu_item("在资源管理器中显示")
+                                    .on_click(move |_, _, cx| reveal_path(&reveal, cx)),
+                            )
+                            .item(
+                                compact_menu_item("复制完整路径").on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))
+                                }),
+                            )
+                            .when(batch_tags, |menu| {
+                                menu.item(compact_menu_icon_item(IconName::Tag, "批量编辑标签…")
+                                    .on_click(move |_, window, cx| {
+                                        batch_tags_app.update(cx, |app, cx| {
+                                            let paths = app.selected_files.iter().cloned().collect();
+                                            app.edit_file_tags(paths, window, cx);
+                                        });
+                                    }))
+                            })
+                            .item(compact_menu_item("编辑此文件的标签…").on_click(move |_, window, cx| {
+                                tags_app.update(cx, |app, cx| app.edit_file_tags(vec![tag_path.clone()], window, cx));
+                            }))
+                            .when(
+                                split.path.to_lowercase().ends_with(".pdf")
+                                    || Self::is_html_path(&split.path)
+                                    || split.path.to_lowercase().ends_with(".md"),
+                                |menu| {
+                                    menu.item(compact_menu_item("在分屏中打开").on_click(
+                                        move |_, window, cx| {
+                                            split_app.update(cx, |app, cx| {
+                                                app.open_reading_pane(&split, window, cx)
+                                            })
+                                        },
+                                    ))
+                                },
+                            )
+                            .when(user_project && main.to_lowercase().ends_with(".tex"), |menu| {
+                                menu.item(compact_menu_item("设为编译主文件").on_click(
+                                    move |_, _, cx| {
+                                        main_app.update(cx, |app, cx| {
+                                            if app.cancellation.is_some() {
+                                                return;
+                                            }
+                                            app.config
+                                                .projects
+                                                .iter_mut()
+                                                .find(|project| {
+                                                    Some(&project.id) == app.config.active_id.as_ref()
+                                                })
+                                                .expect("file has active project")
+                                                .main_file = main.clone();
+                                            if let Err(error) = storage::save_projects(&app.config) {
+                                                app.report(error, cx);
+                                            }
+                                            cx.notify();
                                         })
                                     },
                                 ))
-                            },
-                        )
-                        .when(user_project && main.to_lowercase().ends_with(".tex"), |menu| {
-                            menu.item(PopupMenuItem::new("设为编译主文件").on_click(
-                                move |_, _, cx| {
-                                    main_app.update(cx, |app, cx| {
-                                        if app.cancellation.is_some() {
-                                            return;
-                                        }
-                                        app.config
-                                            .projects
-                                            .iter_mut()
-                                            .find(|project| {
-                                                Some(&project.id) == app.config.active_id.as_ref()
-                                            })
-                                            .expect("file has active project")
-                                            .main_file = main.clone();
-                                        if let Err(error) = storage::save_projects(&app.config) {
-                                            app.report(error, cx);
-                                        }
-                                        cx.notify();
+                            })
+                            .separator()
+                            .item(
+                                compact_menu_item("重命名…").on_click(move |_, window, cx| {
+                                    rename_app.update(cx, |app, cx| {
+                                        app.start_name(
+                                            NameAction::RenameFile(rename.clone()),
+                                            &name,
+                                            window,
+                                            cx,
+                                        )
                                     })
-                                },
-                            ))
-                        })
-                        .separator()
-                        .item(
-                            PopupMenuItem::new("重命名…").on_click(move |_, window, cx| {
-                                rename_app.update(cx, |app, cx| {
-                                    app.start_name(
-                                        NameAction::RenameFile(rename.clone()),
-                                        &name,
-                                        window,
-                                        cx,
-                                    )
-                                })
-                            }),
-                        )
-                        .item(PopupMenuItem::new("删除…").on_click(move |_, window, cx| {
-                            delete_app.update(cx, |app, cx| app.delete_file(&delete, window, cx))
-                        }))
+                                }),
+                            )
+                            .item(compact_menu_item("删除…").on_click(move |_, window, cx| {
+                                delete_app.update(cx, |app, cx| app.delete_file(&delete, window, cx))
+                            }))
                     })
                     .into_any_element()
                 })();
@@ -5575,6 +5578,30 @@ impl Render for Workspace {
         }
         app
     }
+}
+
+fn compact_menu_item(label: &'static str) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| {
+        div()
+            .h(px(18.))
+            .flex()
+            .items_center()
+            .text_size(px(11.5))
+            .child(label)
+    })
+}
+
+fn compact_menu_icon_item(icon: IconName, label: &'static str) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| {
+        div()
+            .h(px(18.))
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .text_size(px(11.5))
+            .child(crate::ui::icon(icon).size(px(12.)))
+            .child(label)
+    })
 }
 
 fn reveal_path(path: &Path, cx: &App) {
