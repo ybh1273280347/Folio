@@ -15,6 +15,7 @@ mod model;
 mod pdf;
 mod preferences;
 mod storage;
+mod tags;
 mod theme;
 mod terminal;
 mod trash;

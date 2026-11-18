@@ -2996,6 +2996,8 @@ impl BlockEditorState {
         self.end_composition();
         let _ = self.model.run(EditorCommand::SelectAll);
         self.selection_changed(cx);
+        // The selection head is at the end of the document. Keep the current viewport.
+        self.reveal.set(false);
     }
     pub(crate) fn on_undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
         self.end_composition();

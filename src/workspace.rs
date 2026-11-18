@@ -1,6 +1,7 @@
 //! Workspace orchestration: disk-backed drafts, project actions and asynchronous builds.
 //! Disk revisions arbitrate external edits; conflicted drafts never autosave over them.
 mod annotations;
+mod tags;
 use crate::ai::{AiPane, AiPaneEvent, AttachedFile};
 use crate::theme::color as rgb;
 use crate::html::{HtmlPane, HtmlPaneEvent};
@@ -218,6 +219,7 @@ enum Dialog {
     TrashPurge,
     TrashClear,
     TrashConflict,
+    DeleteTag,
 }
 #[derive(Clone)]
 enum DialogButtons {
@@ -245,6 +247,7 @@ pub struct Workspace {
     show_preferences: bool,
     searching: bool,
     search_input: Entity<InputState>,
+    tags: tags::TagPanel,
     reading_panes: Vec<String>,
     markdown_panes: BTreeMap<String, Entity<MarkdownPane>>,
     // Retain the capture pane until publication, even when its tab closes.
@@ -509,8 +512,14 @@ impl Workspace {
         )
         .detach();
         let search_input = cx.new(|cx| InputState::new(window, cx));
-        cx.subscribe(&search_input, |_, _, _: &InputEvent, cx| cx.notify())
+        cx.subscribe(&search_input, |app, _, _: &InputEvent, cx| {
+            if app.tags.filter.is_some() {
+                app.prune_tag_selection(cx);
+            }
+            cx.notify();
+        })
             .detach();
+        let tags = tags::TagPanel::new(window, cx);
         let entity = cx.entity();
         window.on_window_should_close(cx, move |window, cx| {
             entity.update(cx, |app, cx| app.request_close(window, cx))
@@ -557,6 +566,7 @@ impl Workspace {
             show_preferences: false,
             searching: false,
             search_input,
+            tags,
             reading_panes: Vec::new(),
             markdown_panes: BTreeMap::new(),
             markdown_export: None,
@@ -831,6 +841,7 @@ impl Workspace {
     ) -> io::Result<()> {
         self.show_trash = false;
         self.remember_session()?;
+        self.tags.reset();
         self.watcher = None;
         self.watch_events = None;
         self.watch_paths.clear();
@@ -869,6 +880,7 @@ impl Workspace {
             self.open_reading_key(path, window, cx)?;
         }
         self.active = active;
+        self.refresh_tags(cx);
         storage::save_projects(&self.config)?;
         self.remember_session()?;
         cx.notify();
@@ -916,6 +928,7 @@ impl Workspace {
     ) -> io::Result<()> {
         self.show_trash = false;
         self.remember_session()?;
+        self.tags.reset();
         self.watcher = None;
         self.watch_events = None;
         self.active_session = Some(id.to_owned());
@@ -944,6 +957,7 @@ impl Workspace {
         self.watch_tree = false;
         self.files = files::list_files(Path::new(&project.folder))?;
         self.folders = files::list_folders(Path::new(&project.folder)).unwrap_or_default();
+        self.refresh_tags(cx);
         self.logs.clear();
         self.build_status = BuildStatus::Idle;
         self.notice = None;
@@ -1193,6 +1207,7 @@ impl Workspace {
                 return;
             }
         }
+        self.refresh_tags(cx);
     }
 
     fn open_path(
@@ -1227,23 +1242,25 @@ impl Workspace {
                 "请选择受支持的本地文件。",
             ));
         }
-        self.ensure_default_watcher()?;
-        let parent = full
-            .parent()
-            .expect("canonical file has a parent")
-            .to_path_buf();
-        if self.watched_directories.insert(parent.clone()) {
-            self.watcher
-                .as_mut()
-                .expect("default space has a watcher")
-                .watch(&parent, RecursiveMode::NonRecursive)
-                .map_err(io::Error::other)?;
-        }
+        self.watch_standalone_parent(full.parent().expect("canonical file has a parent"))?;
         let key = full.to_string_lossy().into_owned();
         Ok(ProjectFile {
             kind: Self::file_kind(&full),
             path: key,
         })
+    }
+
+    fn watch_standalone_parent(&mut self, parent: &Path) -> io::Result<()> {
+        self.ensure_default_watcher()?;
+        if !self.watched_directories.contains(parent) {
+            self.watcher
+                .as_mut()
+                .expect("independent files have a watcher")
+                .watch(parent, RecursiveMode::NonRecursive)
+                .map_err(io::Error::other)?;
+            self.watched_directories.insert(parent.to_owned());
+        }
+        Ok(())
     }
 
     fn open_standalone_file(
@@ -1338,7 +1355,7 @@ impl Workspace {
             match self.prepare_standalone_file(&resolved).and_then(|file| {
                 self.open_internal_link_file(&file, anchor.as_deref(), window, cx)
             }) {
-                Ok(()) => {}
+                Ok(()) => self.refresh_tags(cx),
                 Err(error) => self.report(error, cx),
             }
             return;
@@ -1862,8 +1879,9 @@ impl Workspace {
     fn refresh_files(&mut self, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
         let root = self.directory_workspace().map(|project| PathBuf::from(&project.folder));
         let previous: BTreeSet<_> = self.files.iter().map(|file| file.path.clone()).collect();
+        let refresh_tree = self.watch_paths.is_empty() || self.watch_tree;
         if let Some(root) = &root {
-            if self.watch_paths.is_empty() || self.watch_tree {
+            if refresh_tree {
                 self.files = files::list_files(root)?;
                 self.folders = files::list_folders(root).unwrap_or_default();
                 if self
@@ -1874,6 +1892,14 @@ impl Workspace {
                     self.focused_folder = None;
                 }
             }
+        }
+        if refresh_tree || self.watch_paths.iter().any(|path| {
+            let key = root.as_ref().and_then(|root| path.strip_prefix(root).ok())
+                .map(|path| path.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|| path.to_string_lossy().into_owned());
+            self.tags.snapshot.assigned.contains_key(&key)
+        }) {
+            self.refresh_tags(cx);
         }
         let changed = std::mem::take(&mut self.watch_paths);
         self.queue_math_preload(
@@ -1962,7 +1988,7 @@ impl Workspace {
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if Instant::now() >= self.next_trash_cleanup {
             self.next_trash_cleanup = Instant::now() + Duration::from_secs(3600);
-            if let Err(error) = crate::trash::cleanup().and_then(|_| crate::trash::list()).map(|entries| self.trash_entries = entries) {
+            if let Err(error) = crate::trash::cleanup().and_then(|_| Ok(crate::trash::list()?)).map(|entries| self.trash_entries = entries) {
                 self.report(error, cx);
             }
             cx.notify();
@@ -2011,17 +2037,18 @@ impl Workspace {
                         .into_iter()
                         .filter(|path| {
                             if let Some(root) = &root {
-                                (directory_event || path.is_dir() || files::is_relevant(path))
-                                    && path.strip_prefix(root).is_ok_and(|relative| {
-                                        !relative.components().any(|part| {
-                                            files::EXCLUDED_DIRECTORIES
-                                                .iter()
-                                                .any(|name| part.as_os_str() == *name)
-                                        })
+                                path.strip_prefix(root).is_ok_and(|relative| {
+                                    !relative.components().any(|part| {
+                                        files::EXCLUDED_DIRECTORIES
+                                            .iter()
+                                            .any(|name| part.as_os_str() == *name)
                                     })
+                                    && (directory_event || path.is_dir() || files::is_relevant(path)
+                                        || (tree && self.folders.iter().any(|folder| root.join(folder) == *path)))
+                                })
                             } else {
                                 files::is_relevant(path)
-                                    && (self
+                                && ((tree && path.parent().is_some_and(|parent| self.watched_directories.contains(parent))) || self
                                         .documents
                                         .values()
                                         .any(|document| document.path == *path)
@@ -2396,6 +2423,7 @@ impl Workspace {
         if let Some(workspace) = self.directory_workspace() {
             self.files = files::list_files(Path::new(&workspace.folder))?;
         }
+        self.relocate_tags(&[(key.to_owned(), renamed.clone())], false, cx);
         self.remember_session()?;
         cx.notify();
         // Annotation storage is keyed by filename, independently of editor state.
@@ -2481,12 +2509,14 @@ impl Workspace {
             moves.push((source, target, relative, renamed));
         }
         let mut result = Ok(());
+        let mut relocated = Vec::new();
         for (source, target, relative, renamed) in moves {
             // Match rename's no-overwrite hard-link operation. On failure, retain earlier successes.
             result = std::fs::hard_link(&source, &target).and_then(|_| std::fs::remove_file(&source));
             if result.is_err() { break; }
             self.relocate_file_state(&relative, &renamed, window, cx);
             self.expand_ancestors(&renamed);
+            relocated.push((relative, renamed));
             // Annotations live in the source directory's .folio store, not inside the file.
             let annotations = storage::load_annotations(&source);
             if !annotations.is_empty() {
@@ -2497,6 +2527,7 @@ impl Workspace {
         }
         self.files = files::list_files(&root)?;
         self.folders = files::list_folders(&root)?;
+        self.relocate_tags(&relocated, false, cx);
         storage::save_projects(&self.config)?;
         self.remember_session()?;
         cx.notify();
@@ -2538,6 +2569,7 @@ impl Workspace {
         self.watch_tree = true;
         self.files = files::list_files(&root)?;
         self.folders = files::list_folders(&root)?;
+        self.relocate_tags(&[(dragged.0.clone(), renamed)], true, cx);
         storage::save_projects(&self.config)?;
         self.remember_session()?;
         self.file_tree_focus.focus(window, cx);
@@ -2727,13 +2759,17 @@ impl Workspace {
                     ;
                 if let Some(project) = project && project.main_file == path {
                     project.main_file = if renamed.to_lowercase().ends_with(".tex") {
-                        renamed
+                        renamed.clone()
                     } else {
                         String::new()
                     };
                 }
                 self.files = files::list_files(&root)?;
                 self.folders = files::list_folders(&root).unwrap_or_default();
+                if self.selected_files.remove(&path) {
+                    self.selected_files.insert(renamed.clone());
+                }
+                self.relocate_tags(&[(path, renamed)], false, cx);
                 storage::save_projects(&self.config)?;
             }
             NameAction::RenameFolder(folder_path) => {
@@ -2896,6 +2932,7 @@ impl Workspace {
                     self.watch_tree = true;
                     self.files = files::list_files(&root)?;
                     self.folders = files::list_folders(&root).unwrap_or_default();
+                    self.relocate_tags(&[(folder_path, renamed)], true, cx);
                     storage::save_projects(&self.config)?;
                 }
             }
@@ -3161,7 +3198,7 @@ impl Workspace {
                 }
             }
             let result = std::fs::create_dir_all(target.parent().expect("file parent"))
-                .and_then(|_| crate::trash::restore(&entry, &target));
+                .map_err(Into::into).and_then(|_| crate::trash::restore(&entry, &target));
             if let Err(error) = result { self.report(error, cx); return; }
             self.trash_entries.retain(|item| item.id != id);
             if entry.was_main && target == entry.project_root.join(&entry.relative) {
@@ -3288,9 +3325,6 @@ impl Workspace {
     }
 
     fn find_file(&mut self, _: &FindFile, window: &mut Window, cx: &mut Context<Self>) {
-        if self.directory_workspace().is_none() {
-            return;
-        }
         self.settings.sidebar_open = true;
         self.searching = !self.searching;
         if self.searching {
@@ -3514,18 +3548,20 @@ impl Workspace {
         };
         let mut entries = BTreeMap::new();
         if self.directory_workspace().is_none() {
-            for path in self
-                .tabs
-                .iter()
-                .filter(|path| path.to_lowercase().contains(&query))
-            {
-                entries.insert(path.clone(), false);
+            let mut paths: BTreeSet<_> = self.tabs.iter().collect();
+            if self.tags.filter.is_some() {
+                paths.extend(self.tags.snapshot.assigned.keys());
+            }
+            for path in paths {
+                if self.tag_matches(path) && path.to_lowercase().contains(&query) {
+                    entries.insert(path.clone(), false);
+                }
             }
         } else {
             for folder in self
                 .folders
                 .iter()
-                .filter(|folder| folder.to_lowercase().contains(&query))
+                .filter(|folder| self.tags.filter.is_none() && folder.to_lowercase().contains(&query))
             {
                 let parts: Vec<_> = folder.split('/').collect();
                 for depth in 1..=parts.len() {
@@ -3535,7 +3571,7 @@ impl Workspace {
             for file in self
                 .files
                 .iter()
-                .filter(|file| file.path.to_lowercase().contains(&query))
+                .filter(|file| self.tag_matches(&file.path) && file.path.to_lowercase().contains(&query))
             {
                 let parts: Vec<_> = file.path.split('/').collect();
                 for depth in 1..parts.len() {
@@ -3544,6 +3580,7 @@ impl Workspace {
                 entries.insert(file.path.clone(), false);
             }
         }
+        let no_tag_results = self.tags.filter.is_some() && entries.is_empty();
         let mut entries: Vec<_> = entries.iter().collect();
         // Group sibling files as PDF, Markdown, TeX sources/support, then other
         // extensions. Component-wise keys keep folders first and children together.
@@ -3583,7 +3620,7 @@ impl Workspace {
         let rows = entries
             .into_iter()
             .filter(|(path, _)| {
-                !query.is_empty()
+                !query.is_empty() || self.tags.filter.is_some()
                     || !self
                         .collapsed_folders
                         .iter()
@@ -3605,6 +3642,9 @@ impl Workspace {
                     let rename_key = key.clone();
                     let rename_name = Path::new(path).file_name().unwrap().to_string_lossy().into_owned();
                     let rename_app = cx.entity();
+                    let tags_app = rename_app.clone();
+                    let tag_path = key.clone();
+                    let is_open = self.tabs.contains(&key);
                     let full = PathBuf::from(path);
                     let reveal = full.clone();
                     let copy = full.clone();
@@ -3635,17 +3675,24 @@ impl Workspace {
                         .hover(|style| style.bg(rgb(0xefefed)))
                         .child(crate::ui::file_icon(&key, false, false))
                         .child(div().flex_1().min_w_0().text_ellipsis().child(name))
-                        .child(
+                        .children(self.render_file_tags(&key, depth, cx))
+                        .when(is_open, |row| row.child(
                             crate::ui::control(close_id, IconName::Close).on_click(cx.listener(
                                 move |app, _, window, cx| {
                                     cx.stop_propagation();
                                     app.close_tab(&close, window, cx);
                                 },
                             )),
-                        )
+                        ))
                         .on_click(cx.listener(move |app, event: &ClickEvent, window, cx| {
                             cx.stop_propagation();
                             app.show_trash = false;
+                            if !app.tabs.contains(&key) {
+                                if let Err(error) = app.open_standalone_file(Path::new(&key), window, cx) {
+                                    app.report(error, cx);
+                                }
+                                return;
+                            }
                             app.active = key.clone();
                             if event.click_count() >= 2 {
                                 if let Some(pane) = app.markdown_panes.get(&key) {
@@ -3669,9 +3716,14 @@ impl Workspace {
                             let name = rename_name.clone();
                             let reveal = reveal.clone();
                             let copy = copy.clone();
+                            let tags_app = tags_app.clone();
+                            let tag_path = tag_path.clone();
                             menu.item(PopupMenuItem::new("在资源管理器中显示").on_click(move |_, _, cx| reveal_path(&reveal, cx)))
                             .item(PopupMenuItem::new("复制完整路径").on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(copy.to_string_lossy().into_owned()));
+                            }))
+                            .item(PopupMenuItem::new("编辑标签…").on_click(move |_, window, cx| {
+                                tags_app.update(cx, |app, cx| app.edit_file_tags(vec![tag_path.clone()], window, cx));
                             }))
                             .when(path.to_lowercase().ends_with(".md"), |menu| {
                                 menu.item(PopupMenuItem::new("重命名…").on_click(move |_, window, cx| {
@@ -3731,12 +3783,12 @@ impl Workspace {
                         .when(is_focused, |row| row.bg(rgb(0xedf2fa)))
                         .hover(|style| style.bg(rgb(0xefefed)))
                         .active(|style| style.bg(rgb(crate::ui::PRESSED_BG)))
-                        .child(crate::ui::icon(if self.collapsed_folders.contains(path) {
+                        .child(crate::ui::icon(if self.tags.filter.is_none() && self.collapsed_folders.contains(path) {
                             IconName::ChevronRight
                         } else {
                             IconName::ChevronDown
                         }))
-                        .child(crate::ui::icon(if self.collapsed_folders.contains(path) {
+                        .child(crate::ui::icon(if self.tags.filter.is_none() && self.collapsed_folders.contains(path) {
                             IconName::Folder
                         } else {
                             IconName::FolderOpen
@@ -3754,10 +3806,12 @@ impl Workspace {
                             cx.stop_propagation();
                             app.show_trash = false;
                             app.focused_folder = Some(toggled.clone());
-                            if !app.collapsed_folders.remove(&toggled) {
-                                app.collapsed_folders.insert(toggled.clone());
+                            if app.tags.filter.is_none() {
+                                if !app.collapsed_folders.remove(&toggled) {
+                                    app.collapsed_folders.insert(toggled.clone());
+                                }
+                                let _ = app.remember_session();
                             }
-                            let _ = app.remember_session();
                             app.file_tree_focus.focus(window, cx);
                             cx.notify();
                         }))
@@ -3954,6 +4008,7 @@ impl Workspace {
                             )
                             .child(name.clone()),
                     )
+                    .children(self.render_file_tags(path, depth, cx))
                     .when(
                         pdf_file || Self::is_html_path(&file.path) || file.path.to_lowercase().ends_with(".md"),
                         |row| {
@@ -4005,6 +4060,8 @@ impl Workspace {
                         let main = rename.clone();
                         let split = split.clone();
                         let split_app = app.clone();
+                        let tags_app = app.clone();
+                        let tag_path = rename.clone();
                         menu.item(
                             PopupMenuItem::new("在资源管理器中显示")
                                 .on_click(move |_, _, cx| reveal_path(&reveal, cx)),
@@ -4014,6 +4071,9 @@ impl Workspace {
                                 cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))
                             }),
                         )
+                        .item(PopupMenuItem::new("编辑标签…").on_click(move |_, window, cx| {
+                            tags_app.update(cx, |app, cx| app.edit_file_tags(vec![tag_path.clone()], window, cx));
+                        }))
                         .when(
                             split.path.to_lowercase().ends_with(".pdf")
                                 || Self::is_html_path(&split.path)
@@ -4153,6 +4213,7 @@ impl Workspace {
                     .text_xs()
                     .text_color(rgb(MUTED))
                     .child("文件")
+                    .child(self.render_tag_toggle(cx))
                     .child(button("new-markdown", "+ Markdown").on_click(cx.listener(|app, _, window, cx| {
                         if let Err(error) = app.new_markdown(window, cx) { app.report(error, cx); }
                     })))
@@ -4196,12 +4257,12 @@ impl Workspace {
                                         let prefix = app.focused_folder_prefix();
                                         app.start_name(NameAction::CreateFolder, &prefix, window, cx)
                                     },
-                                )))
-                                .child(button("find-file", "⌕").on_click(cx.listener(
-                                    |app, _, window, cx| app.find_file(&FindFile, window, cx),
                                 ))),
                         )
-                    }),
+                    })
+                    .child(button("find-file", "⌕").on_click(cx.listener(
+                        |app, _, window, cx| app.find_file(&FindFile, window, cx),
+                    ))),
             )
             .when(self.searching, |sidebar| {
                 sidebar.child(
@@ -4222,6 +4283,8 @@ impl Workspace {
                         ),
                 )
             })
+            .children(self.render_tag_filter(cx))
+            .children(self.render_tag_panel(cx))
             .when(!self.selected_files.is_empty(), |sidebar| {
                 let sel_count = self.selected_files.len();
                 sidebar.child(
@@ -4251,6 +4314,11 @@ impl Workspace {
                                 .flex()
                                 .items_center()
                                 .gap_1()
+                                .child(crate::ui::control("batch-tags", IconName::Tag)
+                                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("批量编辑标签").build(window, cx))
+                                    .on_click(cx.listener(|app, _, window, cx| {
+                                        app.edit_file_tags(app.selected_files.iter().cloned().collect(), window, cx);
+                                    })))
                                 .child(
                                     crate::ui::button_secondary("batch-compile", "编译")
                                         .min_h(px(22.))
@@ -4341,6 +4409,7 @@ impl Workspace {
                         }
                         app.file_tree_focus.focus(window, cx);
                     }))
+                    .when(no_tag_results, |tree| tree.child(div().px_3().py_2().text_xs().text_color(rgb(MUTED)).child("没有匹配的文件")))
                     .children(rows)
                     .when_some(self.directory_workspace(), |tree, project| {
                         let project_id = project.id.clone();
@@ -4900,7 +4969,7 @@ impl Render for Workspace {
             })
             .when(!self.show_terminal || !self.terminal_maximized, |body| {
                 body.child(resizable_panel().child(div().flex().flex_col().size_full().min_w_0().min_h_0()
-                    .p_2().gap_2().child(vertical_work_area)))
+                    .child(vertical_work_area)))
             })
             .when(self.show_terminal, |body| {
                 let drawer_child = if self.right_drawer_tab == RightDrawerTab::Ai {

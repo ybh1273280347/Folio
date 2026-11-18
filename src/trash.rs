@@ -31,6 +31,8 @@ pub struct TrashEntry {
     #[serde(default)]
     pub deleted_at_nanos: u32,
     pub was_main: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<String>,
 }
 
 fn trash_directory() -> io::Result<PathBuf> {
@@ -145,15 +147,17 @@ pub fn put(
     relative: &str,
     batch: &str,
     was_main: bool,
-) -> io::Result<TrashEntry> {
+) -> crate::tags::Result<TrashEntry> {
     let source = crate::files::project_path(root, relative)?;
+    let tags = crate::tags::Store::project(root);
+    let file_id = tags.tracked_id(relative)?;
     let mut source_file = File::open(&source)?;
     let source_metadata = source_file.metadata()?;
     if !source_metadata.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "只能将文件移入 Folio 废纸篓。",
-        ));
+        ).into());
     }
 
     let trash_root = trash_directory()?;
@@ -187,17 +191,24 @@ pub fn put(
         deleted_at: deleted_at.as_secs(),
         deleted_at_nanos: deleted_at.subsec_nanos(),
         was_main,
+        file_id,
     };
     persist_entry(&directory, &entry)?;
 
-    fs::remove_file(&source)?;
+    // The durable trash entry carries the UUID even if the process stops
+    // between removing the source and committing the registry transaction.
+    if let Some(file_id) = &entry.file_id {
+        tags.trash_file(file_id, &entry.id, || fs::remove_file(&source))?;
+    } else {
+        fs::remove_file(&source)?;
+    }
     sync_parent(&source)?;
     Ok(entry)
 }
 
 /// Restore into a new target file. The target and its parent are synced before
 /// removing the stored copy, so a failed or interrupted restore keeps recoverable data.
-pub fn restore(entry: &TrashEntry, target: &Path) -> io::Result<()> {
+pub fn restore(entry: &TrashEntry, target: &Path) -> crate::tags::Result<()> {
     let directory = entry_directory(&entry.id)?;
     read_entry(&directory)?;
 
@@ -211,10 +222,21 @@ pub fn restore(entry: &TrashEntry, target: &Path) -> io::Result<()> {
     {
         drop(destination);
         fs::remove_file(target)?;
-        return Err(error);
+        return Err(error.into());
     }
     drop(destination);
     sync_parent(target)?;
+
+    if let Some(file_id) = &entry.file_id {
+        let relative = target.strip_prefix(&entry.project_root)?.to_string_lossy().replace('\\', "/");
+        let tags = crate::tags::Store::project(&entry.project_root);
+        if let Err(error) = tags.restore_file(file_id, &relative) {
+            // This call created the target exclusively. Keep the durable
+            // payload available so fixing the tag store allows a retry.
+            fs::remove_file(target)?;
+            return Err(error);
+        }
+    }
 
     fs::remove_file(directory.join(PAYLOAD_FILE))?;
     sync_directory(&directory)?;
@@ -226,15 +248,20 @@ pub fn restore(entry: &TrashEntry, target: &Path) -> io::Result<()> {
 }
 
 /// Permanently remove one persisted trash item.
-pub fn purge(entry: &TrashEntry) -> io::Result<()> {
+pub fn purge(entry: &TrashEntry) -> crate::tags::Result<()> {
     let directory = entry_directory(&entry.id)?;
     read_entry(&directory)?;
-    fs::remove_dir_all(&directory)?;
-    sync_parent(&directory)
+    let remove = || fs::remove_dir_all(&directory).and_then(|_| sync_parent(&directory));
+    if let Some(file_id) = &entry.file_id {
+        crate::tags::Store::project(&entry.project_root).purge_file(file_id, &entry.id, remove)?;
+    } else {
+        remove()?;
+    }
+    Ok(())
 }
 
 /// Permanently remove entries whose recorded deletion time is more than seven days old.
-pub fn cleanup() -> io::Result<()> {
+pub fn cleanup() -> crate::tags::Result<()> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(io::Error::other)?
