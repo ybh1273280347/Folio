@@ -10,6 +10,7 @@ use gpui_kit::{
     assets::IconName,
     base::{Scrollbar, ScrollbarMode, StyledExt, text::MarkdownExtensions},
     component::{
+        Sizable,
         input::{
             Editor, EditorState, Input, InputEvent, InputState, Position, RangeDecoration,
             RangeDecorationCollection, RangeDecorationStyle, Textarea, TextareaState,
@@ -2942,10 +2943,10 @@ impl Render for MarkdownPane {
                                 .absolute()
                                 .top_3()
                                 .right(right_offset)
-                                .w(px(340.))
-                                .px_2p5()
-                                .py_1()
-                                .rounded(px(8.))
+                                .w(px(230.))
+                                .px_2()
+                                .py_0p5()
+                                .rounded(px(6.))
                                 .bg(rgb(0xffffff))
                                 .border_1()
                                 .border_color(rgb(0xe2e4e8))
@@ -2954,12 +2955,19 @@ impl Render for MarkdownPane {
                                 .items_center()
                                 .gap_1()
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .child(Input::new(&self.search_input).flex_1().min_w_0())
+                                .child(
+                                    Input::new(&self.search_input)
+                                        .xsmall()
+                                        .h(px(22.))
+                                        .text_size(px(12.))
+                                        .flex_1()
+                                        .min_w_0(),
+                                )
                                 .when_some(count_label, |bar, label| {
                                     bar.child(
                                         div()
                                             .px_1()
-                                            .text_xs()
+                                            .text_size(px(11.))
                                             .text_color(rgb(0x787774))
                                             .flex_shrink_0()
                                             .child(label),
@@ -2967,6 +2975,7 @@ impl Render for MarkdownPane {
                                 })
                                 .child(
                                     crate::ui::control("prev-md-search", IconName::ChevronUp)
+                                        .size(px(18.))
                                         .on_click(cx.listener(|pane, _, _, cx| {
                                             let q = pane.search_input.read(cx).value().to_string();
                                             pane.step_search(&q, -1, cx);
@@ -2975,6 +2984,7 @@ impl Render for MarkdownPane {
                                 )
                                 .child(
                                     crate::ui::control("next-md-search", IconName::ChevronDown)
+                                        .size(px(18.))
                                         .on_click(cx.listener(|pane, _, _, cx| {
                                             let q = pane.search_input.read(cx).value().to_string();
                                             pane.step_search(&q, 1, cx);
@@ -2983,6 +2993,7 @@ impl Render for MarkdownPane {
                                 )
                                 .child(
                                     crate::ui::control("close-md-search", IconName::Close)
+                                        .size(px(18.))
                                         .on_click(cx.listener(|pane, _, window, cx| {
                                             pane.close_search(window, cx);
                                         })),

@@ -135,7 +135,7 @@ impl Workspace {
         }
     }
 
-    fn use_tag_snapshot(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
+    pub(super) fn use_tag_snapshot(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
         self.tags.snapshot = snapshot;
         if self.directory_workspace().is_none() {
             // Tagged loose files remain discoverable after closing their tabs.
@@ -539,7 +539,14 @@ impl Workspace {
                         .flex()
                         .gap_1()
                         .items_center()
-                        .child(Input::new(&self.tags.input).flex_1().min_w_0())
+                        .child(
+                            Input::new(&self.tags.input)
+                                .xsmall()
+                                .h(px(22.))
+                                .text_size(px(12.))
+                                .flex_1()
+                                .min_w_0(),
+                        )
                         .child(
                             tag_control("save-tag-name", IconName::Check, "保存标签名称").on_click(
                                 cx.listener(|app, _, window, cx| app.submit_tag_input(window, cx)),
@@ -591,7 +598,14 @@ impl Workspace {
                     paths.dedup();
                 }
                 panel = panel
-                    .child(Input::new(&self.tags.input).flex_1().min_w_0())
+                    .child(
+                        Input::new(&self.tags.input)
+                            .xsmall()
+                            .h(px(22.))
+                            .text_size(px(12.))
+                            .flex_1()
+                            .min_w_0(),
+                    )
                     .when(self.directory_workspace().is_none(), |panel| {
                         panel.child(button("tag-open-target", "打开目标文件…").on_click(
                             cx.listener(|app, _, window, cx| app.open_file_dialog(window, cx)),
@@ -661,7 +675,14 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .gap_1()
-                            .child(Input::new(&self.tags.input).flex_1().min_w_0())
+                            .child(
+                            Input::new(&self.tags.input)
+                                .xsmall()
+                                .h(px(22.))
+                                .text_size(px(12.))
+                                .flex_1()
+                                .min_w_0(),
+                        )
                             .child(
                                 tag_control("create-tag", IconName::Plus, "新建输入的标签")
                                     .when(query.is_empty() || exact, |control| {

@@ -383,9 +383,11 @@ impl AiPane {
                 }
                 RpcInbound::Event(event) => {
                     let kind = event["type"].as_str().unwrap_or("");
-                    if matches!(kind, "annotation_request" | "annotation_cancel") {
-                        // Project control routes stay alive even when the originating tab is hidden.
-                        cx.emit(AiPaneEvent::Annotation(event.clone()));
+                    // Project control routes stay alive even when the originating tab is hidden.
+                    match kind {
+                        "annotation_request" | "annotation_cancel" => cx.emit(AiPaneEvent::Annotation(event.clone())),
+                        "tag_request" | "tag_cancel" => cx.emit(AiPaneEvent::TagRequest(event.clone())),
+                        _ => {}
                     }
                     if matches!(
                         kind,
@@ -443,6 +445,13 @@ impl AiPane {
         let project = request["projectKey"].as_str().expect("host annotation project");
         if let Some(client) = self.controls.get(project) {
             let _ = client.send(json!({ "type": "annotation_response", "id": request["id"],
+                "sessionId": request["sessionId"], "result": result }));
+        }
+    }
+    pub fn respond_tag(&self, request: &Value, result: Value) {
+        let project = request["projectKey"].as_str().expect("host tag project");
+        if let Some(client) = self.controls.get(project) {
+            let _ = client.send(json!({ "type": "tag_response", "id": request["id"],
                 "sessionId": request["sessionId"], "result": result }));
         }
     }
@@ -599,7 +608,8 @@ impl AiPane {
             });
         }
         let subscription = cx.subscribe(&view, |_, _, event: &AiPaneEvent, cx| match event {
-            AiPaneEvent::Annotation(_) => unreachable!("annotation requests use the project control route"),
+            AiPaneEvent::Annotation(_) | AiPaneEvent::TagRequest(_) =>
+                unreachable!("workspace tool requests use the project control route"),
             AiPaneEvent::OpenFile(path) => cx.emit(AiPaneEvent::OpenFile(path.clone())),
             AiPaneEvent::Hide => cx.emit(AiPaneEvent::Hide),
             AiPaneEvent::ToggleMaximize => cx.emit(AiPaneEvent::ToggleMaximize),
@@ -643,7 +653,7 @@ impl AiPane {
             .border_color(subtle_border(palette.border)).bg(gpui_kit::rgb(palette.surface))
             .shadow(popover_shadow(palette.is_dark())).flex().flex_col().gap_1().occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(div().w_full().px_1().pt_0p5().child(Input::new(&self.search).small().text_size(px(font_size))))
+            .child(div().w_full().px_1().pt_0p5().child(Input::new(&self.search).xsmall().h(px(20.)).text_size(px(font_size))))
             .child(div().relative().min_h_0().child(div().id("ai-history-list").max_h(px(285.)).overflow_y_scroll().track_scroll(&self.history_scroll)
                 .children(rows.into_iter().map(|(_, entry)| {
                     let id = entry.id.clone(); let open = id.clone(); let pin = id.clone(); let rename = id.clone(); let delete = id.clone();

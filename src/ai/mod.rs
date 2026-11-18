@@ -9,6 +9,7 @@ pub use quote::SelectionQuote;
 use quote::{append_quotes, split_injected_prompt};
 
 use crate::math::{MathReady, MathRenderer};
+use gpui_kit::component::Sizable;
 use crate::mermaid::{MermaidReady, MermaidRenderer};
 use crate::model::{AppSettings, ToolExecutionView};
 use crate::terminal::{DraggedFolder, DraggedPaths};
@@ -51,6 +52,7 @@ use std::{
 
 pub enum AiPaneEvent {
     Annotation(Value),
+    TagRequest(Value),
     OpenFile(PathBuf),
     ToggleMaximize,
     Hide,
@@ -3608,7 +3610,7 @@ impl ChatPane {
                     .child(
                         div()
                             .px_2p5()
-                            .py_1p5()
+                            .py_1()
                             .border_b_1()
                             .border_color(subtle_border(palette.border))
                             .flex()
@@ -3617,8 +3619,8 @@ impl ChatPane {
                             .flex_shrink_0()
                             .child(
                                 crate::ui::icon(IconName::Search)
-                                    .w(px(13.))
-                                    .h(px(13.))
+                                    .w(px(12.))
+                                    .h(px(12.))
                                     .text_color(gpui_kit::rgb(palette.muted)),
                             )
                             .child(
@@ -3628,6 +3630,8 @@ impl ChatPane {
                                     .text_size(typo.sm)
                                     .child(
                                         Input::new(&self.model_search_input)
+                                            .xsmall()
+                                            .h(px(20.))
                                             .appearance(false)
                                             .bordered(false)
                                             .font_family(ui_font.clone())
@@ -6298,6 +6302,13 @@ fn summarize_tool_call(name: &str, args: &Value, diffs: &[FileDiff]) -> String {
         return format!("已编辑 {} +{} -{}", fname, first.added, first.removed);
     }
     match name {
+        "folio_tags_list" => "查看 Folio 标签".into(),
+        "folio_files_query" => "查找 Folio 文件及标签".into(),
+        "folio_file_tags_update" => format!(
+            "编辑 {} 个文件的标签",
+            args["paths"].as_array().map_or(0, Vec::len)
+        ),
+        "folio_tags_manage" => format!("管理标签：{}", args["tag"].as_str().unwrap_or_default()),
         "bash" | "powershell" => args
             .get("command")
             .and_then(|v| v.as_str())

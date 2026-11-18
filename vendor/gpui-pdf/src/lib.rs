@@ -41,7 +41,10 @@ use gpui::{
     hsla, img, point, px,
 };
 #[cfg(feature = "search")]
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::{
+    Sizable,
+    input::{Input, InputEvent, InputState},
+};
 // Only the forms layer maps field rects to window space.
 #[cfg(feature = "forms")]
 use gpui::{Bounds, Pixels};
@@ -2973,14 +2976,14 @@ impl Render for PdfView {
                 )
             };
             let field = div()
-                .w(px(240.0))
-                .min_w(px(120.0))
-                .h(px(24.0))
+                .w(px(160.0))
+                .min_w(px(80.0))
+                .h(px(20.0))
                 .flex()
                 .flex_row()
                 .items_center()
                 .text_color(style.header_fg)
-                .child(Input::new(&self.search_input));
+                .child(Input::new(&self.search_input).xsmall().h(px(20.0)).text_size(px(12.0)));
             root.child(deferred(
                 div()
                     .absolute()
@@ -2989,9 +2992,9 @@ impl Render for PdfView {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
-                    .px(px(8.0))
-                    .py(px(4.0))
+                    .gap_1p5()
+                    .px(px(6.0))
+                    .py(px(3.0))
                     .rounded(px(6.0))
                     .border_1()
                     .border_color(style.border)

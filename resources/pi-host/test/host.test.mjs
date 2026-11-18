@@ -29,7 +29,7 @@ function driver(child) {
       const id = `${value.sessionId}:${value.type}`;
       waiters.get(id)?.resolve(value);
       waiters.delete(id);
-      const subtype = `${id}:${value.assistantMessageEvent?.type ?? value.toolCallId}`;
+      const subtype = `${id}:${value.assistantMessageEvent?.type ?? value.toolCallId ?? value.operation}`;
       waiters.get(subtype)?.resolve(value);
       waiters.delete(subtype);
     }
@@ -48,7 +48,7 @@ function driver(child) {
     },
     event: (sessionId, type, subtype) => {
       const existing = events.find(value => value.sessionId === sessionId && value.type === type
-        && (subtype === undefined || (value.assistantMessageEvent?.type ?? value.toolCallId) === subtype));
+        && (subtype === undefined || (value.assistantMessageEvent?.type ?? value.toolCallId ?? value.operation) === subtype));
       if (existing) return Promise.resolve(existing);
       const deferred = Promise.withResolvers();
       waiters.set(`${sessionId}:${type}${subtype === undefined ? '' : `:${subtype}`}`, deferred);
@@ -57,8 +57,8 @@ function driver(child) {
   };
 }
 
-test('annotation tools cross the real SDK and JSONL request/reply boundary', { timeout: 45000 }, async t => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'folio-annotation-host-'));
+async function runWorkspaceTool(t, { name, args, message }) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'folio-tool-host-'));
   const agentDir = path.join(directory, 'agent');
   const cwd = path.join(directory, 'project');
   fs.mkdirSync(agentDir); fs.mkdirSync(cwd);
@@ -70,11 +70,11 @@ test('annotation tools cross the real SDK and JSONL request/reply boundary', { t
     const body = JSON.parse(Buffer.concat(chunks).toString());
     requests.push(body);
     const role = body.messages.at(-1).role;
-    const delta = { user: { tool_calls:[{index:0, id:'add-note', type:'function', function:{name:'folio_annotation_create',
-      arguments:JSON.stringify({path:'note.md', quote:'target', comment:'解释'})}}] }, tool:{content:'批注已添加'} }[role];
+    const delta = { user: { tool_calls:[{index:0, id:'workspace-tool', type:'function', function:{
+      name, arguments:JSON.stringify(args)}}] }, tool:{content:'完成'} }[role];
     response.setHeader('Content-Type', 'text/event-stream');
-    response.write(`data: ${JSON.stringify({id:'annotation-run', choices:[{index:0, delta, finish_reason:null}]})}\n\n`);
-    response.end(`data: ${JSON.stringify({id:'annotation-run', choices:[{index:0, delta:{}, finish_reason:{user:'tool_calls', tool:'stop'}[role]}]})}\n\ndata: [DONE]\n\n`);
+    response.write(`data: ${JSON.stringify({id:'workspace-run', choices:[{index:0, delta, finish_reason:null}]})}\n\n`);
+    response.end(`data: ${JSON.stringify({id:'workspace-run', choices:[{index:0, delta:{}, finish_reason:{user:'tool_calls', tool:'stop'}[role]}]})}\n\ndata: [DONE]\n\n`);
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   t.after(() => { server.closeAllConnections(); server.close(); });
@@ -99,7 +99,16 @@ test('annotation tools cross the real SDK and JSONL request/reply boundary', { t
   const created = await client.request({...project, type:'create_session'});
   const sessionId = created.data.sessionId;
   // Prompt replies only after the run settles; service the UI request while that run is pending.
-  const run = client.request({...project, sessionId, type:'prompt', message:'给 target 加批注'});
+  const run = client.request({...project, sessionId, type:'prompt', message});
+  return { client, project, sessionId, requests, run };
+}
+
+test('annotation tools cross the real SDK and JSONL request/reply boundary', { timeout: 45000 }, async t => {
+  const {client, project, sessionId, requests, run} = await runWorkspaceTool(t, {
+    name: 'folio_annotation_create',
+    args: {path:'note.md', quote:'target', comment:'解释'},
+    message: '给 target 加批注',
+  });
   const pending = await client.event(sessionId, 'annotation_request');
   assert.equal(pending.projectKey, project.projectKey);
   assert.equal(pending.params.quote, 'target');
@@ -111,6 +120,32 @@ test('annotation tools cross the real SDK and JSONL request/reply boundary', { t
   await client.event(sessionId, 'agent_settled');
   assert.equal((await run).success, true);
   assert.match(JSON.stringify(requests[0].messages), /folio-annotations/);
+  assert.deepEqual(JSON.parse(requests[1].messages.at(-1).content), result);
+});
+
+test('the tag tool commits the exact preview approved in the originating SDK session', {timeout:45000}, async t => {
+  const args = {paths:['note.md', 'sheet.pdf'], add:['已掌握'], remove:['待复习'], create_missing:true};
+  const {client, project, sessionId, requests, run} = await runWorkspaceTool(t, {
+    name:'folio_file_tags_update', args, message:'把这两份资料改为已掌握',
+  });
+  const owner = {...project, sessionId};
+  const preview = await client.event(sessionId, 'tag_request', 'preview_files');
+  const proposal_id = preview.params.proposal_id;
+  assert.deepEqual(preview.params.edit, args);
+  const confirmation = '将更新 2 个文件的标签\n\nnote.md\n  ＋已掌握  －待复习\n\nsheet.pdf\n  ＋已掌握  －待复习';
+  assert.equal((await client.request({...owner, type:'tag_response', id:preview.id, result:{status:'ok', confirmation}})).success, true);
+  const card = await client.event(sessionId, 'extension_ui_request');
+  assert.equal(card.method, 'confirm');
+  assert.equal(card.message, confirmation);
+  assert.equal((await client.request({...owner, type:'extension_ui_response', id:card.id, confirmed:true})).success, true);
+
+  const commit = await client.event(sessionId, 'tag_request', 'commit');
+  assert.deepEqual(commit.params, {proposal_id});
+  const result = {status:'ok', updated:2, paths:['note.md', 'sheet.pdf'], created_tags:['已掌握']};
+  assert.equal((await client.request({...owner, type:'tag_response', id:commit.id, result})).success, true);
+  const discard = await client.event(sessionId, 'tag_request', 'discard');
+  assert.equal((await client.request({...owner, type:'tag_response', id:discard.id, result:{status:'ok'}})).success, true);
+  assert.equal((await run).success, true);
   assert.deepEqual(JSON.parse(requests[1].messages.at(-1).content), result);
 });
 
