@@ -289,6 +289,7 @@ icon_assets!(
         GripVertical,
         Keyboard,
         Palette,
+        Tag,
         RotateCcw,
         Type,
         Sparkles,
