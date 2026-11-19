@@ -365,6 +365,7 @@ pub struct MarkdownPane {
     selected_annotation_id: Option<u64>,
     editing_drawer_annotation_id: Option<u64>,
     annotation_list_focus: FocusHandle,
+    annotation_list_scroll: ScrollHandle,
     show_annotations_drawer: bool,
     note_input: Entity<TextareaState>,
     drawer_note_input: Entity<TextareaState>,
@@ -868,6 +869,7 @@ impl MarkdownPane {
             selected_annotation_id: None,
             editing_drawer_annotation_id: None,
             annotation_list_focus: cx.focus_handle(),
+            annotation_list_scroll: ScrollHandle::new(),
             show_annotations_drawer: false,
             note_input,
             drawer_note_input,
@@ -3389,6 +3391,7 @@ impl Render for MarkdownPane {
                         .border_color(card_border)
                         .flex()
                         .flex_col()
+                        .flex_shrink_0()
                         .min_w_0()
                         .overflow_hidden()
                         .gap_1p5()
@@ -3604,16 +3607,18 @@ impl Render for MarkdownPane {
                                         .min_w_0()
                                         .flex_shrink_0()
                                         .h_full()
-                                        .overflow_y_scroll()
+                                        .min_h_0()
                                         .bg(rgb(0xfafaf9))
                                         .border_l_1()
                                         .border_color(rgb(0xe8e7e3))
-                                        .p_3()
                                         .flex()
                                         .flex_col()
-                                        .gap_2()
                                         .child(
                                             div()
+                                                .flex_shrink_0()
+                                                .px_3()
+                                                .pt_3()
+                                                .pb_2()
                                                 .flex()
                                                 .items_center()
                                                 .justify_between()
@@ -3632,7 +3637,31 @@ impl Render for MarkdownPane {
                                                         })),
                                                 ),
                                         )
-                                        .children(cards),
+                                        .child(
+                                            div()
+                                                .relative()
+                                                .flex_1()
+                                                .min_h_0()
+                                                .child(
+                                                    div()
+                                                        .id("md-annotations-list")
+                                                        .size_full()
+                                                        .overflow_y_scroll()
+                                                        .track_scroll(&self.annotation_list_scroll)
+                                                        .px_3()
+                                                        .pb_3()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap_2()
+                                                        .children(cards),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .absolute()
+                                                        .inset_0()
+                                                        .child(Scrollbar::vertical(&self.annotation_list_scroll)),
+                                                ),
+                                        ),
                                 ),
                         ),
                 );

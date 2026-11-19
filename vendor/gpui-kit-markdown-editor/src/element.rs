@@ -1227,17 +1227,18 @@ fn compute_mark_rects(
             let mut prev_x: Option<Pixels> = None;
             let mut prev_y: Option<Pixels> = None;
             let mut last_dx = px(0.);
+            let line_tol = (lh * 0.55).max(px(2.));
             for offset in start..end {
                 let p = leaf.caret_point(offset);
                 if let (Some(px_prev), Some(py_prev)) = (prev_x, prev_y)
-                    && (p.y - py_prev).abs() < px(0.5)
+                    && (p.y - py_prev).abs() < line_tol
                     && p.x > px_prev
                 {
                     last_dx = p.x - px_prev;
                 }
                 prev_x = Some(p.x);
                 prev_y = Some(p.y);
-                if let Some(row) = rows.iter_mut().find(|r| (r.y - p.y).abs() < px(0.5)) {
+                if let Some(row) = rows.iter_mut().find(|r| (r.y - p.y).abs() < line_tol) {
                     row.min_x = row.min_x.min(p.x);
                     row.max_x = row.max_x.max(p.x);
                 } else {
@@ -1249,7 +1250,7 @@ fn compute_mark_rects(
                 }
             }
             let end_p = leaf.caret_point(end);
-            if let Some(row) = rows.iter_mut().find(|r| (r.y - end_p.y).abs() < px(0.5)) {
+            if let Some(row) = rows.iter_mut().find(|r| (r.y - end_p.y).abs() < line_tol) {
                 row.max_x = row.max_x.max(end_p.x);
             } else if let Some(last_row) = rows.last_mut()
                 && last_dx > px(0.)
@@ -1558,11 +1559,10 @@ impl Element for EditorRoot {
             .iter()
             .map(|(id, bounds)| (*id, *bounds))
             .collect();
-        child.paint(window, cx);
-
         for (mark_bounds, color) in &prepaint.mark_rects {
-            window.paint_quad(fill(*mark_bounds, color.opacity(0.35)).corner_radii(px(2.)));
+            window.paint_quad(fill(*mark_bounds, *color).corner_radii(px(2.)));
         }
+        child.paint(window, cx);
 
         let frame = frame.borrow();
         let style = &self.style;
