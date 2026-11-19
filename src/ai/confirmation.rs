@@ -73,7 +73,12 @@ impl ChatPane {
         let (icon, body, shell, action) = match content {
             ConfirmationContent::Message(message) => (
                 IconName::Shield,
-                div().text_size(typo.sm).child(message.clone()),
+                div()
+                    .text_size(typo.sm)
+                    .line_height(relative(1.45))
+                    .text_color(gpui_kit::rgb(palette.text))
+                    .child(message.clone())
+                    .into_any_element(),
                 false,
                 "允许",
             ),
@@ -81,46 +86,45 @@ impl ChatPane {
                 let (font, size) = crate::theme::tool_typography(&self.settings);
                 (
                     IconName::Terminal,
-                    div()
-                        .p_2()
-                        .rounded(px(6.))
-                        .bg(gpui_kit::rgb(palette.code_background))
-                        .font_family(font)
-                        .text_size(size)
-                        .child(command.clone()),
+                    crate::ui::approval_command_body(command, font.into(), size, palette),
                     true,
                     "运行命令",
                 )
             }
         };
-        div()
-            .mx_3()
-            .mb_2()
-            .child(
-                conversation_surface(palette)
-                    .id(format!("confirmation-{}", pending.id))
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p_3()
-                    .child(review_heading(
-                        icon,
-                        &pending.title,
-                        None,
-                        ApprovalState::Pending,
-                        palette,
-                        typo,
-                    ))
-                    .child(
-                        div()
-                            .id("confirmation-body")
-                            .max_h(px(160.))
-                            .overflow_y_scroll()
-                            .child(body),
-                    )
-                    .child(self.confirm_buttons(&pending.id, shell, action, palette, cx)),
-            )
-            .into_any_element()
+        let deny = pending.id.clone();
+        let allow = pending.id.clone();
+        let session = pending.id.clone();
+        let mut card = crate::ui::ApprovalCard::new(
+            format!("confirmation-{}", pending.id),
+            pending.title.clone(),
+            body,
+            palette,
+        )
+        .icon(icon)
+        .action(
+            "deny",
+            "拒绝",
+            crate::ui::ApprovalActionKind::GhostDanger,
+            cx.listener(move |pane, _, _, cx| pane.respond_confirm(&deny, false, false, cx)),
+        );
+        if shell {
+            card = card.action(
+                "allow-session",
+                "此会话始终允许",
+                crate::ui::ApprovalActionKind::Secondary,
+                cx.listener(move |pane, _, _, cx| {
+                    pane.respond_confirm(&session, true, true, cx)
+                }),
+            );
+        }
+        card = card.action(
+            "allow",
+            action,
+            crate::ui::ApprovalActionKind::Primary,
+            cx.listener(move |pane, _, _, cx| pane.respond_confirm(&allow, true, false, cx)),
+        );
+        div().mx_3().mb_2().child(card).into_any_element()
     }
 
     pub(super) fn render_tag_approval(
@@ -461,64 +465,6 @@ impl ChatPane {
                 )
             })
             .into_any_element()
-    }
-
-    fn confirm_buttons(
-        &self,
-        id: &str,
-        shell: bool,
-        action: &'static str,
-        palette: Palette,
-        cx: &Context<Self>,
-    ) -> Div {
-        let deny = id.to_owned();
-        let allow = id.to_owned();
-        let session = id.to_owned();
-        let primary = ButtonCustomVariant::new(cx)
-            .color(gpui_kit::rgb(palette.accent).into())
-            .foreground(gpui_kit::rgb(palette.on_accent).into())
-            .hover(mix_color(palette.accent, palette.text, 0.11).into())
-            .active(mix_color(palette.accent, palette.text, 0.20).into());
-        div()
-            .flex()
-            .items_center()
-            .justify_end()
-            .gap_1p5()
-            .child(
-                Button::new("deny")
-                    .ghost()
-                    .compact()
-                    .h(px(26.))
-                    .rounded(px(7.))
-                    .label("拒绝")
-                    .on_click(cx.listener(move |pane, _, _, cx| {
-                        pane.respond_confirm(&deny, false, false, cx)
-                    })),
-            )
-            .when(shell, |row| {
-                row.child(
-                    Button::new("allow-session")
-                        .ghost()
-                        .compact()
-                        .h(px(26.))
-                        .rounded(px(7.))
-                        .label("此会话始终允许")
-                        .on_click(cx.listener(move |pane, _, _, cx| {
-                            pane.respond_confirm(&session, true, true, cx)
-                        })),
-                )
-            })
-            .child(
-                Button::new("allow")
-                    .custom(primary)
-                    .compact()
-                    .h(px(26.))
-                    .rounded(px(7.))
-                    .label(action)
-                    .on_click(cx.listener(move |pane, _, _, cx| {
-                        pane.respond_confirm(&allow, true, false, cx)
-                    })),
-            )
     }
 }
 

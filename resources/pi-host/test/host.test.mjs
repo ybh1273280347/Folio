@@ -166,6 +166,27 @@ test('the tag tool commits the exact preview approved in the originating SDK ses
   assert.deepEqual(receipt.details.tagApproval, confirmation);
 });
 
+test('Python source approved in Folio reaches the project interpreter verbatim', { timeout: 45000 }, async t => {
+  const literal = '中文 `backtick` $(echo untouched) $HOME C:\\new\\test';
+  const source = ['from pathlib import Path', `print(r'${literal}')`, 'print(Path.cwd())'].join('\r\n');
+  const {client, project, sessionId, requests, run} = await runWorkspaceTool(t, {
+    name: 'run_python', args: {source}, message: '用 Python 运行一段临时代码',
+  });
+  const card = await client.event(sessionId, 'extension_ui_request');
+  assert.equal(card.method, 'confirm');
+  assert.equal(card.commandApproval, true);
+  assert.equal(card.message, source);
+  assert.equal((await client.request({...project, sessionId, type:'extension_ui_response', id:card.id, confirmed:true})).success, true);
+
+  const ended = await client.event(sessionId, 'tool_execution_end');
+  assert.equal(ended.isError, false);
+  assert.equal(ended.result.structuredContent.exit_code, 0);
+  const output = [literal, project.cwd];
+  assert.deepEqual(ended.result.content[0].text.trimEnd().split(/\r?\n/), output);
+  assert.equal((await run).success, true);
+  assert.deepEqual(requests[1].messages.at(-1).content.trimEnd().split(/\r?\n/), output);
+});
+
 test('independent SDK sessions keep running across snapshots, closing tabs, and manual rename', { timeout: 45000 }, async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'folio-sdk-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

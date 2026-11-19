@@ -1491,7 +1491,10 @@ impl ChatPane {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_owned();
-                let content = if title.contains("bash") || title.contains("powershell") {
+                let command_approval = req["commandApproval"].as_bool() == Some(true)
+                    || title.contains("bash")
+                    || title.contains("powershell");
+                let content = if command_approval {
                     ConfirmationContent::Command(message)
                 } else {
                     ConfirmationContent::Message(message)
@@ -3092,7 +3095,8 @@ impl ChatPane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let is_file_edit = block.name == "edit" || block.name == "write";
-        let is_cmd = block.name == "bash" || block.name == "powershell";
+        let is_shell = matches!(block.name.as_str(), "bash" | "powershell");
+        let is_cmd = is_shell || block.name == "run_python";
         let mode = self.settings.tool_execution_view;
         let icon = if is_cmd {
             IconName::Terminal
@@ -3109,6 +3113,9 @@ impl ChatPane {
                 ("edit" | "write", _, true) => "编辑文件失败".into(),
                 ("edit" | "write", true, false) => "编辑了文件".into(),
                 ("edit" | "write", false, false) => "正在编辑文件".into(),
+                ("run_python", _, true) => "Python 脚本执行失败".into(),
+                ("run_python", true, false) => "运行了 Python 脚本".into(),
+                ("run_python", false, false) => "正在运行 Python 脚本".into(),
                 ("bash" | "powershell", _, true) => "命令执行失败".into(),
                 ("bash" | "powershell", true, false) => "执行了命令".into(),
                 ("bash" | "powershell", false, false) => "正在执行命令".into(),
@@ -3206,7 +3213,7 @@ impl ChatPane {
                 .into_any_element();
         }
 
-        let text = if is_cmd {
+        let text = if is_shell {
             let raw = block
                 .args
                 .get("command")
@@ -3223,7 +3230,7 @@ impl ChatPane {
             block.summary.clone()
         };
 
-        let detail_font = if is_cmd { code_font } else { ui_font };
+        let detail_font = if is_shell { code_font } else { ui_font };
         let row = render_command_detail_row(
             row_id.clone(),
             icon,
@@ -4503,7 +4510,7 @@ impl ChatPane {
                                             ))
                                             .hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
                                             .tooltip(|window, cx| {
-                                                Tooltip::new("切换 Shell 命令确认权限")
+                                                Tooltip::new("切换命令与脚本的确认权限")
                                                     .build(window, cx)
                                             })
                                             .on_click(cx.listener(|pane, _, _, cx| {
@@ -5401,7 +5408,7 @@ fn process_group_title(steps: &[ProcessStep<'_>], is_running: bool) -> String {
             ProcessStep::Thinking { .. } => has_thinking = true,
             ProcessStep::Tool { block, .. } => match block.name.as_str() {
                 "edit" | "write" => has_edit = true,
-                "bash" | "powershell" => has_cmd = true,
+                "bash" | "powershell" | "run_python" => has_cmd = true,
                 "read" | "grep" | "find" | "ls" => has_read = true,
                 _ => has_other = true,
             },
@@ -5454,7 +5461,7 @@ fn process_group_icon(steps: &[ProcessStep<'_>]) -> IconName {
         .any(|s| matches!(s, ProcessStep::Tool { block, .. } if block.name == "edit" || block.name == "write"));
     let has_cmd = steps
         .iter()
-        .any(|s| matches!(s, ProcessStep::Tool { block, .. } if block.name == "bash" || block.name == "powershell"));
+        .any(|s| matches!(s, ProcessStep::Tool { block, .. } if matches!(block.name.as_str(), "bash" | "powershell" | "run_python")));
     let has_read = steps
         .iter()
         .any(|s| matches!(s, ProcessStep::Tool { block, .. } if matches!(block.name.as_str(), "read" | "grep" | "find" | "ls")));
@@ -6318,6 +6325,7 @@ fn summarize_tool_call(name: &str, args: &Value, diffs: &[FileDiff]) -> String {
             }
         }
         "folio_tags_manage" => format!("管理标签：{}", args["tag"].as_str().unwrap_or_default()),
+        "run_python" => "运行 Python 脚本".into(),
         "bash" | "powershell" => args
             .get("command")
             .and_then(|v| v.as_str())

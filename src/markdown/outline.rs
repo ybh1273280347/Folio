@@ -436,7 +436,7 @@ fn collapse_whitespace(input: &str) -> String {
 fn outline_font_family() -> &'static str {
     #[cfg(target_os = "windows")]
     {
-        "Noto Sans SC"
+        "Jetbrain Maple Mono"
     }
     #[cfg(target_os = "macos")]
     {
