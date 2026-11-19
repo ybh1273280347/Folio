@@ -3621,27 +3621,26 @@ impl ChatPane {
             .font_family(ui_font.clone())
             .overflow_hidden()
             .flex()
+            .flex_col()
             .occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .border_r_1()
-                    .border_color(subtle_border(palette.border))
+                    .flex_shrink_0()
                     .flex()
-                    .flex_col()
+                    .border_b_1()
+                    .border_color(subtle_border(palette.border))
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
+                            .border_r_1()
+                            .border_color(subtle_border(palette.border))
                             .px_2p5()
                             .py_1()
-                            .border_b_1()
-                            .border_color(subtle_border(palette.border))
                             .flex()
                             .items_center()
                             .gap_1p5()
-                            .flex_shrink_0()
                             .child(
                                 crate::ui::icon(IconName::Search)
                                     .w(px(12.))
@@ -3665,6 +3664,37 @@ impl ChatPane {
                             ),
                     )
                     .child(
+                        div()
+                            .w(px(136.))
+                            .flex_shrink_0()
+                            .px_2p5()
+                            .py_1p5()
+                            .flex()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_size(typo.xs)
+                                    .font_semibold()
+                                    .text_color(gpui_kit::rgb(palette.muted))
+                                    .child("Effort"),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .border_r_1()
+                            .border_color(subtle_border(palette.border))
+                            .flex()
+                            .flex_col()
+                            .child(
                         div()
                             .id("ai-model-list")
                             .flex_1()
@@ -3787,30 +3817,14 @@ impl ChatPane {
                             })),
                     ),
             )
-            .child(
-                div()
-                    .w(px(136.))
-                    .flex_shrink_0()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
                     .child(
                         div()
-                            .px_2p5()
-                            .py_1p5()
-                            .border_b_1()
-                            .border_color(subtle_border(palette.border))
+                            .w(px(136.))
+                            .flex_shrink_0()
+                            .min_h_0()
                             .flex()
-                            .items_center()
+                            .flex_col()
                             .child(
-                                div()
-                                    .text_size(typo.xs)
-                                    .font_semibold()
-                                    .text_color(gpui_kit::rgb(palette.muted))
-                                    .child("Effort"),
-                            ),
-                    )
-                    .child(
                         div()
                             .id("ai-think-list")
                             .flex_1()
@@ -3875,6 +3889,7 @@ impl ChatPane {
                                     },
                                 ))
                             }),
+                    ),
                     ),
             )
             .with_animation(
