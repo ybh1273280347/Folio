@@ -747,6 +747,11 @@ impl Render for AiPane {
             }
             self.displayed_view = displayed_view;
         }
+        let header_bg = if palette.is_dark() {
+            palette.background
+        } else {
+            palette.hover
+        };
         div()
             .id("ai-manager")
             .relative()
@@ -767,7 +772,9 @@ impl Render for AiPane {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .bg(gpui_kit::rgb(palette.surface))
+                    .bg(gpui_kit::rgb(header_bg))
+                    .border_b_1()
+                    .border_color(gpui_kit::rgb(palette.border))
                     .child(
                         Button::new("ai-history")
                             .ghost()
@@ -817,6 +824,7 @@ impl Render for AiPane {
                                 let open = id.clone();
                                 let close = id.clone();
                                 // Selected tab stays wider via flex_shrink_0; keep all tabs inside the clipped tab strip.
+                                let tab_hover_bg = fg_alpha(palette.text, 0.07);
                                 let tab = div()
                                     .id(SharedString::from(format!("tab-{id}")))
                                     .w(px(150.))
@@ -831,8 +839,17 @@ impl Render for AiPane {
                                     .items_center()
                                     .gap_1()
                                     .cursor_pointer()
-                                    .bg(gpui_kit::rgb(palette.surface))
-                                    .when(current, |s| s.bg(gpui_kit::rgb(palette.hover)))
+                                    .text_color(fg_alpha(palette.text, 0.78))
+                                    .when(current, |s| {
+                                        s.bg(gpui_kit::rgb(palette.surface))
+                                            .text_color(gpui_kit::rgb(palette.text))
+                                    })
+                                    .when(!current, |s| {
+                                        s.hover(move |h| {
+                                            h.bg(tab_hover_bg)
+                                                .text_color(gpui_kit::rgb(palette.text))
+                                        })
+                                    })
                                     .on_click(cx.listener(move |pane, _, _, cx| {
                                         pane.activate(open.clone(), cx)
                                     }))
