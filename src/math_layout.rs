@@ -2,11 +2,11 @@
 use crate::model::MathFont;
 use gpui_kit::*;
 use latex_rust::{BoxContent, Dim, MathBox};
-use std::{collections::HashMap, sync::OnceLock};
+use std::{collections::HashMap, sync::{Arc, OnceLock}};
 
 type LayoutError = Box<dyn std::error::Error>;
+type FontFaceData = (Vec<u8>, u32);
 const EM: f32 = 10.;
-static CJK_FONT: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
 const FONTS: [(&str, &[u8]); 7] = [
     (
         "STIXTwoMath-Regular.otf",
@@ -50,37 +50,44 @@ pub fn register_fonts(cx: &App) {
 }
 
 /// Parse each font once per worker, rather than once per formula.
-#[derive(Default)]
 pub struct Typesetter {
-    fonts: HashMap<&'static str, latex_rust::MathFont>,
+    text_system: Arc<TextSystem>,
+    fonts: HashMap<(&'static str, FontId), latex_rust::MathFont>,
+    fallback_faces: HashMap<FontId, Arc<OnceLock<Result<FontFaceData, String>>>>,
 }
 impl Typesetter {
+    pub fn new(text_system: Arc<TextSystem>) -> Self {
+        Self { text_system, fonts: HashMap::new(), fallback_faces: HashMap::new() }
+    }
+
     pub fn typeset(
         &mut self,
         latex: &str,
         display: bool,
         selected: MathFont,
+        fallback: FontId,
     ) -> Result<MathLayout, LayoutError> {
-        if !self.fonts.contains_key(selected.filename()) {
+        let font_key = (selected.filename(), fallback);
+        if !self.fonts.contains_key(&font_key) {
             let bytes = FONTS
                 .iter()
                 .find(|(file, _)| *file == selected.filename())
                 .expect("bundled math font")
                 .1;
             // Fallback metrics must participate in layout, including fractions and accents.
+            let text_system = self.text_system.clone();
+            let face = self.fallback_faces.entry(fallback).or_default().clone();
             let font = latex_rust::MathFont::from_bytes(bytes)?.with_glyph_fallback(move |ch| {
-                // Large text-font bytes are loaded only when a formula actually needs fallback.
-                let bytes = CJK_FONT
+                // Use the exact face and collection index that GPUI will paint.
+                let (bytes, index) = face
                     .get_or_init(|| {
-                        let windows = std::env::var_os("WINDIR").expect("Windows provides WINDIR");
-                        std::fs::read(std::path::PathBuf::from(windows).join("Fonts/msyh.ttc"))
-                            .map_err(|error| error.to_string())
+                        text_system.font_data(fallback).map_err(|error| error.to_string())
                     })
                     .as_ref()
                     .map_err(|message| latex_rust::FontError::Fallback {
                         message: format!("中文字体加载失败：{message}"),
                     })?;
-                let cjk = ttf_parser::Face::parse(bytes, 0)
+                let cjk = ttf_parser::Face::parse(bytes, *index)
                     .map_err(|_| latex_rust::FontError::InvalidFace)?;
                 let Some(id) = cjk.glyph_index(ch) else {
                     return Ok(None);
@@ -98,7 +105,7 @@ impl Typesetter {
                     depth: Dim::from_font_units(bounds.map_or(0, |b| (-b.y_min).max(0)).into(), em),
                 }))
             });
-            self.fonts.insert(selected.filename(), font);
+            self.fonts.insert(font_key, font);
         }
         let ast = latex_rust::parse(latex).map_err(latex_rust::Error::from)?;
         let style = if display {
@@ -106,9 +113,10 @@ impl Typesetter {
         } else {
             latex_rust::MathStyle::Text
         };
-        let boxed = latex_rust::layout(&ast, &self.fonts[selected.filename()], style)?;
+        let boxed = latex_rust::layout(&ast, &self.fonts[&font_key], style)?;
         let mut layout = MathLayout {
             font: selected,
+            fallback_font: fallback,
             operations: Vec::new(),
             width: dim(&boxed.width),
             height: dim(&boxed.height) + dim(&boxed.depth),
@@ -149,6 +157,7 @@ enum Operation {
 }
 pub struct MathLayout {
     font: MathFont,
+    fallback_font: FontId,
     operations: Vec<Operation>,
     pub width: f32,
     pub height: f32,
@@ -251,7 +260,6 @@ impl MathLayout {
     }
     pub fn paint(&self, origin: Point<Pixels>, scale: f32, window: &mut Window, cx: &App) {
         let main = cx.text_system().resolve_font(&font(self.font.family()));
-        let mut fallback = None;
         for op in &self.operations {
             match *op {
                 Operation::Glyph {
@@ -266,13 +274,7 @@ impl MathLayout {
                     if window.is_vector_capture() {
                         window.set_vector_text(ch.to_string());
                     }
-                    let face = if other {
-                        *fallback.get_or_insert_with(|| {
-                            cx.text_system().resolve_font(&font("Microsoft YaHei"))
-                        })
-                    } else {
-                        main
-                    };
+                    let face = if other { self.fallback_font } else { main };
                     window
                         .paint_glyph(
                             origin + point(px(x * scale), px(y * scale)),

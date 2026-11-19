@@ -762,10 +762,13 @@ impl Workspace {
             self.report(format!("找不到文件：{}", path.display()), cx);
             return;
         };
+        if !resolved.is_file() || !files::is_relevant(&resolved) {
+            self.report(format!("Folio 不支持打开此文件：{}", resolved.display()), cx);
+            return;
+        }
         if let Some(project) = self.directory_workspace()
             && let Ok(canonical_root) = dunce::canonicalize(&project.folder)
             && let Ok(relative) = resolved.strip_prefix(&canonical_root)
-            && files::is_relevant(&resolved)
         {
             let key = relative.to_string_lossy().replace('\\', "/");
             let file = ProjectFile {
@@ -777,14 +780,8 @@ impl Workspace {
             }
             return;
         }
-        if files::is_relevant(&resolved) {
-            match self
-                .prepare_standalone_file(&resolved)
-                .and_then(|file| self.open_file(&file, window, cx))
-            {
-                Ok(()) => {}
-                Err(error) => self.report(error, cx),
-            }
+        if let Err(error) = self.open_standalone_file(&resolved, window, cx) {
+            self.report(error, cx);
         }
     }
 

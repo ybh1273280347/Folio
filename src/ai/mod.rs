@@ -9,7 +9,7 @@ pub(crate) use rpc::project_key;
 pub use quote::SelectionQuote;
 use quote::{append_quotes, split_injected_prompt};
 
-use crate::math::{MathReady, MathRenderer};
+use crate::math::{MathDisplaySize, MathReady, MathRenderer};
 use gpui_kit::component::Sizable;
 use crate::mermaid::{MermaidReady, MermaidRenderer};
 use crate::model::{AppSettings, ToolExecutionView};
@@ -206,7 +206,7 @@ struct AiTypography {
 
 impl AiTypography {
     fn from_settings(settings: &AppSettings) -> Self {
-        let base = (settings.interface_font_size as f32).clamp(11., 24.);
+        let base = settings.interface_body_size();
         Self {
             body: px(base),
             sm: px((base - 1.5).max(10.5)),
@@ -313,7 +313,7 @@ impl ChatPane {
         cx: &mut Context<Self>,
     ) -> Self {
         let mermaid = cx.new(MermaidRenderer::new);
-        let md_extensions = crate::markdown::markdown_extensions(&math, cx)
+        let md_extensions = crate::markdown::markdown_extensions(&math, MathDisplaySize::Interface, cx)
             .plugin(mermaid.read(cx).plugin(mermaid.downgrade()));
         let sub_math = cx.subscribe(&math, |_, _, event: &MathReady, cx| {
             if matches!(event, MathReady::Ready) {
@@ -2276,11 +2276,11 @@ impl ChatPane {
             .into_any_element()
     }
 
-    fn md_style(&self, cx: &App) -> TextViewStyle {
+    fn md_style(&self, body_size: Pixels, cx: &App) -> TextViewStyle {
         let base = TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx));
         let soft_selection = base.selection().alpha(0.3);
-        base.with_inline_code_style(crate::ui::inline_code_style(&self.settings))
-            .with_code_block(crate::ui::block_code_style(&self.settings))
+        base.with_inline_code_style(crate::ui::inline_code_style(&self.settings, body_size))
+            .with_code_block(crate::ui::block_code_style(&self.settings, body_size))
             .with_table(crate::ui::markdown_table_style())
             .with_selection(soft_selection)
     }
@@ -2366,6 +2366,7 @@ impl ChatPane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let normalized = markdown_editor::normalize_math(text);
+        let chat = cx.entity().downgrade();
         div()
             .id(SharedString::from(format!("ai-quote-source-{msg_idx}-{part_idx}")))
             .on_mouse_down(MouseButton::Left, cx.listener(move |pane, event: &MouseDownEvent, _, _| {
@@ -2402,6 +2403,38 @@ impl ChatPane {
                 TextView::markdown(id, normalized)
                     .selectable(true)
                     .markdown_extensions(self.md_extensions.clone())
+                    .on_link_click(move |url, event, _, cx| {
+                        // Match TextView's activation gestures when overriding its link handler.
+                        let activate = match event {
+                            ClickEvent::Mouse(click) => {
+                                matches!(click.up.button, MouseButton::Left | MouseButton::Middle)
+                            }
+                            ClickEvent::Keyboard(_) => true,
+                            ClickEvent::Touch(click) => !click.long_press,
+                        };
+                        if !activate {
+                            return;
+                        }
+                        let relative = url.starts_with("./");
+                        if !relative && !url.starts_with("file://") {
+                            cx.open_url(url);
+                            return;
+                        }
+                        let _ = chat.update(cx, |pane, cx| {
+                            // Relative citations belong to the conversation's workspace.
+                            let path = if relative {
+                                let path = url.split(['#', '?']).next().expect("link has a path");
+                                Some(pane.cwd.join(crate::files::percent_decode(path)))
+                            } else {
+                                url::Url::parse(url).ok().and_then(|uri| uri.to_file_path().ok())
+                            };
+                            if let Some(path) = path {
+                                cx.emit(AiPaneEvent::OpenFile(path));
+                            } else {
+                                pane.show_toast("无法解析文件引用".into(), true, cx);
+                            }
+                        });
+                    })
                     .style(md_style.clone())
                     .font_family(ui_font.clone())
                     .text_size(typo.body)
@@ -4685,7 +4718,7 @@ impl Render for ChatPane {
             && self.startup_error.is_none()
             && self.pending_ui.is_none()
             && self.ext_widgets.is_empty();
-        let md_style = self.md_style(cx);
+        let md_style = self.md_style(typo.body, cx);
         let total_msgs = self.messages.len();
 
         let user_bubble_bg = mix_color(

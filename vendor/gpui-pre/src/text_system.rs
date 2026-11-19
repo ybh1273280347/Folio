@@ -235,6 +235,7 @@ pub struct TextSystem {
     raster_bounds: RwLock<FxHashMap<RenderGlyphParams, Bounds<DevicePixels>>>,
     wrapper_pool: Mutex<FxHashMap<FontIdWithSize, Vec<CharWidthCache>>>,
     fallback_font_stack: SmallVec<[Font; 2]>,
+    default_font_fallbacks: RwLock<Option<FontFallbacks>>,
     font_generation: Arc<AtomicUsize>,
     missing_glyph_reporter: Arc<MissingGlyphReporter>,
     missing_glyph_receiver: Mutex<Option<MissingGlyphReceiver>>,
@@ -271,6 +272,7 @@ impl TextSystem {
                 font("DejaVu Sans"),
                 font("Arial"), // macOS, Windows
             ],
+            default_font_fallbacks: RwLock::default(),
             font_generation: Arc::default(),
             missing_glyph_reporter: Arc::new(MissingGlyphReporter {
                 generation: missing_glyph_generation.clone(),
@@ -297,6 +299,20 @@ impl TextSystem {
     /// Export the exact selected face, including platform-selected fallback fonts.
     pub fn font_data(&self, id: FontId) -> Result<(Vec<u8>, u32)> {
         self.platform_text_system.font_data(id)
+    }
+
+    /// Set the app-wide glyph fallback for fonts without their own fallback list.
+    pub fn set_default_font_fallbacks(&self, fallbacks: Option<FontFallbacks>) {
+        let mut current = self.default_font_fallbacks.write();
+        if *current != fallbacks {
+            *current = fallbacks;
+            self.missing_glyph_reporter.reset();
+            self.font_generation.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    pub(crate) fn default_font_fallbacks(&self) -> Option<FontFallbacks> {
+        self.default_font_fallbacks.read().clone()
     }
 
     /// Add a font's data to the text system.
@@ -354,6 +370,15 @@ impl TextSystem {
     ///
     /// Panics if the font and none of the fallbacks can be resolved.
     pub fn resolve_font(&self, font: &Font) -> FontId {
+        let configured;
+        // Key font IDs by the effective descriptor so switching fallbacks also
+        // updates callers that construct their font without a window text style.
+        let font = if font.fallbacks.is_none() && let Some(fallbacks) = self.default_font_fallbacks() {
+            configured = Font { fallbacks: Some(fallbacks), ..font.clone() };
+            &configured
+        } else {
+            font
+        };
         if let Some(CachedFont::Direct(font_id) | CachedFont::Fallback(font_id)) =
             self.font_ids_by_font.read().get(font)
         {
@@ -609,7 +634,10 @@ impl TextSystem {
             if let Some(font_id) = lookup_font(font) {
                 Some(font_id)
             } else {
-                let font_id = self.fallback_font_stack.iter().find_map(lookup_font);
+                let font_id = self.fallback_font_stack.iter().find_map(|candidate| {
+                    let candidate = Font { fallbacks: font.fallbacks.clone(), ..candidate.clone() };
+                    lookup_font(&candidate)
+                });
                 if let Some(font_id) = font_id {
                     font_ids.with_upgraded(|font_ids| {
                         font_ids.insert(font.clone(), CachedFont::Fallback(font_id));

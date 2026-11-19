@@ -268,6 +268,11 @@ fn mix(base: u32, tint: u32, amount: f32) -> Rgba {
 }
 
 pub fn apply_settings(settings: &crate::model::AppSettings, cx: &mut App) {
+    cx.text_system().set_default_font_fallbacks(
+        (!settings.cjk_fallback_font.is_empty()).then(|| {
+            gpui_kit::FontFallbacks::from_fonts(vec![settings.cjk_fallback_font.clone()])
+        }),
+    );
     let document_typography = gpui_kit::base::Theme::global(cx).tokens.typography;
     apply(settings.theme.palette, cx);
 

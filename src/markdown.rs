@@ -1,7 +1,7 @@
 //! Markdown panes share one GPUI block editor for live editing and keep the
 //! source editor only for the explicit source-mode toggle.
 use crate::theme::color as rgb;
-use crate::math::{MathReady, MathRenderer, formula_id};
+use crate::math::{MathDisplaySize, MathReady, MathRenderer, formula_id};
 use crate::mermaid::{MermaidReady, MermaidRenderer};
 use crate::model::{AnnotationItem, AppSettings, HIGHLIGHT_COLORS};
 use crate::storage;
@@ -59,10 +59,14 @@ pub(crate) const CALLOUTS: &[(&str, &str, u32)] = &[
 ];
 
 /// Build Folio's shared Markdown extensions (math typesetting + 25 callout surfaces).
-pub(crate) fn markdown_extensions(math: &Entity<MathRenderer>, cx: &App) -> MarkdownExtensions {
+pub(crate) fn markdown_extensions(
+    math: &Entity<MathRenderer>,
+    display_size: MathDisplaySize,
+    cx: &App,
+) -> MarkdownExtensions {
     let mut extensions = MarkdownExtensions::default()
-        .plugin(math.read(cx).plugin(false, math.clone()))
-        .plugin(math.read(cx).plugin(true, math.clone()));
+        .plugin(math.read(cx).plugin(false, math.clone(), display_size))
+        .plugin(math.read(cx).plugin(true, math.clone(), display_size));
     for &(name, title, color) in CALLOUTS {
         let hsla: Hsla = gpui_kit::rgb(color).into();
         extensions = extensions.block_surface(name, move |_, _| {
@@ -491,7 +495,7 @@ impl MarkdownPane {
         let scroll = ScrollHandle::new();
         math.update(cx, |renderer, cx| renderer.set_appearance(&settings, cx));
         let mermaid = cx.new(MermaidRenderer::new);
-        let extensions = markdown_extensions(&math, cx);
+        let extensions = markdown_extensions(&math, MathDisplaySize::Markdown, cx);
         let callout_styles: Vec<_> = CALLOUTS
             .iter()
             .map(|&(name, title, color)| CalloutStyle {
@@ -507,7 +511,12 @@ impl MarkdownPane {
                 .expect("current Markdown parses with the configured GPUI extensions");
             editor.set_callout_styles(callout_styles, cx);
             editor.set_scroll_handle(scroll.clone());
-            editor.set_code_styles(crate::ui::inline_code_style(&settings), crate::ui::block_code_style(&settings), cx);
+            let body_size = px(settings.markdown_font_size as f32);
+            editor.set_code_styles(
+                crate::ui::inline_code_style(&settings, body_size),
+                crate::ui::block_code_style(&settings, body_size),
+                cx,
+            );
             let renderer = mermaid.downgrade();
             editor.set_code_block_preview("mermaid".into(), move |id, revision, code, interactive, window, cx| {
                 renderer.update(cx, |renderer, cx| renderer.element(id, revision, code, interactive, window, cx))
@@ -1197,7 +1206,12 @@ impl MarkdownPane {
                 editor.set_line_number(settings.show_line_numbers, window, cx);
             });
             self.visual_editor.update(cx, |editor, cx| {
-                editor.set_code_styles(crate::ui::inline_code_style(settings), crate::ui::block_code_style(settings), cx);
+                let body_size = px(settings.markdown_font_size as f32);
+                editor.set_code_styles(
+                    crate::ui::inline_code_style(settings, body_size),
+                    crate::ui::block_code_style(settings, body_size),
+                    cx,
+                );
             });
             self.math
                 .update(cx, |renderer, cx| renderer.set_appearance(settings, cx));
@@ -2569,7 +2583,12 @@ impl Render for MarkdownPane {
                         .on_click(cx.listener(|pane, _, _, cx| {
                             pane.settings.markdown_font_size = 14;
                             pane.visual_editor.update(cx, |editor, cx| {
-                                editor.set_code_styles(crate::ui::inline_code_style(&pane.settings), crate::ui::block_code_style(&pane.settings), cx);
+                                let body_size = px(pane.settings.markdown_font_size as f32);
+                                editor.set_code_styles(
+                                    crate::ui::inline_code_style(&pane.settings, body_size),
+                                    crate::ui::block_code_style(&pane.settings, body_size),
+                                    cx,
+                                );
                             });
                             cx.emit(MarkdownEvent::Zoom(14));
                             cx.notify();
@@ -3379,7 +3398,12 @@ impl Render for MarkdownPane {
                     pane.settings.markdown_font_size =
                         (pane.settings.markdown_font_size as i16 + delta).clamp(11, 26) as u8;
                     pane.visual_editor.update(cx, |editor, cx| {
-                        editor.set_code_styles(crate::ui::inline_code_style(&pane.settings), crate::ui::block_code_style(&pane.settings), cx);
+                        let body_size = px(pane.settings.markdown_font_size as f32);
+                        editor.set_code_styles(
+                            crate::ui::inline_code_style(&pane.settings, body_size),
+                            crate::ui::block_code_style(&pane.settings, body_size),
+                            cx,
+                        );
                     });
                     pane.math.update(cx, |renderer, cx| {
                         renderer.set_appearance(&pane.settings, cx)
