@@ -111,6 +111,9 @@ fn render(data: &Data, window: &mut Window, cx: &mut App) -> AnyElement {
                     cx.write_to_clipboard(ClipboardItem::new_string(code));
                 }),
         );
+        if state.read(cx).code_folding {
+            actions = actions.child(super::code_ui::fold_button(&state, block, cx));
+        }
         div()
             .flex()
             .items_center()

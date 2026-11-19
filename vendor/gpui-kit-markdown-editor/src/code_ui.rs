@@ -114,6 +114,19 @@ pub(crate) fn container(context: &RenderContext) -> gpui::Div {
         .rounded(px(8.))
 }
 
+pub(crate) fn fold_button(state: &Entity<BlockEditorState>, block: BlockId, cx: &App) -> Button {
+    let open = state.read(cx).is_fold_open(block);
+    let state = state.clone();
+    Button::new(("code-fold", block.as_u64() as usize))
+        .ghost().compact().w(px(28.)).h(px(28.))
+        .icon(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
+            .w(px(14.)).h(px(14.)))
+        .tooltip(if open { "折叠代码块" } else { "展开代码块" })
+        .on_click(move |_, _, cx| {
+            state.update(cx, |state, cx| state.toggle_code_fold(block, cx));
+        })
+}
+
 pub(crate) fn header(
     state: &Entity<BlockEditorState>, block: BlockId,
     window: &mut Window, cx: &mut App,
@@ -161,10 +174,15 @@ pub(crate) fn header(
                 }),
         );
     }
-    div()
+    if state.read(cx).code_folding {
+        actions = actions.child(fold_button(state, block, cx));
+    }
+    let header = div()
         .id(("code-tools", block.as_u64() as usize))
         .w_full().px_2().py_1().flex().items_center().justify_between()
-        .border_b_1().border_color(theme.border.opacity(0.5))
+        .border_color(theme.border.opacity(0.5));
+    let header = if state.read(cx).is_fold_open(block) { header.border_b_1() } else { header };
+    header
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(
             div()
