@@ -267,6 +267,15 @@ fn mix(base: u32, tint: u32, amount: f32) -> Rgba {
     }
 }
 
+pub(crate) fn tool_typography(settings: &crate::model::AppSettings) -> (SharedString, Pixels) {
+    let code_font = if settings.block_code_font.is_empty() {
+        "Consolas".into()
+    } else {
+        settings.block_code_font.clone().into()
+    };
+    (code_font, px(settings.ai_font_size as f32 * settings.block_code_scale))
+}
+
 pub fn apply_settings(settings: &crate::model::AppSettings, cx: &mut App) {
     cx.text_system().set_default_font_fallbacks(
         (!settings.cjk_fallback_font.is_empty()).then(|| {
@@ -276,14 +285,8 @@ pub fn apply_settings(settings: &crate::model::AppSettings, cx: &mut App) {
     let document_typography = gpui_kit::base::Theme::global(cx).tokens.typography;
     apply(settings.theme.palette, cx);
 
-    let family: SharedString = if settings.interface_font.trim().is_empty() {
-        "Segoe UI".into()
-    } else {
-        settings.interface_font.trim().to_owned().into()
-    };
-    let (tool_font, tool_size) = crate::ai::tool_typography(settings);
+    let (tool_font, tool_size) = tool_typography(settings);
     Theme::update(cx, |theme| {
-        theme.font_family = family;
         // Native Diff reads the component monospace font at row layout time.
         theme.mono_font_family = tool_font;
         theme.mono_font_size = tool_size;

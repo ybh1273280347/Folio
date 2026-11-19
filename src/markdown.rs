@@ -409,11 +409,7 @@ impl MarkdownPane {
                 .top_0()
                 .left_0()
                 .text_size(px(self.settings.markdown_font_size as f32))
-                .font_family(if self.settings.interface_font.is_empty() {
-                    SharedString::from("Segoe UI")
-                } else {
-                    self.settings.interface_font.clone().into()
-                })
+                .font_family(crate::ui::sans_font(&self.settings.markdown_font))
                 .child(
                     canvas(
                         move |_, window, cx| {
@@ -506,7 +502,6 @@ impl MarkdownPane {
             }
         }).detach();
         let scroll = ScrollHandle::new();
-        math.update(cx, |renderer, cx| renderer.set_appearance(&settings, cx));
         let mermaid = cx.new(MermaidRenderer::new);
         let extensions = markdown_extensions(&math, MathDisplaySize::Markdown, cx);
         let callout_styles: Vec<_> = CALLOUTS
@@ -1395,8 +1390,6 @@ impl MarkdownPane {
                     cx,
                 );
             });
-            self.math
-                .update(cx, |renderer, cx| renderer.set_appearance(settings, cx));
             cx.notify();
         }
         if self.text == text {
@@ -2948,8 +2941,8 @@ impl Render for MarkdownPane {
                 self.render_active_annotation_popover(pane_origin, pane_size, cx);
             let translate_popover = self.translate.render(
                 "md-translate",
-                Some(self.settings.interface_font.as_str()),
-                Some(self.settings.interface_font_size),
+                Some(self.settings.markdown_font.as_str()),
+                Some(self.settings.markdown_font_size),
                 Some(pane_size),
                 cx,
                 |this| &mut this.translate,
@@ -2975,12 +2968,6 @@ impl Render for MarkdownPane {
                     .on_scroll(cx.listener(|pane, _: &ScrollEvent, _, cx| {
                         pane.sync_active_heading(cx);
                     }))
-                    .text_size(px(self.settings.markdown_font_size as f32))
-                    .font_family(if self.settings.interface_font.is_empty() {
-                        SharedString::from("Segoe UI")
-                    } else {
-                        self.settings.interface_font.clone().into()
-                    })
                     .on_mouse_move(cx.listener(|pane, ev: &MouseMoveEvent, _, cx| {
                         pane.mouse_pos = Some(ev.position);
                         let next_id = pane
@@ -3649,7 +3636,11 @@ impl Render for MarkdownPane {
         div()
             .relative()
             .size_full()
-            .when(!self.source, |pane| pane.key_context("FolioMarkdownVisual"))
+            .when(!self.source, |pane| {
+                pane.key_context("FolioMarkdownVisual")
+                    .font_family(crate::ui::sans_font(&self.settings.markdown_font))
+                    .text_size(px(self.settings.markdown_font_size as f32))
+            })
             .track_focus(&self.focus)
             .flex()
             .flex_col()
@@ -3671,9 +3662,6 @@ impl Render for MarkdownPane {
                             crate::ui::block_code_style(&pane.settings, body_size),
                             cx,
                         );
-                    });
-                    pane.math.update(cx, |renderer, cx| {
-                        renderer.set_appearance(&pane.settings, cx)
                     });
                     pane.zoom_hud.show(
                         pane.settings.markdown_font_size,

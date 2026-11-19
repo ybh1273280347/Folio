@@ -9,6 +9,16 @@ use gpui_kit::{
 };
 use std::borrow::Cow;
 
+pub const DEFAULT_SANS_FONT: &str = "Segoe UI";
+
+pub fn sans_font(family: &str) -> SharedString {
+    if family.trim().is_empty() {
+        DEFAULT_SANS_FONT.into()
+    } else {
+        family.trim().to_owned().into()
+    }
+}
+
 /// Read the current draft only when clicked; feedback belongs to this document's button.
 pub fn copy_document_button(
     id: impl Into<ElementId>,

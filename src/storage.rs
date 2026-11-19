@@ -54,7 +54,18 @@ pub fn save_workspace_sessions(
 }
 
 pub fn load_settings() -> io::Result<AppSettings> {
-    read_json(&data_directory()?.join("preferences.json"))
+    let mut values: serde_json::Map<String, serde_json::Value> =
+        read_json(&data_directory()?.join("preferences.json"))?;
+    // Older files shared the interface family with both panels and its size with AI.
+    // An explicit empty family already means that the panel uses the system font.
+    if let Some(family) = values.get("interfaceFont").cloned() {
+        values.entry("markdownFont").or_insert_with(|| family.clone());
+        values.entry("aiFont").or_insert(family);
+    }
+    if let Some(size) = values.get("interfaceFontSize").and_then(serde_json::Value::as_u64) {
+        values.entry("aiFontSize").or_insert_with(|| size.clamp(11, 24).into());
+    }
+    serde_json::from_value(values.into()).map_err(io::Error::other)
 }
 
 pub fn save_settings(settings: &AppSettings) -> io::Result<()> {

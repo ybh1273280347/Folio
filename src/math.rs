@@ -47,7 +47,7 @@ const DEFAULT_CJK_FONT: &str = "Microsoft YaHei";
 #[derive(Clone, Copy)]
 pub(crate) enum MathDisplaySize {
     Markdown,
-    Interface,
+    Ai,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -55,7 +55,7 @@ struct MathAppearance {
     font: MathFont,
     fallback_font: FontId,
     display_size: f32,
-    interface_display_size: f32,
+    ai_display_size: f32,
     inline_scale: f32,
 }
 struct MathRequest {
@@ -147,7 +147,7 @@ impl MathRenderer {
                 font: MathFont::default(),
                 fallback_font: cx.text_system().resolve_font(&font(DEFAULT_CJK_FONT)),
                 display_size: 23.8,
-                interface_display_size: 23.8,
+                ai_display_size: 23.8,
                 inline_scale: 1.,
             })),
             _task: task,
@@ -163,7 +163,7 @@ impl MathRenderer {
             font: settings.math_font,
             fallback_font: cx.text_system().resolve_font(&font(fallback_family.to_owned())),
             display_size: settings.markdown_font_size as f32 * settings.math_scale,
-            interface_display_size: settings.interface_body_size() * settings.math_scale,
+            ai_display_size: settings.ai_font_size as f32 * settings.math_scale,
             inline_scale: settings.inline_math_scale,
         };
         let previous = std::mem::replace(
@@ -414,7 +414,7 @@ impl MarkdownPlugin for MathPlugin {
         let appearance = *self.appearance.lock().expect("math appearance lock");
         let size = match self.display_size {
             MathDisplaySize::Markdown => appearance.display_size,
-            MathDisplaySize::Interface => appearance.interface_display_size,
+            MathDisplaySize::Ai => appearance.ai_display_size,
         };
         let (element, _) = self.formula_element(content, size / 10.);
         self.editable(

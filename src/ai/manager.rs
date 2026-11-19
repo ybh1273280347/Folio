@@ -632,7 +632,7 @@ impl AiPane {
 
     fn history(&self, cx: &mut Context<Self>) -> AnyElement {
         let palette = active_palette();
-        let font_size = (self.settings.interface_font_size as f32 - 2.).max(10.);
+        let font_size = (self.settings.ai_font_size as f32 - 2.).max(10.);
         let metadata_color = mix_color(palette.surface, palette.muted, 0.65);
         let pinned_style = ButtonCustomVariant::new(cx)
             .color(mix_color(palette.surface, palette.accent, 0.14).into())
@@ -651,6 +651,7 @@ impl AiPane {
             .collect();
         rows.sort_by_key(|(rank, _)| *rank);
         div().w(px(300.)).max_h(px(340.)).p_1().rounded(px(10.)).border_1().text_size(px(font_size))
+            .font_family(crate::ui::sans_font(&self.settings.ai_font))
             .border_color(subtle_border(palette.border)).bg(gpui_kit::rgb(palette.surface))
             .shadow(popover_shadow(palette.is_dark())).flex().flex_col().gap_1().occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -756,6 +757,8 @@ impl Render for AiPane {
             .min_h_0()
             .bg(gpui_kit::rgb(palette.surface))
             .text_color(gpui_kit::rgb(palette.text))
+            .font_family(crate::ui::sans_font(&self.settings.ai_font))
+            .text_size(px(self.settings.ai_font_size as f32))
             .child(
                 div()
                     .h(px(32.))
