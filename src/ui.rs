@@ -799,7 +799,7 @@ impl RenderOnce for ApprovalCard {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let p = self.palette;
         let dark = p.is_dark();
-        let (badge_text, badge_bg, badge_fg) = self.badge;
+        let (badge_text, _badge_bg, badge_fg) = self.badge;
         let has_actions = !self.actions.is_empty();
         let footer_actions = self.actions.into_iter().map(|act| {
             let el = match act.kind {
@@ -807,7 +807,7 @@ impl RenderOnce for ApprovalCard {
                     let hover_bg = if dark { 0x3b1d22 } else { 0xfff1f0 };
                     let hover_fg = if dark { 0xfca5a5 } else { 0xcf1322 };
                     button_base(act.id, act.label)
-                        .min_h(px(27.))
+                        .min_h(px(26.))
                         .px_2p5()
                         .rounded(px(6.))
                         .text_size(px(12.))
@@ -819,31 +819,28 @@ impl RenderOnce for ApprovalCard {
                         .active(|s| s.shadow(inset_press(0.08)))
                 }
                 ApprovalActionKind::Secondary => button_base(act.id, act.label)
-                    .min_h(px(27.))
+                    .min_h(px(26.))
                     .px_2p5()
                     .rounded(px(6.))
                     .text_size(px(12.))
                     .text_color(gpui_kit::rgb(p.text))
-                    .bg(gpui_kit::rgb(p.surface))
-                    .border_1()
-                    .border_color(gpui_kit::rgb(p.border))
-                    .shadow(raised(0.05, 0.0))
-                    .hover(move |s| s.bg(gpui_kit::rgb(p.hover)))
+                    .bg(gpui_kit::rgb(p.hover))
+                    .hover(move |s| s.bg(gpui_kit::rgb(p.pressed)))
                     .active(move |s| {
                         s.bg(gpui_kit::rgb(p.pressed))
-                            .shadow(inset_press(0.10))
+                            .shadow(inset_press(0.08))
                     }),
                 ApprovalActionKind::Primary => button_base(act.id, act.label)
-                    .min_h(px(27.))
+                    .min_h(px(26.))
                     .px_3()
                     .rounded(px(6.))
                     .text_size(px(12.))
                     .font_medium()
                     .text_color(gpui_kit::rgb(p.on_accent))
                     .bg(gpui_kit::rgb(p.accent))
-                    .shadow(raised(0.14, 0.14))
+                    .shadow(raised(0.12, 0.12))
                     .hover(|s| s.opacity(0.90))
-                    .active(|s| s.opacity(0.82).shadow(inset_press(0.20))),
+                    .active(|s| s.opacity(0.82).shadow(inset_press(0.18))),
             };
             el.on_click(move |ev, window, cx| (act.on_click)(ev, window, cx))
         });
@@ -856,87 +853,78 @@ impl RenderOnce for ApprovalCard {
             .border_color(gpui_kit::rgb(p.border))
             .bg(gpui_kit::rgb(p.surface))
             .shadow_sm()
-            .overflow_hidden()
+            .p_3()
             .flex()
-            .flex_row()
-            .child(div().w(px(3.)).flex_shrink_0().bg(gpui_kit::rgb(self.accent_bar)))
+            .flex_col()
+            .gap_2p5()
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
                     .flex()
-                    .flex_col()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .px_3()
-                            .py_2()
-                            .border_b_1()
-                            .border_color(gpui_kit::rgb(p.border))
+                            .gap_1p5()
+                            .min_w_0()
+                            .flex_1()
                             .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .child(
-                                        self::icon(self.icon)
-                                            .size(px(14.))
-                                            .text_color(gpui_kit::rgb(self.accent_bar))
-                                            .flex_shrink_0(),
-                                    )
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .text_ellipsis()
-                                            .text_size(px(12.5))
-                                            .font_medium()
-                                            .text_color(gpui_kit::rgb(p.text))
-                                            .child(self.title),
-                                    ),
+                                self::icon(self.icon)
+                                    .size(px(14.))
+                                    .text_color(gpui_kit::rgb(self.accent_bar))
+                                    .flex_shrink_0(),
                             )
                             .child(
                                 div()
-                                    .flex_shrink_0()
-                                    .px_2()
-                                    .py(px(2.))
-                                    .rounded(px(999.))
-                                    .bg(gpui_kit::rgb(badge_bg))
-                                    .text_color(gpui_kit::rgb(badge_fg))
-                                    .text_size(px(11.))
+                                    .min_w_0()
+                                    .text_ellipsis()
+                                    .text_size(px(12.5))
                                     .font_medium()
-                                    .child(format!("• {badge_text}")),
+                                    .text_color(gpui_kit::rgb(p.text))
+                                    .child(self.title),
                             ),
                     )
                     .child(
                         div()
-                            .id("approval-card-body")
-                            .px_3()
-                            .py_2p5()
-                            .max_h(px(176.))
-                            .overflow_y_scroll()
-                            .child(self.body),
-                    )
-                    .when(has_actions, |col| {
-                        col.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_end()
-                                .gap_2()
-                                .px_3()
-                                .py_2()
-                                .bg(gpui_kit::rgb(p.background))
-                                .border_t_1()
-                                .border_color(gpui_kit::rgb(p.border))
-                                .children(footer_actions),
-                        )
-                    }),
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .w(px(6.))
+                                    .h(px(6.))
+                                    .rounded(px(3.))
+                                    .bg(gpui_kit::rgb(self.accent_bar)),
+                            )
+                            .child(
+                                div()
+                                    .text_color(gpui_kit::rgb(badge_fg))
+                                    .text_size(px(11.5))
+                                    .font_medium()
+                                    .child(badge_text),
+                            ),
+                    ),
             )
+            .child(
+                div()
+                    .id("approval-card-body")
+                    .max_h(px(176.))
+                    .overflow_y_scroll()
+                    .child(self.body),
+            )
+            .when(has_actions, |col| {
+                col.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .gap_1p5()
+                        .children(footer_actions),
+                )
+            })
     }
 }
 
@@ -953,8 +941,6 @@ pub fn approval_command_body(
         .py_2()
         .rounded(px(8.))
         .bg(gpui_kit::rgb(palette.code_background))
-        .border_1()
-        .border_color(gpui_kit::rgb(palette.border))
         .font_family(font)
         .text_size(size)
         .line_height(relative(1.45))
