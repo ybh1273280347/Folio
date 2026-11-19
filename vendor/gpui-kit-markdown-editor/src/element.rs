@@ -102,7 +102,8 @@ fn with_live_surfaces(
                 code.lang()
                     .is_some_and(|language| language.eq_ignore_ascii_case(&registration.language))
             });
-        if force_preview || state.code_preview_source() != Some(id) {
+        let open = force_preview || state.is_fold_open(id);
+        if open && (force_preview || state.code_preview_source() != Some(id)) {
             if let Some(registration) = preview {
                 return BlockNode::Custom {
                     node: code_preview::node(
@@ -121,7 +122,8 @@ fn with_live_surfaces(
         if !force_preview {
             return BlockNode::Surface {
                 name: format!("editor-code-source-{}", id.as_u64()).into(),
-                children: vec![node.clone()],
+                // An empty surface would skip its header in the shared renderer.
+                children: vec![if open { node.clone() } else { noop_surface() }],
                 span: None,
             };
         }

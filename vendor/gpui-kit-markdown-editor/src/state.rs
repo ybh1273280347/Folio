@@ -383,6 +383,7 @@ pub struct BlockEditorState {
     pub(crate) frame: Rc<RefCell<FrameLayout>>,
     pub(crate) cull: Rc<RefCell<super::cull::CullState>>,
     pub(crate) fold_open: std::collections::HashMap<BlockId, bool>,
+    pub(crate) code_folding: bool,
     /// The accessible value (document text), cached per revision (D8).
     pub(crate) a11y_value: RefCell<Option<(u64, SharedString)>>,
     /// Scroll container to keep the caret in view (see `set_scroll_handle`).
@@ -471,6 +472,7 @@ impl BlockEditorState {
             frame: Rc::default(),
             cull: Rc::default(),
             fold_open: Default::default(),
+            code_folding: false,
             a11y_value: RefCell::default(),
             scroll_handle: Some(gpui::ScrollHandle::new()),
             reveal: Default::default(),
@@ -746,6 +748,12 @@ impl BlockEditorState {
         self.fold_open.clear();
         self.reveal_selection_folds();
         self.projection.invalidate();
+        self
+    }
+
+    /// Enable view-only folding for code blocks in this reader.
+    pub fn with_code_folding(mut self, enabled: bool) -> Self {
+        self.code_folding = enabled;
         self
     }
 
@@ -1486,6 +1494,9 @@ impl BlockEditorState {
             Some(super::kind::BlockKindData::Fold { initially_open, .. }) => {
                 self.fold_open.get(&id).copied().unwrap_or(*initially_open)
             }
+            Some(super::kind::BlockKindData::CodeBlock { .. }) if self.code_folding => {
+                self.fold_open.get(&id).copied().unwrap_or(true)
+            }
             _ => true,
         }
     }
@@ -1547,12 +1558,46 @@ impl BlockEditorState {
         cx.notify();
     }
 
+    pub(crate) fn toggle_code_fold(&mut self, block: BlockId, cx: &mut Context<Self>) {
+        let open = self.is_fold_open(block);
+        if open && matches!(self.model.selection(), BlockSelection::Text { anchor, head }
+            if anchor.block == block || head.block == block)
+        {
+            self.end_composition();
+            self.model.set_selection(BlockSelection::Blocks { anchor: block, head: block })
+                .expect("a folded code block can be selected as a whole");
+            self.selection_changed(cx);
+            // The header remains visible, so collapsing needs no caret scroll.
+            self.reveal.set(false);
+        }
+        self.fold_open.insert(block, !open);
+        self.invalidate_fold_height(&self.model.doc.path(block));
+        cx.notify();
+    }
+
+    fn reveal_code_fold(&mut self, block: BlockId) -> bool {
+        if !matches!(self.model.doc.kind(block), Some(super::kind::BlockKindData::CodeBlock { .. }))
+            || self.is_fold_open(block)
+        {
+            return false;
+        }
+        self.fold_open.insert(block, true);
+        self.invalidate_fold_height(&self.model.doc.path(block));
+        true
+    }
+
     fn reveal_selection_folds(&mut self) {
         let blocks: Vec<_> = self.selection_ranges().into_iter().map(|(id, _)| id)
             .chain(self.head_anchor().into_iter().flat_map(|(a, h)| [a.block, h.block]))
             .collect();
         for block in blocks {
             self.reveal_fold_ancestors(block);
+        }
+        // Keyboard navigation and search may put a text endpoint inside code.
+        // A block selection or a range crossing it does not need its geometry.
+        if self.code_folding && let Some((anchor, head)) = self.head_anchor() {
+            self.reveal_code_fold(anchor.block);
+            self.reveal_code_fold(head.block);
         }
     }
 
@@ -1565,7 +1610,7 @@ impl BlockEditorState {
         let leaves = self.model.doc.leaves();
         let Some(ix) = leaves.iter().position(|id| *id == pos.block) else { return false; };
         let next = if forward { leaves.get(ix + 1) } else { ix.checked_sub(1).and_then(|i| leaves.get(i)) };
-        next.copied().is_some_and(|id| self.reveal_fold_ancestors(id))
+        next.copied().is_some_and(|id| self.reveal_fold_ancestors(id) | self.reveal_code_fold(id))
     }
 
     /// Blocks that are always laid out: the selection ends, the IME

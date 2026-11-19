@@ -740,7 +740,7 @@ fn render_nodes(
             && active_heading.is_some_and(|active_ix| node.contains_index(active_ix));
         let is_active = is_direct_active || is_collapsed_ancestor_active;
 
-        let font_size = if depth == 0 { px(14.) } else { px(13.5) };
+        let font_size = if depth == 0 { px(13.) } else { px(12.5) };
         let line_height = if depth == 0 { px(18.) } else { px(17.5) };
         let rest_color = if is_active {
             colors.item_text_active
