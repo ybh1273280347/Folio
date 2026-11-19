@@ -2570,10 +2570,9 @@ impl MarkdownPane {
             .selection_window_bounds()
             .or_else(|| self.visual_editor.read(cx).caret_window_bounds())?;
 
-        let scale = (self.settings.markdown_font_size as f32) / 14.0;
-        let quote_font_size = (12.0 * scale).clamp(11.0, 20.0);
-        let comment_font_size = (12.5 * scale).clamp(11.5, 19.0);
-        let popover_w = (308.0 * scale).clamp(280.0, 480.0);
+        let quote_font_size = 12.0;
+        let comment_font_size = 12.5;
+        let popover_w = 308.0;
 
         let rel_x = (anchor.origin.x - pane_origin.x)
             .max(px(16.))
@@ -2675,7 +2674,13 @@ impl MarkdownPane {
                             .flex()
                             .justify_end()
                             .child(
-                                crate::ui::button_primary("save-md-annotation", "保存批注").on_click(
+                                crate::ui::button_primary("save-md-annotation", "保存批注")
+                                    .font_family(crate::ui::DEFAULT_SANS_FONT)
+                                    .text_size(px(12.))
+                                    .min_h(px(26.))
+                                    .px(px(10.))
+                                    .py(px(3.))
+                                    .on_click(
                                     cx.listener(move |pane, _, _, cx| {
                                         let comment =
                                             pane.note_input.read(cx).value().trim().to_string();
@@ -2941,8 +2946,8 @@ impl Render for MarkdownPane {
                 self.render_active_annotation_popover(pane_origin, pane_size, cx);
             let translate_popover = self.translate.render(
                 "md-translate",
-                Some(self.settings.markdown_font.as_str()),
-                Some(self.settings.markdown_font_size),
+                None,
+                None,
                 Some(pane_size),
                 cx,
                 |this| &mut this.translate,
@@ -2986,6 +2991,8 @@ impl Render for MarkdownPane {
                             .flex_col()
                             .w_full()
                             .flex_shrink_0()
+                            .font_family(crate::ui::sans_font(&self.settings.markdown_font))
+                            .text_size(px(self.settings.markdown_font_size as f32))
                             .when(self.settings.line_width_limited, |content| {
                                 content.max_w(px(850.))
                             })
@@ -3310,11 +3317,10 @@ impl Render for MarkdownPane {
             }
 
             if self.show_annotations_drawer && !self.annotations.is_empty() {
-                let editor_font_size = self.settings.markdown_font_size as f32;
-                let quote_font_size = (editor_font_size - 1.5).clamp(11.5, 20.0);
-                let comment_font_size = (editor_font_size - 3.0).clamp(11.5, 19.0);
-                let title_font_size = (editor_font_size * 0.85).clamp(11.5, 18.0);
-                let drawer_width = (editor_font_size * 18.0).clamp(280.0, 600.0);
+                let quote_font_size = 12.0;
+                let comment_font_size = 12.5;
+                let title_font_size = 13.0;
+                let drawer_width = 300.0;
 
                 let cards = self.annotations.iter().map(|item| {
                     let id = item.id;
@@ -3636,10 +3642,10 @@ impl Render for MarkdownPane {
         div()
             .relative()
             .size_full()
+            .font_family(crate::ui::DEFAULT_SANS_FONT)
+            .text_size(px(13.))
             .when(!self.source, |pane| {
                 pane.key_context("FolioMarkdownVisual")
-                    .font_family(crate::ui::sans_font(&self.settings.markdown_font))
-                    .text_size(px(self.settings.markdown_font_size as f32))
             })
             .track_focus(&self.focus)
             .flex()
