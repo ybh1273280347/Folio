@@ -38,9 +38,11 @@ pub struct Preferences {
     focus: FocusHandle,
     interface_font: Entity<SelectState<SearchableVec<String>>>,
     editor_font: Entity<SelectState<SearchableVec<String>>>,
+    cjk_fallback_font: Entity<SelectState<SearchableVec<String>>>,
     inline_code_font: Entity<SelectState<SearchableVec<String>>>,
     block_code_font: Entity<SelectState<SearchableVec<String>>>,
     inline_code_scale: Entity<SliderState>,
+    block_code_scale: Entity<SliderState>,
     math_font: Entity<SelectState<SearchableVec<String>>>,
     sizes: [Entity<SliderState>; 3],
     math_scale: Entity<SliderState>,
@@ -182,6 +184,9 @@ impl Preferences {
         let editor_font = cx.new(|cx| {
             SelectState::new(SearchableVec::new(fonts.clone()), None, window, cx).searchable(true)
         });
+        let cjk_fallback_font = cx.new(|cx| {
+            SelectState::new(SearchableVec::new(fonts.clone()), None, window, cx).searchable(true)
+        });
         fonts[0] = "默认等宽字体".into();
         let inline_code_font = cx.new(|cx| {
             SelectState::new(SearchableVec::new(fonts.clone()), None, window, cx).searchable(true)
@@ -199,6 +204,20 @@ impl Preferences {
         cx.subscribe(&inline_code_scale, |panel, _, event: &SliderEvent, cx| {
             if let SliderEvent::Change(value) = event {
                 panel.settings.inline_code_scale = (value.end() * 40.).round() / 40.;
+                panel.changed(cx);
+            }
+        })
+        .detach();
+        let block_code_scale = cx.new(|_| {
+            SliderState::new()
+                .min(0.5)
+                .max(1.5)
+                .step(0.025)
+                .default_value(settings.block_code_scale)
+        });
+        cx.subscribe(&block_code_scale, |panel, _, event: &SliderEvent, cx| {
+            if let SliderEvent::Change(value) = event {
+                panel.settings.block_code_scale = (value.end() * 40.).round() / 40.;
                 panel.changed(cx);
             }
         })
@@ -327,6 +346,7 @@ impl Preferences {
         for (state, selected) in [
             (&interface_font, &settings.interface_font),
             (&editor_font, &settings.editor_font),
+            (&cjk_fallback_font, &settings.cjk_fallback_font),
         ] {
             state.update(cx, |state, cx| {
                 state.set_selected_value(
@@ -367,6 +387,20 @@ impl Preferences {
                     font.clone()
                 };
                 panel.changed(cx);
+            },
+        )
+        .detach();
+        cx.subscribe(
+            &cjk_fallback_font,
+            |panel, _, event: &SelectEvent<SearchableVec<String>>, cx| {
+                if let SelectEvent::Confirm(Some(font)) = event {
+                    panel.settings.cjk_fallback_font = if font == "系统默认" {
+                        String::new()
+                    } else {
+                        font.clone()
+                    };
+                    panel.changed(cx);
+                }
             },
         )
         .detach();
@@ -432,9 +466,11 @@ impl Preferences {
             focus: cx.focus_handle(),
             interface_font,
             editor_font,
+            cjk_fallback_font,
             inline_code_font,
             block_code_font,
             inline_code_scale,
+            block_code_scale,
             math_font,
             math_scale,
             inline_math_scale,
@@ -467,8 +503,24 @@ impl Preferences {
             });
         }
         self.recording = None;
+        for (selector, selected) in [
+            (&self.interface_font, &settings.interface_font),
+            (&self.editor_font, &settings.editor_font),
+            (&self.cjk_fallback_font, &settings.cjk_fallback_font),
+        ] {
+            selector.update(cx, |state, cx| {
+                state.set_selected_value(
+                    &if selected.is_empty() { "系统默认".into() } else { selected.clone() },
+                    window,
+                    cx,
+                );
+            });
+        }
         self.inline_code_scale.update(cx, |state, cx| {
             state.set_value(settings.inline_code_scale, window, cx)
+        });
+        self.block_code_scale.update(cx, |state, cx| {
+            state.set_value(settings.block_code_scale, window, cx)
         });
         for (selector, selected) in [
             (&self.inline_code_font, &settings.inline_code_font),
@@ -640,16 +692,13 @@ impl Preferences {
     }
 
     fn render_fonts(&self, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .flex()
-            .flex_col()
-            .gap_5()
-            .child(
-                div()
-                    .text_lg()
-                    .font_semibold()
-                    .child("外观 / 字体"),
-            )
+        let markdown_body_size = px(self.settings.markdown_font_size as f32);
+        let border = rgb(self.settings.theme.palette.border);
+        let section = |title: &'static str| {
+            div().flex().flex_col().gap_4().border_t_1().border_color(border).pt_4()
+                .child(div().font_semibold().child(title))
+        };
+        let interface = section("界面与中文回退")
             .child(
                 div()
                     .flex()
@@ -658,6 +707,19 @@ impl Preferences {
                     .child("界面字体")
                     .child(Select::new(&self.interface_font)),
             )
+            .child(self.size_row("ui-size", "界面字号", self.settings.interface_font_size, cx))
+            .child(
+                div().flex().flex_col().gap_2()
+                    .child("中文回退字体")
+                    .child(Select::new(&self.cjk_fallback_font))
+                    .child(div().text_xs().text_color(rgb(self.settings.theme.palette.muted))
+                        .child("主字体缺少中文字形时优先使用所选字体。"))
+                    .child(div().p_3().rounded(px(5.))
+                        .bg(rgb(self.settings.theme.palette.background))
+                        .text_size(px(self.settings.interface_body_size()))
+                        .child("Aa 中文字体预览")),
+            );
+        let source_editor = section("源码编辑器")
             .child(
                 div()
                     .flex()
@@ -666,8 +728,17 @@ impl Preferences {
                     .child("编辑器字体")
                     .child(Select::new(&self.editor_font)),
             )
-            .child(self.size_row("ui-size", "界面字号", self.settings.interface_font_size, cx))
             .child(self.size_row("editor-size", "编辑器字号", self.settings.editor_font_size, cx))
+            .child(div().p_3().rounded(px(5.))
+                .bg(rgb(self.settings.theme.palette.background))
+                .font_family(if self.settings.editor_font.is_empty() {
+                    SharedString::from("Consolas")
+                } else {
+                    self.settings.editor_font.clone().into()
+                })
+                .text_size(px(self.settings.editor_font_size as f32))
+                .child("\\section{Introduction} % 中文注释"));
+        let markdown = section("Markdown 正文与代码")
             .child(self.size_row("markdown-size", "Markdown 字号", self.settings.markdown_font_size, cx))
             .child(
                 div()
@@ -704,12 +775,15 @@ impl Preferences {
                             } else {
                                 self.settings.interface_font.clone().into()
                             })
-                            .text_size(px(self.settings.markdown_font_size as f32))
+                            .text_size(markdown_body_size)
                             .child(
                                 gpui_kit::base::text::markdown("合并 `c3(3)` 和 `c8(4)`，得新结点 `7`；根结点 `100`。")
                                     .style(
                                         gpui_kit::base::text::TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx))
-                                            .with_inline_code_style(crate::ui::inline_code_style(&self.settings)),
+                                            .with_inline_code_style(crate::ui::inline_code_style(
+                                                &self.settings,
+                                                markdown_body_size,
+                                            )),
                                     ),
                             ),
                     ),
@@ -722,13 +796,29 @@ impl Preferences {
                     .child("块级代码字体")
                     .child(Select::new(&self.block_code_font))
                     .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .child("块级代码字号 / Markdown 正文")
+                            .child(format!(
+                                "{:.1}% · {:.1} px",
+                                self.settings.block_code_scale * 100.,
+                                self.settings.markdown_font_size as f32 * self.settings.block_code_scale,
+                            )),
+                    )
+                    .child(Slider::new(&self.block_code_scale))
+                    .child(
                         gpui_kit::base::text::markdown("```rust\nlet root = merge(39, 61);\nprintln!(\"root = {}\", root);\n```")
                             .style(
                                 gpui_kit::base::text::TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx))
-                                    .with_code_block(crate::ui::block_code_style(&self.settings)),
+                                    .with_code_block(crate::ui::block_code_style(
+                                        &self.settings,
+                                        markdown_body_size,
+                                    )),
                             ),
                     ),
-            )
+            );
+        let math = section("数学公式")
             .child(
                 div()
                     .flex()
@@ -764,7 +854,8 @@ impl Preferences {
                             .child(format!("{:.1}×", self.settings.inline_math_scale)),
                     )
                     .child(Slider::new(&self.inline_math_scale)),
-            )
+            );
+        let terminal = section("终端")
             .child(
                 div()
                     .flex()
@@ -793,32 +884,14 @@ impl Preferences {
                             .child(format!("{} px", self.settings.terminal.font_size)),
                     )
                     .child(Slider::new(&self.terminal_font_size)),
-            )
-            .child(
-                div()
-                    .p_4()
-                    .rounded(px(5.))
-                    .bg(rgb(0xf7f6f5))
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .font_family(if self.settings.interface_font.is_empty() {
-                        SharedString::from("Segoe UI")
-                    } else {
-                        self.settings.interface_font.clone().into()
-                    })
-                    .child("Aa 中文字体")
-                    .child(
-                        div()
-                            .font_family(if self.settings.editor_font.is_empty() {
-                                SharedString::from("Consolas")
-                            } else {
-                                self.settings.editor_font.clone().into()
-                            })
-                            .text_size(px(self.settings.editor_font_size as f32))
-                            .child("\\section{Introduction}"),
-                    ),
-            )
+            );
+        div().flex().flex_col().gap_5()
+            .child(div().text_lg().font_semibold().child("外观 / 字体"))
+            .child(interface)
+            .child(source_editor)
+            .child(markdown)
+            .child(math)
+            .child(terminal)
             .child(
                 div().flex().justify_start().child(
                     control("reset-fonts", "恢复默认字体").on_click(cx.listener(
@@ -827,6 +900,7 @@ impl Preferences {
                             let defaults = AppSettings::default();
                             panel.settings.interface_font = defaults.interface_font;
                             panel.settings.editor_font = defaults.editor_font;
+                            panel.settings.cjk_fallback_font = defaults.cjk_fallback_font;
                             panel.settings.inline_code_font = defaults.inline_code_font;
                             panel.settings.block_code_font = defaults.block_code_font;
                             panel.settings.math_font = defaults.math_font;
@@ -834,18 +908,13 @@ impl Preferences {
                             panel.settings.editor_font_size = defaults.editor_font_size;
                             panel.settings.markdown_font_size = defaults.markdown_font_size;
                             panel.settings.inline_code_scale = defaults.inline_code_scale;
+                            panel.settings.block_code_scale = defaults.block_code_scale;
                             panel.settings.math_scale = defaults.math_scale;
                             panel.settings.inline_math_scale = defaults.inline_math_scale;
                             panel.settings.terminal.font_family = defaults.terminal.font_family;
                             panel.settings.terminal.font_size = defaults.terminal.font_size;
                             let settings = panel.settings.clone();
                             panel.sync(&settings, window, cx);
-                            panel.interface_font.update(cx, |state, cx| {
-                                state.set_selected_value(&"系统默认".into(), window, cx)
-                            });
-                            panel.editor_font.update(cx, |state, cx| {
-                                state.set_selected_value(&"系统默认".into(), window, cx)
-                            });
                             panel.changed(cx);
                         },
                     )),

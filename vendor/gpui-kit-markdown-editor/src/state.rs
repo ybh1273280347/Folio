@@ -1299,7 +1299,15 @@ impl BlockEditorState {
     pub(crate) fn render_context(&self, cx: &App) -> RenderContext {
         let context = RenderContext::from_app(cx).on_link_click(|_, _, _, _| {});
         let style = context.style().clone()
-            .with_inline_code_style(self.inline_code_style.clone())
+            .with_inline_code_style({
+                let mut inline_code_style = self.inline_code_style.clone();
+                // Keep the pill's base color behind the separately painted mark ranges.
+                let base = context.style();
+                inline_code_style.background.get_or_insert_with(|| {
+                    base.inline_code().background_color.unwrap_or_else(|| base.code_background()).into()
+                });
+                inline_code_style
+            })
             .with_code_block(self.block_code_style.clone());
         context.with_style(style)
     }

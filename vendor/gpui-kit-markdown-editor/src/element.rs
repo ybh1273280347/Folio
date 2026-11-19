@@ -488,7 +488,16 @@ impl BlockEditor {
                 block_el
             });
         }
-        div().w_full().children(children).into_any_element()
+        let document = div().w_full().children(children).into_any_element();
+        if snapshot.code_highlights.is_empty() {
+            document
+        } else {
+            DocumentHighlights {
+                child: document,
+                backgrounds: snapshot.code_highlights.clone(),
+            }
+            .into_any_element()
+        }
     }
 
     pub fn new(state: &Entity<BlockEditorState>) -> Self {
@@ -560,11 +569,11 @@ impl RenderOnce for BlockEditor {
         let (focus, snapshot, backgrounds, extensions, keep, list_items) =
             self.state.update(cx, |state, _| {
                 let snapshot = state.snapshot();
-                let mut backgrounds: HashMap<u64, Vec<(Range<usize>, Hsla)>> = HashMap::new();
+                let mut backgrounds = snapshot.code_highlights.clone();
                 if let Some((block, _)) = &state.heading_highlight
                     && let Some(len) = state.model.doc.leaf_len(*block)
                 {
-                    backgrounds.insert(block.as_u64(), vec![(0..len, style.selection())]);
+                    backgrounds.entry(block.as_u64()).or_default().push((0..len, style.selection()));
                 }
                 for (block, range) in state.selection_ranges() {
                     // Atoms paint whole (O(1) lookup, not a scan of the leaves).
@@ -1009,6 +1018,70 @@ impl RenderOnce for BlockEditor {
 }
 
 type LeafBackgrounds = HashMap<u64, Vec<(Range<usize>, Hsla)>>;
+
+/// Collect persistent paint ranges for the export view without editor interaction state.
+struct DocumentHighlights {
+    child: AnyElement,
+    backgrounds: LeafBackgrounds,
+}
+
+impl IntoElement for DocumentHighlights {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for DocumentHighlights {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        collect_leaf_geometry(std::mem::take(&mut self.backgrounds), || {
+            self.child.prepaint(window, cx)
+        });
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
+    }
+}
 
 struct EditorRoot {
     state: Entity<BlockEditorState>,

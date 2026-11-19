@@ -8,6 +8,7 @@ use gpui_kit::{
     component::text::{
         InlineElement, InlineRenderContext, MarkdownNode, MarkdownParseContext, MarkdownPlugin,
     },
+    prelude::FluentBuilder,
     *,
 };
 use sha2::{Digest, Sha256};
@@ -41,10 +42,20 @@ pub enum MathReady {
     },
 }
 static NEXT_FORMULA: AtomicU64 = AtomicU64::new(1);
+const DEFAULT_CJK_FONT: &str = "Microsoft YaHei";
+
+#[derive(Clone, Copy)]
+pub(crate) enum MathDisplaySize {
+    Markdown,
+    Interface,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 struct MathAppearance {
     font: MathFont,
+    fallback_font: FontId,
     display_size: f32,
+    interface_display_size: f32,
     inline_scale: f32,
 }
 struct MathRequest {
@@ -52,6 +63,7 @@ struct MathRequest {
     latex: String,
     display: bool,
     font: MathFont,
+    fallback_font: FontId,
     background: bool,
 }
 
@@ -74,9 +86,10 @@ impl MathRenderer {
         let results = assets.clone();
         let (requests, jobs) = mpsc::channel::<MathRequest>();
         let (finished, events) = mpsc::channel();
+        let text_system = cx.text_system().clone();
         thread::spawn(move || {
             let mut queue = VecDeque::<MathRequest>::new();
-            let mut typesetter = crate::math_layout::Typesetter::default();
+            let mut typesetter = crate::math_layout::Typesetter::new(text_system);
             loop {
                 // Visible edits bypass unopened documents waiting for background warmup.
                 if queue.is_empty() {
@@ -92,12 +105,13 @@ impl MathRenderer {
                     latex,
                     display,
                     font,
+                    fallback_font,
                     ..
                 } = queue.remove(next).expect("queued formula");
                 if results.lock().expect("math assets lock").contains_key(&key) {
                     continue;
                 }
-                let formula = match typesetter.typeset(&latex, display, font) {
+                let formula = match typesetter.typeset(&latex, display, font, fallback_font) {
                     Ok(layout) => Formula::Ready(Arc::new(layout)),
                     Err(error) => Formula::Failed(error.to_string()),
                 };
@@ -131,27 +145,36 @@ impl MathRenderer {
             requests,
             appearance: Arc::new(Mutex::new(MathAppearance {
                 font: MathFont::default(),
+                fallback_font: cx.text_system().resolve_font(&font(DEFAULT_CJK_FONT)),
                 display_size: 23.8,
+                interface_display_size: 23.8,
                 inline_scale: 1.,
             })),
             _task: task,
         }
     }
     pub fn set_appearance(&self, settings: &AppSettings, cx: &mut Context<Self>) {
+        let fallback_family = if settings.cjk_fallback_font.is_empty() {
+            DEFAULT_CJK_FONT
+        } else {
+            &settings.cjk_fallback_font
+        };
         let updated = MathAppearance {
             font: settings.math_font,
+            fallback_font: cx.text_system().resolve_font(&font(fallback_family.to_owned())),
             display_size: settings.markdown_font_size as f32 * settings.math_scale,
+            interface_display_size: settings.interface_body_size() * settings.math_scale,
             inline_scale: settings.inline_math_scale,
         };
         let previous = std::mem::replace(
             &mut *self.appearance.lock().expect("math appearance lock"),
             updated,
         );
-        if previous.font != updated.font {
+        if previous.font != updated.font || previous.fallback_font != updated.fallback_font {
             let mut pending = self.pending.lock().expect("math pending lock");
             let formulas: HashSet<_> = pending.values().cloned().collect();
             for (latex, display) in formulas {
-                let key = key(&latex, display, updated.font);
+                let key = key(&latex, display, updated);
                 if pending
                     .insert(key.clone(), (latex.clone(), display))
                     .is_none()
@@ -162,6 +185,7 @@ impl MathRenderer {
                             latex,
                             display,
                             font: updated.font,
+                            fallback_font: updated.fallback_font,
                             background: false,
                         })
                         .expect("math worker is alive");
@@ -178,8 +202,8 @@ impl MathRenderer {
         renderer: Entity<Self>,
         cx: &App,
     ) -> Task<Result<(), String>> {
-        let mut inline = self.plugin(false, renderer.clone());
-        let mut block = self.plugin(true, renderer);
+        let mut inline = self.plugin(false, renderer.clone(), MathDisplaySize::Markdown);
+        let mut block = self.plugin(true, renderer, MathDisplaySize::Markdown);
         inline.background = true;
         block.background = true;
         let extensions = Arc::new(
@@ -198,7 +222,12 @@ impl MathRenderer {
             Ok(())
         })
     }
-    pub fn plugin(&self, display: bool, renderer: Entity<MathRenderer>) -> MathPlugin {
+    pub(crate) fn plugin(
+        &self,
+        display: bool,
+        renderer: Entity<MathRenderer>,
+        display_size: MathDisplaySize,
+    ) -> MathPlugin {
         MathPlugin {
             assets: self.assets.clone(),
             pending: self.pending.clone(),
@@ -206,12 +235,19 @@ impl MathRenderer {
             appearance: self.appearance.clone(),
             background: false,
             display,
+            display_size,
             renderer: renderer.downgrade(),
         }
     }
 }
-fn key(latex: &str, display: bool, font: MathFont) -> String {
-    Sha256::digest(format!("native-v3:{}:{display}:{latex}", font.filename()).as_bytes())
+fn key(latex: &str, display: bool, appearance: MathAppearance) -> String {
+    Sha256::digest(
+        format!(
+            "native-v3:{}:{}:{display}:{latex}",
+            appearance.font.filename(), appearance.fallback_font.0,
+        )
+        .as_bytes(),
+    )
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
@@ -223,6 +259,7 @@ pub struct MathPlugin {
     appearance: Arc<Mutex<MathAppearance>>,
     background: bool,
     display: bool,
+    display_size: MathDisplaySize,
     renderer: WeakEntity<MathRenderer>,
 }
 impl MathPlugin {
@@ -234,7 +271,7 @@ impl MathPlugin {
             .get(&key(
                 &content.latex,
                 content.display,
-                self.appearance.lock().expect("math appearance lock").font,
+                *self.appearance.lock().expect("math appearance lock"),
             ))
             .cloned();
         match formula {
@@ -320,8 +357,8 @@ impl MarkdownPlugin for MathPlugin {
             _ => return None,
         };
         // Request exactly the bytes owned by the displayed node, before any Markdown escaping.
-        let font = self.appearance.lock().expect("math appearance lock").font;
-        let key = key(latex, self.display, font);
+        let appearance = *self.appearance.lock().expect("math appearance lock");
+        let key = key(latex, self.display, appearance);
         let fresh = self
             .pending
             .lock()
@@ -341,7 +378,8 @@ impl MarkdownPlugin for MathPlugin {
                     key,
                     latex: latex.clone(),
                     display: self.display,
-                    font,
+                    font: appearance.font,
+                    fallback_font: appearance.fallback_font,
                     background: self.background,
                 })
                 .expect("math worker is alive");
@@ -371,13 +409,14 @@ impl MarkdownPlugin for MathPlugin {
     }
     fn render(&self, node: &MarkdownNode, _: &mut Window, _: &mut App) -> impl IntoElement {
         let content = node.data::<MathContent>().expect("math content");
-        let scale = self
-            .appearance
-            .lock()
-            .expect("math appearance lock")
-            .display_size
-            / 10.;
-        let (element, _) = self.formula_element(content, scale);
+        // Block plugins lack the inline text context, so each surface selects
+        // its own body size while sharing the typeset formula and scale setting.
+        let appearance = *self.appearance.lock().expect("math appearance lock");
+        let size = match self.display_size {
+            MathDisplaySize::Markdown => appearance.display_size,
+            MathDisplaySize::Interface => appearance.interface_display_size,
+        };
+        let (element, _) = self.formula_element(content, size / 10.);
         self.editable(
             content,
             div()
@@ -403,7 +442,11 @@ impl MarkdownPlugin for MathPlugin {
             .inline_scale;
         let (element, baseline) =
             self.formula_element(content, f32::from(context.font_size()) * inline_scale / 10.);
-        Some(InlineElement::new(self.editable(content, element)).with_baseline(px(baseline)))
+        // The inline renderer inherits the mark color. Its own box covers the
+        // entire typeset expression, which is one selection unit in the editor.
+        let formula = self.editable(content, element)
+            .when_some(context.text_style().background_color, |formula, color| formula.bg(color));
+        Some(InlineElement::new(formula).with_baseline(px(baseline)))
     }
 }
 pub fn formula_id(node: &MarkdownNode) -> Option<u64> {

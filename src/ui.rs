@@ -55,10 +55,8 @@ impl RenderOnce for CopyDocumentButton {
     }
 }
 
-/// Keep preview, live Markdown and PDF typography relative to the same body size.
-pub fn inline_code_style(settings: &crate::model::AppSettings) -> StyleRefinement {
-    let mut style = StyleRefinement::default()
-        .text_size(px(settings.markdown_font_size as f32 * settings.inline_code_scale));
+pub fn inline_code_style(settings: &crate::model::AppSettings, body_size: Pixels) -> StyleRefinement {
+    let mut style = StyleRefinement::default().text_size(body_size * settings.inline_code_scale);
     if settings.theme.palette != crate::theme::Palette::light() {
         style = style.bg(gpui_kit::rgb(settings.theme.palette.code_background));
     }
@@ -72,10 +70,9 @@ pub fn inline_code_style(settings: &crate::model::AppSettings) -> StyleRefinemen
 /// aligned with the WYSIWYG Markdown editor (`gpui-kit-markdown-editor`).
 pub const MD_BLOCK_RADIUS: Pixels = px(8.);
 
-pub fn block_code_style(settings: &crate::model::AppSettings) -> StyleRefinement {
-    // Match the default 13px code at 14px body size, then scale with Ctrl+wheel.
+pub fn block_code_style(settings: &crate::model::AppSettings, body_size: Pixels) -> StyleRefinement {
     let mut style = StyleRefinement::default()
-        .text_size(px(settings.markdown_font_size as f32 * 13. / 14.))
+        .text_size(body_size * settings.block_code_scale)
         .rounded(MD_BLOCK_RADIUS);
     if settings.theme.palette != crate::theme::Palette::light() {
         style = style.bg(gpui_kit::rgb(settings.theme.palette.code_background));
