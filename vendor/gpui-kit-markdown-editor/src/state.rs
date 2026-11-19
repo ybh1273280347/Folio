@@ -951,6 +951,46 @@ impl BlockEditorState {
         })));
         Ok(())
     }
+
+    /// 0-based index among all heading blocks of the section currently at or above
+    /// `viewport_top + trigger_offset`.
+    pub fn active_heading_index(&self, trigger_offset: Pixels) -> Option<usize> {
+        let frame = self.frame.borrow();
+        let cull = self.cull.borrow();
+        let viewport_top = self
+            .scroll_handle
+            .as_ref()
+            .map(|h| h.bounds())
+            .filter(|b| b.size.height > gpui::px(0.))
+            .map(|b| b.top());
+        let vis_top = cull.visible.map(|(top, _)| top);
+        let mut active = None;
+        let mut any_heading = false;
+        for (ix, block) in self
+            .model
+            .document()
+            .leaves()
+            .filter(|block| matches!(block.kind(), BlockKind::Heading { .. }))
+            .enumerate()
+        {
+            any_heading = true;
+            let passed = if let (Some(&leaf_ix), Some(vp_top)) =
+                (frame.index.get(&block.id()), viewport_top)
+            {
+                frame.leaves[leaf_ix].bounds().top() <= vp_top + trigger_offset
+            } else if let (Some(&unit_ix), Some(local_top)) =
+                (cull.index.unit_of.get(&block.id()), vis_top)
+            {
+                cull.index.prefix(unit_ix) <= local_top + trigger_offset
+            } else {
+                false
+            };
+            if passed {
+                active = Some(ix);
+            }
+        }
+        active.or(any_heading.then_some(0))
+    }
     /// Fence host callbacks on external owner changes without reparsing content.
     pub fn invalidate_captures(&mut self) {
         self.model.invalidate_captures();
