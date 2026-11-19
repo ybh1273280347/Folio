@@ -518,7 +518,7 @@ impl MarkdownPane {
             })
             .collect();
         let visual_editor = cx.new(|cx| {
-            let mut editor = BlockEditorState::new(window, cx).with_code_folding(reading);
+            let mut editor = BlockEditorState::new(window, cx).with_content_folding();
             editor
                 .set_markdown_extensions(extensions.clone(), cx)
                 .expect("current Markdown parses with the configured GPUI extensions");

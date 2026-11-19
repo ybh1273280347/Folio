@@ -4,6 +4,7 @@
 //! opens a small menu of table commands.
 
 use std::time::Duration;
+use gpui::prelude::FluentBuilder as _;
 
 use gpui::{
     AnyElement, App, Bounds, ClipboardItem, Context, Entity, InteractiveElement, IntoElement,
@@ -481,9 +482,9 @@ pub(crate) fn table_tsv(doc: &EditorDocument, table: BlockId) -> String {
         .join("\n")
 }
 
-/// Floating top-right copy controls shown while a table is hovered, selected,
-/// or showing post-copy feedback.
-pub(crate) fn copy_controls(
+/// Foldable tables keep the toggle outside the header cells. Copy controls
+/// still appear on hover, selection or while showing post-copy feedback.
+pub(crate) fn controls(
     state: &Entity<BlockEditorState>,
     table: BlockId,
     window: &mut Window,
@@ -493,7 +494,10 @@ pub(crate) fn copy_controls(
         TableCopyTools::new()
     });
     let copied = tools.read(cx).copied;
-    if !state.read(cx).is_table_active_for_controls(table) && copied.is_none() {
+    let editor = state.read(cx);
+    let foldable = editor.content_folding && editor.model.doc.children(table).len() > 1;
+    let show_copy = editor.is_table_active_for_controls(table) || copied.is_some();
+    if !foldable && !show_copy {
         return None;
     }
 
@@ -538,13 +542,9 @@ pub(crate) fn copy_controls(
             })
     };
 
-    Some(
-        div()
+    let controls = div()
             .id(("table-copy-controls", table_key))
             .occlude()
-            .absolute()
-            .top(px(4.))
-            .right(px(4.))
             .flex()
             .items_center()
             .gap_0p5()
@@ -555,20 +555,27 @@ pub(crate) fn copy_controls(
             .border_1()
             .border_color(theme.border.opacity(0.65))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(copy_button(
-                "copy-table-md",
-                "MD",
-                "复制为 Markdown 表格",
-                "已复制 Markdown",
-                TableCopyFormat::Markdown,
-            ))
-            .child(copy_button(
-                "copy-table-tsv",
-                "TSV",
-                "复制为表格文本（可粘贴到 Excel）",
-                "已复制 TSV",
-                TableCopyFormat::Tsv,
-            ))
-            .into_any_element(),
-    )
+            .when(show_copy, |row| {
+                row.child(copy_button(
+                    "copy-table-md",
+                    "MD",
+                    "复制为 Markdown 表格",
+                    "已复制 Markdown",
+                    TableCopyFormat::Markdown,
+                ))
+                .child(copy_button(
+                    "copy-table-tsv",
+                    "TSV",
+                    "复制为表格文本（可粘贴到 Excel）",
+                    "已复制 TSV",
+                    TableCopyFormat::Tsv,
+                ))
+            });
+    Some(if foldable {
+        div().flex().justify_end().pb(px(2.))
+            .child(controls.child(super::element::content_fold_button(state, table, "表格", cx)))
+            .into_any_element()
+    } else {
+        controls.absolute().top(px(4.)).right(px(4.)).into_any_element()
+    })
 }
