@@ -1257,7 +1257,19 @@ fn compute_mark_rects(
             {
                 last_row.max_x = (last_row.max_x + last_dx).min(leaf_bounds.right());
             }
-            for row in rows {
+            rows.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
+            let left_aligned = matches!(
+                leaf.align,
+                gpui_kit::base::text::editor_host::ColumnAlign::None
+                    | gpui_kit::base::text::editor_host::ColumnAlign::Left
+            );
+            for (row_idx, mut row) in rows.into_iter().enumerate() {
+                // On wrapped continuation lines, the line-start byte index maps
+                // to the end of the previous visual line in `position_for_index`,
+                // so clamp left-aligned continuation lines to `leaf_bounds.left()`.
+                if row_idx > 0 && left_aligned {
+                    row.min_x = row.min_x.min(leaf_bounds.left());
+                }
                 if row.max_x <= row.min_x {
                     continue;
                 }
