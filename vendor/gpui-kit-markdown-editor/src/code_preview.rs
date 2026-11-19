@@ -111,8 +111,8 @@ fn render(data: &Data, window: &mut Window, cx: &mut App) -> AnyElement {
                     cx.write_to_clipboard(ClipboardItem::new_string(code));
                 }),
         );
-        if state.read(cx).code_folding {
-            actions = actions.child(super::code_ui::fold_button(&state, block, cx));
+        if state.read(cx).content_folding {
+            actions = actions.child(super::element::content_fold_button(&state, block, "代码块", cx));
         }
         div()
             .flex()

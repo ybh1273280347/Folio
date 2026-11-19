@@ -35,10 +35,10 @@ use gpui_kit::{
         StyledExt as _,
         text::{
             MarkdownExtensions,
-            editor_host::{BlockNode, BlockState, FlowPosition, collect_leaf_geometry, RenderContext},
+            editor_host::{BlockNode, BlockState, FlowPosition, Table, collect_leaf_geometry, RenderContext},
         },
     },
-    component::{Icon, IconName},
+    component::{Icon, IconName, button::{Button, ButtonVariants}},
 };
 
 type AtomBounds = Arc<Mutex<HashMap<BlockId, Bounds<Pixels>>>>;
@@ -49,6 +49,21 @@ fn noop_surface() -> BlockNode {
         children: Vec::new(),
         span: None,
     }
+}
+
+pub(crate) fn content_fold_button(
+    state: &Entity<BlockEditorState>, block: BlockId, label: &'static str, cx: &App,
+) -> Button {
+    let open = state.read(cx).is_fold_open(block);
+    let state = state.clone();
+    Button::new(("content-fold", block.as_u64() as usize))
+        .ghost().compact().w(px(28.)).h(px(28.))
+        .icon(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
+            .w(px(14.)).h(px(14.)))
+        .tooltip(format!("{}{label}", if open { "折叠" } else { "展开" }))
+        .on_click(move |_, _, cx| {
+            state.update(cx, |state, cx| state.toggle_content_fold(block, cx));
+        })
 }
 
 fn capitalize_alert_name(name: &str) -> SharedString {
@@ -127,6 +142,24 @@ fn with_live_surfaces(
                 span: None,
             };
         }
+    }
+    if !force_preview && state.content_folding && let BlockNode::Table(table) = node
+        && doc.children(id).len() > 1
+    {
+        // Retain the real first row and its cell keys, so the header stays editable.
+        let visible = if state.is_fold_open(id) {
+            node.clone()
+        } else {
+            BlockNode::Table(Table::new(
+                table.rows().take(1).map(|row| row.cloned().collect()).collect(),
+                table.column_aligns().to_vec(),
+            ))
+        };
+        return BlockNode::Surface {
+            name: format!("editor-table-{}", id.as_u64()).into(),
+            children: vec![visible],
+            span: None,
+        };
     }
     if matches!(doc.kind(id), Some(super::kind::BlockKindData::Fold { .. })) {
         if let BlockNode::Root { children, .. } = node {
@@ -387,6 +420,23 @@ fn register_code_surfaces(
     }
 }
 
+fn register_table_surfaces(extensions: &mut MarkdownExtensions, state: &Entity<BlockEditorState>, cx: &App) {
+    let editor = state.read(cx);
+    if !editor.content_folding {
+        return;
+    }
+    let doc = &editor.model.doc;
+    for (&id, entry) in &doc.blocks {
+        if matches!(entry.kind, super::kind::BlockKindData::Table { .. }) && doc.children(id).len() > 1 {
+            let state = state.clone();
+            *extensions = std::mem::take(extensions).block_surface(
+                format!("editor-table-{}", id.as_u64()),
+                move |window, cx| div().relative().children(super::table_ui::controls(&state, id, window, cx)),
+            );
+        }
+    }
+}
+
 
 
 /// Items per cull unit of a long top-level list.
@@ -623,6 +673,7 @@ impl RenderOnce for BlockEditor {
         let mut extensions = (*extensions).clone();
         code_preview::register_renderer(&mut extensions);
         register_code_surfaces(&mut extensions, &self.state, &render_cx, cx);
+        register_table_surfaces(&mut extensions, &self.state, cx);
         for leaf in snapshot.leaves.iter().filter(|leaf| leaf.atomic) {
             let id = leaf.block;
             let bounds = atom_bounds.clone();
@@ -835,7 +886,7 @@ impl RenderOnce for BlockEditor {
                             .relative()
                             .w_full()
                             .child(table)
-                            .children(super::table_ui::copy_controls(
+                            .children(super::table_ui::controls(
                                 &self.state,
                                 unit.id,
                                 window,
@@ -1224,7 +1275,14 @@ impl Element for EditorRoot {
                     .iter()
                     .map(|(table, _)| super::frame::TableShape {
                         table: *table,
-                        grid: super::table::grid(doc, *table),
+                        // Hidden rows have no hitboxes and must not suppress the header grid.
+                        grid: {
+                            let mut grid = super::table::grid(doc, *table);
+                            if !state.is_fold_open(*table) {
+                                grid.truncate(1);
+                            }
+                            grid
+                        },
                         aligns: match doc.kind(*table) {
                             Some(super::kind::BlockKindData::Table { aligns }) => aligns.clone(),
                             _ => Vec::new(),
