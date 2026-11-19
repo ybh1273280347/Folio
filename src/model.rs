@@ -416,7 +416,9 @@ pub struct AppSettings {
     pub theme: crate::theme::ThemeSettings,
     pub interface_font: String,
     pub editor_font: String,
-    /// Empty lets the platform choose fallback glyphs for ordinary text.
+    pub markdown_font: String,
+    pub ai_font: String,
+    /// Shared glyph fallback. Empty lets the platform choose fallback faces.
     pub cjk_fallback_font: String,
     /// Empty selects the renderer's default monospace family.
     pub inline_code_font: String,
@@ -429,6 +431,7 @@ pub struct AppSettings {
     pub interface_font_size: u8,
     pub editor_font_size: u8,
     pub markdown_font_size: u8,
+    pub ai_font_size: u8,
     pub math_scale: f32,
     pub inline_math_scale: f32,
     pub math_font: MathFont,
@@ -449,10 +452,6 @@ pub struct AppSettings {
 }
 
 impl AppSettings {
-    pub fn interface_body_size(&self) -> f32 {
-        (self.interface_font_size as f32).clamp(11., 24.)
-    }
-
     pub fn key_for(&self, id: &str) -> String {
         if let Some(custom) = self.keybindings.get(id).filter(|k| !k.trim().is_empty()) {
             return custom.clone();
@@ -492,6 +491,8 @@ impl Default for AppSettings {
             theme: crate::theme::ThemeSettings::default(),
             interface_font: String::new(),
             editor_font: String::new(),
+            markdown_font: String::new(),
+            ai_font: String::new(),
             cjk_fallback_font: String::new(),
             inline_code_font: String::new(),
             block_code_font: String::new(),
@@ -500,6 +501,7 @@ impl Default for AppSettings {
             interface_font_size: 14,
             editor_font_size: 14,
             markdown_font_size: 14,
+            ai_font_size: 14,
             math_scale: 1.7,
             inline_math_scale: 1.,
             math_font: MathFont::StixTwo,

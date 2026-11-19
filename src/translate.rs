@@ -205,8 +205,8 @@ impl TranslatePopover {
     pub fn render<T: 'static>(
         &self,
         id_prefix: &'static str,
-        interface_font: Option<&str>,
-        interface_font_size: Option<u8>,
+        font_family: Option<&str>,
+        font_size: Option<u8>,
         pane_size: Option<Size<Pixels>>,
         cx: &mut Context<T>,
         get_mut: fn(&mut T) -> &mut TranslatePopover,
@@ -215,14 +215,8 @@ impl TranslatePopover {
             return None;
         }
 
-        let explicit_font: Option<SharedString> = interface_font.map(|f| {
-            if f.is_empty() {
-                SharedString::from("Segoe UI")
-            } else {
-                SharedString::from(f.to_owned())
-            }
-        });
-        let base_size = (interface_font_size.unwrap_or(14) as f32).clamp(12.0, 18.0);
+        let explicit_font = font_family.map(crate::ui::sans_font);
+        let base_size = (font_size.unwrap_or(14) as f32).clamp(12.0, 18.0);
         let title_size = (base_size - 1.5).max(11.0);
         let small_size = (base_size - 2.0).max(11.0);
 

@@ -27,7 +27,10 @@ fn existing_preferences_keep_the_light_theme_and_their_typography() {
 fn custom_colors_survive_save_switch_and_preferences_round_trip() {
     let mut settings = AppSettings::default();
     settings.editor_font = "Consolas".into();
+    settings.markdown_font = "Georgia".into();
     settings.markdown_font_size = 23;
+    settings.ai_font = "Verdana".into();
+    settings.ai_font_size = 16;
     settings.math_scale = 2.1;
     settings.theme.select("深色");
     settings.theme.palette.set(ColorRole::Accent, 0x84a578);
@@ -40,7 +43,10 @@ fn custom_colors_survive_save_switch_and_preferences_round_trip() {
     restored.theme.select("夜间写作");
     assert_eq!(restored.theme.palette, custom);
     assert_eq!(restored.editor_font, "Consolas");
+    assert_eq!(restored.markdown_font, "Georgia");
     assert_eq!(restored.markdown_font_size, 23);
+    assert_eq!(restored.ai_font, "Verdana");
+    assert_eq!(restored.ai_font_size, 16);
     assert_eq!(restored.math_scale, 2.1);
     restored.theme.select("深色");
     assert_eq!(restored.theme.palette, Palette::dark());
@@ -74,12 +80,13 @@ fn preset_overrides_persist_and_reset_restores_both_builtins() {
 fn fenced_code_scales_with_body_size_and_keeps_its_selected_font() {
     let mut settings = AppSettings::default();
     settings.block_code_font = "Consolas".into();
-    let initial = ui::block_code_style(&settings);
-    settings.markdown_font_size = 26;
-    let zoomed = ui::block_code_style(&settings);
-    let initial_size = initial.text.font_size.unwrap().to_pixels(px(16.));
-    let zoomed_size = zoomed.text.font_size.unwrap().to_pixels(px(16.));
-    assert!((f32::from(initial_size) - 13.).abs() < 0.01);
-    assert!((f32::from(zoomed_size) / f32::from(initial_size) - 26. / 14.).abs() < 0.001);
-    assert_eq!(initial.text.font_family, zoomed.text.font_family);
+    settings.block_code_scale = 0.75;
+    settings.markdown_font_size = 16;
+    settings.ai_font_size = 24;
+    let markdown = ui::block_code_style(&settings, px(settings.markdown_font_size as f32));
+    let ai = ui::block_code_style(&settings, px(settings.ai_font_size as f32));
+    assert_eq!(markdown.text.font_size.unwrap().to_pixels(px(16.)), px(12.));
+    assert_eq!(ai.text.font_size.unwrap().to_pixels(px(16.)), px(18.));
+    assert_eq!(markdown.text.font_family.as_deref(), Some("Consolas"));
+    assert_eq!(ai.text.font_family.as_deref(), Some("Consolas"));
 }

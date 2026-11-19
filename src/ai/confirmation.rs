@@ -78,7 +78,7 @@ impl ChatPane {
                 "允许",
             ),
             ConfirmationContent::Command(command) => {
-                let (font, size) = tool_typography(&self.settings);
+                let (font, size) = crate::theme::tool_typography(&self.settings);
                 (
                     IconName::Terminal,
                     div()

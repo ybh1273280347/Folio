@@ -206,22 +206,13 @@ struct AiTypography {
 
 impl AiTypography {
     fn from_settings(settings: &AppSettings) -> Self {
-        let base = settings.interface_body_size();
+        let base = settings.ai_font_size as f32;
         Self {
             body: px(base),
             sm: px((base - 1.5).max(10.5)),
             xs: px((base - 2.5).max(9.5)),
         }
     }
-}
-
-pub(crate) fn tool_typography(settings: &AppSettings) -> (SharedString, Pixels) {
-    let code_font = if settings.block_code_font.is_empty() {
-        "Consolas".into()
-    } else {
-        settings.block_code_font.clone().into()
-    };
-    (code_font, AiTypography::from_settings(settings).sm)
 }
 
 const AI_COMPOSER_MAX_WIDTH: Pixels = px(720.);
@@ -313,7 +304,7 @@ impl ChatPane {
         cx: &mut Context<Self>,
     ) -> Self {
         let mermaid = cx.new(MermaidRenderer::new);
-        let md_extensions = crate::markdown::markdown_extensions(&math, MathDisplaySize::Interface, cx)
+        let md_extensions = crate::markdown::markdown_extensions(&math, MathDisplaySize::Ai, cx)
             .plugin(mermaid.read(cx).plugin(mermaid.downgrade()));
         let sub_math = cx.subscribe(&math, |_, _, event: &MathReady, cx| {
             if matches!(event, MathReady::Ready) {
@@ -2496,7 +2487,7 @@ impl ChatPane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ps = ProcessStyle::from_theme(palette, typo);
-        let (code_font, _) = tool_typography(&self.settings);
+        let (code_font, _) = crate::theme::tool_typography(&self.settings);
 
         let mut all_parts: Vec<(usize, usize, &AssistantPart)> = Vec::new();
         let mut run_streaming = false;
@@ -4708,11 +4699,7 @@ impl Render for ChatPane {
 
         let palette = active_palette();
         let typo = AiTypography::from_settings(&self.settings);
-        let ui_font: SharedString = if self.settings.interface_font.is_empty() {
-            "Segoe UI".into()
-        } else {
-            self.settings.interface_font.clone().into()
-        };
+        let ui_font = crate::ui::sans_font(&self.settings.ai_font);
 
         let is_welcome = self.messages.is_empty()
             && self.startup_error.is_none()

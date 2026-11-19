@@ -488,6 +488,7 @@ impl Workspace {
                     )]);
                 }
             }
+            let fallback_changed = app.settings.cjk_fallback_font != event.0.cjk_fallback_font;
             app.settings = event.0.clone();
             app.terminal.update(cx, |pane, cx| pane.sync(&app.settings.terminal, app.settings.theme.palette, cx));
             app.ai.update(cx, |pane, cx| pane.sync_settings(&app.settings, cx));
@@ -497,6 +498,10 @@ impl Workspace {
                 });
             }
             crate::theme::apply_settings(&app.settings, cx);
+            if fallback_changed {
+                // Terminal cells and mounted views may reuse their draws when only glyph fallback changes.
+                window.refresh();
+            }
             bind_shortcuts(&app.settings, cx);
             app.math.update(cx, |renderer, cx| {
                 renderer.set_appearance(&app.settings, cx)
@@ -1575,6 +1580,7 @@ impl Workspace {
                 MarkdownEvent::Focus => app.focused_markdown = reading.then(|| file.clone()),
                 MarkdownEvent::Zoom(size) => {
                     app.settings.markdown_font_size = *size;
+                    app.math.update(cx, |renderer, cx| renderer.set_appearance(&app.settings, cx));
                     if let Err(error) = storage::save_settings(&app.settings) {
                         app.report(error, cx);
                     }
@@ -3661,7 +3667,7 @@ impl Workspace {
                     let full = PathBuf::from(path);
                     let reveal = full.clone();
                     let copy = full.clone();
-                    let preview_font: SharedString = if self.settings.interface_font.is_empty() { "Segoe UI".into() } else { self.settings.interface_font.clone().into() };
+                    let preview_font = crate::ui::sans_font(&self.settings.interface_font);
                     let preview_font_size = self.settings.interface_font_size;
                     let trash_bounds = self.trash_bounds.clone();
                     let dragging = self.dragging_tree_item.clone();
@@ -3759,7 +3765,7 @@ impl Workspace {
                         self.directory_workspace().expect("folder has project").id.clone(),
                         full.clone(),
                     );
-                    let folder_font: SharedString = if self.settings.interface_font.is_empty() { "Segoe UI".into() } else { self.settings.interface_font.clone().into() };
+                    let folder_font = crate::ui::sans_font(&self.settings.interface_font);
                     let folder_font_size = self.settings.interface_font_size;
                     let trash_bounds = self.trash_bounds.clone();
                     let dragging = self.dragging_tree_item.clone();
@@ -3950,11 +3956,7 @@ impl Workspace {
                 } else {
                     vec![full.clone()]
                 };
-                let preview_font: SharedString = if self.settings.interface_font.is_empty() {
-                    "Segoe UI".into()
-                } else {
-                    self.settings.interface_font.clone().into()
-                };
+                let preview_font = crate::ui::sans_font(&self.settings.interface_font);
                 let preview_font_size = self.settings.interface_font_size;
                 let drag_project = self.directory_workspace().expect("file has project").id.clone();
                 let trash_bounds = self.trash_bounds.clone();
@@ -4209,6 +4211,8 @@ impl Workspace {
             .min_h_0()
             .overflow_hidden()
             .bg(rgb(0xfbfbfa))
+            .font_family(crate::ui::sans_font(&self.settings.interface_font))
+            .text_size(px(self.settings.interface_font_size as f32))
             .border_r_1()
             .border_color(rgb(BORDER))
             .child(div().pt_2().child(default_space))
@@ -5041,12 +5045,8 @@ impl Render for Workspace {
             .flex_col()
             .bg(rgb(BG))
             .text_color(rgb(0x37352f))
-            .text_size(px(self.settings.interface_font_size as f32))
-            .font_family(if self.settings.interface_font.is_empty() {
-                SharedString::from("Segoe UI")
-            } else {
-                self.settings.interface_font.clone().into()
-            })
+            .text_size(px(14.))
+            .font_family(crate::ui::DEFAULT_SANS_FONT)
             .track_focus(&self.focus)
             .key_context("FolioWorkspace")
             .on_action(cx.listener(|app, _: &ToggleAi, window, cx| {
