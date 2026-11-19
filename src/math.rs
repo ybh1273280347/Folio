@@ -8,7 +8,6 @@ use gpui_kit::{
     component::text::{
         InlineElement, InlineRenderContext, MarkdownNode, MarkdownParseContext, MarkdownPlugin,
     },
-    prelude::FluentBuilder,
     *,
 };
 use sha2::{Digest, Sha256};
@@ -442,11 +441,69 @@ impl MarkdownPlugin for MathPlugin {
             .inline_scale;
         let (element, baseline) =
             self.formula_element(content, f32::from(context.font_size()) * inline_scale / 10.);
-        // The inline renderer inherits the mark color. Its own box covers the
-        // entire typeset expression, which is one selection unit in the editor.
-        let formula = self.editable(content, element)
-            .when_some(context.text_style().background_color, |formula, color| formula.bg(color));
-        Some(InlineElement::new(formula).with_baseline(px(baseline)))
+        // Mark highlights are painted at the editor line level using the max
+        // vertical extent across text and inline math; record bounds in prepaint.
+        let formula = self.editable(content, element).into_any_element();
+        Some(InlineElement::new(InlineBoundsRecorder(formula)).with_baseline(px(baseline)))
+    }
+}
+
+struct InlineBoundsRecorder(AnyElement);
+
+impl IntoElement for InlineBoundsRecorder {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for InlineBoundsRecorder {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.0.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        markdown_editor::record_inline_atom_bounds(bounds);
+        self.0.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.0.paint(window, cx);
     }
 }
 pub fn formula_id(node: &MarkdownNode) -> Option<u64> {

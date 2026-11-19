@@ -20,20 +20,22 @@ use gpui_kit::base::text::editor_host::{
 pub(crate) fn paragraph(inline: &InlineText, id: BlockId, placeholders: bool) -> Paragraph {
     let mut paragraph = Paragraph::default();
     for (range, mark, atom) in inline.pieces() {
+        let mut mark = mark.clone();
+        mark.highlight = None;
         match atom {
             Some(InlineAtom::Image(image)) if placeholders => {
-                paragraph.push(image_placeholder(image).marks(vec![(0..1, mark.clone())]))
+                paragraph.push(image_placeholder(image).marks(vec![(0..1, mark)]))
             }
             Some(InlineAtom::Image(image)) => paragraph.push(InlineNode::image(image.clone())),
             Some(InlineAtom::Custom(node)) => {
                 let node = InlineNode::custom(node.clone());
                 let len = node.text().len();
-                paragraph.push(node.marks(vec![(0..len, mark.clone())]));
+                paragraph.push(node.marks(vec![(0..len, mark)]));
             }
             None => {
                 let text = &inline.text()[range];
                 paragraph.push(
-                    InlineNode::new(text.to_string()).marks(vec![(0..text.len(), mark.clone())]),
+                    InlineNode::new(text.to_string()).marks(vec![(0..text.len(), mark)]),
                 );
             }
         }
