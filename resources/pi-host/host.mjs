@@ -11,6 +11,7 @@ import { createAgentSession, SessionManager, DefaultResourceLoader, ModelRuntime
 import { webTools } from './web-tools.mjs';
 import { annotationTools } from './annotation-tools.mjs';
 import { tagTools } from './tag-tools.mjs';
+import { pythonTool } from './python-tool.mjs';
 import { WorkspaceToolBridge } from './workspace-tool-bridge.mjs';
 
 // stdout is a protocol channel, including while third-party extensions initialize.
@@ -77,7 +78,7 @@ function uiContext(record) {
   return {
     select: (title, options, opts) => request('select', { title, options }, opts),
     confirm: async (title, message, opts) => Boolean(await request('confirm', {
-      title, message, tagPreview: opts?.tagPreview, toolCallId: opts?.toolCallId,
+      title, message, tagPreview: opts?.tagPreview, toolCallId: opts?.toolCallId, commandApproval: opts?.commandApproval,
     }, opts)),
     input: (title, placeholder, opts) => request('input', { title, placeholder }, opts),
     editor: (title, prefill) => request('editor', { title, prefill }),
@@ -150,14 +151,19 @@ async function createRecord(cwd, manager) {
         details: { utc: now.toISOString(), timeZone } } };
     }),
     pi => pi.on('tool_call', async event => {
-      if (!['bash', 'powershell'].includes(event.toolName)) return;
-      const ok = await uiContext(record).confirm(`执行 ${event.toolName} 命令`, String(event.input.command));
+      if (!['bash', 'powershell', 'run_python'].includes(event.toolName)) return;
+      const python = event.toolName === 'run_python';
+      const ok = await uiContext(record).confirm(
+        python ? '运行 Python 脚本' : `执行 ${event.toolName} 命令`,
+        String(python ? event.input.source : event.input.command),
+        { commandApproval: true, toolCallId: event.toolCallId },
+      );
       if (!ok) return { block: true, reason: '用户拒绝执行命令' };
     }),
   ] });
   await loader.reload();
   const { session } = await createAgentSession({ cwd, sessionManager: manager, modelRuntime: record.models,
-    resourceLoader: loader, customTools: [...webTools(() => settings, cwd, root),
+    resourceLoader: loader, customTools: [pythonTool(cwd), ...webTools(() => settings, cwd, root),
       ...annotationTools((operation, params, signal) => annotationBridge.request(
         { projectKey: project, sessionId: id }, operation, params, signal)),
       ...tagTools((operation, params, signal) => tagBridge.request(

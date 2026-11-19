@@ -673,6 +673,12 @@ fn table_cells_click_type_tab_and_cell_selection(cx: &mut TestAppContext) {
         e.model().selection(),
         BlockSelection::Cells { .. }
     )));
+    editor.read_with(cx, |e, _| {
+        let bounds = e.selection_window_bounds().expect("selected cells have toolbar bounds");
+        assert!(bounds.contains(&from));
+        assert!(bounds.contains(&to));
+        assert_eq!(e.selected_plain_text().as_deref(), Some("| x | y |\n| --- | --- |\n| 1 | 2 |"));
+    });
     assert_eq!(editor.update(cx, |e, _| e.selection_ranges().len()), 4);
     keys(cx, "M-c");
     let copied = cx.read_from_clipboard().and_then(|c| c.text()).unwrap();

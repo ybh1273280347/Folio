@@ -701,3 +701,278 @@ pub fn label(text: SharedString) -> AnyElement {
         .children((!caption.is_empty()).then_some(caption))
         .into_any_element()
 }
+
+/// Visual weight for an action inside [`ApprovalCard`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApprovalActionKind {
+    Primary,
+    Secondary,
+    GhostDanger,
+}
+
+struct ApprovalAction {
+    id: ElementId,
+    label: SharedString,
+    kind: ApprovalActionKind,
+    on_click: Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>,
+}
+
+/// Reusable three-part confirmation card (header, scrollable body, tinted action footer)
+/// with a subtle status accent strip for human-in-the-loop approvals across panes.
+#[derive(IntoElement)]
+pub struct ApprovalCard {
+    id: ElementId,
+    icon: IconName,
+    title: SharedString,
+    badge: (SharedString, u32, u32),
+    accent_bar: u32,
+    body: AnyElement,
+    actions: Vec<ApprovalAction>,
+    palette: crate::theme::Palette,
+}
+
+impl ApprovalCard {
+    pub fn new(
+        id: impl Into<ElementId>,
+        title: impl Into<SharedString>,
+        body: AnyElement,
+        palette: crate::theme::Palette,
+    ) -> Self {
+        let dark = palette.is_dark();
+        let (accent_bar, badge_bg, badge_fg) = if dark {
+            (0xf59e0b, 0x3b2c12, 0xfcd34d)
+        } else {
+            (0xd97706, 0xfef3c7, 0x92400e)
+        };
+        Self {
+            id: id.into(),
+            icon: IconName::Shield,
+            title: title.into(),
+            badge: ("待确认".into(), badge_bg, badge_fg),
+            accent_bar,
+            body,
+            actions: Vec::new(),
+            palette,
+        }
+    }
+
+    pub fn icon(mut self, icon: IconName) -> Self {
+        self.icon = icon;
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn status_badge(
+        mut self,
+        label: impl Into<SharedString>,
+        bg_hex: u32,
+        fg_hex: u32,
+    ) -> Self {
+        self.badge = (label.into(), bg_hex, fg_hex);
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn accent_bar(mut self, hex: u32) -> Self {
+        self.accent_bar = hex;
+        self
+    }
+
+    pub fn action(
+        mut self,
+        id: impl Into<ElementId>,
+        label: impl Into<SharedString>,
+        kind: ApprovalActionKind,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.actions.push(ApprovalAction {
+            id: id.into(),
+            label: label.into(),
+            kind,
+            on_click: Box::new(on_click),
+        });
+        self
+    }
+}
+
+impl RenderOnce for ApprovalCard {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let p = self.palette;
+        let dark = p.is_dark();
+        let (badge_text, badge_bg, badge_fg) = self.badge;
+        let has_actions = !self.actions.is_empty();
+        let footer_actions = self.actions.into_iter().map(|act| {
+            let el = match act.kind {
+                ApprovalActionKind::GhostDanger => {
+                    let hover_bg = if dark { 0x3b1d22 } else { 0xfff1f0 };
+                    let hover_fg = if dark { 0xfca5a5 } else { 0xcf1322 };
+                    button_base(act.id, act.label)
+                        .min_h(px(27.))
+                        .px_2p5()
+                        .rounded(px(6.))
+                        .text_size(px(12.))
+                        .text_color(gpui_kit::rgb(p.muted))
+                        .hover(move |s| {
+                            s.bg(gpui_kit::rgb(hover_bg))
+                                .text_color(gpui_kit::rgb(hover_fg))
+                        })
+                        .active(|s| s.shadow(inset_press(0.08)))
+                }
+                ApprovalActionKind::Secondary => button_base(act.id, act.label)
+                    .min_h(px(27.))
+                    .px_2p5()
+                    .rounded(px(6.))
+                    .text_size(px(12.))
+                    .text_color(gpui_kit::rgb(p.text))
+                    .bg(gpui_kit::rgb(p.surface))
+                    .border_1()
+                    .border_color(gpui_kit::rgb(p.border))
+                    .shadow(raised(0.05, 0.0))
+                    .hover(move |s| s.bg(gpui_kit::rgb(p.hover)))
+                    .active(move |s| {
+                        s.bg(gpui_kit::rgb(p.pressed))
+                            .shadow(inset_press(0.10))
+                    }),
+                ApprovalActionKind::Primary => button_base(act.id, act.label)
+                    .min_h(px(27.))
+                    .px_3()
+                    .rounded(px(6.))
+                    .text_size(px(12.))
+                    .font_medium()
+                    .text_color(gpui_kit::rgb(p.on_accent))
+                    .bg(gpui_kit::rgb(p.accent))
+                    .shadow(raised(0.14, 0.14))
+                    .hover(|s| s.opacity(0.90))
+                    .active(|s| s.opacity(0.82).shadow(inset_press(0.20))),
+            };
+            el.on_click(move |ev, window, cx| (act.on_click)(ev, window, cx))
+        });
+
+        div()
+            .id(self.id)
+            .font_family(DEFAULT_SANS_FONT)
+            .rounded(px(12.))
+            .border_1()
+            .border_color(gpui_kit::rgb(p.border))
+            .bg(gpui_kit::rgb(p.surface))
+            .shadow_sm()
+            .overflow_hidden()
+            .flex()
+            .flex_row()
+            .child(div().w(px(3.)).flex_shrink_0().bg(gpui_kit::rgb(self.accent_bar)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .px_3()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(gpui_kit::rgb(p.border))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .child(
+                                        self::icon(self.icon)
+                                            .size(px(14.))
+                                            .text_color(gpui_kit::rgb(self.accent_bar))
+                                            .flex_shrink_0(),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .text_ellipsis()
+                                            .text_size(px(12.5))
+                                            .font_medium()
+                                            .text_color(gpui_kit::rgb(p.text))
+                                            .child(self.title),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .px_2()
+                                    .py(px(2.))
+                                    .rounded(px(999.))
+                                    .bg(gpui_kit::rgb(badge_bg))
+                                    .text_color(gpui_kit::rgb(badge_fg))
+                                    .text_size(px(11.))
+                                    .font_medium()
+                                    .child(format!("• {badge_text}")),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("approval-card-body")
+                            .px_3()
+                            .py_2p5()
+                            .max_h(px(176.))
+                            .overflow_y_scroll()
+                            .child(self.body),
+                    )
+                    .when(has_actions, |col| {
+                        col.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .gap_2()
+                                .px_3()
+                                .py_2()
+                                .bg(gpui_kit::rgb(p.background))
+                                .border_t_1()
+                                .border_color(gpui_kit::rgb(p.border))
+                                .children(footer_actions),
+                        )
+                    }),
+            )
+    }
+}
+
+/// Inset monospace command block for use inside [`ApprovalCard`].
+pub fn approval_command_body(
+    command: &str,
+    font: SharedString,
+    size: Pixels,
+    palette: crate::theme::Palette,
+) -> AnyElement {
+    div()
+        .w_full()
+        .px_2p5()
+        .py_2()
+        .rounded(px(8.))
+        .bg(gpui_kit::rgb(palette.code_background))
+        .border_1()
+        .border_color(gpui_kit::rgb(palette.border))
+        .font_family(font)
+        .text_size(size)
+        .line_height(relative(1.45))
+        .flex()
+        .items_start()
+        .gap_1p5()
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_color(gpui_kit::rgb(palette.muted))
+                .child("$"),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_color(gpui_kit::rgb(palette.text))
+                .child(command.to_owned()),
+        )
+        .into_any_element()
+}
