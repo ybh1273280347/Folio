@@ -29,6 +29,7 @@ use markdown_editor::{
 use std::{cell::RefCell, ops::Range, path::PathBuf, rc::Rc};
 
 mod emoji;
+mod outline;
 
 pub(crate) const CALLOUTS: &[(&str, &str, u32)] = &[
     ("note", "ⓘ  Note", 0x0969da),
@@ -286,6 +287,7 @@ struct OutlineHeading {
     range: Range<usize>,
     level: u8,
     title: String,
+    display_title: String,
 }
 
 #[derive(Clone)]
@@ -315,6 +317,17 @@ pub struct MarkdownPane {
     outline: bool,
     outline_width: f32,
     outline_drag: Option<(f32, f32)>,
+    outline_initialized: bool,
+    outline_user_toggled: bool,
+    outline_anim_gen: u64,
+    outline_closing: bool,
+    outline_closing_task: Task<()>,
+    outline_scroll: ScrollHandle,
+    outline_collapsed: std::collections::BTreeSet<usize>,
+    active_heading: Option<usize>,
+    heading_click_lock_until: Option<std::time::Instant>,
+    pane_outer_width: Rc<std::cell::Cell<f32>>,
+    last_scroll_y: Rc<std::cell::Cell<Pixels>>,
     reading: bool,
     focus: FocusHandle,
     scroll: ScrollHandle,
@@ -817,6 +830,17 @@ impl MarkdownPane {
             outline: false,
             outline_width: 210.,
             outline_drag: None,
+            outline_initialized: false,
+            outline_user_toggled: false,
+            outline_anim_gen: 0,
+            outline_closing: false,
+            outline_closing_task: Task::ready(()),
+            outline_scroll: ScrollHandle::new(),
+            outline_collapsed: std::collections::BTreeSet::new(),
+            active_heading: None,
+            heading_click_lock_until: None,
+            pane_outer_width: Rc::new(std::cell::Cell::new(0.0)),
+            last_scroll_y: Rc::new(std::cell::Cell::new(px(0.))),
             reading,
             focus: cx.focus_handle(),
             scroll,
@@ -904,6 +928,7 @@ impl MarkdownPane {
                 });
                 pane.retain_mermaid_blocks(cx);
                 pane.headings = headings;
+                pane.reconcile_outline_state(cx);
                 pane.loading = None;
                 if let Some(anchor) = pane.pending_anchor.take() {
                     pane.reveal_anchor(&anchor, None, cx);
@@ -923,6 +948,32 @@ impl MarkdownPane {
 
     fn parse_outline(&mut self) {
         self.headings = Self::outline_headings(&self.text);
+        let len = self.headings.len();
+        self.outline_collapsed.retain(|&ix| ix < len);
+        if self.active_heading.is_some_and(|ix| ix >= len) {
+            self.active_heading = (len > 0).then_some(0);
+        } else if self.active_heading.is_none() && len > 0 {
+            self.active_heading = Some(0);
+        }
+    }
+
+    fn reconcile_outline_state(&mut self, cx: &App) {
+        let len = self.headings.len();
+        self.outline_collapsed.retain(|&ix| ix < len);
+        self.active_heading = self
+            .visual_editor
+            .read(cx)
+            .active_heading_index(px(96.))
+            .or((len > 0).then_some(0));
+        let width = self.pane_outer_width.get();
+        if !self.source
+            && !self.outline_user_toggled
+            && !self.headings.is_empty()
+            && width >= outline::AUTO_OPEN_WIDTH
+        {
+            self.outline = true;
+            self.outline_closing = false;
+        }
     }
 
     fn outline_headings(text: &str) -> Vec<OutlineHeading> {
@@ -949,26 +1000,157 @@ impl MarkdownPane {
                     .unwrap_or(0)
                     + position.end.column)
                     .min(text.len());
-                let title = node
+                let title: String = node
                     .descendants()
                     .filter_map(|child| match &child.data.borrow().value {
                         NodeValue::Text(text) => Some(text.to_string()),
                         NodeValue::Code(code) => Some(code.literal.clone()),
+                        NodeValue::SoftBreak => Some(" ".to_owned()),
                         _ => None,
                     })
                     .collect();
+                let display_title = outline::clean_outline_title(&title);
                 Some(OutlineHeading {
                     range: start..end,
                     level: heading.level,
                     title,
+                    display_title,
                 })
             })
             .collect()
     }
 
+    pub fn is_outline_open(&self) -> bool {
+        self.outline && !self.outline_closing
+    }
+
+    fn is_outline_rendered(&self) -> bool {
+        self.outline || self.outline_closing
+    }
+
+    fn is_outline_overlay(&self) -> bool {
+        let w = self.pane_outer_width.get();
+        w > 0.0 && w < outline::OVERLAY_WIDTH
+    }
+
     pub fn toggle_outline(&mut self, cx: &mut Context<Self>) {
-        self.outline = !self.outline;
+        if self.source {
+            self.outline = !self.outline;
+            self.outline_closing = false;
+            cx.notify();
+            return;
+        }
+        self.outline_user_toggled = true;
+        self.outline_initialized = true;
+        if self.is_outline_open() {
+            self.close_outline(cx);
+        } else {
+            self.outline = true;
+            self.outline_closing = false;
+            self.outline_closing_task = Task::ready(());
+            self.outline_anim_gen = self.outline_anim_gen.wrapping_add(1);
+            self.sync_active_heading(cx);
+            cx.notify();
+        }
+    }
+
+    fn close_outline(&mut self, cx: &mut Context<Self>) {
+        if !self.outline || self.outline_closing {
+            return;
+        }
+        self.outline_closing = true;
+        self.outline_anim_gen = self.outline_anim_gen.wrapping_add(1);
+        self.outline_closing_task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(outline::ANIMATION_MS + 10))
+                .await;
+            let _ = this.update(cx, |pane, cx| {
+                if pane.outline_closing {
+                    pane.outline = false;
+                    pane.outline_closing = false;
+                    cx.notify();
+                }
+            });
+        });
         cx.notify();
+    }
+
+    fn handle_pane_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        if self.source || width <= 0.0 {
+            return;
+        }
+        let prev = self.pane_outer_width.replace(width);
+        let mut changed = false;
+
+        if !self.outline_initialized {
+            self.outline_initialized = true;
+            if !self.outline_user_toggled
+                && !self.headings.is_empty()
+                && width >= outline::AUTO_OPEN_WIDTH
+            {
+                self.outline = true;
+                self.outline_closing = false;
+                changed = true;
+            }
+        } else {
+            let was_overlay = prev > 0.0 && prev < outline::OVERLAY_WIDTH;
+            let is_overlay = width < outline::OVERLAY_WIDTH;
+            if was_overlay != is_overlay {
+                changed = true;
+            }
+            if !self.outline_user_toggled {
+                if is_overlay && self.is_outline_open() {
+                    self.outline = false;
+                    self.outline_closing = false;
+                    changed = true;
+                } else if !self.is_outline_open()
+                    && !self.headings.is_empty()
+                    && width >= outline::AUTO_OPEN_WIDTH
+                    && prev < outline::AUTO_OPEN_WIDTH
+                {
+                    self.outline = true;
+                    self.outline_closing = false;
+                    self.outline_anim_gen = self.outline_anim_gen.wrapping_add(1);
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn sync_active_heading(&mut self, cx: &mut Context<Self>) {
+        if self.source || self.headings.is_empty() {
+            return;
+        }
+        if self
+            .heading_click_lock_until
+            .is_some_and(|until| std::time::Instant::now() < until)
+        {
+            return;
+        }
+        let next = self.visual_editor.read(cx).active_heading_index(px(96.));
+        if next != self.active_heading {
+            self.active_heading = next;
+            cx.notify();
+        }
+    }
+
+    fn on_outline_heading_click(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.active_heading = Some(index);
+        self.heading_click_lock_until =
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(260));
+        self.navigate_heading(index, window, cx);
+        if !self.source && self.is_outline_overlay() {
+            self.close_outline(cx);
+        }
     }
 
     fn handle_link_click(&mut self, raw: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -2554,6 +2736,13 @@ impl Render for MarkdownPane {
                     .gap_2()
                     .flex_1()
                     .min_w_0()
+                    .when(!self.source, |row| {
+                        row.child(outline::render_toggle_button(
+                            "md-outline",
+                            self.is_outline_open(),
+                            cx,
+                        ))
+                    })
                     .child(crate::ui::icon(IconName::FileText))
                     .child(
                         div().min_w_0().text_ellipsis().child(
@@ -2571,10 +2760,12 @@ impl Render for MarkdownPane {
                     .flex_shrink_0()
                     .items_center()
                     .gap_1()
-                    .child(
-                        crate::ui::control("md-outline", IconName::ListTree)
-                            .on_click(cx.listener(|pane, _, _, cx| pane.toggle_outline(cx))),
-                    )
+                    .when(self.source, |row| {
+                        row.child(
+                            crate::ui::control("md-outline", IconName::ListTree)
+                                .on_click(cx.listener(|pane, _, _, cx| pane.toggle_outline(cx))),
+                        )
+                    })
                     .child(
                         action(
                             "md-font-size",
@@ -2607,7 +2798,7 @@ impl Render for MarkdownPane {
             );
 
         let mut content = div().relative().flex().flex_1().min_w_0().min_h_0().overflow_hidden();
-        if self.outline {
+        if self.source && self.outline {
             let headings = self.headings.iter().enumerate().map(|(index, heading)| {
                 div()
                     .id(("md-heading", index))
@@ -2764,6 +2955,11 @@ impl Render for MarkdownPane {
                 |this| &mut this.translate,
             );
 
+            let outline_overlay = self.is_outline_overlay();
+            if self.is_outline_rendered() && !outline_overlay {
+                content = content.child(outline::render_docked(self, cx));
+            }
+
             content = content.child(
                 // Floating controls must be outside the scroll owner: their
                 // screen-relative positions otherwise enlarge its scroll bounds.
@@ -2776,6 +2972,9 @@ impl Render for MarkdownPane {
                     .justify_center()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
+                    .on_scroll(cx.listener(|pane, _: &ScrollEvent, _, cx| {
+                        pane.sync_active_heading(cx);
+                    }))
                     .text_size(px(self.settings.markdown_font_size as f32))
                     .font_family(if self.settings.interface_font.is_empty() {
                         SharedString::from("Segoe UI")
@@ -2867,12 +3066,6 @@ impl Render for MarkdownPane {
                                         pane.read(cx).text.clone()
                                     })
                                 })
-                                .child(
-                                    crate::ui::control("md-float-outline", IconName::ListTree)
-                                        .on_click(cx.listener(|pane, _, _, cx| {
-                                            pane.toggle_outline(cx)
-                                        })),
-                                 )
                                 .child(
                                     crate::ui::control("md-float-source", IconName::CodeXml)
                                         .on_click(cx.listener(|pane, _, window, cx| {
@@ -3054,6 +3247,80 @@ impl Render for MarkdownPane {
                         )
                     }),
             );
+
+            // Observe outer pane width (for wide auto-open / narrow overlay switching)
+            // and scroll offset changes (including scrollbar drag) after BlockEditor prepaints.
+            {
+                let weak_pane = cx.weak_entity();
+                let pane_outer_width = self.pane_outer_width.clone();
+                let last_scroll_y = self.last_scroll_y.clone();
+                let scroll = self.scroll.clone();
+                let visual_editor = self.visual_editor.clone();
+                let current_active = self.active_heading;
+                let initialized = self.outline_initialized;
+                content = content.child(
+                    canvas(
+                        move |bounds, window, cx| {
+                            let width = f32::from(bounds.size.width);
+                            if width > 0.0 {
+                                let prev = pane_outer_width.get();
+                                let crossed_overlay = (prev > 0.0 && prev < outline::OVERLAY_WIDTH)
+                                    != (width < outline::OVERLAY_WIDTH);
+                                let crossed_auto = (prev < outline::AUTO_OPEN_WIDTH)
+                                    != (width >= outline::AUTO_OPEN_WIDTH);
+                                if !initialized || crossed_overlay || crossed_auto {
+                                    let weak = weak_pane.clone();
+                                    window.defer(cx, move |_, cx| {
+                                        if let Some(pane) = weak.upgrade() {
+                                            pane.update(cx, |pane, cx| {
+                                                pane.handle_pane_width(width, cx)
+                                            });
+                                        }
+                                    });
+                                } else {
+                                    pane_outer_width.set(width);
+                                }
+                            }
+                            let scroll_y = scroll.offset().y;
+                            if (f32::from(scroll_y) - f32::from(last_scroll_y.get())).abs() > 0.5 {
+                                last_scroll_y.set(scroll_y);
+                                let next = visual_editor.read(cx).active_heading_index(px(96.));
+                                if next != current_active {
+                                    let weak = weak_pane.clone();
+                                    window.defer(cx, move |_, cx| {
+                                        if let Some(pane) = weak.upgrade() {
+                                            pane.update(cx, |pane, cx| {
+                                                pane.sync_active_heading(cx)
+                                            });
+                                        }
+                                    });
+                                }
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
+                );
+            }
+
+            if self.is_outline_rendered() && outline_overlay {
+                content = content.child(outline::render_overlay(self, cx));
+            }
+
+            if !self.reading {
+                content = content.child(
+                    div()
+                        .absolute()
+                        .top(px(9.))
+                        .left(px(12.))
+                        .child(outline::render_toggle_button(
+                            "md-float-outline",
+                            self.is_outline_open(),
+                            cx,
+                        )),
+                );
+            }
 
             if self.show_annotations_drawer && !self.annotations.is_empty() {
                 let editor_font_size = self.settings.markdown_font_size as f32;
@@ -3432,6 +3699,11 @@ impl Render for MarkdownPane {
                         cx.notify();
                         return;
                     }
+                    if !pane.source && pane.is_outline_open() && pane.is_outline_overlay() {
+                        pane.close_outline(cx);
+                        cx.stop_propagation();
+                        return;
+                    }
                     if pane.show_turn_into
                         || pane.show_color_picker
                         || pane.link_editing
@@ -3694,7 +3966,7 @@ fn collapse_hyphens(slug: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{OutlineHeading, match_heading_index};
 
     #[test]
     fn heading_anchor_matches_exact_slug_and_percent_encoded() {
@@ -3703,11 +3975,13 @@ mod tests {
                 range: 0..10,
                 level: 1,
                 title: "1. 背景介绍".to_owned(),
+                display_title: "1. 背景介绍".to_owned(),
             },
             OutlineHeading {
                 range: 12..30,
                 level: 2,
                 title: "Quick Start Guide".to_owned(),
+                display_title: "Quick Start Guide".to_owned(),
             },
         ];
         assert_eq!(match_heading_index(&headings, "1.%20背景介绍"), Some(0));
