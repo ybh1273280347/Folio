@@ -16,6 +16,7 @@ use super::{
     editor::BlockEditorModel,
     frame::FrameLayout,
     id::BlockId,
+    inline::{InlineAtom, InlineText},
     kind::BlockKind,
     marks::MarkKind,
     position::BlockPosition,
@@ -1019,35 +1020,91 @@ impl BlockEditorState {
         self.frame.borrow().caret_bounds(pos, self.style.caret_width())
     }
 
-    /// Window-space bounding box of a non-collapsed text selection.
+    /// Window-space bounds of the selected text or table cells.
     pub fn selection_window_bounds(&self) -> Option<Bounds<Pixels>> {
-        let BlockSelection::Text { anchor, head } = self.model.selection else {
-            return None;
-        };
-        if anchor == head {
-            return None;
-        }
         let frame = self.frame.borrow();
-        let w = self.style.caret_width();
-        let a = frame.caret_bounds(anchor, w)?;
-        let b = frame.caret_bounds(head, w)?;
-        Some(a.union(&b))
+        match self.model.selection {
+            BlockSelection::Text { anchor, head } if anchor != head => {
+                let width = self.style.caret_width();
+                let start = frame.caret_bounds(anchor, width)?;
+                let end = frame.caret_bounds(head, width)?;
+                Some(start.union(&end))
+            }
+            BlockSelection::Cells { anchor, head } => {
+                // The opposite cell boxes span the full rectangle, including empty cells.
+                let start = frame.cell_boxes.get(&anchor)?;
+                let end = frame.cell_boxes.get(&head)?;
+                Some(start.union(end))
+            }
+            _ => None,
+        }
     }
 
-    /// Plain text of the current non-collapsed selection.
-    pub fn selected_plain_text(&self) -> Option<String> {
-        let BlockSelection::Text { anchor, head } = self.model.selection else {
-            return None;
-        };
-        if anchor == head {
-            return None;
+    /// Expand inline atoms (e.g. inline math `$i$`) into readable plain text,
+    /// returning `(expanded_text, raw_starts, raw_ends)` where `raw_starts[i]`
+    /// and `raw_ends[i]` map expanded byte offsets back to `inline.text()`.
+    fn expand_inline_plain(inline: &InlineText) -> (String, Vec<usize>, Vec<usize>) {
+        let raw = inline.text();
+        let mut out = String::with_capacity(raw.len());
+        let mut starts = Vec::with_capacity(raw.len() + 1);
+        let mut ends = Vec::with_capacity(raw.len() + 1);
+        ends.push(0);
+        for (range, _marks, atom) in inline.pieces() {
+            match atom {
+                Some(InlineAtom::Custom(node)) => {
+                    let s = if node.as_markdown().is_empty() {
+                        node.as_text()
+                    } else {
+                        node.as_markdown()
+                    };
+                    out.push_str(s);
+                    for _ in 0..s.len() {
+                        starts.push(range.start);
+                        ends.push(range.end);
+                    }
+                }
+                Some(InlineAtom::Image(image)) => {
+                    let s = image.alt.as_deref().unwrap_or("");
+                    out.push_str(s);
+                    for _ in 0..s.len() {
+                        starts.push(range.start);
+                        ends.push(range.end);
+                    }
+                }
+                None => {
+                    let s = &raw[range.clone()];
+                    out.push_str(s);
+                    for k in 0..s.len() {
+                        starts.push(range.start + k);
+                        ends.push(range.start + k + 1);
+                    }
+                }
+            }
         }
-        if anchor.block == head.block
-            && let Some(text) = self.model.doc.leaf_text(anchor.block)
-        {
-            let (lo, hi) = (anchor.offset.min(head.offset), anchor.offset.max(head.offset));
-            let s = text.get(lo..hi)?.trim().to_string();
-            return (!s.is_empty()).then_some(s);
+        starts.push(raw.len());
+        (out, starts, ends)
+    }
+
+    /// Text of the current selection, preserving the rows and columns of selected cells.
+    pub fn selected_plain_text(&self) -> Option<String> {
+        match self.model.selection {
+            BlockSelection::Text { anchor, head } if anchor != head => {
+                if anchor.block == head.block {
+                    let (lo, hi) = (anchor.offset.min(head.offset), anchor.offset.max(head.offset));
+                    if let Some(inline) = self.model.doc.inline(anchor.block) {
+                        let (expanded, _, _) = Self::expand_inline_plain(&inline.slice(lo..hi));
+                        let s = expanded.trim().to_string();
+                        return (!s.is_empty()).then_some(s);
+                    }
+                    if let Some(text) = self.model.doc.leaf_text(anchor.block) {
+                        let s = text.get(lo..hi)?.trim().to_string();
+                        return (!s.is_empty()).then_some(s);
+                    }
+                }
+            }
+            // Reuse the clipboard representation so consumers receive only the selected rectangle.
+            BlockSelection::Cells { .. } => return self.model.cells_markdown(),
+            _ => return None,
         }
         let (text, _) = self.selected_text();
         let s = text.trim().to_string();
@@ -1071,16 +1128,25 @@ impl BlockEditorState {
         let quote = self.selected_plain_text()?;
         let mut count = 0usize;
         for leaf in self.model.document().leaves() {
-            let Some(text) = self.model.doc.leaf_text(leaf.id()) else {
-                continue;
-            };
-            if leaf.id() == target_block {
-                if let Some(prefix) = text.get(..lo.min(text.len())) {
-                    count += prefix.matches(&quote).count();
+            if let Some(inline) = self.model.doc.inline(leaf.id()) {
+                if leaf.id() == target_block {
+                    let prefix_end = lo.min(inline.text().len());
+                    let (expanded, _, _) = Self::expand_inline_plain(&inline.slice(0..prefix_end));
+                    count += expanded.matches(&quote).count();
+                    break;
+                } else {
+                    let (expanded, _, _) = Self::expand_inline_plain(inline);
+                    count += expanded.matches(&quote).count();
                 }
-                break;
-            } else {
-                count += text.matches(&quote).count();
+            } else if let Some(text) = self.model.doc.leaf_text(leaf.id()) {
+                if leaf.id() == target_block {
+                    if let Some(prefix) = text.get(..lo.min(text.len())) {
+                        count += prefix.matches(&quote).count();
+                    }
+                    break;
+                } else {
+                    count += text.matches(&quote).count();
+                }
             }
         }
         Some((quote, count))
@@ -1097,25 +1163,41 @@ impl BlockEditorState {
             return false;
         }
         let step = quote.chars().next().map_or(1, char::len_utf8);
+        let legacy_raw = quote.contains('\u{FFFC}');
         let mut seen = 0usize;
         let mut found = None;
         for leaf in self.model.document().leaves() {
-            let Some(text) = self.model.doc.leaf_text(leaf.id()) else {
-                continue;
-            };
-            let mut from = 0;
-            while let Some(slice) = text.get(from..) {
-                let Some(rel) = slice.find(quote) else {
-                    break;
-                };
-                let start = from + rel;
-                let end = start + quote.len();
-                if seen == occurrence {
-                    found = Some((leaf.id(), start, end));
-                    break;
+            if !legacy_raw && let Some(inline) = self.model.doc.inline(leaf.id()) {
+                let (expanded, starts, ends) = Self::expand_inline_plain(inline);
+                let mut from = 0;
+                while let Some(slice) = expanded.get(from..) {
+                    let Some(rel) = slice.find(quote) else {
+                        break;
+                    };
+                    let out_start = from + rel;
+                    let out_end = out_start + quote.len();
+                    if seen == occurrence {
+                        found = Some((leaf.id(), starts[out_start], ends[out_end]));
+                        break;
+                    }
+                    seen += 1;
+                    from = out_start + step;
                 }
-                seen += 1;
-                from = start + step;
+            } else if let Some(text) = self.model.doc.leaf_text(leaf.id()) {
+                let mut from = 0;
+                while let Some(slice) = text.get(from..) {
+                    let Some(rel) = slice.find(quote) else {
+                        break;
+                    };
+                    let start = from + rel;
+                    let end = start + quote.len();
+                    if seen == occurrence {
+                        found = Some((leaf.id(), start, end));
+                        break;
+                    }
+                    seen += 1;
+                    from = start + step;
+                }
             }
             if found.is_some() {
                 break;
@@ -2382,7 +2464,8 @@ impl BlockEditorState {
             hi += 1;
         }
         let range = pieces[lo].0.start..pieces[hi].0.end;
-        let quote = inline.text().get(range.clone())?.trim().to_string();
+        let (expanded, _, _) = Self::expand_inline_plain(&inline.slice(range.clone()));
+        let quote = expanded.trim().to_string();
         (!quote.is_empty()).then_some((head.block, range, quote))
     }
 
