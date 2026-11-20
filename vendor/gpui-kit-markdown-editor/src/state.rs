@@ -1218,45 +1218,83 @@ impl BlockEditorState {
 
     /// Case-insensitively selects and reveals the wrapped `index`-th match of `query`,
     /// returning `(1_based_index, total_matches)` or `(0, 0)` when no matches exist.
+    fn collect_search_matches(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+        whole_word: bool,
+    ) -> Vec<(BlockId, usize, usize)> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let is_word_char = |ch: char| ch.is_alphanumeric() || ch == '_';
+        let query_chars: Vec<char> = if case_sensitive {
+            Vec::new()
+        } else {
+            query.chars().flat_map(char::to_lowercase).collect()
+        };
+        let mut matches = Vec::new();
+        for leaf in self.model.document().leaves() {
+            let Some(text) = self.model.doc.leaf_text(leaf.id()) else {
+                continue;
+            };
+            for (start, _) in text.char_indices() {
+                let matched_end = if case_sensitive {
+                    text[start..].starts_with(query).then_some(start + query.len())
+                } else {
+                    let mut qi = 0usize;
+                    let mut end = start;
+                    let mut matched = true;
+                    for (offset, ch) in text[start..].char_indices() {
+                        for lc in ch.to_lowercase() {
+                            if qi < query_chars.len() && lc == query_chars[qi] {
+                                qi += 1;
+                            } else {
+                                matched = false;
+                                break;
+                            }
+                        }
+                        end = start + offset + ch.len_utf8();
+                        if !matched || qi == query_chars.len() {
+                            break;
+                        }
+                    }
+                    (matched && qi == query_chars.len()).then_some(end)
+                };
+                let Some(end) = matched_end else {
+                    continue;
+                };
+                if whole_word {
+                    let prev_word = text[..start].chars().next_back().is_some_and(is_word_char);
+                    let next_word = text[end..].chars().next().is_some_and(is_word_char);
+                    if prev_word || next_word {
+                        continue;
+                    }
+                }
+                matches.push((leaf.id(), start, end));
+            }
+        }
+        matches
+    }
+
     pub fn search_occurrence(
         &mut self,
         query: &str,
         index: isize,
         cx: &mut Context<Self>,
     ) -> (usize, usize) {
-        let query_chars: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
-        if query_chars.is_empty() {
-            return (0, 0);
-        }
-        let mut matches = Vec::new();
-        for leaf in self.model.document().leaves() {
-            let Some(text) = self.model.doc.leaf_text(leaf.id()) else {
-                continue;
-            };
-            let mut indices = text.char_indices().peekable();
-            while let Some((start, _)) = indices.next() {
-                let mut qi = 0usize;
-                let mut end = start;
-                let mut matched = true;
-                for (offset, ch) in text[start..].char_indices() {
-                    for lc in ch.to_lowercase() {
-                        if qi < query_chars.len() && lc == query_chars[qi] {
-                            qi += 1;
-                        } else {
-                            matched = false;
-                            break;
-                        }
-                    }
-                    end = start + offset + ch.len_utf8();
-                    if !matched || qi == query_chars.len() {
-                        break;
-                    }
-                }
-                if matched && qi == query_chars.len() {
-                    matches.push((leaf.id(), start, end));
-                }
-            }
-        }
+        self.search_occurrence_with(query, index, false, false, cx)
+    }
+
+    pub fn search_occurrence_with(
+        &mut self,
+        query: &str,
+        index: isize,
+        case_sensitive: bool,
+        whole_word: bool,
+        cx: &mut Context<Self>,
+    ) -> (usize, usize) {
+        let matches = self.collect_search_matches(query, case_sensitive, whole_word);
         let total = matches.len();
         if total == 0 {
             return (0, 0);
@@ -1270,6 +1308,81 @@ impl BlockEditorState {
         self.selection_changed(cx);
         self.reveal_caret(cx);
         (chosen + 1, total)
+    }
+
+    pub fn replace_search_occurrence(
+        &mut self,
+        query: &str,
+        replacement: &str,
+        index: isize,
+        case_sensitive: bool,
+        whole_word: bool,
+        cx: &mut Context<Self>,
+    ) -> (usize, usize) {
+        if self.readonly {
+            return (0, 0);
+        }
+        let matches = self.collect_search_matches(query, case_sensitive, whole_word);
+        if matches.is_empty() {
+            return (0, 0);
+        }
+        let chosen = index.rem_euclid(matches.len() as isize) as usize;
+        let (block, start, end) = matches[chosen];
+        self.edit(
+            EditOrigin::Api,
+            |model| {
+                model.set_selection(BlockSelection::Text {
+                    anchor: BlockPosition::new(block, start),
+                    head: BlockPosition::new(block, end),
+                })?;
+                model.insert_text(replacement, EditOrigin::Api)
+            },
+            cx,
+        );
+        self.search_occurrence_with(query, chosen as isize, case_sensitive, whole_word, cx)
+    }
+
+    pub fn replace_all_search_occurrences(
+        &mut self,
+        query: &str,
+        replacement: &str,
+        case_sensitive: bool,
+        whole_word: bool,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        if self.readonly {
+            return 0;
+        }
+        let matches = self.collect_search_matches(query, case_sensitive, whole_word);
+        let count = matches.len();
+        if count == 0 {
+            return 0;
+        }
+        // Reverse order keeps earlier byte offsets valid within each leaf block.
+        self.edit(
+            EditOrigin::Api,
+            |model| {
+                model.history.begin_transaction();
+                let mut result: Result<(), CommandError> = Ok(());
+                for (block, start, end) in matches.into_iter().rev() {
+                    if let Err(err) = model
+                        .set_selection(BlockSelection::Text {
+                            anchor: BlockPosition::new(block, start),
+                            head: BlockPosition::new(block, end),
+                        })
+                        .map_err(CommandError::from)
+                        .and_then(|_| model.insert_text(replacement, EditOrigin::Api))
+                    {
+                        result = Err(err);
+                        break;
+                    }
+                }
+                model.history.commit_transaction();
+                result
+            },
+            cx,
+        );
+        count
     }
 
     /// Returns `(top_block_id, representative_kind, window_bounds)` for the hovered or active top-level block.

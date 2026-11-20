@@ -17,6 +17,7 @@ use gpui_kit::{
         },
         menu::ContextMenuExt,
         resizable::{h_resizable, resizable_panel},
+        tooltip::Tooltip,
     },
     prelude::FluentBuilder,
     *,
@@ -102,7 +103,8 @@ actions!(
         TaskList,
         InsertImage,
         InsertTable,
-        FindInDocument
+        FindInDocument,
+        ReplaceInDocument
     ]
 );
 
@@ -351,7 +353,11 @@ pub struct MarkdownPane {
     pending_anchor: Option<String>,
     // Inline search state
     search_open: bool,
+    search_replace_open: bool,
+    search_case_sensitive: bool,
+    search_whole_word: bool,
     search_input: Entity<InputState>,
+    replace_input: Entity<InputState>,
     search_occurrence: usize,
     search_match_index: usize,
     search_match_total: usize,
@@ -643,6 +649,17 @@ impl MarkdownPane {
             },
         )
         .detach();
+        let replace_input = cx.new(|cx| InputState::new(window, cx).placeholder("替换为…"));
+        cx.subscribe_in(
+            &replace_input,
+            window,
+            |pane: &mut Self, _, event: &InputEvent, _, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    pane.replace_current(cx);
+                }
+            },
+        )
+        .detach();
         let note_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(2, 8)
@@ -857,7 +874,11 @@ impl MarkdownPane {
             hovered_link: None,
             pending_anchor: None,
             search_open: false,
+            search_replace_open: false,
+            search_case_sensitive: false,
+            search_whole_word: false,
             search_input,
+            replace_input,
             search_occurrence: 0,
             search_match_index: 0,
             search_match_total: 0,
@@ -1459,9 +1480,11 @@ impl MarkdownPane {
             self.search_match_total = 0;
             return;
         }
-        let (matched_index, total) = self
-            .visual_editor
-            .update(cx, |editor, cx| editor.search_occurrence(query, index, cx));
+        let case_sensitive = self.search_case_sensitive;
+        let whole_word = self.search_whole_word;
+        let (matched_index, total) = self.visual_editor.update(cx, |editor, cx| {
+            editor.search_occurrence_with(query, index, case_sensitive, whole_word, cx)
+        });
         self.search_match_index = matched_index;
         self.search_match_total = total;
         self.search_occurrence = matched_index.saturating_sub(1);
@@ -1504,8 +1527,101 @@ impl MarkdownPane {
         cx.notify();
     }
 
+    fn open_replace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.source {
+            return;
+        }
+        let selected = self
+            .visual_editor
+            .read(cx)
+            .selected_plain_text()
+            .unwrap_or_default();
+        self.search_open = true;
+        self.search_replace_open = true;
+        if !selected.is_empty() {
+            self.run_search(&selected, 0, cx);
+        } else {
+            let existing = self.search_input.read(cx).value().to_string();
+            self.run_search(&existing, self.search_occurrence as isize, cx);
+        }
+        let has_query = !selected.is_empty() || !self.search_input.read(cx).value().is_empty();
+        let search_input = self.search_input.clone();
+        let replace_input = self.replace_input.clone();
+        window.defer(cx, move |window, cx| {
+            if !selected.is_empty() {
+                search_input.update(cx, |input, cx| input.set_value(selected, window, cx));
+            }
+            if has_query {
+                replace_input.update(cx, |input, cx| input.focus(window, cx));
+            } else {
+                search_input.update(cx, |input, cx| input.focus(window, cx));
+            }
+        });
+        cx.notify();
+    }
+
+    fn toggle_replace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_replace_open = !self.search_replace_open;
+        if self.search_replace_open {
+            let replace_input = self.replace_input.clone();
+            window.defer(cx, move |window, cx| {
+                replace_input.update(cx, |input, cx| input.focus(window, cx));
+            });
+        }
+        cx.notify();
+    }
+
+    fn replace_current(&mut self, cx: &mut Context<Self>) {
+        let query = self.search_input.read(cx).value().to_string();
+        if query.is_empty() {
+            return;
+        }
+        let replacement = self.replace_input.read(cx).value().to_string();
+        let index = self.search_occurrence as isize;
+        let case_sensitive = self.search_case_sensitive;
+        let whole_word = self.search_whole_word;
+        let (matched_index, total) = self.visual_editor.update(cx, |editor, cx| {
+            editor.replace_search_occurrence(
+                &query,
+                &replacement,
+                index,
+                case_sensitive,
+                whole_word,
+                cx,
+            )
+        });
+        self.search_match_index = matched_index;
+        self.search_match_total = total;
+        self.search_occurrence = matched_index.saturating_sub(1);
+        cx.notify();
+    }
+
+    fn replace_all(&mut self, cx: &mut Context<Self>) {
+        let query = self.search_input.read(cx).value().to_string();
+        if query.is_empty() {
+            return;
+        }
+        let replacement = self.replace_input.read(cx).value().to_string();
+        let case_sensitive = self.search_case_sensitive;
+        let whole_word = self.search_whole_word;
+        self.visual_editor.update(cx, |editor, cx| {
+            editor.replace_all_search_occurrences(
+                &query,
+                &replacement,
+                case_sensitive,
+                whole_word,
+                cx,
+            )
+        });
+        self.search_occurrence = 0;
+        self.search_match_index = 0;
+        self.search_match_total = 0;
+        cx.notify();
+    }
+
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search_open = false;
+        self.search_replace_open = false;
         self.defer_focus_visual(window, cx);
         cx.notify();
     }
@@ -3066,6 +3182,7 @@ impl Render for MarkdownPane {
                         )
                     })
                     .when(self.search_open && !self.source, |area| {
+                        let palette = crate::theme::palette();
                         let query = self.search_input.read(cx).value().to_string();
                         let count_label = if query.is_empty() {
                             None
@@ -3074,76 +3191,208 @@ impl Render for MarkdownPane {
                         } else {
                             Some(format!("{}/{}", self.search_match_index, self.search_match_total))
                         };
-                        let right_offset = if self.reading {
-                            if self.annotations.is_empty() {
-                                px(16.)
-                            } else {
-                                px(72.)
-                            }
+                        let right_offset = if self.reading && !self.annotations.is_empty() {
+                            px(72.)
                         } else {
-                            px(140.)
+                            px(16.)
                         };
+                        let active_bg = gpui_kit::rgb(0xdbeafe);
+                        let active_text = gpui_kit::rgb(palette.accent);
+                        let muted_text = gpui_kit::rgb(0x787774);
+                        let case_on = self.search_case_sensitive;
+                        let word_on = self.search_whole_word;
+                        let replace_on = self.search_replace_open;
+
                         area.child(
                             div()
                                 .id("md-search-bar")
                                 .absolute()
-                                .top_3()
+                                .top_2p5()
                                 .right(right_offset)
-                                .w(px(230.))
                                 .px_2()
-                                .py_0p5()
-                                .rounded(px(6.))
-                                .bg(rgb(0xffffff))
+                                .py_1p5()
+                                .rounded(px(8.))
+                                .bg(gpui_kit::rgb(palette.surface))
                                 .border_1()
-                                .border_color(rgb(0xe2e4e8))
+                                .border_color(gpui_kit::rgb(palette.border))
                                 .shadow_md()
                                 .flex()
-                                .items_center()
-                                .gap_1()
+                                .flex_col()
+                                .gap_1p5()
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .child(
-                                    Input::new(&self.search_input)
-                                        .xsmall()
-                                        .h(px(22.))
-                                        .text_size(px(12.))
-                                        .flex_1()
-                                        .min_w_0(),
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .w(px(230.))
+                                                .h(px(26.))
+                                                .px_1p5()
+                                                .rounded(px(6.))
+                                                .bg(gpui_kit::rgb(palette.background))
+                                                .border_1()
+                                                .border_color(gpui_kit::rgb(palette.border))
+                                                .flex()
+                                                .items_center()
+                                                .gap_0p5()
+                                                .child(
+                                                    Input::new(&self.search_input)
+                                                        .appearance(false)
+                                                        .bordered(false)
+                                                        .xsmall()
+                                                        .h(px(22.))
+                                                        .text_size(px(12.))
+                                                        .flex_1()
+                                                        .min_w_0(),
+                                                )
+                                                .child(
+                                                    crate::ui::control("toggle-md-case", IconName::CaseSensitive)
+                                                        .size(px(20.))
+                                                        .rounded(px(4.))
+                                                        .when(case_on, |s| s.bg(active_bg).text_color(active_text))
+                                                        .tooltip(|window, cx| {
+                                                            Tooltip::new("区分大小写").build(window, cx)
+                                                        })
+                                                        .on_click(cx.listener(|pane, _, _, cx| {
+                                                            pane.search_case_sensitive = !pane.search_case_sensitive;
+                                                            let q = pane.search_input.read(cx).value().to_string();
+                                                            pane.run_search(&q, 0, cx);
+                                                            cx.notify();
+                                                        })),
+                                                )
+                                                .child(
+                                                    crate::ui::control("toggle-md-word", IconName::WholeWord)
+                                                        .size(px(20.))
+                                                        .rounded(px(4.))
+                                                        .when(word_on, |s| s.bg(active_bg).text_color(active_text))
+                                                        .tooltip(|window, cx| {
+                                                            Tooltip::new("全字匹配").build(window, cx)
+                                                        })
+                                                        .on_click(cx.listener(|pane, _, _, cx| {
+                                                            pane.search_whole_word = !pane.search_whole_word;
+                                                            let q = pane.search_input.read(cx).value().to_string();
+                                                            pane.run_search(&q, 0, cx);
+                                                            cx.notify();
+                                                        })),
+                                                ),
+                                        )
+                                        .when(!self.reading, |row| {
+                                            row.child(
+                                                crate::ui::control("toggle-md-replace", IconName::Replace)
+                                                    .size(px(22.))
+                                                    .when(replace_on, |s| s.bg(active_bg).text_color(active_text))
+                                                    .tooltip(|window, cx| {
+                                                        Tooltip::new("替换 (Ctrl+H)").build(window, cx)
+                                                    })
+                                                    .on_click(cx.listener(|pane, _, window, cx| {
+                                                        pane.toggle_replace(window, cx);
+                                                    })),
+                                            )
+                                        })
+                                        .child(
+                                            div()
+                                                .w(px(1.))
+                                                .h(px(14.))
+                                                .mx_0p5()
+                                                .bg(gpui_kit::rgb(palette.border)),
+                                        )
+                                        .child(
+                                            crate::ui::control("prev-md-search", IconName::ChevronLeft)
+                                                .size(px(20.))
+                                                .tooltip(|window, cx| {
+                                                    Tooltip::new("上一个 (Shift+Enter)").build(window, cx)
+                                                })
+                                                .on_click(cx.listener(|pane, _, _, cx| {
+                                                    let q = pane.search_input.read(cx).value().to_string();
+                                                    pane.step_search(&q, -1, cx);
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .child(
+                                            crate::ui::control("next-md-search", IconName::ChevronRight)
+                                                .size(px(20.))
+                                                .tooltip(|window, cx| {
+                                                    Tooltip::new("下一个 (Enter)").build(window, cx)
+                                                })
+                                                .on_click(cx.listener(|pane, _, _, cx| {
+                                                    let q = pane.search_input.read(cx).value().to_string();
+                                                    pane.step_search(&q, 1, cx);
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .when_some(count_label, |row, label| {
+                                            row.child(
+                                                div()
+                                                    .px_1()
+                                                    .text_size(px(11.))
+                                                    .text_color(muted_text)
+                                                    .flex_shrink_0()
+                                                    .child(label),
+                                            )
+                                        })
+                                        .child(
+                                            crate::ui::control("close-md-search", IconName::Close)
+                                                .size(px(20.))
+                                                .tooltip(|window, cx| {
+                                                    Tooltip::new("关闭 (Esc)").build(window, cx)
+                                                })
+                                                .on_click(cx.listener(|pane, _, window, cx| {
+                                                    pane.close_search(window, cx);
+                                                })),
+                                        ),
                                 )
-                                .when_some(count_label, |bar, label| {
-                                    bar.child(
+                                .when(self.search_replace_open && !self.reading, |col| {
+                                    col.child(
                                         div()
-                                            .px_1()
-                                            .text_size(px(11.))
-                                            .text_color(rgb(0x787774))
-                                            .flex_shrink_0()
-                                            .child(label),
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .w(px(230.))
+                                                    .h(px(26.))
+                                                    .px_1p5()
+                                                    .rounded(px(6.))
+                                                    .bg(gpui_kit::rgb(palette.background))
+                                                    .border_1()
+                                                    .border_color(gpui_kit::rgb(palette.border))
+                                                    .flex()
+                                                    .items_center()
+                                                    .child(
+                                                        Input::new(&self.replace_input)
+                                                            .appearance(false)
+                                                            .bordered(false)
+                                                            .xsmall()
+                                                            .h(px(22.))
+                                                            .text_size(px(12.))
+                                                            .flex_1()
+                                                            .min_w_0(),
+                                                    ),
+                                            )
+                                            .child(
+                                                crate::ui::control("replace-md-one", IconName::Replace)
+                                                    .size(px(22.))
+                                                    .tooltip(|window, cx| {
+                                                        Tooltip::new("替换当前 (Enter)").build(window, cx)
+                                                    })
+                                                    .on_click(cx.listener(|pane, _, _, cx| {
+                                                        pane.replace_current(cx);
+                                                    })),
+                                            )
+                                            .child(
+                                                crate::ui::control("replace-md-all", IconName::ReplaceAll)
+                                                    .size(px(22.))
+                                                    .tooltip(|window, cx| {
+                                                        Tooltip::new("全部替换").build(window, cx)
+                                                    })
+                                                    .on_click(cx.listener(|pane, _, _, cx| {
+                                                        pane.replace_all(cx);
+                                                    })),
+                                            ),
                                     )
-                                })
-                                .child(
-                                    crate::ui::control("prev-md-search", IconName::ChevronUp)
-                                        .size(px(18.))
-                                        .on_click(cx.listener(|pane, _, _, cx| {
-                                            let q = pane.search_input.read(cx).value().to_string();
-                                            pane.step_search(&q, -1, cx);
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    crate::ui::control("next-md-search", IconName::ChevronDown)
-                                        .size(px(18.))
-                                        .on_click(cx.listener(|pane, _, _, cx| {
-                                            let q = pane.search_input.read(cx).value().to_string();
-                                            pane.step_search(&q, 1, cx);
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    crate::ui::control("close-md-search", IconName::Close)
-                                        .size(px(18.))
-                                        .on_click(cx.listener(|pane, _, window, cx| {
-                                            pane.close_search(window, cx);
-                                        })),
-                                ),
+                                }),
                         )
                     })
                     .child({
@@ -3673,6 +3922,7 @@ impl Render for MarkdownPane {
                         pane.block_menu_for = None;
                         pane.active_annotation_id = None;
                         pane.search_open = false;
+                        pane.search_replace_open = false;
                         pane.translate.dismiss();
                         if was_search {
                             pane.defer_focus_visual(window, cx);
@@ -3697,6 +3947,9 @@ impl Render for MarkdownPane {
             )
             .on_action(cx.listener(|pane, _: &FindInDocument, window, cx| {
                 pane.open_search(window, cx);
+            }))
+            .on_action(cx.listener(|pane, _: &ReplaceInDocument, window, cx| {
+                pane.open_replace(window, cx);
             }))
             .on_action(cx.listener(
                 |pane, _: &gpui_kit::component::input::Search, window, cx| {

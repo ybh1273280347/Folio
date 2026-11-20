@@ -11,7 +11,7 @@ use gpui_kit::{
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-pub(super) const PANEL_WIDTH: f32 = 188.0;
+pub(super) const PANEL_WIDTH: f32 = 200.0;
 pub(super) const AUTO_OPEN_WIDTH: f32 = 1050.0;
 pub(super) const OVERLAY_WIDTH: f32 = 900.0;
 pub(super) const ANIMATION_MS: u64 = 200;
@@ -440,7 +440,7 @@ fn collapse_whitespace(input: &str) -> String {
 fn outline_font_family() -> &'static str {
     #[cfg(target_os = "windows")]
     {
-        "Noto Sans Sans"
+        "Noto Sans SC"
     }
     #[cfg(target_os = "macos")]
     {
@@ -746,8 +746,8 @@ fn render_nodes(
             is_collapsed && active_heading.is_some_and(|active_ix| node.contains_index(active_ix));
         let is_active = is_direct_active || is_collapsed_ancestor_active;
 
-        let font_size = if depth == 0 { px(12.5) } else { px(12.) };
-        let line_height = if depth == 0 { px(16.) } else { px(15.5) };
+        let font_size = if depth == 0 { px(13.5) } else { px(13.) };
+        let line_height = if depth == 0 { px(18.) } else { px(17.5) };
         let rest_color = if is_active {
             colors.item_text_active
         } else if depth == 0 {
@@ -796,7 +796,7 @@ fn render_nodes(
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |pane, _, _, cx| {
                                 cx.stop_propagation();
-       ！                         if !pane.outline_collapsed.remove(&index) {
+                                if !pane.outline_collapsed.remove(&index) {
                                     pane.outline_collapsed.insert(index);
                                 }
                                 cx.notify();
