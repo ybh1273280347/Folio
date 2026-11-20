@@ -2709,7 +2709,9 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
+ "html5ever",
  "markdown",
+ "markup5ever_rcdom",
  "unicode-segmentation",
 ]
 

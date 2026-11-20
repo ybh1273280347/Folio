@@ -104,9 +104,27 @@ fn with_live_surfaces(
             Some(super::document::BlockContent::Atom(_))
         )
     {
+        let node = match node {
+            BlockNode::Custom { node, .. }
+                if node.name() == super::html_table::NAME && !state.is_readonly() =>
+            {
+                BlockNode::Custom {
+                    node: gpui_kit::base::text::MarkdownNode::new(
+                        super::html_table::EDITABLE_NAME,
+                        super::html_table::EditableTable {
+                            node: node.clone(),
+                            editor: editor.downgrade(),
+                            block: id,
+                        },
+                    ),
+                    state: BlockState::default(),
+                }
+            }
+            _ => node.clone(),
+        };
         return BlockNode::Surface {
             name: format!("editor-atom-{}", id.as_u64()).into(),
-            children: vec![node.clone()],
+            children: vec![node],
             span: None,
         };
     }
@@ -450,7 +468,9 @@ fn is_container_node(node: &BlockNode) -> bool {
         | BlockNode::Table(_)
         | BlockNode::CodeBlock(_)
         | BlockNode::Blockquote { .. } => true,
-        BlockNode::Custom { node, .. } => node.name() == code_preview::NAME,
+        BlockNode::Custom { node, .. } => {
+            matches!(node.name(), code_preview::NAME | super::html_table::NAME)
+        }
         _ => false,
     }
 }
@@ -581,6 +601,9 @@ pub(crate) fn block_role(node: &BlockNode) -> Option<(Role, Option<usize>)> {
         BlockNode::CodeBlock(_) => (Role::Code, None),
         BlockNode::Table(_) => (Role::Table, None),
         BlockNode::HorizontalRule { .. } => (Role::Splitter, None),
+        BlockNode::Custom { node, .. } if node.name() == super::html_table::NAME => {
+            (Role::Table, None)
+        }
         BlockNode::Custom { .. } => (Role::Group, None),
         BlockNode::ListItem { .. } => (Role::ListItem, None),
         BlockNode::Root { .. }

@@ -53,6 +53,7 @@ mod editor;
 mod element;
 mod frame;
 mod host;
+mod html_table;
 mod id;
 mod import;
 mod inline;

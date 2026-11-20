@@ -3549,22 +3549,29 @@ impl Render for MarkdownPane {
                                     .child(comment.clone()),
                             )
                         })
-                        .on_click(cx.listener(move |pane, _, window, cx| {
+                        .on_click(cx.listener(move |pane, event: &ClickEvent, window, cx| {
                             let visual_editor = pane.visual_editor.clone();
                             let drawer_note_input = pane.drawer_note_input.clone();
                             let quote_cl = quote.clone();
                             let comment_cl = comment.clone();
+                            let double_click = event.click_count() >= 2;
                             pane.active_annotation_id = None;
                             pane.selected_annotation_id = Some(id);
-                            pane.editing_drawer_annotation_id = Some(id);
+                            if double_click {
+                                pane.editing_drawer_annotation_id = Some(id);
+                            } else if pane.editing_drawer_annotation_id != Some(id) {
+                                pane.annotation_list_focus.focus(window, cx);
+                            }
                             window.defer(cx, move |window, cx| {
                                 visual_editor.update(cx, |editor, cx| {
                                     editor.select_quote_occurrence(&quote_cl, occ, cx);
                                 });
-                                drawer_note_input.update(cx, |input, cx| {
-                                    input.set_value(comment_cl, window, cx);
-                                    input.focus(window, cx);
-                                });
+                                if double_click {
+                                    drawer_note_input.update(cx, |input, cx| {
+                                        input.set_value(comment_cl, window, cx);
+                                        input.focus(window, cx);
+                                    });
+                                }
                             });
                             cx.notify();
                         }))

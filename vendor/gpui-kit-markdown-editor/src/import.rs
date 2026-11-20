@@ -743,13 +743,15 @@ fn import_inline_node(node: &InlineNode) -> InlineText {
     out
 }
 
-/// Footnotes and unsupported HTML are outside the editable block vocabulary. Keep their original
-/// source in opaque, selectable atoms rather than accepting the display
-/// parser's decorated-prose projection. Uses the same AST/parser pipeline as
-/// every other editor node; no second parser or mutable source mirror.
+/// Preserve the source of footnotes and raw HTML as selectable atoms. HTML
+/// tables and divs get native rendering while retaining their HTML source.
 pub(crate) fn preserve_source_extensions(extensions: MarkdownExtensions) -> MarkdownExtensions {
     use ::markdown::mdast::Node;
-    use gpui_kit::base::text::{MarkdownNode, MarkdownParseContext, MarkdownPlugin};
+    use gpui::{App, Styled as _, Window, div};
+    use gpui_kit::base::text::{InlineElement, InlineRenderContext, MarkdownNode, MarkdownParseContext, MarkdownPlugin, TextView};
+
+    const HTML_DIV: &str = "editor-html-div";
+    struct DivTag;
 
     struct SourceAtom {
         block: bool,
@@ -766,18 +768,18 @@ pub(crate) fn preserve_source_extensions(extensions: MarkdownExtensions) -> Mark
             self.block
         }
         fn parse(&self, node: &Node, cx: &MarkdownParseContext<'_>) -> Option<MarkdownNode> {
-            let known_html = if let Node::Html(html) = node {
-                let lower = html.value.to_ascii_lowercase();
-                let tag = lower
+            let tag = if let Node::Html(html) = node {
+                html.value
                     .trim_start_matches('<')
                     .trim_start_matches('/')
-                    .split(|ch: char| !ch.is_ascii_alphabetic())
+                    .split(|ch: char| ch.is_ascii_whitespace() || matches!(ch, '>' | '/'))
                     .next()
-                    .unwrap_or_default();
-                matches!(tag, "u" | "mark" | "em" | "strong" | "s" | "del" | "br")
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
             } else {
-                false
+                String::new()
             };
+            let known_html = matches!(tag.as_str(), "u" | "mark" | "em" | "strong" | "s" | "del" | "br");
             let accepts = if self.block {
                 matches!(node, Node::FootnoteDefinition(_))
                     || (matches!(node, Node::Html(_)) && !known_html)
@@ -826,14 +828,48 @@ pub(crate) fn preserve_source_extensions(extensions: MarkdownExtensions) -> Mark
             } else {
                 source.to_owned()
             };
+            if self.block
+                && matches!(tag.as_str(), "table" | "div")
+                && let Some(table) = super::html_table::parse(&source)
+            {
+                return Some(
+                    MarkdownNode::new(super::html_table::NAME, table)
+                        .text(source.clone())
+                        .markdown(source),
+                );
+            }
+            if tag == "div" {
+                return Some(MarkdownNode::new(if self.block { HTML_DIV } else { self.name() }, DivTag)
+                    .text(source.clone())
+                    .markdown(source));
+            }
             Some(
                 MarkdownNode::new(self.name(), ())
                     .text(source.clone())
                     .markdown(source),
             )
         }
+
+        fn render_inline(
+            &self, node: &MarkdownNode, _: &InlineRenderContext, _: &mut Window, _: &mut App,
+        ) -> Option<InlineElement> {
+            // In an inline Markdown context a div tag is a separate token.
+            // The neighbouring editable text already contains its body.
+            Some(if node.data::<DivTag>().is_some() {
+                InlineElement::new(div().size_0())
+            } else {
+                InlineElement::new(node.as_text().to_string())
+            })
+        }
     }
     extensions
         .plugin(SourceAtom { block: true })
         .plugin(SourceAtom { block: false })
+        .block_renderer(super::html_table::NAME, super::html_table::render)
+        .block_renderer(super::html_table::EDITABLE_NAME, super::html_table::render)
+        .block_renderer(HTML_DIV, |node, _, _| {
+            // The kit's HTML renderer draws the children with native text
+            // styles. The opaque block still serializes the original HTML.
+            TextView::html("editor-html-div-content", node.as_text().to_owned()).selectable(false)
+        })
 }

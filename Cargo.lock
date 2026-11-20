@@ -3070,7 +3070,9 @@ name = "gpui-kit-markdown-editor"
 version = "0.2.0"
 dependencies = [
  "gpui-kit",
+ "html5ever 0.27.0",
  "markdown",
+ "markup5ever_rcdom",
  "unicode-segmentation",
 ]
 
