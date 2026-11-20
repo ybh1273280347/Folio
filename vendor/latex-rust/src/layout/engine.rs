@@ -1949,12 +1949,16 @@ impl Engine<'_> {
         };
         match style_m {
             MatrixStyle::Align => self.align_env(rows, body_style, true),
+            MatrixStyle::AlignStar => self.align_env(rows, body_style, false),
             MatrixStyle::Aligned => self.amsmath_aligned(rows, body_style),
             MatrixStyle::Split => self.align_env(rows, body_style, false),
-            MatrixStyle::Gather => self.gather_env(rows, body_style),
+            MatrixStyle::Gather => self.gather_env(rows, body_style, true),
+            MatrixStyle::GatherStar => self.gather_env(rows, body_style, false),
             MatrixStyle::Gathered => self.gathered_env(rows, body_style),
-            MatrixStyle::Multline => self.multline_env(rows, body_style),
-            MatrixStyle::Equation => self.equation_env(rows, body_style),
+            MatrixStyle::Multline => self.multline_env(rows, body_style, true),
+            MatrixStyle::MultlineStar => self.multline_env(rows, body_style, false),
+            MatrixStyle::Equation => self.equation_env(rows, body_style, true),
+            MatrixStyle::EquationStar => self.equation_env(rows, body_style, false),
             MatrixStyle::Array => self.array_env(spec, rows, body_style),
             MatrixStyle::Cases => self.cases_env(rows, body_style),
             _ => self.centered_matrix(style_m, rows, body_style),
@@ -2435,7 +2439,7 @@ impl Engine<'_> {
         })
     }
 
-    fn gather_env(&self, rows: &[EnvRow], style: MathStyle) -> Result<Item, Error> {
+    fn gather_env(&self, rows: &[EnvRow], style: MathStyle, numbered: bool) -> Result<Item, Error> {
         let row_sep = self.params.em(style) / Dim::from_i64(5);
         let mut bodies = Vec::new();
         let mut kinds = Vec::new();
@@ -2466,9 +2470,13 @@ impl Engine<'_> {
                 RowKind::Intertext(t) => packed.push(*t),
                 RowKind::Cells => {
                     let body = align_in(bodies[bi].clone(), &max_w, ColSpec::Center);
-                    let num = match self.take_number() {
-                        Some(s) => Some(self.number_box(&s, MathStyle::Text)?),
-                        None => None,
+                    let num = if numbered {
+                        match self.take_number() {
+                            Some(s) => Some(self.number_box(&s, MathStyle::Text)?),
+                            None => None,
+                        }
+                    } else {
+                        None
                     };
                     packed.push(self.attach_number(body, num, style));
                     bi += 1;
@@ -2482,10 +2490,12 @@ impl Engine<'_> {
         })
     }
 
-    fn multline_env(&self, rows: &[EnvRow], style: MathStyle) -> Result<Item, Error> {
+    fn multline_env(&self, rows: &[EnvRow], style: MathStyle, numbered: bool) -> Result<Item, Error> {
         let data = data_cells(rows)?;
         if data.is_empty() {
-            let _ = self.take_number();
+            if numbered {
+                let _ = self.take_number();
+            }
             return Ok(Item {
                 bx: MathBox::empty(),
                 class: Some(AtomKind::Inner),
@@ -2513,9 +2523,13 @@ impl Engine<'_> {
             packed.push(align_in(b, &max_w, align));
         }
         let mut inner = MathBox::vpack(packed);
-        let num = match self.take_number() {
-            Some(s) => Some(self.number_box(&s, MathStyle::Text)?),
-            None => None,
+        let num = if numbered {
+            match self.take_number() {
+                Some(s) => Some(self.number_box(&s, MathStyle::Text)?),
+                None => None,
+            }
+        } else {
+            None
         };
         inner = self.attach_number(inner, num, style);
         Ok(Item {
@@ -2524,12 +2538,16 @@ impl Engine<'_> {
         })
     }
 
-    fn equation_env(&self, rows: &[EnvRow], style: MathStyle) -> Result<Item, Error> {
+    fn equation_env(&self, rows: &[EnvRow], style: MathStyle, numbered: bool) -> Result<Item, Error> {
         let _data = data_cells(rows)?;
         let body = self.take_box()?;
-        let num = match self.take_number() {
-            Some(s) => Some(self.number_box(&s, MathStyle::Text)?),
-            None => None,
+        let num = if numbered {
+            match self.take_number() {
+                Some(s) => Some(self.number_box(&s, MathStyle::Text)?),
+                None => None,
+            }
+        } else {
+            None
         };
         Ok(Item {
             class: Some(AtomKind::Inner),

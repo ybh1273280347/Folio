@@ -315,3 +315,34 @@ impl MathLayout {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::FONTS;
+
+    #[test]
+    fn extended_mod_and_starred_envs_layout() {
+        let bytes = FONTS
+            .iter()
+            .find(|(file, _)| *file == "STIXTwoMath-Regular.otf")
+            .expect("bundled STIX Two Math")
+            .1;
+        let font = latex_rust::MathFont::from_bytes(bytes).expect("load STIX Two Math");
+        for tex in [
+            r"a \equiv b \pmod{n}",
+            r"a \equiv b \pmod{\frac{p-1}{2}}",
+            r"a \bmod b",
+            r"a \equiv b \pod{n}",
+            r"a \equiv b \mod{n}",
+            r"\begin{align*} a &= b \\ c &= d \end{align*}",
+            r"\begin{gather*} x = 1 \\ y = 2 \end{gather*}",
+            r"\begin{equation*} E = mc^2 \end{equation*}",
+            r"\begin{multline*} a + b \\ + c \end{multline*}",
+        ] {
+            let ast = latex_rust::parse(tex).unwrap_or_else(|e| panic!("parse {tex}: {e}"));
+            let boxed = latex_rust::layout(&ast, &font, latex_rust::MathStyle::Display)
+                .unwrap_or_else(|e| panic!("layout {tex}: {e}"));
+            assert!(!boxed.width.is_zero(), "empty box for {tex}");
+        }
+    }
+}

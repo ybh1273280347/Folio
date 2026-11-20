@@ -1562,4 +1562,37 @@ mod tests {
         assert!(parse_with_options(&bare(31), &opts).is_ok());
         assert!(parse_with_options(&bare(32), &opts).is_err());
     }
+
+    #[test]
+    fn mod_commands_parse_and_layout() {
+        let font = crate::MathFont::stix_two_math().expect("STIX Two Math");
+        for tex in [
+            r"a \equiv b \pmod{n}",
+            r"a \equiv b \pmod{\frac{p-1}{2}}",
+            r"a \bmod b",
+            r"a \equiv b \pod{n}",
+            r"a \equiv b \mod{n}",
+        ] {
+            let ast = parse(tex).unwrap_or_else(|e| panic!("parse {tex}: {e}"));
+            let boxed = crate::layout(&ast, &font, crate::MathStyle::Display)
+                .unwrap_or_else(|e| panic!("layout {tex}: {e}"));
+            assert!(!boxed.width.is_zero(), "empty box for {tex}");
+        }
+    }
+
+    #[test]
+    fn starred_environments_parse_and_layout() {
+        let font = crate::MathFont::stix_two_math().expect("STIX Two Math");
+        for tex in [
+            r"\begin{align*} a &= b \\ c &= d \end{align*}",
+            r"\begin{gather*} x = 1 \\ y = 2 \end{gather*}",
+            r"\begin{equation*} E = mc^2 \end{equation*}",
+            r"\begin{multline*} a + b \\ + c \end{multline*}",
+        ] {
+            let ast = parse(tex).unwrap_or_else(|e| panic!("parse {tex}: {e}"));
+            let boxed = crate::layout(&ast, &font, crate::MathStyle::Display)
+                .unwrap_or_else(|e| panic!("layout {tex}: {e}"));
+            assert!(!boxed.width.is_zero(), "empty box for {tex}");
+        }
+    }
 }

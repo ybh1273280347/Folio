@@ -15,7 +15,7 @@ use crate::dim::Dim;
 use crate::error::ParseError;
 use crate::parser::ast::{
     AccentKind, AtomKind, ColSpec, Delimiter, EnvRow, EqNumber, FracStyle, IntegralKind, MathNode,
-    MatrixStyle, PhantomKind, SpaceKind, TextStyle,
+    MatrixStyle, PhantomKind, SpaceKind, TextRun, TextStyle,
 };
 use crate::parser::token::Token;
 
@@ -124,6 +124,13 @@ enum OptSeq {
     AfterBracket,
     Body,
     Finish,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ModKind {
+    Pmod,
+    Pod,
+    Mod,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -248,6 +255,10 @@ enum Cmd {
         phase: One,
     },
     Tail {
+        phase: One,
+    },
+    Mod {
+        kind: ModKind,
         phase: One,
     },
     Substack(Box<SubstackState>),
@@ -1019,6 +1030,35 @@ fn step_cmd(
             OneOut::Step(step) => Ok(step),
             OneOut::Node(body) => Ok(Step::Done(body)),
         },
+        Cmd::Mod { kind, phase } => match one_call(phase, ready, true, Kind::arg)? {
+            OneOut::Step(step) => Ok(step),
+            OneOut::Node(body) => {
+                let mod_text = || MathNode::Text(TextRun::plain("mod"), TextStyle::Rm);
+                let items = match kind {
+                    ModKind::Pmod => vec![
+                        MathNode::Space(SpaceKind::Quad),
+                        MathNode::Atom('(', AtomKind::Open),
+                        mod_text(),
+                        MathNode::Space(SpaceKind::Thick),
+                        body,
+                        MathNode::Atom(')', AtomKind::Close),
+                    ],
+                    ModKind::Pod => vec![
+                        MathNode::Space(SpaceKind::Quad),
+                        MathNode::Atom('(', AtomKind::Open),
+                        body,
+                        MathNode::Atom(')', AtomKind::Close),
+                    ],
+                    ModKind::Mod => vec![
+                        MathNode::Space(SpaceKind::Quad),
+                        mod_text(),
+                        MathNode::Space(SpaceKind::Thick),
+                        body,
+                    ],
+                };
+                Ok(Step::Done(MathNode::Row(items)))
+            }
+        },
         Cmd::Font { style, phase } => match one_call(phase, ready, true, Kind::arg)? {
             OneOut::Step(step) => Ok(step),
             OneOut::Node(inner) => Ok(Step::Done(collapse_text(apply_text_style(inner, *style)))),
@@ -1432,6 +1472,23 @@ fn classify(parser: &mut super::Parser, name: &str) -> Result<Classified, ParseE
         "xrightarrow" => start_xarrow(parser, "longrightarrow"),
         "xleftarrow" => start_xarrow(parser, "longleftarrow"),
         "text" | "mbox" => Ok(Classified::Node(parser.parse_text(TextStyle::Text)?)),
+        "pmod" => Ok(Classified::Cmd(Cmd::Mod {
+            kind: ModKind::Pmod,
+            phase: One::Need,
+        })),
+        "pod" => Ok(Classified::Cmd(Cmd::Mod {
+            kind: ModKind::Pod,
+            phase: One::Need,
+        })),
+        "mod" => Ok(Classified::Cmd(Cmd::Mod {
+            kind: ModKind::Mod,
+            phase: One::Need,
+        })),
+        "bmod" => Ok(Classified::Node(MathNode::Row(vec![
+            MathNode::Space(SpaceKind::Medium),
+            MathNode::Text(TextRun::plain("mod"), TextStyle::Rm),
+            MathNode::Space(SpaceKind::Medium),
+        ]))),
         "operatorname" => {
             let op = parser.collect_group_text()?;
             Ok(Classified::Node(MathNode::Operator(op, false)))
@@ -1643,10 +1700,14 @@ fn start_begin(parser: &mut super::Parser) -> Result<Classified, ParseError> {
         "array" => MatrixStyle::Array,
         "aligned" => MatrixStyle::Aligned,
         "align" => MatrixStyle::Align,
+        "align*" => MatrixStyle::AlignStar,
         "gather" => MatrixStyle::Gather,
+        "gather*" => MatrixStyle::GatherStar,
         "gathered" => MatrixStyle::Gathered,
         "multline" => MatrixStyle::Multline,
+        "multline*" => MatrixStyle::MultlineStar,
         "equation" => MatrixStyle::Equation,
+        "equation*" => MatrixStyle::EquationStar,
         "split" => MatrixStyle::Split,
         other => {
             return Err(ParseError::Unsupported(format!("environment {other}")));

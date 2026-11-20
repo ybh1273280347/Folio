@@ -234,7 +234,7 @@ impl Engine<'_> {
         };
         let numbered = match ms {
             MatrixStyle::Align => true,
-            MatrixStyle::Split => false,
+            MatrixStyle::AlignStar | MatrixStyle::Split => false,
             MatrixStyle::Aligned if rows.iter().any(|row| !matches!(row, EnvRow::Cells { .. })) => {
                 false
             }
@@ -478,7 +478,7 @@ impl Engine<'_> {
             style
         };
         match ms {
-            MatrixStyle::Align | MatrixStyle::Split => Ok(()),
+            MatrixStyle::Align | MatrixStyle::AlignStar | MatrixStyle::Split => Ok(()),
             MatrixStyle::Aligned => {
                 if rows.iter().any(|row| !matches!(row, EnvRow::Cells { .. })) {
                     return Ok(());
@@ -501,7 +501,7 @@ impl Engine<'_> {
                 }
                 Ok(())
             }
-            MatrixStyle::Gather | MatrixStyle::Gathered => {
+            MatrixStyle::Gather | MatrixStyle::GatherStar | MatrixStyle::Gathered => {
                 for row in rows {
                     match row {
                         EnvRow::Hline => {}
@@ -521,7 +521,7 @@ impl Engine<'_> {
                 }
                 Ok(())
             }
-            MatrixStyle::Multline => {
+            MatrixStyle::Multline | MatrixStyle::MultlineStar => {
                 if rows.iter().any(|row| !matches!(row, EnvRow::Cells { .. })) {
                     return Ok(());
                 }
@@ -532,7 +532,7 @@ impl Engine<'_> {
                 }
                 Ok(())
             }
-            MatrixStyle::Equation => {
+            MatrixStyle::Equation | MatrixStyle::EquationStar => {
                 if rows.iter().any(|row| !matches!(row, EnvRow::Cells { .. })) {
                     return Ok(());
                 }
