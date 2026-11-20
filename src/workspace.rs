@@ -206,6 +206,11 @@ pub fn bind_shortcuts(settings: &AppSettings, cx: &mut App) {
         crate::markdown::FindInDocument,
         Some("FolioMarkdownVisual"),
     );
+    bindings.push(KeyBinding::new(
+        "ctrl-h",
+        crate::markdown::ReplaceInDocument,
+        Some("FolioMarkdownVisual"),
+    ));
     cx.bind_keys(bindings);
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
