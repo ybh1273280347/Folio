@@ -63,7 +63,8 @@ struct DirectWriteState {
     custom_font_collection: IDWriteFontCollection1,
     fonts: Vec<FontInfo>,
     font_to_font_id: HashMap<Font, FontId>,
-    font_info_cache: HashMap<usize, FontId>,
+    // Keep the keyed IDWriteFontFace3 alive so DirectWrite cannot free it and reuse its address for another face.
+    font_info_cache: HashMap<usize, (IDWriteFontFace3, FontId)>,
     layout_line_scratch: Vec<u16>,
 }
 
@@ -243,8 +244,10 @@ impl DirectWriteState {
 
             let font_id = FontId(this.fonts.len());
             let font_face_key = info.font_face.cast::<IUnknown>().unwrap().as_raw().addr();
+            let cached_face = info.font_face.clone();
             this.fonts.push(info);
-            this.font_info_cache.insert(font_face_key, font_id);
+            this.font_info_cache
+                .insert(font_face_key, (cached_face, font_id));
             Some(font_id)
         };
 
@@ -1364,7 +1367,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
             .text_system
             .font_info_cache
             .get(&font_face_key)
-            .copied()
+            .map(|(_, font_id)| *font_id)
             // in some circumstances, we might be getting served a FontFace that we did not create ourselves
             // so create a new font from it and cache it accordingly. The usual culprit here seems to be Segoe UI Symbol
             .map_or_else(
@@ -1381,7 +1384,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                     context
                         .text_system
                         .font_info_cache
-                        .insert(font_face_key, font_id);
+                        .insert(font_face_key, (font_face.clone(), font_id));
                     windows::core::Result::Ok(font_id)
                 },
                 Ok,

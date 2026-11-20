@@ -108,7 +108,7 @@ impl AiPane {
         let location = crate::storage::data_directory()
             .expect("application data directory")
             .join("ai-tabs.json");
-        let (store, error): (TabStore, Option<String>) = match std::fs::read(&location) {
+        let (mut store, error): (TabStore, Option<String>) = match std::fs::read(&location) {
             Ok(bytes) => match serde_json::from_slice(&bytes) {
                 Ok(store) => (store, None),
                 Err(e) => (TabStore::default(), Some(e.to_string())),
@@ -116,6 +116,17 @@ impl AiPane {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (TabStore::default(), None),
             Err(e) => (TabStore::default(), Some(e.to_string())),
         };
+        // On cold start, keep only the last active AI tab per project instead of inheriting all old tabs.
+        for tabs in store.projects.values_mut() {
+            let keep = tabs
+                .active
+                .as_ref()
+                .filter(|id| tabs.tabs.contains(id))
+                .cloned()
+                .or_else(|| tabs.tabs.last().cloned());
+            tabs.tabs = keep.iter().cloned().collect();
+            tabs.active = keep;
+        }
         let restoring = store.projects.keys().cloned().collect();
         let poll = cx.spawn(async move |this, cx| {
             loop {

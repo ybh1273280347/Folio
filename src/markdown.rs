@@ -1021,6 +1021,27 @@ impl MarkdownPane {
         self.outline && !self.outline_closing
     }
 
+    pub fn is_source(&self) -> bool {
+        self.source
+    }
+
+    pub fn source_text(&self) -> String {
+        self.text.clone()
+    }
+
+    pub fn annotation_count(&self) -> usize {
+        self.annotations.len()
+    }
+
+    pub fn toggle_annotations_drawer(&mut self, cx: &mut Context<Self>) {
+        self.show_annotations_drawer = !self.show_annotations_drawer;
+        cx.notify();
+    }
+
+    pub fn is_focused(&self, window: &Window, cx: &App) -> bool {
+        self.focus.contains_focused(window, cx)
+    }
+
     fn is_outline_rendered(&self) -> bool {
         self.outline || self.outline_closing
     }
@@ -2884,36 +2905,7 @@ impl Render for MarkdownPane {
                                 self.settings.editor_font.clone().into()
                             })
                             .text_size(px(self.settings.editor_font_size as f32)),
-                    )
-                    .when(!self.reading, |area| {
-                        area.child(
-                            div()
-                                .absolute()
-                                .top_2()
-                                .right_4()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .child({
-                                    let pane = cx.entity();
-                                    crate::ui::copy_document_button("md-copy-document-source", move |cx| {
-                                        pane.read(cx).text.clone()
-                                    })
-                                })
-                                .child(
-                                    crate::ui::control("md-float-outline-src", IconName::ListTree)
-                                        .on_click(cx.listener(|pane, _, _, cx| {
-                                            pane.toggle_outline(cx)
-                                        })),
-                                )
-                                .child(
-                                    crate::ui::control("md-float-source-src", IconName::CodeXml)
-                                        .on_click(cx.listener(|pane, _, window, cx| {
-                                            pane.toggle_source(window, cx)
-                                        })),
-                                ),
-                        )
-                    }),
+                    ),
             );
         } else {
             // The title is document content, so it shares the body's scroll
@@ -2998,7 +2990,7 @@ impl Render for MarkdownPane {
                             .when(self.settings.line_width_limited, |content| {
                                 content.max_w(px(850.))
                             })
-                            .pl(px(54.))
+                            .pl(px(24.))
                             .pr_6()
                             .pt_6()
                             .pb(trailing_space)
@@ -3016,60 +3008,6 @@ impl Render for MarkdownPane {
                     .children(slash_menu)
                     .children(annotation_popover)
                     .children(translate_popover)
-                    .when(!self.reading, |area| {
-                        area.child(
-                            div()
-                                .id("md-floating-controls")
-                                .absolute()
-                                .top_2p5()
-                                .right_4()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .when(!self.annotations.is_empty(), |row| {
-                                    let count = self.annotations.len();
-                                    row.child(
-                                        div()
-                                            .id("md-annotations-pill")
-                                            .px_2p5()
-                                            .py_1()
-                                            .rounded_full()
-                                            .bg(rgb(0xfef9c3))
-                                            .border_1()
-                                            .border_color(rgb(0xfde047))
-                                            .flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .cursor_pointer()
-                                            .hover(|s| s.bg(rgb(0xfef08a)))
-                                            .active(|s| s.bg(rgb(0xfde047)))
-                                            .text_xs()
-                                            .text_color(rgb(0x854d0e))
-                                            .child(crate::ui::icon(IconName::MessageSquareText))
-                                            .child(format!("{count}"))
-                                            .on_click(cx.listener(|pane, _, _, cx| {
-                                                pane.show_annotations_drawer =
-                                                    !pane.show_annotations_drawer;
-                                                cx.notify();
-                                            })),
-                                    )
-                                })
-                                // Editing uses floating controls instead of the reading toolbar.
-                                // Copy the retained full source here too, including unloaded blocks.
-                                .child({
-                                    let pane = cx.entity();
-                                    crate::ui::copy_document_button("md-copy-document-visual", move |cx| {
-                                        pane.read(cx).text.clone()
-                                    })
-                                })
-                                .child(
-                                    crate::ui::control("md-float-source", IconName::CodeXml)
-                                        .on_click(cx.listener(|pane, _, window, cx| {
-                                            pane.toggle_source(window, cx)
-                                        })),
-                                ),
-                        )
-                    })
                     .when(self.reading && !self.annotations.is_empty(), |area| {
                         let count = self.annotations.len();
                         area.child(
@@ -3302,20 +3240,6 @@ impl Render for MarkdownPane {
 
             if self.is_outline_rendered() && outline_overlay {
                 content = content.child(outline::render_overlay(self, cx));
-            }
-
-            if !self.reading {
-                content = content.child(
-                    div()
-                        .absolute()
-                        .top(px(9.))
-                        .left(px(12.))
-                        .child(outline::render_toggle_button(
-                            "md-float-outline",
-                            self.is_outline_open(),
-                            cx,
-                        )),
-                );
             }
 
             if self.show_annotations_drawer && !self.annotations.is_empty() {
