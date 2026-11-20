@@ -409,7 +409,19 @@ impl DirectWriteState {
         for index in 0..total_number {
             let res = maybe!({
                 let font_face_ref = unsafe { font.GetFontFaceReference(index).log_err()? };
-                let font_face = unsafe { font_face_ref.CreateFontFace().log_err()? };
+                let simulations = unsafe { font_face_ref.GetSimulations() };
+                let font_face = if (simulations.0 & DWRITE_FONT_SIMULATIONS_OBLIQUE.0) != 0 {
+                    // Disable DirectWrite synthetic oblique so fonts without a native italic face stay upright.
+                    let without_oblique =
+                        DWRITE_FONT_SIMULATIONS(simulations.0 & !DWRITE_FONT_SIMULATIONS_OBLIQUE.0);
+                    unsafe {
+                        font_face_ref
+                            .CreateFontFaceWithSimulations(without_oblique)
+                            .log_err()?
+                    }
+                } else {
+                    unsafe { font_face_ref.CreateFontFace().log_err()? }
+                };
                 let direct_write_features =
                     unsafe { Self::generate_font_features(factory, features).log_err()? };
                 let fallbacks = fallbacks.as_ref().and_then(|fallbacks| {
@@ -1638,12 +1650,17 @@ fn font_face_to_font(font_face: &IDWriteFontFace3, locale: &HSTRING) -> Option<F
     let localized_family_name = unsafe { font_face.GetFamilyNames().log_err() }?;
     let family_name = get_name(localized_family_name, locale).log_err()?;
     let weight = unsafe { font_face.GetWeight() };
-    let style = unsafe { font_face.GetStyle() };
+    let simulations = unsafe { font_face.GetSimulations() };
+    let style = if (simulations.0 & DWRITE_FONT_SIMULATIONS_OBLIQUE.0) != 0 {
+        FontStyle::Normal
+    } else {
+        font_style_from_dwrite(unsafe { font_face.GetStyle() })
+    };
     Some(Font {
         family: family_name.into(),
         features: FontFeatures::default(),
         weight: font_weight_from_dwrite(weight),
-        style: font_style_from_dwrite(style),
+        style,
         fallbacks: None,
     })
 }
@@ -2096,5 +2113,63 @@ mod tests {
         assert_eq!(next, Some((5, 1)));
         let next = analyzer.next();
         assert_eq!(next, None);
+    }
+
+    #[test]
+    fn disables_synthetic_oblique_for_fonts_and_fallbacks() -> Result<()> {
+        let platform_text_system = Arc::new(DirectWriteTextSystem::new()?);
+
+        // A CJK font without a native italic face must not receive oblique simulation.
+        let yahei_italic = Font {
+            family: "Microsoft YaHei".into(),
+            ..Default::default()
+        }
+        .italic();
+        let yahei_id = platform_text_system.font_id(&yahei_italic)?;
+        {
+            let state = platform_text_system.state.read();
+            let simulations = unsafe { state.fonts[yahei_id.0].font_face.GetSimulations() };
+            assert_eq!(
+                simulations.0 & super::DWRITE_FONT_SIMULATIONS_OBLIQUE.0,
+                0,
+                "Microsoft YaHei should not have synthetic oblique simulation"
+            );
+        }
+
+        // An italic Latin font falling back to Microsoft YaHei must not inherit synthetic oblique.
+        let text_system =
+            WindowTextSystem::new(Arc::new(TextSystem::new(platform_text_system.clone())));
+        let latin_italic = Font {
+            family: "Segoe UI".into(),
+            fallbacks: Some(gpui::FontFallbacks::from_fonts(vec![
+                "Microsoft YaHei".to_owned(),
+            ])),
+            ..Default::default()
+        }
+        .italic();
+        let layout = text_system.layout_line(
+            "a中",
+            px(16.0),
+            &[TextRun {
+                len: "a中".len(),
+                font: latin_italic,
+                ..Default::default()
+            }],
+            None,
+        );
+        assert!(
+            layout.runs.len() >= 2,
+            "expected separate runs for Latin and CJK fallback"
+        );
+        let state = platform_text_system.state.read();
+        for run in &layout.runs {
+            let simulations = unsafe { state.fonts[run.font_id.0].font_face.GetSimulations() };
+            assert_eq!(
+                simulations.0 & super::DWRITE_FONT_SIMULATIONS_OBLIQUE.0,
+                0,
+                "fallback run should not have synthetic oblique simulation"
+            );
+        }
+        Ok(())
     }
 }
