@@ -1827,6 +1827,33 @@ impl BlockEditorState {
         self.blink_cursor.update(cx, |b, cx| b.pause(cx));
     }
 
+    pub(crate) fn edit_html_cell(
+        &mut self,
+        block: BlockId,
+        cell: usize,
+        value: &str,
+        cx: &mut Context<Self>,
+    ) {
+        use super::{document::{AtomData, BlockContent}, kind::BlockKindData, step::DetachedBlock};
+
+        let origin = EditOrigin::Command("html_table_cell");
+        self.edit(origin, |model| {
+            // A source reload while the dialog was open can retire this block.
+            let Some(entry) = model.doc.get(block) else { return Ok(()) };
+            let BlockContent::Atom(AtomData::Custom(node)) = &entry.content else { unreachable!() };
+            let Some(node) = super::html_table::replace_cell(node, cell, value) else { return Ok(()) };
+            let (parent, index) = model.doc.index_in_parent(block).expect("a table belongs to its parent");
+            let replacement = DetachedBlock::leaf(BlockKindData::Custom, BlockContent::Atom(AtomData::Custom(node)));
+            let new_id = replacement.id;
+            model.transact(origin, |tx| {
+                tx.remove(parent, index..index + 1)?;
+                tx.insert(parent, index, vec![replacement])?;
+                Ok(Some(BlockSelection::Blocks { anchor: new_id, head: new_id }))
+            })?;
+            Ok(())
+        }, cx);
+    }
+
     fn edit(
         &mut self,
         origin: EditOrigin,

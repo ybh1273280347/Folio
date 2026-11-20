@@ -1313,9 +1313,8 @@ impl BlockEditorModel {
     }
 
     fn paste_block_markdown(&mut self, text: &str, own: bool) -> Result<bool, CommandError> {
-        // Single-line text is plain unless it holds an inline atom's
-        // Markdown (a copied image), which pastes back as the atom, or an
-        // inline code span (`x`), which pastes back as code.
+        // Single-line text is normally plain. Let the importer recognize
+        // inline atoms and raw HTML blocks such as tables on one line.
         if !own
             && !text.trim_end_matches('\n').contains('\n')
             && !text.contains("![")
@@ -1324,6 +1323,7 @@ impl BlockEditorModel {
             && !text.contains("\\(")
             && !text.contains("\\[")
             && !text.to_ascii_lowercase().contains("<details")
+            && !super::html_table::starts_with_html_block(text)
         {
             return Ok(false);
         }
