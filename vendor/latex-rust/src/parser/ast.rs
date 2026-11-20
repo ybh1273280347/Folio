@@ -358,14 +358,22 @@ pub enum MatrixStyle {
     Aligned,
     /// `{align}`
     Align,
+    /// `{align*}`
+    AlignStar,
     /// `{gather}`
     Gather,
+    /// `{gather*}`
+    GatherStar,
     /// `{gathered}`: unnumbered centered display rows in an inline stack.
     Gathered,
     /// `{multline}`
     Multline,
+    /// `{multline*}`
+    MultlineStar,
     /// `{equation}`
     Equation,
+    /// `{equation*}`
+    EquationStar,
     /// `{split}`
     Split,
 }
@@ -383,20 +391,31 @@ impl MatrixStyle {
             Self::Array => "array",
             Self::Aligned => "aligned",
             Self::Align => "align",
+            Self::AlignStar => "align*",
             Self::Gather => "gather",
+            Self::GatherStar => "gather*",
             Self::Gathered => "gathered",
             Self::Multline => "multline",
+            Self::MultlineStar => "multline*",
             Self::Equation => "equation",
+            Self::EquationStar => "equation*",
             Self::Split => "split",
         }
     }
 
-    /// `align` / `gather` / `multline` / `equation` take display style and numbers.
+    /// `align` / `gather` / `multline` / `equation` (and `*` variants) take display style.
     #[must_use]
     pub fn is_display_env(self) -> bool {
         matches!(
             self,
-            Self::Align | Self::Gather | Self::Multline | Self::Equation
+            Self::Align
+                | Self::AlignStar
+                | Self::Gather
+                | Self::GatherStar
+                | Self::Multline
+                | Self::MultlineStar
+                | Self::Equation
+                | Self::EquationStar
         )
     }
 
