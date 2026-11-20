@@ -11,7 +11,7 @@ use gpui_kit::{
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-pub(super) const PANEL_WIDTH: f32 = 240.0;
+pub(super) const PANEL_WIDTH: f32 = 188.0;
 pub(super) const AUTO_OPEN_WIDTH: f32 = 1050.0;
 pub(super) const OVERLAY_WIDTH: f32 = 900.0;
 pub(super) const ANIMATION_MS: u64 = 200;
@@ -26,7 +26,11 @@ pub(super) struct OutlineNode {
 
 impl OutlineNode {
     fn contains_index(&self, target: usize) -> bool {
-        self.index == target || self.children.iter().any(|child| child.contains_index(target))
+        self.index == target
+            || self
+                .children
+                .iter()
+                .any(|child| child.contains_index(target))
     }
 }
 
@@ -436,7 +440,7 @@ fn collapse_whitespace(input: &str) -> String {
 fn outline_font_family() -> &'static str {
     #[cfg(target_os = "windows")]
     {
-        "Jetbrain Maple Mono"
+        "Noto Sans Sans"
     }
     #[cfg(target_os = "macos")]
     {
@@ -481,18 +485,18 @@ impl OutlineColors {
             Self {
                 panel_bg: gpui_kit::rgb(palette.surface),
                 panel_border: gpui_kit::rgb(palette.border),
-                header_text: gpui_kit::rgb(0x8c8a82),
-                header_hover_text: gpui_kit::rgb(palette.text),
-                item_text_root: gpui_kit::rgb(0xc7c5bc),
-                item_text_nested: gpui_kit::rgb(0x9e9c94),
-                item_text_hover: gpui_kit::rgb(palette.text),
-                item_text_active: gpui_kit::rgb(palette.text),
+                header_text: gpui_kit::rgb(0x7c7a72),
+                header_hover_text: gpui_kit::rgb(0xb5b3aa),
+                item_text_root: gpui_kit::rgb(0xa8a69e),
+                item_text_nested: gpui_kit::rgb(0x828078),
+                item_text_hover: gpui_kit::rgb(0xd6d4cc),
+                item_text_active: gpui_kit::rgb(0xd6d4cc),
                 item_bg_active: gpui_kit::rgb(palette.hover),
                 item_bg_hover: gpui_kit::rgb(0x282724),
                 item_bg_pressed: gpui_kit::rgb(palette.pressed),
-                chevron: gpui_kit::rgb(0x7c7a72),
-                chevron_hover: gpui_kit::rgb(palette.text),
-                guide_line: gpui_kit::rgb(0x33322e),
+                chevron: gpui_kit::rgb(0x727068),
+                chevron_hover: gpui_kit::rgb(0xb5b3aa),
+                guide_line: gpui_kit::rgb(0x46453f),
                 scroll_thumb: gpui_kit::rgb(0x45474b),
                 scroll_thumb_hover: gpui_kit::rgb(0x5c5f66),
                 scroll_thumb_active: gpui_kit::rgb(0x72767f),
@@ -500,19 +504,19 @@ impl OutlineColors {
         } else {
             Self {
                 panel_bg: gpui_kit::rgb(palette.surface),
-                panel_border: gpui_kit::rgb(0xefeeeb),
-                header_text: gpui_kit::rgb(0x9b9a97),
-                header_hover_text: gpui_kit::rgb(0x575653),
-                item_text_root: gpui_kit::rgb(0x52524f),
-                item_text_nested: gpui_kit::rgb(0x73726e),
-                item_text_hover: gpui_kit::rgb(0x1f2328),
-                item_text_active: gpui_kit::rgb(0x1f2328),
+                panel_border: gpui_kit::rgb(0xf2f1ee),
+                header_text: gpui_kit::rgb(0xa8a7a2),
+                header_hover_text: gpui_kit::rgb(0x6b6a65),
+                item_text_root: gpui_kit::rgb(0x787774),
+                item_text_nested: gpui_kit::rgb(0x9b9a97),
+                item_text_hover: gpui_kit::rgb(0x454440),
+                item_text_active: gpui_kit::rgb(0x454440),
                 item_bg_active: gpui_kit::rgb(0xf3f3f1),
                 item_bg_hover: gpui_kit::rgb(0xf7f6f4),
                 item_bg_pressed: gpui_kit::rgb(0xefefed),
-                chevron: gpui_kit::rgb(0xa8a7a2),
-                chevron_hover: gpui_kit::rgb(0x52524f),
-                guide_line: gpui_kit::rgb(0xebebea),
+                chevron: gpui_kit::rgb(0xb0afaa),
+                chevron_hover: gpui_kit::rgb(0x6b6a65),
+                guide_line: gpui_kit::rgb(0xe3e2dd),
                 scroll_thumb: gpui_kit::rgb(0xdcdbd7),
                 scroll_thumb_hover: gpui_kit::rgb(0xc2c1bc),
                 scroll_thumb_active: gpui_kit::rgb(0xa8a7a2),
@@ -527,7 +531,11 @@ pub(super) fn render_toggle_button(
     active: bool,
     cx: &mut Context<MarkdownPane>,
 ) -> Stateful<Div> {
-    let tooltip_text = if active { "收起文档大纲" } else { "展开文档大纲" };
+    let tooltip_text = if active {
+        "收起文档大纲"
+    } else {
+        "展开文档大纲"
+    };
     let active_bg = crate::theme::color(0xefefed);
     let active_hover = crate::theme::color(0xe6e5e1);
     let active_text = crate::theme::color(0x37352f);
@@ -576,18 +584,16 @@ fn render_panel_body(
     let tree = build_tree(&pane.headings);
     let all_parents = parent_indices(&pane.headings);
     let has_any_parents = !all_parents.is_empty();
-    let all_collapsed =
-        has_any_parents && all_parents.iter().all(|ix| pane.outline_collapsed.contains(ix));
-
-    // In main visual mode (no top toolbar), the floating toggle button sits at (12, 10).
-    // Reserve exact space on the left of the header so the toggle button anchors cleanly beside "文档大纲".
-    let header_left_pad = if pane.reading { px(16.) } else { px(44.) };
+    let all_collapsed = has_any_parents
+        && all_parents
+            .iter()
+            .all(|ix| pane.outline_collapsed.contains(ix));
 
     let header = div()
-        .h(px(44.))
+        .h(px(34.))
         .flex_shrink_0()
-        .pl(header_left_pad)
-        .pr(px(12.))
+        .pl(px(10.))
+        .pr(px(8.))
         .flex()
         .items_center()
         .justify_between()
@@ -600,7 +606,7 @@ fn render_panel_body(
                 .py_1()
                 .px_1()
                 .rounded(px(4.))
-                .text_size(px(12.))
+                .text_size(px(11.))
                 .font_medium()
                 .text_color(colors.header_text)
                 .when(has_any_parents, |el| {
@@ -661,8 +667,8 @@ fn render_panel_body(
                 .overflow_y_scroll()
                 .track_scroll(&pane.outline_scroll)
                 .on_scroll(|_, _, cx| cx.stop_propagation())
-                .pl(px(10.))
-                .pr(px(12.))
+                .pl(px(6.))
+                .pr(px(8.))
                 .pb_6()
                 .child(list_content),
         )
@@ -729,19 +735,19 @@ fn render_nodes(
     cx: &mut Context<MarkdownPane>,
 ) -> Div {
     let any_has_children = nodes.iter().any(|n| !n.children.is_empty());
-    let mut list = div().flex().flex_col().gap(px(2.)).w_full().min_w_0();
+    let mut list = div().flex().flex_col().gap(px(1.)).w_full().min_w_0();
 
     for node in nodes {
         let index = node.index;
         let has_children = !node.children.is_empty();
         let is_collapsed = has_children && collapsed.contains(&index);
         let is_direct_active = active_heading == Some(index);
-        let is_collapsed_ancestor_active = is_collapsed
-            && active_heading.is_some_and(|active_ix| node.contains_index(active_ix));
+        let is_collapsed_ancestor_active =
+            is_collapsed && active_heading.is_some_and(|active_ix| node.contains_index(active_ix));
         let is_active = is_direct_active || is_collapsed_ancestor_active;
 
-        let font_size = if depth == 0 { px(13.) } else { px(12.5) };
-        let line_height = if depth == 0 { px(18.) } else { px(17.5) };
+        let font_size = if depth == 0 { px(12.5) } else { px(12.) };
+        let line_height = if depth == 0 { px(16.) } else { px(15.5) };
         let rest_color = if is_active {
             colors.item_text_active
         } else if depth == 0 {
@@ -758,24 +764,27 @@ fn render_nodes(
             .gap(px(2.))
             .w_full()
             .min_w_0()
-            .px(px(6.))
-            .py(px(5.))
-            .rounded(px(6.))
+            .px(px(5.))
+            .py(px(3.5))
+            .rounded(px(5.))
             .cursor_pointer()
             .text_size(font_size)
             .line_height(line_height)
             .text_color(rest_color)
             .when(is_active, |row| row.bg(colors.item_bg_active).font_medium())
             .when(!is_active, |row| {
-                row.hover(move |s| s.bg(colors.item_bg_hover).text_color(colors.item_text_hover))
-                    .active(move |s| s.bg(colors.item_bg_pressed))
+                row.hover(move |s| {
+                    s.bg(colors.item_bg_hover)
+                        .text_color(colors.item_text_hover)
+                })
+                .active(move |s| s.bg(colors.item_bg_pressed))
             })
             .when(any_has_children, |row| {
                 if has_children {
                     row.child(
                         div()
                             .id(("md-outline-fold", index))
-                            .w(px(16.))
+                            .w(px(14.))
                             .h(line_height)
                             .flex_shrink_0()
                             .flex()
@@ -787,7 +796,7 @@ fn render_nodes(
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |pane, _, _, cx| {
                                 cx.stop_propagation();
-                                if !pane.outline_collapsed.remove(&index) {
+       ！                         if !pane.outline_collapsed.remove(&index) {
                                     pane.outline_collapsed.insert(index);
                                 }
                                 cx.notify();
@@ -798,12 +807,12 @@ fn render_nodes(
                                 } else {
                                     IconName::ChevronDown
                                 })
-                                .w(px(11.))
-                                .h(px(11.)),
+                                .w(px(10.))
+                                .h(px(10.)),
                             ),
                     )
                 } else {
-                    row.child(div().w(px(16.)).h(line_height).flex_shrink_0())
+                    row.child(div().w(px(14.)).h(line_height).flex_shrink_0())
                 }
             })
             .child(
@@ -823,13 +832,13 @@ fn render_nodes(
 
         if has_children && !is_collapsed {
             let guide_ml = if depth == 0 {
-                px(13.)
+                px(9.)
             } else if depth < 3 {
-                px(11.)
-            } else {
                 px(8.)
+            } else {
+                px(6.)
             };
-            let guide_pl = if depth < 3 { px(8.) } else { px(6.) };
+            let guide_pl = if depth < 3 { px(6.) } else { px(5.) };
             let child_group = div()
                 .ml(guide_ml)
                 .pl(guide_pl)

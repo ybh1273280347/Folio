@@ -421,6 +421,16 @@ impl Workspace {
         if let Some(session) = workspace_sessions.remove("default") {
             workspace_sessions.insert("loose".into(), session);
         }
+        // On cold start, keep only the last active tab per workspace instead of inheriting all old tabs.
+        for session in workspace_sessions.values_mut() {
+            let keep = if !session.active.is_empty() && session.tabs.contains(&session.active) {
+                Some(session.active.clone())
+            } else {
+                session.tabs.last().cloned()
+            };
+            session.tabs = keep.iter().cloned().collect();
+            session.active = keep.unwrap_or_default();
+        }
         let initial_location = config.active_workspace.clone().unwrap_or_else(|| {
             config.active_id.clone().map(WorkspaceLocation::Project).unwrap_or(
                 if workspace_sessions.contains_key("loose") {
@@ -1792,6 +1802,25 @@ impl Workspace {
         }
         self.release_all_html_panes(window, cx);
         true
+    }
+
+    fn activate_tab(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active == path {
+            return;
+        }
+        self.focused_markdown = None;
+        self.active = path.to_owned();
+        if let Some(pane) = self.markdown_panes.get(path) {
+            pane.update(cx, |pane, cx| pane.focus(window, cx));
+        } else if let Some(document) = self.documents.get(path) {
+            document
+                .editor
+                .update(cx, |editor, cx| editor.focus(window, cx));
+        }
+        if let Err(error) = self.remember_session() {
+            self.report(error, cx);
+        }
+        cx.notify();
     }
 
     fn close_tab(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -4547,6 +4576,231 @@ impl Workspace {
             .into_any_element()
     }
 
+    fn render_editor_tab_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let fg_alpha = |hex: u32, alpha: f32| -> Rgba {
+            let r = ((hex >> 16) & 0xff) as f32 / 255.0;
+            let g = ((hex >> 8) & 0xff) as f32 / 255.0;
+            let b = (hex & 0xff) as f32 / 255.0;
+            Rgba { r, g, b, a: alpha }
+        };
+        let palette = crate::theme::palette();
+        let header_bg = if palette.is_dark() {
+            palette.background
+        } else {
+            palette.hover
+        };
+        let mut bar = div()
+            .h(px(32.))
+            .px_1p5()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_1()
+            .bg(gpui_kit::rgb(header_bg))
+            .border_b_1()
+            .border_color(gpui_kit::rgb(palette.border));
+
+        if let Some(md_pane) = self.markdown_panes.get(&self.active) {
+            let outline_open = md_pane.read(cx).is_outline_open();
+            let outline_pane = md_pane.clone();
+            bar = bar.child(
+                Button::new("md-tab-outline")
+                    .ghost()
+                    .compact()
+                    .with_size(px(16.))
+                    .w(px(22.))
+                    .h(px(22.))
+                    .when(outline_open, |b| b.bg(fg_alpha(palette.text, 0.08)))
+                    .icon(crate::ui::icon(IconName::ListTree))
+                    .tooltip(if outline_open {
+                        "收起文档大纲"
+                    } else {
+                        "展开文档大纲"
+                    })
+                    .on_click(move |_, window, cx| {
+                        outline_pane.update(cx, |pane, cx| {
+                            pane.toggle_outline(cx);
+                            if pane.is_outline_open() && !pane.is_focused(window, cx) {
+                                pane.focus(window, cx);
+                            }
+                        });
+                    }),
+            );
+        }
+
+        bar = bar.child(
+            div()
+                .id("editor-tabs")
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap_1()
+                .overflow_hidden()
+                .children(self.tabs.iter().map(|path| {
+                    let current = self.active == *path;
+                    let title = Path::new(path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.clone());
+                    let switch_path = path.clone();
+                    let close_path = path.clone();
+                    let tooltip_path = path.clone();
+                    let tab_hover_bg = fg_alpha(palette.text, 0.07);
+                    div()
+                        .id(SharedString::from(format!("editor-tab-{path}")))
+                        .w(px(150.))
+                        .min_w_0()
+                        .flex_shrink(1.)
+                        .when(current, |tab| tab.flex_shrink_0().max_w(relative(0.65)))
+                        .h(px(26.))
+                        .px_2()
+                        .rounded(px(6.))
+                        .flex()
+                        .overflow_hidden()
+                        .items_center()
+                        .gap_1()
+                        .cursor_pointer()
+                        .text_color(fg_alpha(palette.text, 0.78))
+                        .when(current, |s| {
+                            s.bg(gpui_kit::rgb(palette.surface))
+                                .text_color(gpui_kit::rgb(palette.text))
+                        })
+                        .when(!current, |s| {
+                            s.hover(move |h| {
+                                h.bg(tab_hover_bg)
+                                    .text_color(gpui_kit::rgb(palette.text))
+                            })
+                        })
+                        .tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(tooltip_path.clone())
+                                .build(window, cx)
+                        })
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            app.activate_tab(&switch_path, window, cx);
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_xs()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(title),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("close-editor-tab-{path}")))
+                                .ghost()
+                                .compact()
+                                .with_size(px(16.))
+                                .w(px(18.))
+                                .h(px(18.))
+                                .flex_shrink_0()
+                                .icon(crate::ui::icon(IconName::Close))
+                                .tooltip("关闭标签")
+                                .on_click(cx.listener(move |app, _, window, cx| {
+                                    cx.stop_propagation();
+                                    app.close_tab(&close_path, window, cx);
+                                })),
+                        )
+                        .into_any_element()
+                })),
+        );
+
+        if let Some(md_pane) = self.markdown_panes.get(&self.active) {
+            let count = md_pane.read(cx).annotation_count();
+            if count > 0 {
+                let drawer_pane = md_pane.clone();
+                bar = bar.child(
+                    div()
+                        .id("md-annotations-pill")
+                        .px_2()
+                        .h(px(22.))
+                        .rounded_full()
+                        .bg(rgb(0xfef9c3))
+                        .border_1()
+                        .border_color(rgb(0xfde047))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(0xfef08a)))
+                        .active(|s| s.bg(rgb(0xfde047)))
+                        .text_xs()
+                        .text_color(rgb(0x854d0e))
+                        .child(crate::ui::icon(IconName::MessageSquareText))
+                        .child(format!("{count}"))
+                        .on_click(move |_, _, cx| {
+                            drawer_pane.update(cx, |pane, cx| pane.toggle_annotations_drawer(cx));
+                        }),
+                );
+            }
+            let copy_pane = md_pane.clone();
+            let source_pane = md_pane.clone();
+            let is_source = md_pane.read(cx).is_source();
+            bar = bar
+                .child(crate::ui::copy_document_button(
+                    SharedString::from(format!("md-copy-document:{}", self.active)),
+                    move |cx| copy_pane.read(cx).source_text(),
+                ))
+                .child(
+                    Button::new("md-tab-source")
+                        .ghost()
+                        .compact()
+                        .with_size(px(16.))
+                        .w(px(22.))
+                        .h(px(22.))
+                        .when(is_source, |b| b.bg(fg_alpha(palette.text, 0.08)))
+                        .icon(crate::ui::icon(IconName::CodeXml))
+                        .tooltip(if is_source {
+                            "切换到可视化视图"
+                        } else {
+                            "切换到源码视图"
+                        })
+                        .on_click(move |_, window, cx| {
+                            source_pane.update(cx, |pane, cx| pane.toggle_source(window, cx));
+                        }),
+                );
+        } else if let Some(document) = self.documents.get(&self.active) {
+            let editor = document.editor.clone();
+            let ask_editor = document.editor.clone();
+            let ask_path = document.path.clone();
+            let ask_source = document
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "源码".to_owned());
+            bar = bar
+                .child(
+                    Button::new("ask-ai-source")
+                        .ghost()
+                        .compact()
+                        .with_size(px(16.))
+                        .w(px(22.))
+                        .h(px(22.))
+                        .icon(crate::ui::icon(IconName::Sparkles))
+                        .tooltip("将当前选中内容（或当前文件）发送到 AI 助手")
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            let selected = ask_editor.read(cx).selected_text().to_string();
+                            app.open_ai_with_selection(
+                                ask_source.clone(),
+                                Some(ask_path.clone()),
+                                selected,
+                                window,
+                                cx,
+                            );
+                        })),
+                )
+                .child(crate::ui::copy_document_button(
+                    SharedString::from(format!("copy-document:{}", document.path.display())),
+                    move |cx| editor.read(cx).value().to_string(),
+                ));
+        }
+
+        bar.into_any_element()
+    }
+
     fn render_editor(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut area = div()
             .flex()
@@ -4557,6 +4811,9 @@ impl Workspace {
                 MouseButton::Left,
                 cx.listener(|app, _, _, _| app.focused_markdown = None),
             );
+        if !self.tabs.is_empty() {
+            area = area.child(self.render_editor_tab_bar(cx));
+        }
         if let Some(document) = self.documents.get(&self.active) {
             if document.buffer.deleted {
                 area = area.child(
@@ -4594,36 +4851,6 @@ impl Workspace {
             if let Some(markdown) = self.markdown_panes.get(&self.active) {
                 area = area.child(div().flex_1().min_h_0().child(markdown.clone()));
             } else {
-                let editor = document.editor.clone();
-                let ask_editor = document.editor.clone();
-                let ask_path = document.path.clone();
-                let ask_source = document
-                    .path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "源码".to_owned());
-                area = area.child(div().h(px(32.)).px_3().flex().items_center().justify_end().gap_1()
-                    .child(
-                        Button::new("ask-ai-source")
-                            .ghost()
-                            .compact()
-                            .icon(crate::ui::icon(IconName::Sparkles))
-                            .tooltip("将当前选中内容（或当前文件）发送到 AI 助手")
-                            .on_click(cx.listener(move |app, _, window, cx| {
-                                let selected = ask_editor.read(cx).selected_text().to_string();
-                                app.open_ai_with_selection(
-                                    ask_source.clone(),
-                                    Some(ask_path.clone()),
-                                    selected,
-                                    window,
-                                    cx,
-                                );
-                            })),
-                    )
-                    .child(crate::ui::copy_document_button(
-                        SharedString::from(format!("copy-document:{}", document.path.display())),
-                        move |cx| editor.read(cx).value().to_string(),
-                    )));
                 area = area.child(
                     div()
                         .relative()
