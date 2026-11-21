@@ -33,7 +33,7 @@ impl TagPanel {
     }
 
     pub(super) fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索…"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::common::SEARCH_ELLIPSIS.get()));
         cx.subscribe_in(&input, window, |app, _, event: &InputEvent, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 app.submit_tag_input(window, cx);
@@ -49,6 +49,12 @@ impl TagPanel {
             mode: Mode::Browse,
             scan: None,
         }
+    }
+
+    pub(super) fn refresh_locale(&self, window: &mut Window, cx: &mut App) {
+        self.input.update(cx, |input, cx| {
+            input.set_placeholder(crate::i18n::common::SEARCH_ELLIPSIS.get(), window, cx);
+        });
     }
 
     pub(super) fn reset(&mut self) {
@@ -80,7 +86,7 @@ impl Workspace {
         let store = match self.tag_store() {
             Ok(store) => store,
             Err(error) => {
-                self.report(format!("无法读取标签：{error}"), cx);
+                self.report(crate::i18n::tags::err_load_tags(&error), cx);
                 return;
             }
         };
@@ -103,7 +109,7 @@ impl Workspace {
             let _ = this.update(cx, |app, cx| {
                 match result.and_then(|scan| store.apply_scan(scan)) {
                     Ok(snapshot) => app.use_tag_snapshot(snapshot, cx),
-                    Err(error) => app.report(format!("无法刷新标签：{error}"), cx),
+                    Err(error) => app.report(crate::i18n::tags::err_refresh_tags(&error), cx),
                 }
             });
         }));
@@ -126,7 +132,7 @@ impl Workspace {
         {
             Ok(snapshot) => self.use_tag_snapshot(snapshot, cx),
             Err(error) => {
-                self.report(format!("文件已移动，标签暂未更新：{error}"), cx);
+                self.report(crate::i18n::tags::err_moved_tags_not_updated(&error), cx);
                 self.refresh_tags(cx);
             }
         }
@@ -149,7 +155,7 @@ impl Workspace {
                 if parent.is_dir()
                     && let Err(error) = self.watch_standalone_parent(parent)
                 {
-                    self.report(format!("无法监听独立文件目录：{error}"), cx);
+                    self.report(crate::i18n::tags::err_watch_loose_dir(&error), cx);
                 }
             }
         }
@@ -183,7 +189,7 @@ impl Workspace {
                 true
             }
             Err(error) => {
-                self.report(format!("无法保存标签：{error}"), cx);
+                self.report(crate::i18n::tags::err_save_tags(&error), cx);
                 false
             }
         }
@@ -289,7 +295,7 @@ impl Workspace {
             .map(|file| file.path.clone())
             .collect();
         if paths.is_empty() {
-            self.report("此文件夹及其子文件夹中没有受支持的文件。", cx);
+            self.report(crate::i18n::tags::ERR_NO_SUPPORTED_FILES_IN_FOLDER.get(), cx);
             return;
         }
         self.show_tag_panel(
@@ -369,7 +375,7 @@ impl Workspace {
                     .input
                     .update(cx, |input, cx| input.set_value(String::new(), window, cx));
             }
-            Err(error) => self.report(format!("无法保存标签：{error}"), cx),
+            Err(error) => self.report(crate::i18n::tags::err_save_tags(&error), cx),
         }
     }
 
@@ -384,9 +390,9 @@ impl Workspace {
         let retry_name = name.clone();
         if self.ask(
             Dialog::DeleteTag,
-            format!("删除标签「{name}」？"),
-            "此标签会从所有关联文件上移除。".into(),
-            DialogButtons::Confirm("删除标签".into()),
+            crate::i18n::tags::dialog_delete_tag_title(&name),
+            crate::i18n::tags::DIALOG_DELETE_TAG_BODY.get().into(),
+            DialogButtons::Confirm(crate::i18n::tags::DIALOG_DELETE_TAG_CONFIRM.get().into()),
             window,
             cx,
             move |app, window, cx| app.delete_tag(retry_id, retry_name, window, cx),
@@ -397,7 +403,7 @@ impl Workspace {
     }
 
     pub(super) fn render_tag_toggle(&self, cx: &Context<Self>) -> Stateful<Div> {
-        tag_control("tags-toggle", IconName::Tag, "标签")
+        tag_control("tags-toggle", IconName::Tag, crate::i18n::tags::TAGS_TITLE.get())
             .when(self.tags.open, |control| control.bg(rgb(0xe8e7e4)))
             .on_click(cx.listener(|app, _, window, cx| {
                 if app.tags.open {
@@ -432,10 +438,10 @@ impl Workspace {
                     div()
                         .min_w_0()
                         .text_ellipsis()
-                        .child(format!("筛选 · {}", tag.name)),
+                        .child(crate::i18n::tags::filter_tag(&tag.name)),
                 )
                 .child(
-                    tag_control("clear-tag-filter", IconName::Close, "清除标签筛选")
+                    tag_control("clear-tag-filter", IconName::Close, crate::i18n::tags::CLEAR_TAG_FILTER.get())
                         .on_click(cx.listener(|app, _, _, cx| app.select_tag(None, cx))),
                 )
                 .into_any_element(),
@@ -554,7 +560,7 @@ impl Workspace {
         let query = tags::name_key(&input);
         let editing = self.tags.is_editing();
         let header = match &self.tags.mode {
-            Mode::Browse => "标签".to_owned(),
+            Mode::Browse => crate::i18n::tags::TAGS_TITLE.get().to_owned(),
             Mode::Edit {
                 paths,
                 folder: None,
@@ -563,10 +569,10 @@ impl Workspace {
                 .expect("file has name")
                 .to_string_lossy()
                 .into_owned(),
-            Mode::Edit { paths, .. } => format!("编辑 {} 个文件的标签", paths.len()),
-            Mode::Rename(_) => "重命名标签".into(),
-            Mode::Colors(_) => "标签颜色".into(),
-            Mode::Recover(_) => "选择新的关联文件".into(),
+            Mode::Edit { paths, .. } => crate::i18n::tags::mode_edit_files_tags(paths.len()),
+            Mode::Rename(_) => crate::i18n::tags::MODE_RENAME_TAG.get().into(),
+            Mode::Colors(_) => crate::i18n::tags::MODE_TAG_COLORS.get().into(),
+            Mode::Recover(_) => crate::i18n::tags::MODE_RECOVER_FILE.get().into(),
         };
         let in_detail = !editing && !matches!(self.tags.mode, Mode::Browse);
         let folder = match &self.tags.mode {
@@ -601,7 +607,7 @@ impl Workspace {
                     .text_xs()
                     .when(in_detail, |row| {
                         row.child(
-                            tag_control("tag-back", IconName::ChevronLeft, "返回标签列表")
+                            tag_control("tag-back", IconName::ChevronLeft, crate::i18n::tags::BACK_TO_TAG_LIST.get())
                                 .on_click(cx.listener(|app, _, window, cx| {
                                     app.show_tag_panel(Mode::Browse, "", window, cx)
                                 })),
@@ -620,9 +626,9 @@ impl Workspace {
                             "tags-close",
                             IconName::Close,
                             if editing {
-                                "关闭标签编辑"
+                                crate::i18n::tags::CLOSE_TAG_EDIT.get()
                             } else {
-                                "收起标签面板"
+                                crate::i18n::tags::COLLAPSE_TAG_PANEL.get()
                             },
                         )
                         .on_click(
@@ -631,7 +637,7 @@ impl Workspace {
                     ),
             )
             .when_some(folder, |panel, folder| {
-                let scope = SharedString::from(format!("{folder}（含子文件夹）"));
+                let scope = SharedString::from(crate::i18n::tags::folder_with_subfolders(folder));
                 panel.child(
                     div()
                         .id("tag-folder-scope")
@@ -659,7 +665,7 @@ impl Workspace {
                                 .min_w_0(),
                         )
                         .child(
-                            tag_control("save-tag-name", IconName::Check, "保存标签名称").on_click(
+                            tag_control("save-tag-name", IconName::Check, crate::i18n::tags::SAVE_TAG_NAME.get()).on_click(
                                 cx.listener(|app, _, window, cx| app.submit_tag_input(window, cx)),
                             ),
                         ),
@@ -691,7 +697,7 @@ impl Workspace {
                             .when(selected == Some(color), |swatch| {
                                 swatch.child(crate::ui::icon(IconName::Check))
                             })
-                            .tooltip(move |window, cx| Tooltip::new(title).build(window, cx))
+                            .tooltip(move |window, cx| Tooltip::new(title.get()).build(window, cx))
                             .on_click(cx.listener(move |app, _, window, cx| {
                                 if app.change_tags(Change::Color { tag: &id, color }, cx) {
                                     app.show_tag_panel(Mode::Browse, "", window, cx);
@@ -718,7 +724,7 @@ impl Workspace {
                             .min_w_0(),
                     )
                     .when(self.directory_workspace().is_none(), |panel| {
-                        panel.child(button("tag-open-target", "打开目标文件…").on_click(
+                        panel.child(button("tag-open-target", crate::i18n::tags::OPEN_TARGET_FILE.get()).on_click(
                             cx.listener(|app, _, window, cx| app.open_file_dialog(window, cx)),
                         ))
                     })
@@ -795,7 +801,7 @@ impl Workspace {
                                     .min_w_0(),
                             )
                             .child(
-                                tag_control("create-tag", IconName::Plus, "新建输入的标签")
+                                tag_control("create-tag", IconName::Plus, crate::i18n::tags::CREATE_TYPED_TAG.get())
                                     .when(query.is_empty() || exact, |control| {
                                         control.opacity(0.45)
                                     })
@@ -821,7 +827,7 @@ impl Workspace {
                                             .pt_2()
                                             .text_xs()
                                             .text_color(rgb(MUTED))
-                                            .child("待重新关联"),
+                                            .child(crate::i18n::tags::PENDING_RELINK.get()),
                                     )
                                     .children(
                                         self.tags
@@ -856,7 +862,7 @@ impl Workspace {
                                                         tag_control(
                                                             "rebind",
                                                             IconName::Link,
-                                                            "重新关联",
+                                                            crate::i18n::tags::RELINK_BTN.get(),
                                                         )
                                                         .on_click(cx.listener(
                                                             move |app, _, window, cx| {
@@ -935,13 +941,13 @@ impl Workspace {
                 })
                 .when(count < paths.len(), |row| {
                     row.child(
-                        tag_control("add", IconName::Plus, "添加标签").on_click(
+                        tag_control("add", IconName::Plus, crate::i18n::tags::ADD_TAG.get()).on_click(
                             cx.listener(move |app, _, _, cx| app.assign_tag(&add, true, cx)),
                         ),
                     )
                 })
                 .when(count > 0, |row| {
-                    row.child(tag_control("remove", IconName::Minus, "移除标签").on_click(
+                    row.child(tag_control("remove", IconName::Minus, crate::i18n::tags::REMOVE_TAG.get()).on_click(
                         cx.listener(move |app, _, _, cx| app.assign_tag(&remove, false, cx)),
                     ))
                 })
@@ -963,21 +969,21 @@ impl Workspace {
             }));
         row.child(label)
             .child(
-                tag_control("tag-rename", IconName::PencilLine, "重命名标签").on_click(
+                tag_control("tag-rename", IconName::PencilLine, crate::i18n::tags::MODE_RENAME_TAG.get()).on_click(
                     cx.listener(move |app, _, window, cx| {
                         app.show_tag_panel(Mode::Rename(rename.clone()), &rename_name, window, cx);
                     }),
                 ),
             )
             .child(
-                tag_control("tag-palette", IconName::Palette, "更改标签颜色").on_click(
+                tag_control("tag-palette", IconName::Palette, crate::i18n::tags::CHANGE_TAG_COLOR.get()).on_click(
                     cx.listener(move |app, _, window, cx| {
                         app.show_tag_panel(Mode::Colors(color.clone()), "", window, cx);
                     }),
                 ),
             )
             .child(
-                tag_control("tag-delete", IconName::Trash, "删除标签").on_click(cx.listener(
+                tag_control("tag-delete", IconName::Trash, crate::i18n::tags::DELETE_TAG.get()).on_click(cx.listener(
                     move |app, _, window, cx| app.delete_tag(id.clone(), name.clone(), window, cx),
                 )),
             )

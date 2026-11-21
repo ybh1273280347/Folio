@@ -227,7 +227,7 @@ impl TranslatePopover {
                 lang_label(self.target_lang)
             )
         } else {
-            format!("自动 → {}", lang_label(self.target_lang))
+            crate::i18n::media::translate_auto_arrow(&lang_label(self.target_lang))
         };
         let lang_badge = if self.provider.is_empty() {
             lang_part
@@ -283,7 +283,7 @@ impl TranslatePopover {
                             .font_semibold()
                             .text_color(rgb(0x37352f))
                             .flex_shrink_0()
-                            .child("翻译"),
+                            .child(crate::i18n::media::TRANSLATE_TITLE.get()),
                     )
                     .child(
                         div()
@@ -327,8 +327,12 @@ impl TranslatePopover {
                             .tooltip({
                                 let copied = self.copied;
                                 move |window, cx| {
-                                    Tooltip::new(if copied { "已复制译文" } else { "复制译文" })
-                                        .build(window, cx)
+                                    Tooltip::new(if copied {
+                                        crate::i18n::media::TRANSLATE_COPIED.get()
+                                    } else {
+                                        crate::i18n::media::TRANSLATE_COPY.get()
+                                    })
+                                    .build(window, cx)
                                 }
                             })
                             .child(
@@ -357,7 +361,7 @@ impl TranslatePopover {
                             .text_color(rgb(0x5b5b58))
                             .hover(|s| s.bg(rgb(0xf2f3f5)))
                             .active(|s| s.bg(rgb(crate::ui::PRESSED_BG)))
-                            .tooltip(|window, cx| Tooltip::new("关闭 (Esc)").build(window, cx))
+                            .tooltip(|window, cx| Tooltip::new(crate::i18n::media::TRANSLATE_CLOSE_ESC.get()).build(window, cx))
                             .child(crate::ui::icon(IconName::Close).w(px(13.)).h(px(13.)))
                             .on_click(cx.listener(move |owner, _, _, cx| {
                                 get_mut(owner).dismiss();
@@ -394,7 +398,7 @@ impl TranslatePopover {
                         .py_2()
                         .text_size(px(base_size))
                         .text_color(rgb(0x787774))
-                        .child("正在翻译…"),
+                        .child(crate::i18n::media::TRANSLATE_LOADING.get()),
                 )
             })
             .when(!self.loading && self.error.is_some(), |box_| {
@@ -416,7 +420,7 @@ impl TranslatePopover {
                             div().flex().child(
                                 crate::ui::button_secondary(
                                     SharedString::from(format!("{id_prefix}-retry")),
-                                    "重试",
+                                    crate::i18n::common::RETRY.get(),
                                 )
                                 .on_click(cx.listener(move |owner, _, _, cx| {
                                     Self::run_request(owner, cx, get_mut);
@@ -523,16 +527,10 @@ fn default_target_lang(text: &str) -> &'static str {
 
 fn lang_label(code: &str) -> String {
     match code.to_ascii_lowercase().as_str() {
-        "zh-cn" | "zh" | "zh-hans" => "中文".to_owned(),
-        "zh-tw" | "zh-hant" | "cht" => "繁中".to_owned(),
-        "en" => "英语".to_owned(),
-        "ja" | "jp" => "日语".to_owned(),
-        "ko" | "kor" => "韩语".to_owned(),
-        "fr" | "fra" => "法语".to_owned(),
-        "de" => "德语".to_owned(),
-        "es" | "spa" => "西语".to_owned(),
-        "ru" => "俄语".to_owned(),
-        "la" => "拉丁语".to_owned(),
+        "zh-cn" | "zh" | "zh-hans" | "zh-tw" | "zh-hant" | "cht" | "en" | "ja" | "jp" | "ko"
+        | "kor" | "fr" | "fra" | "de" | "es" | "spa" | "ru" | "la" => {
+            crate::i18n::media::lang_name(code)
+        }
         other => other.to_uppercase(),
     }
 }
@@ -557,7 +555,7 @@ fn translate_google_then_baidu(
                 settings.baidu_app_id.trim(),
                 settings.baidu_api_key.trim(),
             )
-            .map_err(|baidu_err| format!("{google_err}；百度备用也失败：{baidu_err}"))
+            .map_err(|baidu_err| crate::i18n::media::err_google_and_baidu(&google_err, &baidu_err))
         }
     }
 }
@@ -583,7 +581,7 @@ fn google_translate(
         &body,
         connect_timeout_ms,
         true,
-        "Google 翻译",
+        crate::i18n::media::PROVIDER_GOOGLE.get(),
     )?;
     parse_google_response(&raw)
 }
@@ -595,7 +593,7 @@ fn baidu_translate(
     api_key: &str,
 ) -> Result<TranslateResult, String> {
     if app_id.is_empty() || api_key.is_empty() {
-        return Err("请在 设置 → API 服务 中填写百度翻译 APP ID 与密钥".to_owned());
+        return Err(crate::i18n::media::ERR_BAIDU_NO_KEYS.get().to_owned());
     }
     let to = if target_lang == "en" { "en" } else { "zh" };
     let salt = SystemTime::now()
@@ -619,16 +617,16 @@ fn baidu_translate(
         &body,
         4_500,
         false,
-        "百度翻译",
+        crate::i18n::media::PROVIDER_BAIDU.get(),
     )?;
     parse_baidu_response(&raw)
 }
 
 fn parse_google_response(raw: &str) -> Result<TranslateResult, String> {
     let json: serde_json::Value =
-        serde_json::from_str(raw).map_err(|e| format!("解析 Google 翻译响应失败：{e}"))?;
+        serde_json::from_str(raw).map_err(|e| crate::i18n::media::err_parse_google(&e))?;
     let Some(arr) = json.as_array() else {
-        return Err("Google 翻译返回格式异常".to_owned());
+        return Err(crate::i18n::media::ERR_GOOGLE_FORMAT.get().to_owned());
     };
 
     let mut translated = String::new();
@@ -640,7 +638,7 @@ fn parse_google_response(raw: &str) -> Result<TranslateResult, String> {
         }
     }
     if translated.trim().is_empty() {
-        return Err("未获取到有效译文".to_owned());
+        return Err(crate::i18n::media::ERR_NO_TRANSLATION.get().to_owned());
     }
 
     let detected_lang = arr
@@ -690,7 +688,7 @@ fn parse_google_response(raw: &str) -> Result<TranslateResult, String> {
 
 fn parse_baidu_response(raw: &str) -> Result<TranslateResult, String> {
     let json: serde_json::Value =
-        serde_json::from_str(raw).map_err(|e| format!("解析百度翻译响应失败：{e}"))?;
+        serde_json::from_str(raw).map_err(|e| crate::i18n::media::err_parse_baidu(&e))?;
 
     if let Some(code) = json.get("error_code").and_then(|v| {
         v.as_str()
@@ -701,18 +699,7 @@ fn parse_baidu_response(raw: &str) -> Result<TranslateResult, String> {
             .get("error_msg")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        let detail = match code.as_str() {
-            "52001" => "请求超时",
-            "52002" => "百度服务系统错误",
-            "52003" => "未授权用户，请检查 APP ID 是否正确及是否已开通通用文本翻译",
-            "54001" => "签名错误，请检查 APP ID 与密钥是否匹配",
-            "54003" => "访问频率受限，请稍后再试",
-            "54004" => "百度翻译账户余额不足",
-            "54005" => "请求文本过长",
-            "58000" => "客户端 IP 非法（如设置了 IP 白名单）",
-            _ => msg,
-        };
-        return Err(format!("百度翻译错误 ({code})：{detail}"));
+        return Err(crate::i18n::media::err_baidu_code(&code, msg));
     }
 
     let mut lines = Vec::new();
@@ -725,7 +712,7 @@ fn parse_baidu_response(raw: &str) -> Result<TranslateResult, String> {
     }
     let translated = lines.join("\n");
     if translated.trim().is_empty() {
-        return Err("百度翻译未返回有效译文".to_owned());
+        return Err(crate::i18n::media::ERR_BAIDU_NO_TRANSLATION.get().to_owned());
     }
     let detected_lang = json
         .get("from")
@@ -734,7 +721,7 @@ fn parse_baidu_response(raw: &str) -> Result<TranslateResult, String> {
         .to_owned();
 
     Ok(TranslateResult {
-        provider: "百度",
+        provider: crate::i18n::media::PROVIDER_BAIDU_SHORT.get(),
         translated,
         detected_lang,
         dict: Vec::new(),
@@ -819,7 +806,7 @@ fn post_form_https(
         }
     };
     if session.is_null() {
-        return Err(format!("初始化 {provider_label} WinHTTP 会话失败"));
+        return Err(crate::i18n::media::http_init_session(provider_label));
     }
     let session = Handle(session);
 
@@ -836,7 +823,7 @@ fn post_form_https(
     let host_h = HSTRING::from(host);
     let connect = unsafe { WinHttpConnect(session.0, &host_h, 443, 0) };
     if connect.is_null() {
-        return Err(format!("连接 {provider_label} 失败"));
+        return Err(crate::i18n::media::http_connect(provider_label));
     }
     let connect = Handle(connect);
 
@@ -854,7 +841,7 @@ fn post_form_https(
         )
     };
     if request.is_null() {
-        return Err(format!("创建 {provider_label} 请求失败"));
+        return Err(crate::i18n::media::http_open_req(provider_label));
     }
     let request = Handle(request);
 
@@ -871,11 +858,11 @@ fn post_form_https(
         )
     };
     if sent.is_err() {
-        return Err(format!("请求 {provider_label} 失败（网络超时或未通）"));
+        return Err(crate::i18n::media::http_send_req(provider_label));
     }
 
     if unsafe { WinHttpReceiveResponse(request.0, std::ptr::null_mut()) }.is_err() {
-        return Err(format!("接收 {provider_label} 响应超时"));
+        return Err(crate::i18n::media::http_recv_timeout(provider_label));
     }
 
     let mut status: u32 = 0;
@@ -891,10 +878,10 @@ fn post_form_https(
         )
     };
     if status == 429 {
-        return Err(format!("{provider_label} 请求过于频繁 (HTTP 429)"));
+        return Err(crate::i18n::media::http_rate_limit(provider_label));
     }
     if !(200..300).contains(&status) {
-        return Err(format!("{provider_label} 返回状态码 HTTP {status}"));
+        return Err(crate::i18n::media::http_status(provider_label, status));
     }
 
     let mut out = Vec::new();
@@ -911,18 +898,18 @@ fn post_form_https(
         }
         .is_err()
         {
-            return Err(format!("读取 {provider_label} 响应出错"));
+            return Err(crate::i18n::media::http_read_err(provider_label));
         }
         if read == 0 {
             break;
         }
         out.extend_from_slice(&buf[..read as usize]);
         if out.len() > 1_048_576 {
-            return Err(format!("{provider_label} 响应体积过大"));
+            return Err(crate::i18n::media::http_too_large(provider_label));
         }
     }
 
-    String::from_utf8(out).map_err(|_| format!("{provider_label} 响应不是有效的 UTF-8 文本"))
+    String::from_utf8(out).map_err(|_| crate::i18n::media::http_invalid_utf8(provider_label))
 }
 
 #[cfg(not(windows))]
@@ -947,12 +934,12 @@ fn post_form_https(
             &url,
         ])
         .output()
-        .map_err(|e| format!("调用 curl 请求 {provider_label} 失败：{e}"))?;
+        .map_err(|e| crate::i18n::media::curl_invoke_failed(provider_label, &e))?;
     if !output.status.success() {
-        return Err(format!("请求 {provider_label} 失败"));
+        return Err(crate::i18n::media::curl_req_failed(provider_label));
     }
     String::from_utf8(output.stdout)
-        .map_err(|_| format!("{provider_label} 响应不是有效的 UTF-8 文本"))
+        .map_err(|_| crate::i18n::media::http_invalid_utf8(provider_label))
 }
 
 fn md5_hex(input: &[u8]) -> String {

@@ -40,7 +40,7 @@ pub fn compile_tex(
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "主文件必须是 .tex 文件。",
+            crate::i18n::media::COMPILER_MAIN_TEX_ONLY.get(),
         ));
     }
     let source = files::project_path(Path::new(&project.folder), &project.main_file)?;

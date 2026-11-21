@@ -1,4 +1,5 @@
 //! Appearance and shortcut preferences are persisted independently of project files and PDF typesetting.
+use crate::i18n::{Locale, common as common_i18n, preferences as p};
 use crate::theme::color as rgb;
 use crate::{
     model::{AppSettings, InternalLinkOpenTarget, MathFont, SHORTCUT_DEFS, ToolExecutionView},
@@ -36,6 +37,7 @@ pub struct Preferences {
     appearance_expanded: bool,
     recording: Option<&'static str>,
     focus: FocusHandle,
+    system_fonts: Vec<String>,
     interface_font: Entity<SelectState<SearchableVec<String>>>,
     editor_font: Entity<SelectState<SearchableVec<String>>>,
     markdown_font: Entity<SelectState<SearchableVec<String>>>,
@@ -91,7 +93,7 @@ impl Preferences {
         })
         .detach();
         let theme_name = cx.new(|cx| {
-            let mut input = InputState::new(window, cx).placeholder("主题名称");
+            let mut input = InputState::new(window, cx).placeholder(p::THEME_NAME_PLACEHOLDER.get());
             if settings.theme.active != "自定义（未保存）" {
                 input.set_value(settings.theme.active.clone(), window, cx);
             }
@@ -118,7 +120,7 @@ impl Preferences {
             }).detach();
             (role, picker)
         }).collect();
-        let terminal_shell = cx.new(|cx| InputState::new(window, cx).placeholder("自动使用 PowerShell"));
+        let terminal_shell = cx.new(|cx| InputState::new(window, cx).placeholder(p::TERMINAL_SHELL_PLACEHOLDER.get()));
         if !settings.terminal.shell.is_empty() {
             terminal_shell.update(cx, |input, cx| {
                 input.set_value(settings.terminal.shell.clone(), window, cx);
@@ -175,6 +177,7 @@ impl Preferences {
         let mut fonts = cx.text_system().all_font_names();
         fonts.sort();
         fonts.dedup();
+        let system_fonts = fonts.clone();
         let terminal_font_family = cx.new(|cx| {
             SelectState::new(SearchableVec::new(fonts.clone()), None, window, cx).searchable(true)
         });
@@ -198,7 +201,7 @@ impl Preferences {
                 }
             },
         ).detach();
-        fonts.insert(0, "系统默认".into());
+        fonts.insert(0, p::SYSTEM_DEFAULT.get().into());
         let mut font_selector = || {
             cx.new(|cx| {
                 SelectState::new(SearchableVec::new(fonts.clone()), None, window, cx).searchable(true)
@@ -209,7 +212,7 @@ impl Preferences {
         let markdown_font = font_selector();
         let ai_font = font_selector();
         let cjk_fallback_font = font_selector();
-        fonts[0] = "默认等宽字体".into();
+        fonts[0] = p::DEFAULT_MONOSPACE.get().into();
         let inline_code_font = cx.new(|cx| {
             SelectState::new(SearchableVec::new(fonts.clone()), None, window, cx).searchable(true)
         });
@@ -251,7 +254,7 @@ impl Preferences {
             selector.update(cx, |state, cx| {
                 state.set_selected_value(
                     &if selected.is_empty() {
-                        "默认等宽字体".into()
+                        p::DEFAULT_MONOSPACE.get().into()
                     } else {
                         selected.clone()
                     },
@@ -268,7 +271,11 @@ impl Preferences {
                         } else {
                             &mut panel.settings.block_code_font
                         };
-                        *selected = if font == "默认等宽字体" { String::new() } else { font.clone() };
+                        *selected = if font == p::DEFAULT_MONOSPACE.zh || font == p::DEFAULT_MONOSPACE.en {
+                            String::new()
+                        } else {
+                            font.clone()
+                        };
                         panel.changed(cx);
                     }
                 },
@@ -378,7 +385,7 @@ impl Preferences {
             state.update(cx, |state, cx| {
                 state.set_selected_value(
                     &if selected.is_empty() {
-                        "系统默认".into()
+                        p::SYSTEM_DEFAULT.get().into()
                     } else {
                         selected.clone()
                     },
@@ -388,13 +395,17 @@ impl Preferences {
             });
             cx.subscribe(state, move |panel, _, event: &SelectEvent<SearchableVec<String>>, cx| {
                 if let SelectEvent::Confirm(Some(font)) = event {
-                    *field(&mut panel.settings) = if font == "系统默认" { String::new() } else { font.clone() };
+                    *field(&mut panel.settings) = if font == p::SYSTEM_DEFAULT.zh || font == p::SYSTEM_DEFAULT.en {
+                        String::new()
+                    } else {
+                        font.clone()
+                    };
                     panel.changed(cx);
                 }
             })
             .detach();
         }
-        let baidu_app_id = cx.new(|cx| InputState::new(window, cx).placeholder("填写百度翻译 APP ID").masked(true));
+        let baidu_app_id = cx.new(|cx| InputState::new(window, cx).placeholder(p::BAIDU_APP_ID_PLACEHOLDER.get()).masked(true));
         if !settings.translate.baidu_app_id.is_empty() {
             baidu_app_id.update(cx, |input, cx| {
                 input.set_value(settings.translate.baidu_app_id.clone(), window, cx);
@@ -407,7 +418,7 @@ impl Preferences {
             }
         })
         .detach();
-        let baidu_api_key = cx.new(|cx| InputState::new(window, cx).placeholder("填写百度翻译密钥（API Key）").masked(true));
+        let baidu_api_key = cx.new(|cx| InputState::new(window, cx).placeholder(p::BAIDU_API_KEY_PLACEHOLDER.get()).masked(true));
         if !settings.translate.baidu_api_key.is_empty() {
             baidu_api_key.update(cx, |input, cx| {
                 input.set_value(settings.translate.baidu_api_key.clone(), window, cx);
@@ -443,7 +454,7 @@ impl Preferences {
         cx.subscribe(&ai_exa_key, |panel,input,event: &InputEvent,cx| {
             if matches!(event,InputEvent::Change) { panel.settings.ai.exa_api_key=input.read(cx).value().trim().to_owned(); panel.changed(cx); }
         }).detach();
-        let ai_qianfan_key = cx.new(|cx| InputState::new(window, cx).placeholder("百度千帆 API Key").masked(true));
+        let ai_qianfan_key = cx.new(|cx| InputState::new(window, cx).placeholder(p::QIANFAN_PLACEHOLDER.get()).masked(true));
         ai_qianfan_key.update(cx, |input,cx| input.set_value(settings.ai.baidu_qianfan_api_key.clone(),window,cx));
         cx.subscribe(&ai_qianfan_key, |panel,input,event: &InputEvent,cx| {
             if matches!(event,InputEvent::Change) { panel.settings.ai.baidu_qianfan_api_key=input.read(cx).value().trim().to_owned(); panel.changed(cx); }
@@ -454,6 +465,7 @@ impl Preferences {
             appearance_expanded: true,
             recording: None,
             focus: cx.focus_handle(),
+            system_fonts,
             interface_font,
             editor_font,
             markdown_font,
@@ -509,7 +521,7 @@ impl Preferences {
         ] {
             selector.update(cx, |state, cx| {
                 state.set_selected_value(
-                    &if selected.is_empty() { "系统默认".into() } else { selected.clone() },
+                    &if selected.is_empty() { p::SYSTEM_DEFAULT.get().into() } else { selected.clone() },
                     window,
                     cx,
                 );
@@ -527,7 +539,7 @@ impl Preferences {
         ] {
             selector.update(cx, |state, cx| {
                 state.set_selected_value(
-                    &if selected.is_empty() { "默认等宽字体".into() } else { selected.clone() },
+                    &if selected.is_empty() { p::DEFAULT_MONOSPACE.get().into() } else { selected.clone() },
                     window,
                     cx,
                 );
@@ -592,7 +604,63 @@ impl Preferences {
         cx.notify();
     }
 
+    pub fn refresh_locale(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.theme_name.update(cx, |input, cx| {
+            input.set_placeholder(p::THEME_NAME_PLACEHOLDER.get(), window, cx);
+        });
+        self.terminal_shell.update(cx, |input, cx| {
+            input.set_placeholder(p::TERMINAL_SHELL_PLACEHOLDER.get(), window, cx);
+        });
+        self.baidu_app_id.update(cx, |input, cx| {
+            input.set_placeholder(p::BAIDU_APP_ID_PLACEHOLDER.get(), window, cx);
+        });
+        self.baidu_api_key.update(cx, |input, cx| {
+            input.set_placeholder(p::BAIDU_API_KEY_PLACEHOLDER.get(), window, cx);
+        });
+        self.ai_qianfan_key.update(cx, |input, cx| {
+            input.set_placeholder(p::QIANFAN_PLACEHOLDER.get(), window, cx);
+        });
+        let system_default = p::SYSTEM_DEFAULT.get().to_owned();
+        let default_items: Vec<String> = std::iter::once(system_default.clone())
+            .chain(self.system_fonts.iter().cloned())
+            .collect();
+        for (selector, selected) in [
+            (&self.interface_font, &self.settings.interface_font),
+            (&self.editor_font, &self.settings.editor_font),
+            (&self.markdown_font, &self.settings.markdown_font),
+            (&self.ai_font, &self.settings.ai_font),
+            (&self.cjk_fallback_font, &self.settings.cjk_fallback_font),
+        ] {
+            selector.update(cx, |state, cx| {
+                state.set_items(SearchableVec::new(default_items.clone()), window, cx);
+                state.set_selected_value(
+                    if selected.is_empty() { &system_default } else { selected },
+                    window,
+                    cx,
+                );
+            });
+        }
+        let default_mono = p::DEFAULT_MONOSPACE.get().to_owned();
+        let mono_items: Vec<String> = std::iter::once(default_mono.clone())
+            .chain(self.system_fonts.iter().cloned())
+            .collect();
+        for (selector, selected) in [
+            (&self.inline_code_font, &self.settings.inline_code_font),
+            (&self.block_code_font, &self.settings.block_code_font),
+        ] {
+            selector.update(cx, |state, cx| {
+                state.set_items(SearchableVec::new(mono_items.clone()), window, cx);
+                state.set_selected_value(
+                    if selected.is_empty() { &default_mono } else { selected },
+                    window,
+                    cx,
+                );
+            });
+        }
+    }
+
     fn changed(&mut self, cx: &mut Context<Self>) {
+        crate::i18n::apply_settings(&self.settings);
         self.error = storage::save_settings(&self.settings)
             .err()
             .map(|error| error.to_string());
@@ -630,22 +698,22 @@ impl Preferences {
             });
         let colors = self.theme_colors.iter().zip(ColorRole::ALL).map(|((_, picker), (_, label))| {
             div().flex().items_center().justify_between().gap_3()
-                .child(label).child(ColorPicker::new(picker))
+                .child(label.get()).child(ColorPicker::new(picker))
         });
         let custom_selected = !matches!(self.settings.theme.active.as_str(), "浅色" | "深色")
             && self.settings.theme.saved.contains_key(&self.settings.theme.active);
         div().flex().flex_col().gap_3()
-            .child(div().font_semibold().child("主题"))
+            .child(div().font_semibold().child(p::THEME_SECTION_TITLE.get()))
             .child(div().flex().flex_wrap().gap_2().children(choices))
             .child(div().flex().items_center().justify_between()
-                .child(format!("当前：{}", self.settings.theme.active))
-                .child(crate::ui::button_secondary("edit-theme", if self.editing_theme { "收起配色" } else { "编辑配色" })
+                .child(p::current_theme(&self.settings.theme.active))
+                .child(crate::ui::button_secondary("edit-theme", if self.editing_theme { p::COLLAPSE_COLORS.get() } else { p::EDIT_COLORS.get() })
                     .on_click(cx.listener(|panel, _, _, cx| { panel.editing_theme = !panel.editing_theme; cx.notify(); }))))
             .when(self.editing_theme, |section| section
             .child(div().flex().flex_col().gap_1().children(colors))
             .child(div().flex().items_center().gap_2()
                 .child(div().flex_1().min_w_0().child(Input::new(&self.theme_name)))
-                .child(crate::ui::button_secondary("save-theme", "保存主题")
+                .child(crate::ui::button_secondary("save-theme", p::SAVE_THEME.get())
                     .on_click(cx.listener(|panel, _, _, cx| {
                         let name = panel.theme_name.read(cx).value().to_string();
                         match panel.settings.theme.save(&name) {
@@ -653,13 +721,13 @@ impl Preferences {
                             Err(error) => { panel.error = Some(error.into()); cx.notify(); }
                         }
                     })))
-                .when(custom_selected, |row| row.child(crate::ui::button("delete-theme", "删除主题")
+                .when(custom_selected, |row| row.child(crate::ui::button("delete-theme", p::DELETE_THEME.get())
                     .on_click(cx.listener(|panel, _, window, cx| {
                         panel.settings.theme.saved.remove(&panel.settings.theme.active);
                         panel.select_theme("浅色", window, cx);
                     }))))))
             .child(div().flex().justify_start().child(
-                control("reset-theme", "恢复默认主题")
+                control("reset-theme", p::RESET_THEME.get())
                     .on_click(cx.listener(|panel, _, window, cx| {
                         panel.settings.theme.restore_presets();
                         panel.select_theme("浅色", window, cx);
@@ -689,15 +757,15 @@ impl Preferences {
                 .child(label)
                 .child(div().flex().items_center().gap_4()
                     .child(div().flex_1().min_w_0().child(Select::new(family).w_full()))
-                    .child(slider_row("字号", format!("{value} px"), size).w(px(112.)).flex_shrink_0()))
+                    .child(slider_row(p::FONT_SIZE.get(), format!("{value} px"), size).w(px(112.)).flex_shrink_0()))
         };
         let [interface_size, editor_size, markdown_size, ai_size] = &self.sizes;
-        let surfaces = section("各区域字体")
-            .child(font_row("界面 · 左侧栏和设置", &self.interface_font, interface_size, settings.interface_font_size))
-            .child(font_row("Markdown 预览", &self.markdown_font, markdown_size, settings.markdown_font_size))
-            .child(font_row("AI 面板", &self.ai_font, ai_size, settings.ai_font_size))
-            .child(font_row("终端", &self.terminal_font_family, &self.terminal_font_size, settings.terminal.font_size))
-            .child(font_row("源码编辑器", &self.editor_font, editor_size, settings.editor_font_size))
+        let surfaces = section(p::SECTION_SURFACE_FONTS.get())
+            .child(font_row(p::FONT_INTERFACE.get(), &self.interface_font, interface_size, settings.interface_font_size))
+            .child(font_row(p::FONT_MARKDOWN.get(), &self.markdown_font, markdown_size, settings.markdown_font_size))
+            .child(font_row(p::FONT_AI.get(), &self.ai_font, ai_size, settings.ai_font_size))
+            .child(font_row(p::FONT_TERMINAL.get(), &self.terminal_font_family, &self.terminal_font_size, settings.terminal.font_size))
+            .child(font_row(p::FONT_EDITOR.get(), &self.editor_font, editor_size, settings.editor_font_size))
             .child(div().p_3().rounded(px(5.)).bg(rgb(palette.background))
                 .font_family(if settings.editor_font.is_empty() {
                     SharedString::from("Consolas")
@@ -705,53 +773,53 @@ impl Preferences {
                     settings.editor_font.clone().into()
                 })
                 .text_size(px(settings.editor_font_size as f32))
-                .child("\\section{Introduction} % 中文注释"));
+                .child(p::EDITOR_FONT_SAMPLE.get()));
 
         let markdown_size = px(settings.markdown_font_size as f32);
         let preview_style = gpui_kit::base::text::TextViewStyle::from_theme(&gpui_kit::base::Theme::global(cx))
             .with_inline_code_style(crate::ui::inline_code_style(settings, markdown_size))
             .with_code_block(crate::ui::block_code_style(settings, markdown_size));
-        let shared = section("Markdown 与 AI 共享排版")
+        let shared = section(p::SECTION_SHARED_TYPOGRAPHY.get())
             .child(div().text_sm().text_color(rgb(palette.muted))
-                .child("代码和公式按各自的正文字号缩放。"))
+                .child(p::SHARED_TYPOGRAPHY_HINT.get()))
             .child(div().flex().gap_4()
                 .child(div().flex_1().min_w_0().flex().flex_col().gap_2()
-                    .child("行内代码字体")
+                    .child(p::INLINE_CODE_FONT.get())
                     .child(Select::new(&self.inline_code_font).w_full())
-                    .child(slider_row("字号比例", format!("{:.1}%", settings.inline_code_scale * 100.), &self.inline_code_scale)))
+                    .child(slider_row(p::FONT_SCALE.get(), format!("{:.1}%", settings.inline_code_scale * 100.), &self.inline_code_scale)))
                 .child(div().flex_1().min_w_0().flex().flex_col().gap_2()
-                    .child("代码块字体")
+                    .child(p::BLOCK_CODE_FONT.get())
                     .child(Select::new(&self.block_code_font).w_full())
-                    .child(slider_row("字号比例", format!("{:.1}%", settings.block_code_scale * 100.), &self.block_code_scale))))
+                    .child(slider_row(p::FONT_SCALE.get(), format!("{:.1}%", settings.block_code_scale * 100.), &self.block_code_scale))))
             .child(div().p_3().rounded(px(5.)).bg(rgb(palette.background))
                 .font_family(crate::ui::sans_font(&settings.markdown_font))
                 .text_size(markdown_size)
-                .child(gpui_kit::base::text::markdown("调用 `merge(39, 61)` 合并两个结点。\n\n```rust\nlet root = merge(39, 61);\n```")
+                .child(gpui_kit::base::text::markdown(p::MARKDOWN_FONT_SAMPLE.get())
                     .style(preview_style)))
             .child(div().flex().flex_col().gap_2()
-                .child("数学字体")
+                .child(p::MATH_FONT_LABEL.get())
                 .child(Select::new(&self.math_font).w_full()))
             .child(div().flex().gap_4()
-                .child(slider_row("行内公式比例", format!("{:.1}×", settings.inline_math_scale), &self.inline_math_scale)
+                .child(slider_row(p::INLINE_MATH_SCALE.get(), format!("{:.1}×", settings.inline_math_scale), &self.inline_math_scale)
                     .flex_1().min_w_0())
-                .child(slider_row("块级公式比例", format!("{:.1}×", settings.math_scale), &self.math_scale)
+                .child(slider_row(p::BLOCK_MATH_SCALE.get(), format!("{:.1}×", settings.math_scale), &self.math_scale)
                     .flex_1().min_w_0()));
 
-        let fallback = section("字体回退")
+        let fallback = section(p::SECTION_FONT_FALLBACK.get())
             .child(div().flex().flex_col().gap_2()
                 .child(Select::new(&self.cjk_fallback_font).w_full())
                 .child(div().text_sm().text_color(rgb(palette.muted))
-                    .child("界面、终端、Markdown 预览和 AI 面板的主字体缺少字形时，优先使用此字体。"))
+                    .child(p::FONT_FALLBACK_HINT.get()))
                 .child(div().p_3().rounded(px(5.)).bg(rgb(palette.background))
-                    .child("Aa 中文字体预览")));
+                    .child(p::FALLBACK_FONT_SAMPLE.get())));
         div().flex().flex_col().gap_5()
-            .child(div().text_lg().font_semibold().child("外观 / 字体"))
+            .child(div().text_lg().font_semibold().child(p::PAGE_FONTS_TITLE.get()))
             .child(surfaces)
             .child(shared)
             .child(fallback)
             .child(
                 div().flex().justify_start().child(
-                    control("reset-fonts", "恢复默认字体").on_click(cx.listener(
+                    control("reset-fonts", p::RESET_FONTS.get()).on_click(cx.listener(
                         |panel, _, window, cx| {
                             // Each appearance page resets only its own settings.
                             let defaults = AppSettings::default();
@@ -785,28 +853,48 @@ impl Preferences {
 
     fn render_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let tool_views = [
-            (ToolExecutionView::Minimal, "极简模式"),
-            (ToolExecutionView::Standard, "标准模式"),
-            (ToolExecutionView::Detailed, "详细模式"),
+            (ToolExecutionView::Minimal, p::TOOL_VIEW_MINIMAL.get()),
+            (ToolExecutionView::Standard, p::TOOL_VIEW_STANDARD.get()),
+            (ToolExecutionView::Detailed, p::TOOL_VIEW_DETAILED.get()),
         ];
+        let locales = Locale::ALL;
         div()
             .flex()
             .flex_col()
             .gap_5()
-            .child(div().text_lg().font_semibold().child("外观 / 视图"))
+            .child(div().text_lg().font_semibold().child(p::PAGE_VIEW_TITLE.get()))
+            .child(
+                div().flex().items_center().justify_between().gap_3()
+                    .child(p::LANGUAGE_LABEL.get())
+                    .child(
+                        RadioGroup::horizontal("interface-locale")
+                            .flex_none()
+                            .children(locales.iter().map(|loc| Radio::new(loc.label()).label(loc.label())))
+                            .selected_index(locales.iter().position(|&loc| loc == self.settings.locale))
+                            .on_change(cx.listener(move |panel, index: &usize, window, cx| {
+                                let next = locales[*index];
+                                if panel.settings.locale != next {
+                                    panel.settings.locale = next;
+                                    crate::i18n::apply_settings(&panel.settings);
+                                    panel.refresh_locale(window, cx);
+                                    panel.changed(cx);
+                                }
+                            })),
+                    ),
+            )
             .child(
                 div().flex().flex_col().gap_2()
                     .child(
                         div().flex().items_center().justify_between().gap_3()
-                            .child("背景图")
+                            .child(p::BACKGROUND_IMAGE.get())
                             .child(
                                 div().flex().gap_2()
-                                    .child(control("choose-background-image", "选择图片").on_click(
+                                    .child(control("choose-background-image", p::CHOOSE_IMAGE.get()).on_click(
                                         cx.listener(|_, _, window, cx| {
                                             let dialog = rfd::AsyncFileDialog::new()
                                                 .set_parent(window)
-                                                .set_title("选择背景图")
-                                                .add_filter("图片", &["png", "jpg", "jpeg", "webp", "bmp"]);
+                                                .set_title(p::CHOOSE_BACKGROUND_TITLE.get())
+                                                .add_filter(p::IMAGE_FILTER.get(), &["png", "jpg", "jpeg", "webp", "bmp"]);
                                             cx.spawn(async move |this, cx| {
                                                 if let Some(file) = dialog.pick_file().await {
                                                     let _ = this.update(cx, |panel, cx| {
@@ -818,7 +906,7 @@ impl Preferences {
                                         }),
                                     ))
                                     .when(self.settings.background_image.is_some(), |actions| {
-                                        actions.child(control("remove-background-image", "移除图片").on_click(
+                                        actions.child(control("remove-background-image", p::REMOVE_IMAGE.get()).on_click(
                                             cx.listener(|panel, _, _, cx| {
                                                 panel.settings.background_image = None;
                                                 panel.changed(cx);
@@ -832,7 +920,7 @@ impl Preferences {
                             .child(div().min_w_0().text_ellipsis().text_sm()
                                 .text_color(rgb(0x787774)).child(path.display().to_string()))
                             .child(div().flex().items_center().justify_between()
-                                .child("图片不透明度")
+                                .child(p::IMAGE_OPACITY.get())
                                 .child(format!("{}%", self.settings.background_image_opacity)))
                             .child(Slider::new(&self.background_image_opacity))
                     })
@@ -842,7 +930,7 @@ impl Preferences {
             )
             .child(
                 div().flex().items_center().justify_between().gap_3()
-                    .child("工具执行视图")
+                    .child(p::TOOL_EXECUTION_VIEW.get())
                     .child(
                         RadioGroup::horizontal("tool-execution-view")
                             .flex_none()
@@ -859,9 +947,9 @@ impl Preferences {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child("显示行号（TeX / Markdown 源码）")
+                    .child(p::SHOW_LINE_NUMBERS.get())
                     .child(
-                        control("show-line-numbers", if self.settings.show_line_numbers { "已开启" } else { "已关闭" })
+                        control("show-line-numbers", if self.settings.show_line_numbers { common_i18n::ENABLED.get() } else { common_i18n::DISABLED.get() })
                             .on_click(cx.listener(|panel, _, _, cx| {
                                 panel.settings.show_line_numbers = !panel.settings.show_line_numbers;
                                 panel.changed(cx);
@@ -870,14 +958,14 @@ impl Preferences {
             )
             .child(
                 div().flex().items_center().justify_between()
-                    .child("编辑器限制行宽")
+                    .child(p::LIMIT_LINE_WIDTH.get())
                     .child(
                         control(
                             "limit-width",
                             if self.settings.line_width_limited {
-                                "已开启"
+                                common_i18n::ENABLED.get()
                             } else {
-                                "已关闭"
+                                common_i18n::DISABLED.get()
                             },
                         )
                         .on_click(cx.listener(|panel, _, _, cx| {
@@ -897,7 +985,7 @@ impl Preferences {
                             .items_center()
                             .justify_between()
                             .gap_3()
-                            .child(div().flex_1().min_w_0().child("内部文件链接跳转位置"))
+                            .child(div().flex_1().min_w_0().child(p::INTERNAL_LINK_TARGET.get()))
                             .child(
                                 div()
                                     .flex_shrink_0()
@@ -907,7 +995,7 @@ impl Preferences {
                                     .child(
                                         choice_button(
                                             "link-target-main",
-                                            "主编辑区",
+                                            p::TARGET_MAIN_EDITOR.get(),
                                             self.settings.internal_link_open_target
                                                 == InternalLinkOpenTarget::MainEditor,
                                         )
@@ -920,7 +1008,7 @@ impl Preferences {
                                     .child(
                                         choice_button(
                                             "link-target-split",
-                                            "右侧分屏",
+                                            p::TARGET_SPLIT_PANE.get(),
                                             self.settings.internal_link_open_target
                                                 == InternalLinkOpenTarget::SplitPane,
                                         )
@@ -937,7 +1025,7 @@ impl Preferences {
                             .w_full()
                             .text_xs()
                             .text_color(rgb(0x787774))
-                            .child("Ctrl+左键点击 Markdown 内部文件链接时的打开方式（非分屏类型仍在主编辑区打开）"),
+                            .child(p::INTERNAL_LINK_HINT.get()),
                     ),
             )
             .into_any_element()
@@ -948,19 +1036,19 @@ impl Preferences {
             .flex()
             .flex_col()
             .gap_5()
-            .child(div().text_lg().font_semibold().child("终端设置"))
+            .child(div().text_lg().font_semibold().child(p::PAGE_TERMINAL_TITLE.get()))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child("Shell 命令")
+                    .child(p::TERMINAL_SHELL.get())
                     .child(Input::new(&self.terminal_shell))
                     .child(
                         div()
                             .text_xs()
                             .text_color(rgb(0x787774))
-                            .child("留空时自动使用 PowerShell。默认参数不含 -NoProfile，因此会加载 shell 的用户 profile。"),
+                            .child(p::TERMINAL_SHELL_HINT.get()),
                     ),
             )
             .child(
@@ -968,13 +1056,13 @@ impl Preferences {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child("启动参数")
+                    .child(p::TERMINAL_ARGS.get())
                     .child(Textarea::new(&self.terminal_args).h(px(112.)))
                     .child(
                         div()
                             .text_xs()
                             .text_color(rgb(0x787774))
-                            .child("每行作为一个独立参数传给 shell；不会按空格、引号或 shell 语法拆分。"),
+                            .child(p::TERMINAL_ARGS_HINT.get()),
                     ),
             )
             .child(
@@ -987,7 +1075,7 @@ impl Preferences {
                             .flex()
                             .items_center()
                             .justify_between()
-                            .child("终端面板宽度")
+                            .child(p::TERMINAL_PANEL_WIDTH.get())
                             .child(format!("{:.0} px", self.settings.terminal.panel_width)),
                     )
                     .child(Slider::new(&self.terminal_panel_width)),
@@ -1043,7 +1131,7 @@ impl Preferences {
                         .w(px(12.))
                         .h(px(12.)),
                 )
-                .child(if copied { "已复制" } else { "复制" })
+                .child(if copied { common_i18n::COPIED.get() } else { common_i18n::COPY.get() })
                 .on_click(cx.listener(move |panel, _, _, cx| {
                     panel.copy_api_value(id, value.clone(), cx);
                 }))
@@ -1053,7 +1141,7 @@ impl Preferences {
             .flex()
             .flex_col()
             .gap_5()
-            .child(div().text_lg().font_semibold().child("API 服务"))
+            .child(div().text_lg().font_semibold().child(p::PAGE_API_TITLE.get()))
             .child(
                 div()
                     .flex()
@@ -1076,12 +1164,12 @@ impl Preferences {
                                     .flex_col()
                                     .gap_0p5()
                                     .min_w_0()
-                                    .child(div().font_semibold().child("AI 服务（Magpie 网关）"))
+                                    .child(div().font_semibold().child(p::AI_SERVICE_TITLE.get()))
                                     .child(
                                         div()
                                             .text_xs()
                                             .text_color(rgb(0x787774))
-                                    .child("原生 AI 界面经由 pi SDK 宿主调用本地 Magpie 统一网关（免密钥）"),
+                                    .child(p::AI_SERVICE_DESC.get()),
                                     ),
                             )
                             .child(
@@ -1103,7 +1191,7 @@ impl Preferences {
                                             .text_color(rgb(0x9a5b13))
                                     })
                                     .text_xs()
-                                    .child(if ai_ready { "已配置" } else { "请填写地址" }),
+                                    .child(if ai_ready { p::CONFIGURED.get() } else { p::ENTER_ADDRESS.get() }),
                             ),
                     )
                     .child(div().h(px(1.)).bg(rgb(0xebebe6)))
@@ -1127,7 +1215,7 @@ impl Preferences {
                                 self.copied_api_field == Some("copy-ai-base-url"),
                             ))
                             .child(
-                                crate::ui::button_secondary("reset-ai-base-url", "默认")
+                                crate::ui::button_secondary("reset-ai-base-url", p::DEFAULT_BTN.get())
                                     .px_2()
                                     .on_click(cx.listener(|panel, _, window, cx| {
                                         let default_url = crate::model::AiSettings::default().base_url;
@@ -1140,13 +1228,13 @@ impl Preferences {
                             ),
                     )
                     .child(div().flex().items_center().gap_2()
-                        .child(div().w(px(96.)).text_xs().child("标题模型 ID"))
+                        .child(div().w(px(96.)).text_xs().child(p::TITLE_MODEL_ID.get()))
                         .child(div().flex_1().min_w_0().child(Input::new(&self.ai_title_model))))
                     .child(div().flex().items_center().gap_2()
                         .child(div().w(px(96.)).text_xs().child("Exa API Key"))
                         .child(div().flex_1().min_w_0().child(Input::new(&self.ai_exa_key).mask_toggle())))
                     .child(div().flex().items_center().gap_2()
-                        .child(div().w(px(96.)).text_xs().child("千帆 API Key"))
+                        .child(div().w(px(96.)).text_xs().child(p::QIANFAN_API_KEY.get()))
                         .child(div().flex_1().min_w_0().child(Input::new(&self.ai_qianfan_key).mask_toggle()))),
             )
             .child(
@@ -1165,12 +1253,12 @@ impl Preferences {
                             .items_center()
                             .justify_between()
                             .gap_3()
-                            .child(div().font_semibold().child("翻译服务"))
+                            .child(div().font_semibold().child(p::TRANSLATE_SERVICE_TITLE.get()))
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(rgb(0x787774))
-                                    .child("支持中英互译 · 优先 Google，失败时自动切换百度"),
+                                    .child(p::TRANSLATE_SERVICE_DESC.get()),
                             ),
                     )
                     .child(div().h(px(1.)).bg(rgb(0xebebe6)))
@@ -1186,12 +1274,12 @@ impl Preferences {
                                     .flex_col()
                                     .gap_0p5()
                                     .min_w_0()
-                                    .child(div().font_medium().child("Google 翻译"))
+                                    .child(div().font_medium().child(p::GOOGLE_TRANSLATE_TITLE.get()))
                                     .child(
                                         div()
                                             .text_xs()
                                             .text_color(rgb(0x787774))
-                                            .child("内置网页翻译接口，无需填写 API Key（依赖当前网络或系统代理）"),
+                                            .child(p::GOOGLE_TRANSLATE_DESC.get()),
                                     ),
                             )
                             .child(
@@ -1205,7 +1293,7 @@ impl Preferences {
                                     .border_color(rgb(0xc6e5d0))
                                     .text_xs()
                                     .text_color(rgb(0x237844))
-                                    .child("免配置"),
+                                    .child(p::ZERO_CONFIG.get()),
                             ),
                     )
                     .child(div().h(px(1.)).bg(rgb(0xebebe6)))
@@ -1226,12 +1314,12 @@ impl Preferences {
                                             .flex_col()
                                             .gap_0p5()
                                             .min_w_0()
-                                            .child(div().font_medium().child("百度翻译"))
+                                            .child(div().font_medium().child(p::BAIDU_TRANSLATE_TITLE.get()))
                                             .child(
                                                 div()
                                                     .text_xs()
                                                     .text_color(rgb(0x787774))
-                                                    .child("通用文本翻译 API（fanyi-api.baidu.com），需配置 APP ID 与密钥"),
+                                                    .child(p::BAIDU_TRANSLATE_DESC.get()),
                                             ),
                                     )
                                     .child(
@@ -1253,7 +1341,7 @@ impl Preferences {
                                                     .text_color(rgb(0x9a5b13))
                                             })
                                             .text_xs()
-                                            .child(if baidu_ready { "已配置" } else { "需配置密钥" }),
+                                            .child(if baidu_ready { p::CONFIGURED.get() } else { p::KEY_REQUIRED.get() }),
                                     ),
                             )
                             .child(
@@ -1292,7 +1380,7 @@ impl Preferences {
                                                     .flex_shrink_0()
                                                     .text_xs()
                                                     .text_color(rgb(0x5b5b58))
-                                                    .child("API Key（密钥）"),
+                                                    .child(p::API_KEY_SECRET_LABEL.get()),
                                             )
                                             .child(div().flex_1().min_w_0().child(Input::new(&self.baidu_api_key).mask_toggle()))
                                             .child(copy_btn(
@@ -1308,7 +1396,7 @@ impl Preferences {
     }
 
     fn render_shortcuts(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut categories: Vec<&'static str> = Vec::new();
+        let mut categories: Vec<crate::i18n::BiText> = Vec::new();
         for def in SHORTCUT_DEFS {
             if !categories.contains(&def.category) {
                 categories.push(def.category);
@@ -1333,7 +1421,7 @@ impl Preferences {
                                     .key_for(other.id)
                                     .eq_ignore_ascii_case(&current)
                         })
-                        .map(|other| other.label);
+                        .map(|other| other.label.get());
                     div()
                         .flex()
                         .items_center()
@@ -1347,7 +1435,7 @@ impl Preferences {
                                 .flex()
                                 .items_center()
                                 .gap_2()
-                                .child(div().text_sm().child(def.label))
+                                .child(div().text_sm().child(def.label.get()))
                                 .when_some(conflict, |row, other| {
                                     row.child(
                                         div()
@@ -1357,7 +1445,7 @@ impl Preferences {
                                             .rounded(px(4.))
                                             .bg(rgb(0xfef3c7))
                                             .text_color(rgb(0xb45309))
-                                            .child(format!("与「{other}」冲突")),
+                                            .child(p::shortcut_conflict(other)),
                                     )
                                 }),
                         )
@@ -1398,7 +1486,7 @@ impl Preferences {
                                                 .bg(rgb(0xeef4fb))
                                                 .border_color(rgb(0x4b7bb5))
                                                 .text_color(rgb(0x2b5b94))
-                                                .child("请按下快捷键… (Esc取消)")
+                                                .child(p::PRESS_SHORTCUT_PROMPT.get())
                                         })
                                         .when(!is_recording, |badge| {
                                             badge
@@ -1432,7 +1520,7 @@ impl Preferences {
                         .text_color(rgb(0x787774))
                         .px_3()
                         .pb_1()
-                        .child(cat),
+                        .child(cat.get()),
                 )
                 .child(
                     div()
@@ -1454,9 +1542,9 @@ impl Preferences {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(div().text_lg().font_semibold().child("快捷键设置"))
+                    .child(div().text_lg().font_semibold().child(p::PAGE_SHORTCUTS_TITLE.get()))
                     .child(
-                        control("reset-all-shortcuts", "全部恢复默认").on_click(cx.listener(
+                        control("reset-all-shortcuts", p::RESET_ALL_SHORTCUTS.get()).on_click(cx.listener(
                             |panel, _, _, cx| {
                                 panel.settings.keybindings.clear();
                                 panel.recording = None;
@@ -1469,7 +1557,7 @@ impl Preferences {
                 div()
                     .text_xs()
                     .text_color(rgb(0x787774))
-                    .child("点击右侧按键框后直接按下新的组合键即可修改；在 Markdown 所见即所得模式下还可随时输入 / 呼出快捷块菜单。"),
+                    .child(p::SHORTCUTS_HINT.get()),
             )
             .children(sections)
             .into_any_element()
@@ -1527,7 +1615,7 @@ impl Render for Preferences {
         let body = match self.tab {
             PreferencesTab::Fonts => self.render_fonts(cx),
             PreferencesTab::Theme => div().flex().flex_col().gap_5()
-                .child(div().text_lg().font_semibold().child("外观 / 主题"))
+                .child(div().text_lg().font_semibold().child(p::PAGE_THEME_TITLE.get()))
                 .child(self.render_theme(cx))
                 .into_any_element(),
             PreferencesTab::View => self.render_view(cx),
@@ -1597,7 +1685,7 @@ impl Render for Preferences {
                             .pb_2()
                             .text_size(ui_font_size)
                             .font_semibold()
-                            .child("设置"),
+                            .child(p::SETTINGS_TITLE.get()),
                     )
                     .child(
                         div().id("pref-appearance-group")
@@ -1609,7 +1697,7 @@ impl Render for Preferences {
                             } else {
                                 IconName::ChevronRight
                             }))
-                            .child("外观")
+                            .child(p::NAV_APPEARANCE.get())
                             .on_click(cx.listener(|panel, _, _, cx| {
                                 panel.appearance_expanded = !panel.appearance_expanded;
                                 cx.notify();
@@ -1619,17 +1707,17 @@ impl Render for Preferences {
                             div().ml_2().pl_2().border_l_1().border_color(rgb(0xe8e7e3))
                             .flex().flex_col().gap_1()
                             .child(nav_item("pref-tab-fonts", PreferencesTab::Fonts,
-                                IconName::Type, "字体", self.tab == PreferencesTab::Fonts, cx))
+                                IconName::Type, p::NAV_FONTS.get(), self.tab == PreferencesTab::Fonts, cx))
                             .child(nav_item("pref-tab-theme", PreferencesTab::Theme,
-                                IconName::Palette, "主题", self.tab == PreferencesTab::Theme, cx))
+                                IconName::Palette, p::NAV_THEME.get(), self.tab == PreferencesTab::Theme, cx))
                             .child(nav_item("pref-tab-view", PreferencesTab::View,
-                                IconName::Columns2, "视图", self.tab == PreferencesTab::View, cx))
+                                IconName::Columns2, p::NAV_VIEW.get(), self.tab == PreferencesTab::View, cx))
                     ))
                     .child(nav_item(
                         "pref-tab-shortcuts",
                         PreferencesTab::Shortcuts,
                         IconName::Keyboard,
-                        "快捷键",
+                        p::NAV_SHORTCUTS.get(),
                         self.tab == PreferencesTab::Shortcuts,
                         cx,
                     ))
@@ -1637,7 +1725,7 @@ impl Render for Preferences {
                         "pref-tab-terminal",
                         PreferencesTab::Terminal,
                         IconName::CodeXml,
-                        "终端",
+                        p::NAV_TERMINAL.get(),
                         self.tab == PreferencesTab::Terminal,
                         cx,
                     ))
@@ -1645,7 +1733,7 @@ impl Render for Preferences {
                         "pref-tab-api",
                         PreferencesTab::Api,
                         IconName::Globe,
-                        "API 服务",
+                        p::NAV_API.get(),
                         self.tab == PreferencesTab::Api,
                         cx,
                     )),

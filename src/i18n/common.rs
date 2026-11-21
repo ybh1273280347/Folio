@@ -1,0 +1,23 @@
+use super::BiText;
+
+pub const CANCEL: BiText = BiText::new("取消", "Cancel");
+pub const CONFIRM: BiText = BiText::new("确定", "OK");
+pub const SAVE: BiText = BiText::new("保存", "Save");
+pub const DELETE: BiText = BiText::new("删除", "Delete");
+pub const CLOSE: BiText = BiText::new("关闭", "Close");
+pub const RETRY: BiText = BiText::new("重试", "Retry");
+pub const COPY: BiText = BiText::new("复制", "Copy");
+pub const COPIED: BiText = BiText::new("已复制", "Copied");
+pub const COPY_FULL_TEXT: BiText = BiText::new("复制全文", "Copy all");
+pub const COPIED_FULL_TEXT: BiText = BiText::new("已复制全文", "Copied all");
+pub const ENABLED: BiText = BiText::new("已开启", "On");
+pub const DISABLED: BiText = BiText::new("已关闭", "Off");
+pub const PENDING_APPROVAL: BiText = BiText::new("待确认", "Pending");
+pub const BACK_TO_HUB: BiText = BiText::new("返回功能栏", "Back to Hub");
+pub const APPLY: BiText = BiText::new("应用", "Apply");
+pub const SUBMIT: BiText = BiText::new("提交", "Submit");
+pub const CLEAR: BiText = BiText::new("清除", "Clear");
+pub const REPLACE: BiText = BiText::new("替换", "Replace");
+pub const SKIP: BiText = BiText::new("跳过", "Skip");
+pub const KEEP_BOTH: BiText = BiText::new("保留两个", "Keep both");
+pub const SEARCH_ELLIPSIS: BiText = BiText::new("搜索…", "Search…");

@@ -46,7 +46,11 @@ impl RenderOnce for CopyDocumentButton {
         let copied = feedback.read(cx).copied;
         Button::new(self.id).ghost().compact().w(px(28.)).h(px(28.))
             .icon(icon(if copied { IconName::Check } else { IconName::Copy }))
-            .tooltip(if copied { "已复制全文" } else { "复制全文" })
+            .tooltip(if copied {
+                crate::i18n::common::COPIED_FULL_TEXT.get()
+            } else {
+                crate::i18n::common::COPY_FULL_TEXT.get()
+            })
             .on_click(move |_, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string((self.read_text)(cx)));
                 feedback.update(cx, |feedback, cx| {
@@ -609,13 +613,13 @@ pub fn button_danger_soft(id: impl Into<ElementId>, text: impl Into<SharedString
 pub const MAIN_TEX_COLOR: u32 = 0x5c7f9f;
 
 /// Tag surfaces and their matching text colors in picker order.
-pub const TAG_COLORS: [(&str, u32, u32); 6] = [
-    ("灰色", 0xefeeeb, 0x56524b),
-    ("蓝色", 0xe3edf8, 0x2d5377),
-    ("绿色", 0xe2f0e8, 0x2e5c46),
-    ("橙色", 0xf5ead8, 0x704915),
-    ("红色", 0xf5e4e4, 0x803f45),
-    ("紫色", 0xebe5f5, 0x624785),
+pub const TAG_COLORS: [(crate::i18n::BiText, u32, u32); 6] = [
+    (crate::i18n::tags::TAG_COLOR_GRAY, 0xefeeeb, 0x56524b),
+    (crate::i18n::tags::TAG_COLOR_BLUE, 0xe3edf8, 0x2d5377),
+    (crate::i18n::tags::TAG_COLOR_GREEN, 0xe2f0e8, 0x2e5c46),
+    (crate::i18n::tags::TAG_COLOR_ORANGE, 0xf5ead8, 0x704915),
+    (crate::i18n::tags::TAG_COLOR_RED, 0xf5e4e4, 0x803f45),
+    (crate::i18n::tags::TAG_COLOR_PURPLE, 0xebe5f5, 0x624785),
 ];
 
 pub fn file_icon(path: &str, asset: bool, main: bool) -> AnyElement {
@@ -672,24 +676,24 @@ pub fn label(text: SharedString) -> AnyElement {
         "▦" => (IconName::Table2, ""),
         "▧" => (IconName::Images, ""),
         "⌄" => (IconName::ChevronDown, ""),
-        "源码" | "所见即所得" => (IconName::CodeXml, ""),
+        "源码" | "所见即所得" | "Source" | "WYSIWYG" => (IconName::CodeXml, ""),
         "B" => (IconName::Bold, ""),
         "I" => (IconName::Italic, ""),
         "H" => (IconName::Heading2, ""),
         "•" => (IconName::List, ""),
         "☑" => (IconName::ListTodo, ""),
         "∑" => (IconName::Sigma, ""),
-        "+  添加本地项目" => (IconName::Plus, "添加本地项目"),
+        "+  添加本地项目" | "+  Add Local Project" => (IconName::Plus, crate::i18n::workspace::ADD_LOCAL_PROJECT.get()),
         "‹" => (IconName::ChevronLeft, ""),
         "›" => (IconName::ChevronRight, ""),
         "↓" => (IconName::ArrowDown, ""),
         "✓" => (IconName::Check, ""),
         "📁+" => (IconName::FolderPlus, ""),
-        "导出" => (IconName::Download, ""),
-        "⚙  设置" => (IconName::Settings, "设置"),
-        "终端" => (IconName::SquareTerminal, ""),
-        "▶  编译" => (IconName::Play, ""),
-        "■  停止" => (IconName::Square, ""),
+        "导出" | "Export" => (IconName::Download, ""),
+        "⚙  设置" | "⚙  Settings" => (IconName::Settings, crate::i18n::workspace::SETTINGS_LABEL.get()),
+        "终端" | "Terminal" => (IconName::SquareTerminal, ""),
+        "▶  编译" | "▶  Compile" => (IconName::Play, ""),
+        "■  停止" | "■  Stop" => (IconName::Square, ""),
         _ => return div().child(text).into_any_element(),
     };
     div()
@@ -748,7 +752,7 @@ impl ApprovalCard {
             id: id.into(),
             icon: IconName::Shield,
             title: title.into(),
-            badge: ("待确认".into(), badge_bg, badge_fg),
+            badge: (crate::i18n::common::PENDING_APPROVAL.get().into(), badge_bg, badge_fg),
             accent_bar,
             body,
             actions: Vec::new(),

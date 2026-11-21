@@ -95,7 +95,7 @@ fn label(name: &str) -> Result<&str> {
     if name.is_empty() || name.chars().any(|c| c.is_control() || c == '/') {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "请输入标签名称，名称不能包含 / 或控制字符。",
+            crate::i18n::tags::ERR_INVALID_TAG_NAME.get(),
         )
         .into());
     }
@@ -175,7 +175,7 @@ impl Store {
                 )?;
                 tx.commit()?;
             }
-            _ => return Err(io::Error::other("标签数据库来自更新版本的 Folio。").into()),
+            _ => return Err(io::Error::other(crate::i18n::tags::ERR_NEWER_TAG_DB.get()).into()),
         }
         Ok(Some(db))
     }
@@ -190,7 +190,7 @@ impl Store {
     pub fn change(&self, change: Change<'_>) -> Result<Snapshot> {
         let mut db = self
             .open(matches!(change, Change::Create { .. }))?
-            .ok_or_else(|| io::Error::other("找不到标签数据库。"))?;
+            .ok_or_else(|| io::Error::other(crate::i18n::tags::ERR_TAG_DB_NOT_FOUND.get()))?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         self.apply_change(&tx, change)?;
         let result = snapshot_after_changes(&tx)?;
@@ -225,7 +225,7 @@ impl Store {
                     .optional()?
                     .is_some()
                 {
-                    return Err(io::Error::other("已存在同名标签。").into());
+                    return Err(io::Error::other(crate::i18n::tags::ERR_TAG_ALREADY_EXISTS.get()).into());
                 }
                 db.execute(
                     "UPDATE tags SET name = ?1, name_key = ?2 WHERE id = ?3",
@@ -279,7 +279,7 @@ impl Store {
             None => dunce::canonicalize(path)?,
         };
         if !fs::metadata(&full)?.is_file() || !crate::files::is_relevant(&full) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "请选择受支持的文件。").into());
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, crate::i18n::tags::ERR_SELECT_SUPPORTED_FILE.get()).into());
         }
         let disk = disk_identity(&full);
         if let Some(existing) = active_file(db, path)? {
@@ -382,7 +382,7 @@ impl Store {
     ) -> Result<()> {
         let mut db = self
             .open(false)?
-            .ok_or_else(|| io::Error::other("找不到标签数据库。"))?;
+            .ok_or_else(|| io::Error::other(crate::i18n::tags::ERR_TAG_DB_NOT_FOUND.get()))?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
             "UPDATE files SET trash = ?1, missing = 0 WHERE id = ?2",

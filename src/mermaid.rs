@@ -34,8 +34,6 @@ const MAX_ZOOM: f32 = 6.0;
 const ZOOM_STEP: f32 = 1.25;
 const BASE_DENSITY: f32 = 2.0;
 const MAX_DENSITY: f32 = 4.0;
-const PENDING_TEXT: &str = "图表排版中…";
-const EMPTY_TEXT: &str = "Mermaid 图表为空";
 
 #[derive(Clone, Copy, PartialEq)]
 struct Appearance {
@@ -716,15 +714,15 @@ fn status_element(status: &Status, palette: Palette) -> AnyElement {
     match status {
         Status::Pending => div()
             .text_color(crate::theme::color(palette.muted))
-            .child(PENDING_TEXT)
+            .child(crate::i18n::media::MERMAID_PENDING.get())
             .into_any_element(),
         Status::Empty => div()
             .text_color(crate::theme::color(palette.muted))
-            .child(EMPTY_TEXT)
+            .child(crate::i18n::media::MERMAID_EMPTY.get())
             .into_any_element(),
         Status::Failed(error) => div()
             .text_color(crate::theme::color(palette.danger))
-            .child(format!("Mermaid 渲染失败：{error}"))
+            .child(crate::i18n::media::mermaid_render_failed(error))
             .into_any_element(),
         Status::Ready(_) => unreachable!("ready diagrams render through diagram_element"),
     }
@@ -748,7 +746,7 @@ fn render_diagram(source: &str, dark: bool, density: f32) -> Result<Diagram, Str
         ))
         .map_err(|error| error.to_string())?;
     let RenderOutput::Svg(Some(output)) = output else {
-        return Err("未生成 SVG 输出".to_owned());
+        return Err(crate::i18n::media::MERMAID_NO_SVG.get().to_owned());
     };
     let svg: SharedString = output.svg().to_owned().into();
     let (image, (width, height)) = rasterize(&svg, density)?;
@@ -791,12 +789,12 @@ pub(crate) fn usvg_options() -> usvg::Options<'static> {
 fn rasterize(svg: &str, density: f32) -> Result<(Arc<RenderImage>, (f32, f32)), String> {
     let options = usvg_options();
     let tree = usvg::Tree::from_str(svg, &options)
-        .map_err(|error| format!("SVG 解析失败：{error}"))?;
+        .map_err(|error| crate::i18n::media::mermaid_svg_parse_failed(&error))?;
     let size = tree.size();
     let pixel_width = (size.width() * density).ceil().max(1.0) as u32;
     let pixel_height = (size.height() * density).ceil().max(1.0) as u32;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(pixel_width, pixel_height)
-        .ok_or_else(|| "无法分配图表位图".to_owned())?;
+        .ok_or_else(|| crate::i18n::media::MERMAID_BITMAP_ALLOC.get().to_owned())?;
     resvg::render(
         &tree,
         resvg::tiny_skia::Transform::from_scale(density, density),
@@ -807,7 +805,7 @@ fn rasterize(svg: &str, density: f32) -> Result<(Arc<RenderImage>, (f32, f32)), 
         pixel.swap(0, 2);
     }
     let image = image::RgbaImage::from_raw(pixel_width, pixel_height, bytes)
-        .ok_or_else(|| "图表位图数据无效".to_owned())?;
+        .ok_or_else(|| crate::i18n::media::MERMAID_BITMAP_INVALID.get().to_owned())?;
     Ok((
         Arc::new(RenderImage::new([Frame::new(image)])),
         (size.width(), size.height()),

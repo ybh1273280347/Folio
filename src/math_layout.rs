@@ -85,7 +85,7 @@ impl Typesetter {
                     })
                     .as_ref()
                     .map_err(|message| latex_rust::FontError::Fallback {
-                        message: format!("中文字体加载失败：{message}"),
+                        message: crate::i18n::media::cjk_font_load_failed(message),
                     })?;
                 let cjk = ttf_parser::Face::parse(bytes, *index)
                     .map_err(|_| latex_rust::FontError::InvalidFace)?;

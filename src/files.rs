@@ -87,7 +87,7 @@ pub fn project_path(root: &Path, relative: &str) -> io::Result<PathBuf> {
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "无法访问项目文件夹之外的文件。",
+            crate::i18n::workspace::ERR_OUTSIDE_PROJECT.get(),
         ));
     }
     let canonical_root = dunce::canonicalize(root)?;
@@ -95,7 +95,7 @@ pub fn project_path(root: &Path, relative: &str) -> io::Result<PathBuf> {
     if !target.starts_with(&canonical_root) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "无法访问项目文件夹之外的文件。",
+            crate::i18n::workspace::ERR_OUTSIDE_PROJECT.get(),
         ));
     }
     Ok(target)
@@ -106,7 +106,7 @@ pub fn validate_folder(folder: &Path) -> io::Result<PathBuf> {
     if !resolved.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "请选择一个文件夹。",
+            crate::i18n::workspace::ERR_SELECT_FOLDER.get(),
         ));
     }
     Ok(resolved)
@@ -217,7 +217,7 @@ pub fn create_file(root: &Path, relative: &str) -> io::Result<()> {
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "请输入有效的项目文件名。若需新建文本文件，请使用受支持的扩展名。",
+            crate::i18n::workspace::ERR_INVALID_PROJECT_FILENAME.get(),
         ));
     }
     let parent = path
@@ -241,9 +241,9 @@ pub fn create_markdown_in(root: &Path, folder: Option<&str>) -> io::Result<Proje
     let mut number = 1;
     loop {
         let name = if number == 1 {
-            "未命名.md".to_owned()
+            crate::i18n::workspace::untitled_md(None)
         } else {
-            format!("未命名{number}.md")
+            crate::i18n::workspace::untitled_md(Some(number))
         };
         let relative = match prefix {
             Some(folder) => format!("{folder}/{name}"),
@@ -273,7 +273,7 @@ pub fn rename_file(root: &Path, relative: &str, name: &str) -> io::Result<String
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "请输入有效的文件名和受支持的扩展名。",
+            crate::i18n::workspace::ERR_INVALID_FILENAME_EXT.get(),
         ));
     }
     let source = project_path(root, relative)?;
@@ -344,7 +344,7 @@ pub fn create_folder(root: &Path, relative: &str) -> io::Result<()> {
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "请输入有效的文件夹名称。",
+            crate::i18n::workspace::ERR_INVALID_FOLDER_NAME.get(),
         ));
     }
     let canonical_root = dunce::canonicalize(root)?;
@@ -352,7 +352,7 @@ pub fn create_folder(root: &Path, relative: &str) -> io::Result<()> {
     if target.exists() {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            "同名文件夹或文件已存在。",
+            crate::i18n::workspace::ERR_NAME_ALREADY_EXISTS.get(),
         ));
     }
     fs::create_dir_all(target)
@@ -364,10 +364,10 @@ pub fn move_folder_into(root: &Path, relative: &str, folder: &str) -> io::Result
     let source = project_path(&root, relative)?;
     let destination = project_path(&root, if folder.is_empty() { "." } else { folder })?;
     if source == root || !source.is_dir() || !destination.is_dir() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "请选择项目内的文件夹。"));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, crate::i18n::workspace::ERR_SELECT_PROJECT_FOLDER.get()));
     }
     if destination.starts_with(&source) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "不能将文件夹移入自身或子文件夹。"));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, crate::i18n::workspace::ERR_MOVE_FOLDER_INTO_SELF.get()));
     }
     // Both existing paths were resolved inside root; appending one filename keeps the target inside it too.
     let target = destination.join(source.file_name().expect("non-root folder has a name"));
@@ -375,7 +375,7 @@ pub fn move_folder_into(root: &Path, relative: &str, folder: &str) -> io::Result
         return Ok(relative.to_owned());
     }
     if target.try_exists()? {
-        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "目标已存在同名文件或文件夹，未移动。"));
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, crate::i18n::workspace::ERR_TARGET_EXISTS_UNMOVED.get()));
     }
     fs::rename(&source, &target)?;
     Ok(target.strip_prefix(&root).expect("validated project destination").to_string_lossy().replace('\\', "/"))
@@ -393,14 +393,14 @@ pub fn rename_folder(root: &Path, relative: &str, name: &str) -> io::Result<Stri
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "请输入有效的文件夹名称。",
+            crate::i18n::workspace::ERR_INVALID_FOLDER_NAME.get(),
         ));
     }
     let source = project_path(root, relative)?;
     if !source.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "请选择项目内的文件夹。",
+            crate::i18n::workspace::ERR_SELECT_PROJECT_FOLDER.get(),
         ));
     }
     let current_name = source
@@ -421,7 +421,7 @@ pub fn rename_folder(root: &Path, relative: &str, name: &str) -> io::Result<Stri
     if !current_name.eq_ignore_ascii_case(name) && destination.exists() {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            "同名文件夹或文件已存在。",
+            crate::i18n::workspace::ERR_NAME_ALREADY_EXISTS.get(),
         ));
     }
     fs::rename(&source, &destination)?;
