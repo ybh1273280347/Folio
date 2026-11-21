@@ -2550,6 +2550,14 @@ impl Render for Workspace {
                                     ),
                             )
                             .child(Input::new(&self.name_input))
+                            .when(matches!(action, NameAction::Create), |modal| {
+                                modal.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .child(crate::i18n::workspace::CREATE_FILE_HINT.get()),
+                                )
+                            })
                             .child(
                                 div()
                                     .flex()

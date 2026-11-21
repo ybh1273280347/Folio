@@ -2,6 +2,53 @@
 
 use super::*;
 
+#[derive(Clone, Copy)]
+struct CreatablePreset {
+    ext: &'static str,
+    sample_path: &'static str,
+    badge: &'static str,
+    label: crate::i18n::BiText,
+    folder_label: crate::i18n::BiText,
+}
+
+const CREATABLE_PRESETS: &[CreatablePreset] = &[
+    CreatablePreset {
+        ext: "md",
+        sample_path: "untitled.md",
+        badge: ".md",
+        label: crate::i18n::workspace::NEW_PRESET_MARKDOWN,
+        folder_label: crate::i18n::workspace::MENU_NEW_MARKDOWN,
+    },
+    CreatablePreset {
+        ext: "tex",
+        sample_path: "untitled.tex",
+        badge: ".tex",
+        label: crate::i18n::workspace::NEW_PRESET_TEX,
+        folder_label: crate::i18n::workspace::MENU_NEW_TEX,
+    },
+    CreatablePreset {
+        ext: "drawio",
+        sample_path: "untitled.drawio",
+        badge: ".drawio",
+        label: crate::i18n::workspace::NEW_PRESET_DRAWIO,
+        folder_label: crate::i18n::workspace::MENU_NEW_DRAWIO,
+    },
+    CreatablePreset {
+        ext: "bib",
+        sample_path: "untitled.bib",
+        badge: ".bib",
+        label: crate::i18n::workspace::NEW_PRESET_BIB,
+        folder_label: crate::i18n::workspace::MENU_NEW_BIB,
+    },
+    CreatablePreset {
+        ext: "txt",
+        sample_path: "untitled.txt",
+        badge: ".txt",
+        label: crate::i18n::workspace::NEW_PRESET_TXT,
+        folder_label: crate::i18n::workspace::MENU_NEW_TXT,
+    },
+];
+
 impl Workspace {
     pub(super) fn poll_trash(&mut self, cx: &mut Context<Self>) {
         if Instant::now() >= self.next_trash_cleanup {
@@ -148,7 +195,7 @@ impl Workspace {
 
     pub(super) fn new_markdown(&mut self, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
         let folder = self.focused_folder.clone();
-        self.new_markdown_in(folder.as_deref(), window, cx)
+        self.new_preset_in("md", folder.as_deref(), window, cx)
     }
 
     pub(super) fn new_default_markdown(&mut self, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
@@ -160,61 +207,190 @@ impl Workspace {
             self.select_project("__folio_default", window, cx)?;
         }
         self.show_trash = false;
-        self.new_markdown_in(None, window, cx)
+        self.new_preset_in("md", None, window, cx)
     }
 
-    fn new_markdown_in(
+    fn ensure_creatable_workspace(
         &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        retry: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> io::Result<bool> {
+        if self.directory_workspace().is_some() {
+            return Ok(true);
+        }
+        if self.build.is_busy() {
+            return Ok(false);
+        }
+        if !self.confirm_drafts(window, cx, retry) {
+            return Ok(false);
+        }
+        self.select_project("__folio_default", window, cx)?;
+        Ok(true)
+    }
+
+    fn new_preset_in(
+        &mut self,
+        ext: &'static str,
         folder: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> io::Result<()> {
-        if self.directory_workspace().is_none() {
-            if self.build.is_busy() {
-                return Ok(());
+        let target_folder = folder.map(ToOwned::to_owned);
+        if !self.ensure_creatable_workspace(window, cx, move |app, window, cx| {
+            if let Err(error) = app.new_preset_in(ext, target_folder.as_deref(), window, cx) {
+                app.report(error, cx);
             }
-            let target_folder = folder.map(ToOwned::to_owned);
-            if !self.confirm_drafts(window, cx, move |app, window, cx| {
-                if let Err(error) = app.new_markdown_in(target_folder.as_deref(), window, cx) {
-                    app.report(error, cx);
-                }
-            }) {
-                return Ok(());
-            }
-            self.select_project("__folio_default", window, cx)?;
+        })? {
+            return Ok(());
         }
         let root = PathBuf::from(&self.directory_workspace().unwrap().folder);
-        let file = files::create_markdown_in(&root, folder)?;
+        let file = match ext {
+            "md" => files::create_markdown_in(&root, folder)?,
+            "drawio" => files::create_drawio_in(&root, folder)?,
+            _ => files::create_untitled_in(&root, folder, |n| {
+                crate::i18n::workspace::untitled_ext(ext, n)
+            })?,
+        };
         self.files = files::list_files(&root)?;
         self.expand_ancestors(&file.path);
         self.open_file(&file, window, cx)
     }
 
-    fn new_drawio_in(
+    fn start_create_other(
         &mut self,
         folder: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> io::Result<()> {
-        if self.directory_workspace().is_none() {
-            if self.build.is_busy() {
-                return Ok(());
+        let target_folder = folder.map(ToOwned::to_owned);
+        if !self.ensure_creatable_workspace(window, cx, move |app, window, cx| {
+            if let Err(error) = app.start_create_other(target_folder.as_deref(), window, cx) {
+                app.report(error, cx);
             }
-            let target_folder = folder.map(ToOwned::to_owned);
-            if !self.confirm_drafts(window, cx, move |app, window, cx| {
-                if let Err(error) = app.new_drawio_in(target_folder.as_deref(), window, cx) {
-                    app.report(error, cx);
-                }
-            }) {
-                return Ok(());
-            }
-            self.select_project("__folio_default", window, cx)?;
+        })? {
+            return Ok(());
         }
-        let root = PathBuf::from(&self.directory_workspace().unwrap().folder);
-        let file = files::create_drawio_in(&root, folder)?;
-        self.files = files::list_files(&root)?;
-        self.expand_ancestors(&file.path);
-        self.open_file(&file, window, cx)
+        let prefix = folder
+            .map(|folder| folder.trim().trim_matches(['/', '\\']))
+            .filter(|folder| !folder.is_empty())
+            .map_or_else(String::new, |folder| format!("{folder}/"));
+        self.start_name(NameAction::Create, &prefix, window, cx);
+        Ok(())
+    }
+
+    fn render_new_file_split_button(&self, cx: &Context<Self>) -> AnyElement {
+        let md_app = cx.entity();
+        let menu_app = cx.entity();
+        div()
+            .flex()
+            .items_center()
+            .rounded(px(5.))
+            .child(
+                button("new-markdown", "+ Markdown")
+                    .rounded_r_none()
+                    .px_1p5()
+                    .on_click(move |_, window, cx| {
+                        md_app.update(cx, |app, cx| {
+                            if let Err(error) = app.new_markdown(window, cx) {
+                                app.report(error, cx);
+                            }
+                        });
+                    }),
+            )
+            .child(div().w(px(1.)).h(px(14.)).bg(rgb(0xe2e1dc)))
+            .child(
+                Button::new("new-file-menu")
+                    .ghost()
+                    .compact()
+                    .with_size(px(12.))
+                    .w(px(20.))
+                    .h(px(27.))
+                    .rounded_l_none()
+                    .icon(crate::ui::icon(IconName::ChevronDown).size(px(12.)))
+                    .tooltip(crate::i18n::workspace::TOOLTIP_NEW_FILE_MENU.get())
+                    .dropdown_menu(move |menu, _, _| {
+                        let menu = CREATABLE_PRESETS
+                            .iter()
+                            .fold(menu.min_w(px(184.)), |menu, preset| {
+                                let preset_app = menu_app.clone();
+                                let ext = preset.ext;
+                                let sample_path = preset.sample_path;
+                                let badge = preset.badge;
+                                let label = preset.label.get();
+                                menu.item(
+                                    PopupMenuItem::element(move |_, _| {
+                                        div()
+                                            .w_full()
+                                            .h(px(20.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap_3()
+                                            .text_xs()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .child(crate::ui::file_icon(
+                                                        sample_path,
+                                                        ext == "drawio",
+                                                        false,
+                                                    ))
+                                                    .child(label),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(11.))
+                                                    .text_color(rgb(MUTED))
+                                                    .child(badge),
+                                            )
+                                    })
+                                    .on_click(move |_, window, cx| {
+                                        preset_app.update(cx, |app, cx| {
+                                            let folder = app.focused_folder.clone();
+                                            if let Err(error) = app.new_preset_in(
+                                                ext,
+                                                folder.as_deref(),
+                                                window,
+                                                cx,
+                                            ) {
+                                                app.report(error, cx);
+                                            }
+                                        });
+                                    }),
+                                )
+                            });
+                        let other_app = menu_app.clone();
+                        menu.separator().item(
+                            PopupMenuItem::element(move |_, _| {
+                                div()
+                                    .w_full()
+                                    .h(px(20.))
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_xs()
+                                    .child(crate::ui::icon(IconName::Plus).size(px(13.)))
+                                    .child(crate::i18n::workspace::MENU_NEW_OTHER.get())
+                            })
+                            .on_click(move |_, window, cx| {
+                                other_app.update(cx, |app, cx| {
+                                    let folder = app.focused_folder.clone();
+                                    if let Err(error) = app.start_create_other(
+                                        folder.as_deref(),
+                                        window,
+                                        cx,
+                                    ) {
+                                        app.report(error, cx);
+                                    }
+                                });
+                            }),
+                        )
+                    }),
+            )
+            .into_any_element()
     }
 
     pub(super) fn apply_name(&mut self, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
@@ -963,7 +1139,6 @@ impl Workspace {
                         .context_menu(move |menu, _, _| {
                             let full = full.clone();
                             let deleted = deleted.clone();
-                            let new_md_folder = deleted.clone();
                             let renamed_path = deleted.clone();
                             let renamed_name = Path::new(&deleted)
                                 .file_name()
@@ -974,43 +1149,31 @@ impl Workspace {
                             let folder_prefix_dir = folder_prefix.clone();
                             let app = app.clone();
                             let rename_app = app.clone();
-                            let new_md_app = app.clone();
-                            let new_drawio_app = app.clone();
-                            let new_drawio_folder = new_md_folder.clone();
                             let create_file_app = app.clone();
                             let create_folder_app = app.clone();
                             let tag_folder = deleted.clone();
                             let tags_app = app.clone();
-                            menu.min_w(px(90.))
-                                .item(compact_menu_item(crate::i18n::workspace::MENU_NEW_MARKDOWN.get()).on_click(
+                            let menu = CREATABLE_PRESETS.iter().fold(menu.min_w(px(130.)), |menu, preset| {
+                                let preset_app = app.clone();
+                                let preset_folder = deleted.clone();
+                                let ext = preset.ext;
+                                menu.item(compact_menu_item(preset.folder_label.get()).on_click(
                                     move |_, window, cx| {
-                                        new_md_app.update(cx, |app, cx| {
-                                            app.focused_folder = Some(new_md_folder.clone());
-                                            if let Err(error) = app.new_markdown_in(
-                                                Some(&new_md_folder),
+                                        preset_app.update(cx, |app, cx| {
+                                            app.focused_folder = Some(preset_folder.clone());
+                                            if let Err(error) = app.new_preset_in(
+                                                ext,
+                                                Some(&preset_folder),
                                                 window,
                                                 cx,
                                             ) {
                                                 app.report(error, cx);
                                             }
-                                        })
+                                        });
                                     },
                                 ))
-                                .item(compact_menu_item(crate::i18n::workspace::MENU_NEW_DRAWIO.get()).on_click(
-                                    move |_, window, cx| {
-                                        new_drawio_app.update(cx, |app, cx| {
-                                            app.focused_folder = Some(new_drawio_folder.clone());
-                                            if let Err(error) = app.new_drawio_in(
-                                                Some(&new_drawio_folder),
-                                                window,
-                                                cx,
-                                            ) {
-                                                app.report(error, cx);
-                                            }
-                                        })
-                                    },
-                                ))
-                                .item(compact_menu_item(crate::i18n::workspace::MENU_NEW_FILE.get()).on_click(
+                            });
+                            menu.item(compact_menu_item(crate::i18n::workspace::MENU_NEW_FILE.get()).on_click(
                                     move |_, window, cx| {
                                         create_file_app.update(cx, |app, cx| {
                                             app.start_name(
@@ -1389,9 +1552,7 @@ impl Workspace {
                     .text_color(rgb(MUTED))
                     .child(crate::i18n::workspace::FILES_HEADER.get())
                     .child(self.render_tag_toggle(cx))
-                    .child(button("new-markdown", "+ Markdown").on_click(cx.listener(|app, _, window, cx| {
-                        if let Err(error) = app.new_markdown(window, cx) { app.report(error, cx); }
-                    })))
+                    .child(self.render_new_file_split_button(cx))
                     .when(self.directory_workspace().is_none(), |header| header.child(button("open-file", crate::i18n::workspace::OPEN_FILE.get()).on_click(
                         cx.listener(|app, _, window, cx| app.open_file_dialog(window, cx)),
                     )))
@@ -1419,12 +1580,6 @@ impl Workspace {
                                             Err(error) => app.report(error, cx),
                                         }
                                     })))
-                                .child(button("new-file", "+").on_click(cx.listener(
-                                    |app, _, window, cx| {
-                                        let prefix = app.focused_folder_prefix();
-                                        app.start_name(NameAction::Create, &prefix, window, cx)
-                                    },
-                                )))
                                 .child(button("new-folder", "📁+").on_click(cx.listener(
                                     |app, _, window, cx| {
                                         let prefix = app.focused_folder_prefix();
