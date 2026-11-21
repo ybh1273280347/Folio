@@ -1450,28 +1450,33 @@ impl MarkdownPane {
         cx.notify();
     }
 
-    pub fn sync(
+    pub fn apply_settings(
         &mut self,
-        text: &str,
         settings: &AppSettings,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.settings != *settings {
-            self.settings = settings.clone();
+        if self.settings.show_line_numbers != settings.show_line_numbers {
             self.source_editor.update(cx, |editor, cx| {
                 editor.set_line_number(settings.show_line_numbers, window, cx);
             });
-            self.visual_editor.update(cx, |editor, cx| {
-                let body_size = px(settings.markdown_font_size as f32);
-                editor.set_code_styles(
-                    crate::ui::inline_code_style(settings, body_size),
-                    crate::ui::block_code_style(settings, body_size),
-                    cx,
-                );
-            });
-            cx.notify();
         }
+        let body_size = px(settings.markdown_font_size as f32);
+        let previous_size = px(self.settings.markdown_font_size as f32);
+        let inline = crate::ui::inline_code_style(settings, body_size);
+        let block = crate::ui::block_code_style(settings, body_size);
+        if inline != crate::ui::inline_code_style(&self.settings, previous_size)
+            || block != crate::ui::block_code_style(&self.settings, previous_size)
+        {
+            self.visual_editor.update(cx, |editor, cx| {
+                editor.set_code_styles(inline, block, cx);
+            });
+        }
+        self.settings.clone_from(settings);
+        cx.notify();
+    }
+
+    pub fn sync(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.text == text {
             return;
         }

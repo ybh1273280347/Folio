@@ -581,12 +581,23 @@ impl AiPane {
     }
 
     pub fn sync_settings(&mut self, settings: &AppSettings, cx: &mut Context<Self>) {
+        let host_changed = self.settings.ai != settings.ai;
+        let view_changed = self.settings.ai_font != settings.ai_font
+            || self.settings.ai_font_size != settings.ai_font_size
+            || self.settings.tool_execution_view != settings.tool_execution_view
+            || self.settings.block_code_font != settings.block_code_font
+            || self.settings.block_code_scale != settings.block_code_scale
+            || self.settings.inline_code_font != settings.inline_code_font
+            || self.settings.inline_code_scale != settings.inline_code_scale;
         self.settings = settings.clone();
-        if self.host.is_some() {
+        if host_changed && self.host.is_some() {
             self.command(json!({"type":"configure", "settings":settings.ai}), cx);
         }
-        for view in self.views.values() {
-            view.update(cx, |view, cx| view.sync_settings(settings, cx));
+        if view_changed {
+            for view in self.views.values() {
+                view.update(cx, |view, cx| view.sync_settings(settings, cx));
+            }
+            cx.notify();
         }
     }
     pub fn set_active_file(&mut self, file: Option<AttachedFile>, cx: &mut Context<Self>) {

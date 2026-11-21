@@ -2,6 +2,7 @@
 //! Disk revisions arbitrate external edits; conflicted drafts never autosave over them.
 mod annotations;
 mod agent_tags;
+mod appearance;
 mod build;
 mod documents;
 mod file_tree;
@@ -318,7 +319,7 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(settings: AppSettings, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let config = storage::load_projects().expect(crate::i18n::workspace::ERR_LOAD_PROJECTS.get());
         let mut workspace_sessions =
             storage::load_workspace_sessions().expect(crate::i18n::workspace::ERR_LOAD_SESSIONS.get());
@@ -350,7 +351,6 @@ impl Workspace {
             main_file: String::new(),
             engine: Engine::Xelatex,
         };
-        let settings = storage::load_settings().expect(crate::i18n::workspace::ERR_LOAD_SETTINGS.get());
         let math = cx.new(MathRenderer::new);
         math.update(cx, |renderer, cx| renderer.set_appearance(&settings, cx));
         let preferences = cx.new(|cx| Preferences::new(settings.clone(), window, cx));
@@ -387,72 +387,7 @@ impl Workspace {
         })
         .detach();
         cx.subscribe_in(&preferences, window, |app, _, event: &SettingsChanged, window, cx| {
-            let image_changed = app.settings.background_image != event.0.background_image;
-            let opacity_changed =
-                app.settings.background_image_opacity != event.0.background_image_opacity;
-            if image_changed || opacity_changed {
-                app.settings.background_image.clone_from(&event.0.background_image);
-                app.settings.background_image_opacity = event.0.background_image_opacity;
-                if image_changed {
-                    app.load_background_image(window, cx);
-                } else {
-                    app.sync_backdrop_visible(cx);
-                }
-                // Slider updates redraw the backdrop without resyncing editors and their themes.
-                if app.settings == event.0 {
-                    cx.notify();
-                    return;
-                }
-            }
-            // Retire old panel bindings before adding replacements, so remapping takes effect immediately.
-            for (id, action) in [("toggle_ai", ToggleAi.name()), ("toggle_terminal", ToggleTerminal.name())] {
-                let previous = app.settings.key_for(id);
-                if previous != event.0.key_for(id) {
-                    cx.bind_keys([KeyBinding::new(
-                        Box::leak(previous.into_boxed_str()),
-                        Unbind(action.into()),
-                        Some("FolioWorkspace"),
-                    )]);
-                }
-            }
-            let fallback_changed = app.settings.cjk_fallback_font != event.0.cjk_fallback_font;
-            let locale_changed = app.settings.locale != event.0.locale;
-            app.settings = event.0.clone();
-            crate::i18n::apply_settings(&app.settings);
-            app.terminal.update(cx, |pane, cx| pane.sync(&app.settings.terminal, app.settings.theme.palette, cx));
-            app.ai.update(cx, |pane, cx| pane.sync_settings(&app.settings, cx));
-            for document in app.documents.open.values() {
-                document.editor.update(cx, |editor, cx| {
-                    editor.set_line_number(app.settings.show_line_numbers, window, cx);
-                });
-            }
-            crate::theme::apply_settings(&app.settings, cx);
-            if locale_changed {
-                app.right_panel_search.update(cx, |input, cx| {
-                    input.set_placeholder(crate::i18n::workspace::SEARCH_HUB_PLACEHOLDER.get(), window, cx);
-                });
-                app.tags.refresh_locale(window, cx);
-                app.ai.update(cx, |pane, cx| pane.refresh_locale(window, cx));
-                for pane in app.documents.markdown_panes.values() {
-                    pane.update(cx, |pane, cx| pane.refresh_locale(window, cx));
-                }
-                for pane in app.documents.pdf_panes.values() {
-                    pane.update(cx, |pane, cx| pane.refresh_locale(window, cx));
-                }
-                if let Some(pane) = &app.build_pdf {
-                    pane.update(cx, |pane, cx| pane.refresh_locale(window, cx));
-                }
-            }
-            if fallback_changed || locale_changed {
-                // Terminal cells and mounted views may reuse their draws when only glyph fallback changes.
-                window.refresh();
-            }
-            bind_shortcuts(&app.settings, cx);
-            app.math.update(cx, |renderer, cx| {
-                renderer.set_appearance(&app.settings, cx)
-            });
-            app.documents.markdown_changed.extend(app.documents.open.keys().cloned());
-            cx.notify();
+            app.apply_settings(event.apply_to(&app.settings), window, cx);
         })
         .detach();
         let name_input = cx.new(|cx| InputState::new(window, cx));
@@ -752,18 +687,14 @@ impl Workspace {
                 .timer(Duration::from_millis(250))
                 .await;
             let _ = this.update(cx, |app, cx| {
-                if let Err(error) = storage::save_settings(&app.settings) {
-                    app.report(error, cx);
-                }
+                app.persist_settings(cx);
             });
         });
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.settings.sidebar_open = !self.settings.sidebar_open;
-        if let Err(error) = storage::save_settings(&self.settings) {
-            self.report(error, cx);
-        }
+        self.persist_settings(cx);
         cx.notify();
     }
 
@@ -1412,19 +1343,17 @@ impl Workspace {
                         .p_2()
                         .flex()
                         .justify_center()
-                        .child(crate::ui::ctrl_scroll_capture(cx.listener(|app, event: &ScrollEvent, _, cx| {
+                        .child(crate::ui::ctrl_scroll_capture(cx.listener(|app, event: &ScrollEvent, window, cx| {
                             if event.modifiers.control {
                                 let delta = if event.delta.pixel_delta(px(20.)).y > px(0.) {
                                     1
                                 } else {
                                     -1
                                 };
-                                app.settings.editor_font_size =
-                                    (app.settings.editor_font_size as i16 + delta).clamp(11, 26)
-                                        as u8;
-                                if let Err(error) = storage::save_settings(&app.settings) {
-                                    app.report(error, cx);
-                                }
+                                let mut settings = app.settings.clone();
+                                settings.editor_font_size =
+                                    (settings.editor_font_size as i16 + delta).clamp(11, 26) as u8;
+                                app.apply_settings(settings, window, cx);
                                 app.editor_zoom_hud.show(
                                     app.settings.editor_font_size,
                                     cx,
@@ -1724,9 +1653,7 @@ impl Render for Workspace {
                     let ratio = f32::from(sizes[0]) / (f32::from(sizes[0]) + f32::from(sizes[1]));
                     resize_app.update(cx, |app, cx| {
                         app.settings.editor_ratio = ratio;
-                        if let Err(error) = storage::save_settings(&app.settings) {
-                            app.report(error, cx);
-                        }
+                        app.persist_settings(cx);
                     });
                 }
             })
@@ -1799,9 +1726,7 @@ impl Render for Workspace {
                 app.update(cx, |app, cx| {
                     if app.show_logs {
                         app.settings.log_height = log_height;
-                        if let Err(error) = storage::save_settings(&app.settings) {
-                            app.report(error, cx);
-                        }
+                        app.persist_settings(cx);
                     }
                 });
             }
