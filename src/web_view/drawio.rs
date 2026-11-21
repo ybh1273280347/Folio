@@ -252,31 +252,53 @@ impl DrawioPane {
         cx.notify();
     }
 
-    /// Invoke the bundled Folio plugin and return its result through the pane IPC channel.
+    /// Invoke the in-page Draw.io tool implementation and return its result through pane IPC.
     pub fn request_tool(
         &self,
         request_id: &str,
         operation: &str,
         params: serde_json::Value,
         cx: &App,
-    ) -> bool {
+    ) -> Result<(), &'static str> {
         if !self.ready {
-            return false;
+            return Err("drawio_not_ready");
         }
         let payload = json!({
             "request_id": request_id,
             "operation": operation,
             "params": params,
         });
-        let Ok(encoded) = serde_json::to_string(&payload.to_string()) else {
-            return false;
-        };
+        let encoded = serde_json::to_string(&payload.to_string())
+            .expect("Draw.io tool request serializes as JSON");
         let script = format!(
-            "if (typeof window.__folioDrawioTool !== 'function') throw new Error('Folio Draw.io 插件未加载'); window.__folioDrawioTool({encoded});"
+            r#"(() => {{
+                const request = JSON.parse({encoded});
+                if (typeof window.__folioDrawioTool !== 'function') {{
+                    window.ipc.postMessage(JSON.stringify({{
+                        event: 'folio_tool_result',
+                        request_id: request.request_id,
+                        result: {{
+                            status: 'error',
+                            error: {{
+                                code: 'drawio_bridge_unavailable',
+                                message: 'Folio Draw.io 工具实现未注册。',
+                                retryable: false
+                            }}
+                        }}
+                    }}));
+                    return;
+                }}
+                window.__folioDrawioTool(request);
+            }})();"#
         );
-        self.webview
-            .as_ref()
-            .is_some_and(|webview| webview.read(cx).raw().evaluate_script(&script).is_ok())
+        let Some(webview) = &self.webview else {
+            return Err("drawio_not_ready");
+        };
+        webview
+            .read(cx)
+            .raw()
+            .evaluate_script(&script)
+            .map_err(|_| "drawio_dispatch_failed")
     }
 
     pub fn reload_if_external(&mut self, cx: &mut Context<Self>) {
@@ -575,6 +597,7 @@ impl DrawioPane {
         self.attempted = true;
         self.error = None;
         self.loading = true;
+        self.ready = false;
 
         let drawio_dir = match resolve_drawio_dir() {
             Ok(dir) => dir,
@@ -596,7 +619,7 @@ impl DrawioPane {
 
         // Always load draw.io UI in Simplified Chinese while keeping outer Folio controls synced with `locale()`.
         let entry_url = format!(
-            "https://{DRAWIO_HOST}/index.html?embed=1&proto=json&configure=1&spin=1&offline=1&libraries=1&noExitBtn=1&saveAndExit=0&lang=zh&p=folio"
+            "https://{DRAWIO_HOST}/index.html?embed=1&proto=json&configure=1&spin=1&offline=1&libraries=1&noExitBtn=1&saveAndExit=0&lang=zh&dev=1"
         );
 
         let task = cx.spawn_in(window, async move |this, cx| {
@@ -874,14 +897,6 @@ fn drawio_configure_payload() -> serde_json::Value {
 }
 
 fn resolve_drawio_dir() -> Result<PathBuf, String> {
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(parent) = exe.parent()
-    {
-        let packaged = parent.join("drawio");
-        if packaged.join("index.html").is_file() {
-            return Ok(packaged);
-        }
-    }
     let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/drawio");
     if dev.join("index.html").is_file() {
         return Ok(dev);

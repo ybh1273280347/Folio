@@ -1,13 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
-test('the bundled Draw.io plugin reads selection and applies ID-based edits atomically', () => {
-  const pluginPath = fileURLToPath(new URL('../../drawio/js/plugins/folio.js', import.meta.url));
-  const plugin = fs.readFileSync(pluginPath, 'utf8');
+test('the Draw.io App integration reads selection and applies ID-based edits atomically', () => {
+  const appPath = fileURLToPath(new URL('../../drawio/js/diagramly/App.js', import.meta.url));
+  const appSource = fs.readFileSync(appPath, 'utf8');
+  const methodStart = appSource.indexOf('App.prototype.installFolioDrawioTools = function()');
+  const methodEnd = appSource.indexOf('\n};\n\n/**\n * Initializes the UI', methodStart) + 3;
+  const installMethod = appSource.slice(methodStart, methodEnd);
   const first = {
     id: 'node-1', value: 'User', style: 'rounded=1', vertex: true,
     geometry: { x: 10, y: 20, width: 80, height: 40, relative: false, clone() { return { ...this }; } },
@@ -48,26 +50,28 @@ test('the bundled Draw.io plugin reads selection and applies ID-based edits atom
     removeCells: removed => removed.forEach(cell => cells.delete(cell.id)),
   };
   const results = [];
-  const window = { opener: { postMessage: message => results.push(message) } };
-  vm.runInNewContext(plugin, { Draw: { loadPlugin: callback => callback({ editor: { graph } }) }, window });
+  const window = { ipc: { postMessage: message => results.push(JSON.parse(message)) } };
+  function App() {}
+  vm.runInNewContext(installMethod, { App, window, Date, Map, Set, Object, String, Error });
+  App.prototype.installFolioDrawioTools.call({ editor: { graph } });
 
-  window.__folioDrawioTool(JSON.stringify({
+  window.__folioDrawioTool({
     request_id: 'selection', operation: 'get_selection', params: {},
-  }));
+  });
   assert.deepEqual(JSON.parse(JSON.stringify(results[0].result.cells[0])), {
     id: 'node-1', kind: 'vertex', value: 'User', style: 'rounded=1',
     geometry: { x: 10, y: 20, width: 80, height: 40, relative: false },
     parent_id: 'layer-1', source_id: null, target_id: null,
   });
 
-  window.__folioDrawioTool(JSON.stringify({
+  window.__folioDrawioTool({
     request_id: 'edit', operation: 'edit_cells', params: { operations: [
       { op: 'update', id: 'node-1', value: 'Authentication', geometry: { x: 40 } },
       { op: 'add_vertex', id: 'token-store', value: 'Token store', x: 300, y: 20, width: 100, height: 40 },
       { op: 'add_edge', id: 'auth-token', value: 'writes', source_id: 'node-1', target_id: 'token-store' },
       { op: 'delete', id: 'node-2' },
     ] },
-  }));
+  });
   assert.equal(results[1].result.status, 'ok', JSON.stringify(results[1].result));
   assert.equal(results[1].result.applied, 4);
   assert.equal(model.getCell('node-1').value, 'Authentication');
@@ -77,12 +81,12 @@ test('the bundled Draw.io plugin reads selection and applies ID-based edits atom
   assert.equal(transactions.started, 1);
   assert.equal(transactions.ended, 1);
 
-  window.__folioDrawioTool(JSON.stringify({
+  window.__folioDrawioTool({
     request_id: 'invalid-edit', operation: 'edit_cells', params: { operations: [
       { op: 'update', id: 'node-1', value: 'Should not apply' },
       { op: 'add_edge', id: 'bad-edge', value: '', source_id: 'missing', target_id: 'token-store' },
     ] },
-  }));
+  });
   assert.equal(results[2].result.status, 'error');
   assert.equal(model.getCell('node-1').value, 'Authentication');
   assert.equal(transactions.started, 1);
