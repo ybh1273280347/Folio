@@ -8,8 +8,6 @@ use gpui_kit::{
     *,
 };
 
-pub(crate) const ANIMATION_MS: u64 = 200;
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RightPanelAction {
     OpenAi,
@@ -43,11 +41,6 @@ pub(crate) struct RightPanelHubProps {
     pub(crate) terminal_shortcut: String,
     pub(crate) terminal_sessions: usize,
     pub(crate) ai_tasks: Vec<(String, String, bool)>,
-}
-
-pub(crate) fn ease_out_cubic(t: f32) -> f32 {
-    let inv = 1.0 - t.clamp(0.0, 1.0);
-    1.0 - inv * inv * inv
 }
 
 fn fg_alpha(hex: u32, alpha: f32) -> Rgba {
