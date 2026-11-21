@@ -270,7 +270,7 @@ impl Workspace {
             .iter()
             .filter(|path| {
                 let lower = path.to_lowercase();
-                lower.ends_with(".tex") || lower.ends_with(".md")
+                lower.ends_with(".tex") || lower.ends_with(".md") || Self::is_image_path(&lower)
             })
             .cloned()
             .collect();
@@ -319,7 +319,11 @@ impl Workspace {
     pub(super) fn compile_target(&self) -> Option<&str> {
         let focused = self.documents.focused_markdown.as_deref().unwrap_or(&self.documents.active);
         let lower = focused.to_lowercase();
-        if lower.ends_with(".md") || (self.config.active_id.is_none() && lower.ends_with(".tex")) {
+        if lower.ends_with(".md")
+            || (self.documents.focused_markdown.is_none()
+                && Self::is_image_path(&self.documents.active))
+            || (self.config.active_id.is_none() && lower.ends_with(".tex"))
+        {
             Some(focused)
         } else {
             self.directory_workspace()
@@ -396,14 +400,15 @@ impl Workspace {
             .to_lowercase()
             .ends_with(".md")
             .then(|| target.clone());
-        if markdown.is_none() && self.directory_workspace().is_some() {
+        let is_image = Self::is_image_path(&target);
+        if markdown.is_none() && !is_image && self.directory_workspace().is_some() {
             project.main_file = target.clone();
         }
         let capture = markdown.as_ref().map(|file| {
             self.documents.markdown_panes.get(&PaneKey::reading(file))
                 .unwrap_or_else(|| &self.documents.markdown_panes[&PaneKey::tab(file)]).clone()
         });
-        let (cancelled, sender) = self.build.start(target, self.documents.source_version, capture.clone());
+        let (cancelled, sender) = self.build.start(target.clone(), self.documents.source_version, capture.clone());
         self.show_build_preview = true;
         self.notice = None;
         if let Some((file, pane)) = markdown.zip(capture) {
@@ -419,6 +424,21 @@ impl Workspace {
                 started: Instant::now(),
             };
             pane.update(cx, |pane, cx| pane.export_pdf(request, cx));
+        } else if is_image {
+            let source = PathBuf::from(&project.folder).join(&target);
+            let destination = source.with_extension("pdf");
+            let preview = build_root.join(&project.id).join("preview.pdf");
+            let started = Instant::now();
+            thread::spawn(move || {
+                let result = crate::image::export_image_to_pdf(
+                    &source,
+                    &destination,
+                    &preview,
+                    cancelled,
+                    started,
+                );
+                let _ = sender.send(BuildEvent::Finished(result));
+            });
         } else {
             thread::spawn(move || {
                 let log_sender = sender.clone();
