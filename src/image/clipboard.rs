@@ -28,9 +28,20 @@ pub fn is_supported_image_path(path: &Path) -> bool {
     SUPPORTED_IMAGE_EXTENSIONS.contains(&lower.as_str())
 }
 
+/// Strip trailing NUL bytes that Windows clipboard providers (e.g. Chromium/draw.io)
+/// often append to `image/svg+xml` buffers.
+pub(crate) fn sanitize_svg_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut end = bytes.len();
+    while end > 0 && bytes[end - 1] == 0 {
+        end -= 1;
+    }
+    bytes[..end].to_vec()
+}
+
 /// Extract valid SVG XML bytes from clipboard plain text (e.g. draw.io "Copy as SVG").
 pub fn extract_svg_text(text: &str) -> Option<Vec<u8>> {
-    let trimmed = text.trim_start_matches('\u{feff}').trim();
+    let trimmed = text
+        .trim_matches(|ch: char| ch == '\0' || ch == '\u{feff}' || ch.is_whitespace());
     if trimmed.is_empty() || trimmed.len() > 16 * 1024 * 1024 {
         return None;
     }
@@ -69,7 +80,7 @@ fn clipboard_image_to_bytes(img: &Image) -> Result<PastedImageSource, String> {
         ImageFormat::Jpeg => ("jpg", img.bytes.clone()),
         ImageFormat::Webp => ("webp", img.bytes.clone()),
         ImageFormat::Gif => ("gif", img.bytes.clone()),
-        ImageFormat::Svg => ("svg", img.bytes.clone()),
+        ImageFormat::Svg => ("svg", sanitize_svg_bytes(&img.bytes)),
         ImageFormat::Bmp => ("png", convert_bytes_to_png(&img.bytes, image::ImageFormat::Bmp)?),
         ImageFormat::Tiff => ("png", convert_bytes_to_png(&img.bytes, image::ImageFormat::Tiff)?),
         ImageFormat::Ico => ("png", convert_bytes_to_png(&img.bytes, image::ImageFormat::Ico)?),
@@ -322,5 +333,21 @@ mod tests {
         let resolved = resolve_markdown_image_path(dir.path(), "images/doc/pic%201.png");
         assert_eq!(resolved.as_deref(), Some(img_file.as_path()));
         assert_eq!(resolve_markdown_image_path(dir.path(), "https://example.com/a.png"), None);
+    }
+
+    #[test]
+    fn strips_trailing_nul_bytes_from_clipboard_svg_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw_svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\"/></svg>\0";
+        let item = ClipboardItem::new_image(&Image {
+            format: ImageFormat::Svg,
+            bytes: raw_svg.to_vec(),
+            id: 1,
+        });
+        let saved = save_clipboard_images_to_dir(&item, dir.path()).unwrap();
+        assert_eq!(saved.len(), 1);
+        let written = fs::read(&saved[0]).unwrap();
+        assert!(!written.ends_with(b"\0"));
+        assert!(usvg::Tree::from_data(&written, &usvg::Options::default()).is_ok());
     }
 }

@@ -109,8 +109,9 @@ impl ImagePane {
         };
 
         if self.is_svg {
+            let clean_bytes = super::clipboard::sanitize_svg_bytes(&bytes);
             let options = crate::mermaid::usvg_options();
-            match usvg::Tree::from_data(&bytes, &options) {
+            match usvg::Tree::from_data(&clean_bytes, &options) {
                 Ok(tree) => {
                     let size = tree.size();
                     self.natural_size = Some((size.width().max(1.0), size.height().max(1.0)));
