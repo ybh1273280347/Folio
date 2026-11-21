@@ -65,7 +65,9 @@ pub fn load_settings() -> io::Result<AppSettings> {
     if let Some(size) = values.get("interfaceFontSize").and_then(serde_json::Value::as_u64) {
         values.entry("aiFontSize").or_insert_with(|| size.clamp(11, 24).into());
     }
-    serde_json::from_value(values.into()).map_err(io::Error::other)
+    let mut settings: AppSettings = serde_json::from_value(values.into()).map_err(io::Error::other)?;
+    settings.background_image_opacity = settings.background_image_opacity.min(100);
+    Ok(settings)
 }
 
 pub fn save_settings(settings: &AppSettings) -> io::Result<()> {

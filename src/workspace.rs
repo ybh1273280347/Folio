@@ -252,6 +252,8 @@ pub struct Workspace {
     workspace_sessions: BTreeMap<String, WorkspaceSession>,
     active_session: Option<String>,
     settings: AppSettings,
+    background_image: Option<Arc<RenderImage>>,
+    background_image_load: Option<Task<()>>,
     preferences: Entity<Preferences>,
     math: Entity<MathRenderer>,
     show_preferences: bool,
@@ -492,6 +494,19 @@ impl Workspace {
         })
         .detach();
         cx.subscribe_in(&preferences, window, |app, _, event: &SettingsChanged, window, cx| {
+            let image_changed = app.settings.background_image != event.0.background_image;
+            if image_changed || app.settings.background_image_opacity != event.0.background_image_opacity {
+                app.settings.background_image.clone_from(&event.0.background_image);
+                app.settings.background_image_opacity = event.0.background_image_opacity;
+                if image_changed {
+                    app.load_background_image(window, cx);
+                }
+                // Slider updates redraw the backdrop without resyncing editors and their themes.
+                if app.settings == event.0 {
+                    cx.notify();
+                    return;
+                }
+            }
             // Retire old panel bindings before adding replacements, so remapping takes effect immediately.
             for (id, action) in [("toggle_ai", ToggleAi.name()), ("toggle_terminal", ToggleTerminal.name())] {
                 let previous = app.settings.key_for(id);
@@ -594,6 +609,8 @@ impl Workspace {
             workspace_sessions,
             active_session: None,
             settings,
+            background_image: None,
+            background_image_load: None,
             preferences,
             math,
             show_preferences: false,
@@ -668,6 +685,9 @@ impl Workspace {
             _tick: tick,
             _history_escape: history_escape,
         };
+        if app.settings.background_image.is_some() {
+            app.load_background_image(window, cx);
+        }
         let result = match initial_location {
             WorkspaceLocation::Default => app.select_project("__folio_default", window, cx),
             WorkspaceLocation::Project(id) => app.select_project(&id, window, cx),
@@ -682,6 +702,46 @@ impl Workspace {
         }
         app.focus.focus(window, cx);
         app
+    }
+
+    fn load_background_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Dropping the retained task prevents an older selection from publishing after replacement.
+        self.background_image_load = None;
+        if self.background_image.is_some() {
+            self.set_background_image(None, window, cx);
+        }
+        self.preferences.update(cx, |panel, cx| panel.set_background_image_error(None, cx));
+        let Some(path) = self.settings.background_image.clone() else {
+            return;
+        };
+        let load = ImageAssetLoader::load(path.into(), cx);
+        let load = cx.background_executor().spawn(load);
+        self.background_image_load = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = load.await;
+            let _ = this.update_in(cx, |app, window, cx| match result {
+                Ok(image) => app.set_background_image(Some(image), window, cx),
+                Err(error) => app.preferences.update(cx, |panel, cx| {
+                    panel.set_background_image_error(Some(format!("无法读取背景图：{error}")), cx);
+                }),
+            });
+        }));
+    }
+
+    fn set_background_image(
+        &mut self,
+        image: Option<Arc<RenderImage>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(previous) = std::mem::replace(&mut self.background_image, image) {
+            cx.drop_image(previous, Some(window));
+        }
+        // Document surfaces follow the decoded image, including while a replacement is loading.
+        let visible = self.background_image.is_some();
+        for pane in self.markdown_panes.values() {
+            pane.update(cx, |pane, cx| pane.set_backdrop_visible(visible, cx));
+        }
+        cx.notify();
     }
 
     fn directory_workspace(&self) -> Option<&Project> {
@@ -1563,6 +1623,9 @@ impl Workspace {
         let settings = self.settings.clone();
         let math = self.math.clone();
         let pane = cx.new(|cx| MarkdownPane::new(text, full, settings, math, reading, window, cx));
+        if self.background_image.is_some() {
+            pane.update(cx, |pane, cx| pane.set_backdrop_visible(true, cx));
+        }
         cx.subscribe_in(&pane, window, move |app, pane, event: &MarkdownEvent, window, cx| {
             // Resolve identity from the live pane; a rename keeps this subscription alive.
             let full = pane.read(cx).path().to_path_buf();
@@ -3389,6 +3452,9 @@ impl Workspace {
     fn render_reading_pane(&self, path: &str, cx: &mut Context<Self>) -> AnyElement {
         let close = path.to_owned();
         let is_pdf = path.to_ascii_lowercase().ends_with(".pdf");
+        let key = format!("reading:{path}");
+        let markdown = self.markdown_panes.get(&key);
+        let show_background = self.background_image.is_some() && markdown.is_some();
         let source = self.document_path(path);
         let filename = Path::new(path)
             .file_name()
@@ -3400,7 +3466,7 @@ impl Workspace {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(0xffffff));
+            .when(!show_background, |pane| pane.bg(rgb(0xffffff)));
         let mut titlebar = div()
             .h(px(36.))
             .flex_shrink_0()
@@ -3409,7 +3475,7 @@ impl Workspace {
             .gap_2()
             .pl_3()
             .pr_1()
-            .bg(rgb(0xfafaf9))
+            .when(!show_background, |bar| bar.bg(rgb(0xfafaf9)))
             .border_b_1()
             .border_color(rgb(BORDER))
             .child(crate::ui::file_icon(path, false, false))
@@ -3431,11 +3497,11 @@ impl Workspace {
             ),
         );
         pane = pane.child(titlebar);
-        if let Some(pdf) = self.pdf_panes.get(&format!("reading:{path}")) {
+        if let Some(pdf) = self.pdf_panes.get(&key) {
             pane = pane.child(div().flex_1().min_h_0().child(pdf.clone()));
-        } else if let Some(html) = self.html_panes.get(&format!("reading:{path}")) {
+        } else if let Some(html) = self.html_panes.get(&key) {
             pane = pane.child(div().flex_1().min_h_0().child(html.clone()));
-        } else if let Some(markdown) = self.markdown_panes.get(&format!("reading:{path}")) {
+        } else if let Some(markdown) = markdown {
             pane = pane.child(div().flex_1().min_h_0().child(markdown.clone()));
         }
         pane.into_any_element()
@@ -4581,7 +4647,7 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_editor_tab_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_editor_tab_bar(&self, show_background: bool, cx: &mut Context<Self>) -> AnyElement {
         let fg_alpha = |hex: u32, alpha: f32| -> Rgba {
             let r = ((hex >> 16) & 0xff) as f32 / 255.0;
             let g = ((hex >> 8) & 0xff) as f32 / 255.0;
@@ -4601,7 +4667,7 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_1()
-            .bg(gpui_kit::rgb(header_bg))
+            .when(!show_background, |bar| bar.bg(gpui_kit::rgb(header_bg)))
             .border_b_1()
             .border_color(gpui_kit::rgb(palette.border));
 
@@ -4668,14 +4734,17 @@ impl Workspace {
                         .cursor_pointer()
                         .text_color(fg_alpha(palette.text, 0.78))
                         .when(current, |s| {
-                            s.bg(gpui_kit::rgb(palette.surface))
-                                .text_color(gpui_kit::rgb(palette.text))
+                            s.text_color(gpui_kit::rgb(palette.text))
+                                .when(!show_background, |s| s.bg(gpui_kit::rgb(palette.surface)))
                         })
-                        .when(!current, |s| {
+                        .when(!current || show_background, |s| {
                             s.hover(move |h| {
                                 h.bg(tab_hover_bg)
                                     .text_color(gpui_kit::rgb(palette.text))
                             })
+                        })
+                        .when(show_background, |tab| {
+                            tab.focusable().tab_stop(true).focus_visible(move |s| s.bg(tab_hover_bg))
                         })
                         .tooltip(move |window, cx| {
                             gpui_kit::component::tooltip::Tooltip::new(tooltip_path.clone())
@@ -4807,19 +4876,22 @@ impl Workspace {
     }
 
     fn render_editor(&self, cx: &mut Context<Self>) -> AnyElement {
+        let document = self.documents.get(&self.active);
+        let show_background = self.background_image.is_some()
+            && (self.active.is_empty() || document.is_some());
         let mut area = div()
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(0xffffff))
+            .when(!show_background, |area| area.bg(rgb(0xffffff)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|app, _, _, _| app.focused_markdown = None),
             );
         if !self.tabs.is_empty() {
-            area = area.child(self.render_editor_tab_bar(cx));
+            area = area.child(self.render_editor_tab_bar(show_background, cx));
         }
-        if let Some(document) = self.documents.get(&self.active) {
+        if let Some(document) = document {
             if document.buffer.deleted {
                 area = area.child(
                     div()
@@ -5275,7 +5347,22 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(BG))
+            .bg(if self.background_image.is_some() {
+                gpui_kit::rgb(self.settings.theme.palette.background)
+            } else {
+                rgb(BG)
+            })
+            // Paint once at window coordinates so text panes share the same crop as they scroll.
+            .when_some(self.background_image.clone(), |app, image| {
+                app.child(
+                    img(image)
+                        .absolute()
+                        .inset_0()
+                        .size_full()
+                        .object_fit(ObjectFit::Cover)
+                        .opacity(f32::from(self.settings.background_image_opacity) / 100.),
+                )
+            })
             .text_color(rgb(0x37352f))
             .text_size(px(14.))
             .font_family(crate::ui::DEFAULT_SANS_FONT)
@@ -5330,6 +5417,7 @@ impl Render for Workspace {
                     .items_center()
                     .pl_4()
                     .gap_2()
+                    .bg(rgb(BG))
                     .border_b_1()
                     .border_color(rgb(BORDER))
                     .child(

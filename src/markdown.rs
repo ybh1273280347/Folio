@@ -331,6 +331,7 @@ pub struct MarkdownPane {
     pane_outer_width: Rc<std::cell::Cell<f32>>,
     last_scroll_y: Rc<std::cell::Cell<Pixels>>,
     reading: bool,
+    backdrop_visible: bool,
     focus: FocusHandle,
     scroll: ScrollHandle,
     settings: AppSettings,
@@ -855,6 +856,7 @@ impl MarkdownPane {
             pane_outer_width: Rc::new(std::cell::Cell::new(0.0)),
             last_scroll_y: Rc::new(std::cell::Cell::new(px(0.))),
             reading,
+            backdrop_visible: false,
             focus: cx.focus_handle(),
             scroll,
             settings,
@@ -1061,6 +1063,11 @@ impl MarkdownPane {
 
     pub fn is_focused(&self, window: &Window, cx: &App) -> bool {
         self.focus.contains_focused(window, cx)
+    }
+
+    pub fn set_backdrop_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.backdrop_visible = visible;
+        cx.notify();
     }
 
     fn is_outline_rendered(&self) -> bool {
@@ -3111,7 +3118,9 @@ impl Render for MarkdownPane {
                             .pt_6()
                             .pb(trailing_space)
                             .child(document_title)
-                            .child(BlockEditor::new(&self.visual_editor))
+                            .child(BlockEditor::new(&self.visual_editor).when(self.backdrop_visible, |editor| {
+                                editor.with_content_background_opacity(0.35)
+                            }))
                             .when(self.loading.is_some(), |content| {
                                 content.child(
                                     div().mt_4().text_sm().text_color(rgb(0x787774))
@@ -3859,7 +3868,7 @@ impl Render for MarkdownPane {
             .track_focus(&self.focus)
             .flex()
             .flex_col()
-            .bg(rgb(0xffffff))
+            // The workspace container supplies the surface so all text panes can share one backdrop.
             .when(self.reading, |pane| pane.child(toolbar))
             .child(crate::ui::ctrl_scroll_capture(cx.listener(|pane, event: &ScrollEvent, _, cx| {
                 if event.modifiers.control {

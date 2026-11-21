@@ -49,6 +49,8 @@ pub struct Preferences {
     sizes: [Entity<SliderState>; 4],
     math_scale: Entity<SliderState>,
     inline_math_scale: Entity<SliderState>,
+    background_image_opacity: Entity<SliderState>,
+    background_image_error: Option<String>,
     theme_name: Entity<InputState>,
     theme_colors: Vec<(ColorRole, Entity<ColorPickerState>)>,
     terminal_shell: Entity<InputState>,
@@ -71,6 +73,23 @@ impl EventEmitter<SettingsChanged> for Preferences {}
 
 impl Preferences {
     pub fn new(settings: AppSettings, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let background_image_opacity = cx.new(|_| {
+            SliderState::new()
+                .min(0.)
+                .max(100.)
+                .step(1.)
+                .default_value(f32::from(settings.background_image_opacity))
+        });
+        cx.subscribe(&background_image_opacity, |panel, _, event: &SliderEvent, cx| {
+            if let SliderEvent::Change(value) = event {
+                let opacity = value.end().round() as u8;
+                if panel.settings.background_image_opacity != opacity {
+                    panel.settings.background_image_opacity = opacity;
+                    panel.changed(cx);
+                }
+            }
+        })
+        .detach();
         let theme_name = cx.new(|cx| {
             let mut input = InputState::new(window, cx).placeholder("主题名称");
             if settings.theme.active != "自定义（未保存）" {
@@ -447,6 +466,8 @@ impl Preferences {
             math_font,
             math_scale,
             inline_math_scale,
+            background_image_opacity,
+            background_image_error: None,
             sizes,
             theme_name,
             theme_colors,
@@ -469,6 +490,9 @@ impl Preferences {
     }
     pub fn sync(&mut self, settings: &AppSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.settings = settings.clone();
+        self.background_image_opacity.update(cx, |state, cx| {
+            state.set_value(f32::from(settings.background_image_opacity), window, cx)
+        });
         self.sync_theme_colors(window, cx);
         if settings.theme.active != "自定义（未保存）" {
             self.theme_name.update(cx, |input, cx| {
@@ -563,6 +587,11 @@ impl Preferences {
         self.ai_exa_key.update(cx, |input,cx| input.set_value(settings.ai.exa_api_key.clone(),window,cx));
         self.ai_qianfan_key.update(cx, |input,cx| input.set_value(settings.ai.baidu_qianfan_api_key.clone(),window,cx));
     }
+    pub fn set_background_image_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
+        self.background_image_error = error;
+        cx.notify();
+    }
+
     fn changed(&mut self, cx: &mut Context<Self>) {
         self.error = storage::save_settings(&self.settings)
             .err()
@@ -765,6 +794,52 @@ impl Preferences {
             .flex_col()
             .gap_5()
             .child(div().text_lg().font_semibold().child("外观 / 视图"))
+            .child(
+                div().flex().flex_col().gap_2()
+                    .child(
+                        div().flex().items_center().justify_between().gap_3()
+                            .child("背景图")
+                            .child(
+                                div().flex().gap_2()
+                                    .child(control("choose-background-image", "选择图片").on_click(
+                                        cx.listener(|_, _, window, cx| {
+                                            let dialog = rfd::AsyncFileDialog::new()
+                                                .set_parent(window)
+                                                .set_title("选择背景图")
+                                                .add_filter("图片", &["png", "jpg", "jpeg", "webp", "bmp"]);
+                                            cx.spawn(async move |this, cx| {
+                                                if let Some(file) = dialog.pick_file().await {
+                                                    let _ = this.update(cx, |panel, cx| {
+                                                        panel.settings.background_image = Some(file.path().to_path_buf());
+                                                        panel.changed(cx);
+                                                    });
+                                                }
+                                            }).detach();
+                                        }),
+                                    ))
+                                    .when(self.settings.background_image.is_some(), |actions| {
+                                        actions.child(control("remove-background-image", "移除图片").on_click(
+                                            cx.listener(|panel, _, _, cx| {
+                                                panel.settings.background_image = None;
+                                                panel.changed(cx);
+                                            }),
+                                        ))
+                                    }),
+                            ),
+                    )
+                    .when_some(self.settings.background_image.as_ref(), |section, path| {
+                        section
+                            .child(div().min_w_0().text_ellipsis().text_sm()
+                                .text_color(rgb(0x787774)).child(path.display().to_string()))
+                            .child(div().flex().items_center().justify_between()
+                                .child("图片不透明度")
+                                .child(format!("{}%", self.settings.background_image_opacity)))
+                            .child(Slider::new(&self.background_image_opacity))
+                    })
+                    .when_some(self.background_image_error.as_ref(), |section, error| {
+                        section.child(div().text_sm().text_color(rgb(0xb92d2d)).child(error.clone()))
+                    }),
+            )
             .child(
                 div().flex().items_center().justify_between().gap_3()
                     .child("工具执行视图")

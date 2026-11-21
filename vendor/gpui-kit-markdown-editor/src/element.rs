@@ -499,6 +499,7 @@ fn container_extra_gap(
 pub struct BlockEditor {
     state: Entity<BlockEditorState>,
     style: StyleRefinement,
+    content_background_opacity: f32,
 }
 
 impl BlockEditor {
@@ -576,7 +577,14 @@ impl BlockEditor {
         Self {
             state: state.clone(),
             style: StyleRefinement::default(),
+            content_background_opacity: 1.,
         }
+    }
+
+    /// Modulates the table and code block fills of this view. Document export uses its own style.
+    pub fn with_content_background_opacity(mut self, opacity: f32) -> Self {
+        self.content_background_opacity = opacity;
+        self
     }
 }
 
@@ -619,7 +627,26 @@ impl RenderOnce for BlockEditor {
         let theme = gpui_kit::base::Theme::global(cx);
         // Links are followed by the editor itself (Cmd/Ctrl-click); the shared
         // renderer must never open a URL on its own.
-        let render_cx = self.state.read(cx).render_context(cx);
+        let mut render_cx = self.state.read(cx).render_context(cx);
+        let opacity = self.content_background_opacity;
+        if opacity != 1. {
+            let style = render_cx.style();
+            let code_fill = style.code_background();
+            let fade_fill = |gpui::Fill::Color(color)| gpui::Fill::from(color.opacity(opacity));
+            let mut block = style.code_block().clone();
+            block.background = block.background.map(fade_fill);
+            let mut table = style.table().clone();
+            let table_fill = table.background.take()
+                .unwrap_or_else(|| theme.tokens.colors.surface.into());
+            let mut head = style.table_head().clone();
+            let head_fill = head.background.take().unwrap_or_else(|| code_fill.into());
+            let style = style.clone()
+                .with_code_background(code_fill.opacity(opacity))
+                .with_code_block(block)
+                .with_table(table.bg(fade_fill(table_fill)))
+                .with_table_head(head.bg(fade_fill(head_fill)));
+            render_cx = render_cx.with_style(style);
+        }
         let text_style = render_cx.style().clone();
         let mut style = self.state.read(cx).style.resolved(&theme.tokens);
         if style.selection_is_default() {
