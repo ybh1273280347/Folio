@@ -24,14 +24,56 @@ const { theme } = await import(new URL('./modes/interactive/theme/theme.js', imp
 const { resolveToCwd } = await import(new URL('./core/tools/path-utils.js', import.meta.resolve('@earendil-works/pi-coding-agent')));
 const send = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 const workspaceToolChannels = [
-  ['annotation', annotationTools],
-  ['compile', compileTools],
-  ['drawio', drawioTools],
-  ['tag', tagTools],
-].map(([channel, factory]) => ({
+  {
+    channel: 'annotation',
+    factory: annotationTools,
+    timeoutMs: 30_000,
+    timeouts: { list: 30_000, create: 30_000 },
+    timeoutMessage: 'Folio 批注工具在 30 秒内没有响应。',
+    retryableForError: (operation, error) => operation === 'list' && error.code === 'workspace_tool_timeout',
+  },
+  {
+    channel: 'compile',
+    factory: compileTools,
+    timeoutMs: 180_000,
+    timeouts: { compile_tex: 180_000 },
+    timeoutMessage: 'TeX 编译工具在 180 秒内没有响应。',
+  },
+  {
+    channel: 'drawio',
+    factory: drawioTools,
+    timeoutMs: 10_000,
+    timeouts: {
+      read: 10_000,
+      create: 10_000,
+      update: 10_000,
+      get_selection: 10_000,
+      edit_cells: 10_000,
+    },
+    timeoutMessage: 'Draw.io 画布在 10 秒内没有响应，请确认图表仍打开后重试。',
+    retryableForError: (operation, error) =>
+      error.code === 'drawio_not_ready'
+      || (error.code === 'workspace_tool_timeout' && ['read', 'get_selection'].includes(operation)),
+  },
+  {
+    channel: 'tag',
+    factory: tagTools,
+    timeoutMs: 60_000,
+    timeouts: {
+      list: 60_000,
+      query: 60_000,
+      preview_files: 60_000,
+      preview_definition: 60_000,
+      commit: 60_000,
+      discard: 60_000,
+    },
+    timeoutMessage: 'Folio 标签工具在 60 秒内没有响应。',
+    retryableForError: (operation, error) =>
+      error.code === 'workspace_tool_timeout' && ['list', 'query'].includes(operation),
+  },
+].map(({ channel, factory, ...bridgeOptions }) => ({
   channel,
-  responseType: `${channel}_response`,
-  bridge: new WorkspaceToolBridge(send, channel),
+  bridge: new WorkspaceToolBridge(send, channel, bridgeOptions),
   factory,
 }));
 const root = process.env.FOLIO_USER_DATA ?? path.join(os.homedir(), 'AppData', 'Roaming', 'folio-gpui');
@@ -304,8 +346,9 @@ async function dispatch(command) {
     return response();
   }
   if (command.projectKey !== projectKey(command.cwd)) throw new Error('项目标识不匹配');
-  const toolChannel = workspaceToolChannels.find(entry => entry.responseType === command.type);
-  if (toolChannel) {
+  if (command.type === 'workspace_tool_response') {
+    const toolChannel = workspaceToolChannels.find(entry => entry.channel === command.channel);
+    if (!toolChannel) throw new Error(`未知 workspace tool 通道: ${command.channel}`);
     toolChannel.bridge.respond(command);
     return response();
   }

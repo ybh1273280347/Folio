@@ -11,7 +11,7 @@ enum Snapshot {
 
 impl Workspace {
     pub(super) fn annotation_request(&mut self, request: &WorkspaceToolRequest, window: &mut Window, cx: &mut Context<Self>) {
-        if request.kind == WorkspaceToolKind::AnnotationCancel {
+        if request.action == WorkspaceToolAction::Cancel {
             self.annotation_requests.remove(&request.id);
             return;
         }

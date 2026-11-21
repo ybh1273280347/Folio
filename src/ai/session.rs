@@ -225,7 +225,7 @@ impl Session {
         for item in batch {
             let sequence = match &item {
                 RpcInbound::Event(ev) | RpcInbound::ExtensionUiRequest(ev) => ev["sequence"].as_u64(),
-                RpcInbound::WorkspaceTool(request) => Some(request.sequence),
+                RpcInbound::WorkspaceTool(request) => request.sequence,
                 _ => None,
             };
             if let Some(sequence) = sequence {

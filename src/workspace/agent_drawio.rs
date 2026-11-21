@@ -61,7 +61,7 @@ impl Workspace {
         request: &WorkspaceToolRequest,
         cx: &mut Context<Self>,
     ) {
-        if request.kind == crate::ai::WorkspaceToolKind::DrawioCancel {
+        if request.action == crate::ai::WorkspaceToolAction::Cancel {
             self.drawio_requests.remove(&request.id);
             return;
         }

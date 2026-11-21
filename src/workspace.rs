@@ -12,7 +12,7 @@ mod projects;
 mod tags;
 use build::Build;
 use documents::{DocumentWatch, Documents, PaneKey, PaneRole};
-use crate::ai::{AiPane, AiPaneEvent, AttachedFile, WorkspaceToolKind, WorkspaceToolRequest};
+use crate::ai::{AiPane, AiPaneEvent, AttachedFile, WorkspaceToolAction, WorkspaceToolRequest};
 use gpui_kit::component::Sizable;
 use crate::theme::color as rgb;
 use crate::web_view::{DrawioPane, DrawioPaneEvent, HtmlPane, HtmlPaneEvent};
@@ -389,17 +389,25 @@ impl Workspace {
         let initial_dir = dirs::home_dir().expect("user home");
         let ai = cx.new(|cx| AiPane::new(initial_dir, settings.clone(), math.clone(), window, cx));
         cx.subscribe_in(&ai, window, |app, _, event: &AiPaneEvent, window, cx| match event {
-            AiPaneEvent::WorkspaceTool(request) => match request.kind {
-                WorkspaceToolKind::AnnotationRequest | WorkspaceToolKind::AnnotationCancel => {
-                    app.annotation_request(request, window, cx)
+            AiPaneEvent::WorkspaceTool(request) => match request.channel.as_str() {
+                "annotation" => app.annotation_request(request, window, cx),
+                "compile" => app.compile_request(request, window, cx),
+                "drawio" => app.drawio_request(request, cx),
+                "tag" => app.tag_request(request, cx),
+                _ if request.action == WorkspaceToolAction::Request => {
+                    app.ai.read(cx).respond_workspace_tool(
+                        request,
+                        serde_json::json!({
+                            "status": "error",
+                            "error": {
+                                "code": "unknown_workspace_tool",
+                                "message": "Folio 未注册此 workspace tool 通道。",
+                                "retryable": false
+                            }
+                        }),
+                    );
                 }
-                WorkspaceToolKind::CompileRequest | WorkspaceToolKind::CompileCancel => {
-                    app.compile_request(request, window, cx)
-                }
-                WorkspaceToolKind::DrawioRequest | WorkspaceToolKind::DrawioCancel => {
-                    app.drawio_request(request, cx)
-                }
-                WorkspaceToolKind::TagRequest | WorkspaceToolKind::TagCancel => app.tag_request(request, cx),
+                _ => {}
             },
             AiPaneEvent::UndoTags(items) => app.undo_tag_confirmations(items, cx),
             AiPaneEvent::OpenFile(path) => {

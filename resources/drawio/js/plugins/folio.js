@@ -41,10 +41,23 @@ Draw.loadPlugin(function(ui)
 	function selectedCells()
 	{
 		var graph = ui.editor.graph;
+		var cells = graph.getSelectionCells();
+
+		if (cells.length === 0)
+		{
+			return {
+				status: 'error',
+				error: {
+					code: 'no_selection',
+					message: '当前画布没有选中的元素。',
+					retryable: false,
+				}
+			};
+		}
 
 		return {
 			status: 'ok',
-			cells: graph.getSelectionCells().map(function(cell)
+			cells: cells.map(function(cell)
 			{
 				return cellSummary(cell);
 			})

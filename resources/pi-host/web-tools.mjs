@@ -7,14 +7,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-
-/** Expected external failures carry a short, model-facing category rather than a diagnostic stack. */
-class ToolFailure extends Error {
-  constructor(type, message, retryable = false, httpStatus) {
-    super(message);
-    this.detail = { type, message, retryable, ...(httpStatus === undefined ? {} : { http_status: httpStatus }) };
-  }
-}
+import { ToolFailure } from './tool-failure.mjs';
 
 async function toolResult(run, signal) {
   try {
