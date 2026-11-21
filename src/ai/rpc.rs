@@ -23,8 +23,33 @@ pub enum RpcInbound {
     },
     Event(Value),
     ExtensionUiRequest(Value),
+    WorkspaceTool(WorkspaceToolRequest),
     Stderr(String),
     Exited(Option<i32>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceToolKind {
+    AnnotationRequest,
+    AnnotationCancel,
+    TagRequest,
+    TagCancel,
+}
+
+/// Routing fields are checked as the JSONL message crosses into Rust.
+/// The annotation/tag handlers own validation of their operation arguments.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceToolRequest {
+    #[serde(rename = "type")]
+    pub kind: WorkspaceToolKind,
+    pub id: String,
+    pub sequence: u64,
+    pub project_key: String,
+    pub session_id: String,
+    #[serde(flatten)]
+    pub arguments: Value,
 }
 #[derive(Clone, Debug)]
 pub struct RpcImage {
@@ -149,6 +174,12 @@ impl Host {
                         error: value["error"].as_str().map(str::to_owned),
                     },
                     "extension_ui_request" => RpcInbound::ExtensionUiRequest(value.clone()),
+                    "annotation_request" | "annotation_cancel" | "tag_request" | "tag_cancel" => {
+                        match serde_json::from_value(value.clone()) {
+                            Ok(request) => RpcInbound::WorkspaceTool(request),
+                            Err(error) => RpcInbound::Stderr(crate::i18n::ai::err_rpc_protocol(&error)),
+                        }
+                    }
                     _ => RpcInbound::Event(value.clone()),
                 };
                 for (id, route) in dispatch.lock().expect("routes lock").iter() {
@@ -212,6 +243,32 @@ impl Host {
         });
         *shared = Arc::downgrade(&host);
         Ok(host)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WorkspaceToolKind, WorkspaceToolRequest};
+    use serde_json::json;
+
+    #[test]
+    fn workspace_tool_request_keeps_its_conversation_and_operation_arguments() {
+        let request: WorkspaceToolRequest = serde_json::from_value(json!({
+            "type": "tag_request",
+            "id": "request-1",
+            "sequence": 17,
+            "projectKey": "project-root",
+            "sessionId": "session-1",
+            "operation": "preview_files",
+            "params": { "proposal_id": "proposal-1", "edit": { "add": ["重点"] } }
+        })).unwrap();
+
+        assert_eq!(request.kind, WorkspaceToolKind::TagRequest);
+        assert_eq!(request.project_key, "project-root");
+        assert_eq!(request.session_id, "session-1");
+        assert_eq!(request.sequence, 17);
+        assert_eq!(request.arguments["operation"], "preview_files");
+        assert_eq!(request.arguments["params"]["proposal_id"], "proposal-1");
     }
 }
 impl Drop for Host {

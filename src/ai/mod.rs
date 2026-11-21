@@ -4,8 +4,11 @@ mod diff;
 mod rpc;
 mod manager;
 mod quote;
+mod session;
+use session::{Session, SessionChanges};
 pub use manager::AiPane;
 pub(crate) use rpc::project_key;
+pub(crate) use rpc::{WorkspaceToolKind, WorkspaceToolRequest};
 pub use quote::SelectionQuote;
 use quote::{append_quotes, split_injected_prompt};
 
@@ -42,7 +45,7 @@ use gpui_kit::{
 use rpc::{RpcClient, RpcImage, RpcInbound};
 use serde_json::Value;
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, HashMap, HashSet},
     io::Write,
     ops::Range,
@@ -53,8 +56,7 @@ use std::{
 };
 
 pub enum AiPaneEvent {
-    Annotation(Value),
-    TagRequest(Value),
+    WorkspaceTool(WorkspaceToolRequest),
     UndoTags(Vec<crate::tags::agent::TagConfirmation>),
     OpenFile(PathBuf),
     BackToHub,
@@ -118,7 +120,6 @@ struct ToolBlock {
     done: bool,
     duration_ms: Option<u64>,
     diffs: Vec<FileDiff>,
-    expanded: bool,
     approval: Option<TagApproval>,
 }
 
@@ -126,7 +127,6 @@ struct ToolBlock {
 enum AssistantPart {
     Thinking {
         text: String,
-        collapsed: bool,
         duration_ms: Option<u64>,
         streaming: bool,
     },
@@ -223,26 +223,9 @@ const AI_COPY_ICON_SIZE: Pixels = px(12.);
 const AI_COPY_BUTTON_RADIUS: Pixels = px(5.);
 
 struct ChatPane {
-    host: Arc<rpc::Host>,
-    runtime_id: String,
-    last_sequence: u64,
-    cwd: PathBuf,
+    session: Rc<RefCell<Session>>,
     project_name: Option<String>,
     settings: AppSettings,
-    client: Option<RpcClient>,
-    startup_error: Option<String>,
-    messages: Vec<ChatMessage>,
-    is_streaming: bool,
-    is_compacting: bool,
-    session_file: Option<PathBuf>,
-    session_id: Option<String>,
-    session_name: Option<String>,
-    available_models: Vec<ModelInfo>,
-    current_model: Option<ModelInfo>,
-    thinking_levels: Vec<String>,
-    current_thinking: String,
-    context_usage: Option<ContextUsage>,
-    commands: Vec<PiCommandInfo>,
     active_file: Option<AttachedFile>,
     attach_active_file: bool,
     quoted_selections: Vec<SelectionQuote>,
@@ -251,14 +234,10 @@ struct ChatPane {
     quote_bounds: Rc<Cell<Bounds<Pixels>>>,
     pasted_images: Vec<PastedImage>,
     next_image_id: u64,
-    auto_approve_shell: bool,
-    pending_ui: Option<PendingExtensionUi>,
     pending_ext_prefill: Option<(String, bool)>,
     pending_composer_text: Option<String>,
     ext_input: Entity<InputState>,
     ext_textarea: Entity<TextareaState>,
-    ext_statuses: BTreeMap<String, String>,
-    ext_widgets: BTreeMap<String, Vec<String>>,
     toast: Option<(String, bool)>,
     toast_task: Task<()>,
     toast_anim_gen: u64,
@@ -275,13 +254,12 @@ struct ChatPane {
     last_input_text: String,
     dismissed_slash_text: Option<String>,
     collapsed_tool_groups: HashSet<(usize, usize)>,
+    expanded_thinking: HashSet<(usize, usize)>,
+    expanded_diffs: HashSet<(usize, usize)>,
+    expanded_tag_receipts: HashSet<String>,
     expanded_approval_groups: HashSet<String>,
     toggled_task_processes: HashSet<usize>,
     viewed_diff_files: HashSet<String>,
-    active_run_start: Option<std::time::Instant>,
-    active_thinking_start: Option<std::time::Instant>,
-    write_snapshots: HashMap<String, String>,
-    active_part_map: HashMap<usize, usize>,
     input: Entity<TextareaState>,
     _math: Entity<MathRenderer>,
     _mermaid: Entity<MermaidRenderer>,
@@ -289,16 +267,13 @@ struct ChatPane {
     scroll: ScrollHandle,
     stick_to_bottom: bool,
     _subscriptions: Vec<Subscription>,
-    _poll: Task<()>,
 }
 
 impl ChatPane {
     pub fn new(
-        cwd: PathBuf,
+        session: Rc<RefCell<Session>>,
         settings: AppSettings,
         math: Entity<MathRenderer>,
-        host: Arc<rpc::Host>,
-        runtime_id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -385,43 +360,10 @@ impl ChatPane {
             },
         );
 
-        let poll = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(35))
-                    .await;
-                if this
-                    .update(cx, |pane: &mut Self, cx| {
-                        pane.poll_rpc(cx);
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-
         let pane = Self {
-            host,
-            runtime_id,
-            last_sequence: 0,
-            cwd,
+            session,
             project_name: None,
             settings,
-            client: None,
-            startup_error: None,
-            messages: Vec::new(),
-            is_streaming: false,
-            is_compacting: false,
-            session_file: None,
-            session_id: None,
-            session_name: None,
-            available_models: Vec::new(),
-            current_model: None,
-            thinking_levels: vec!["off".into(), "low".into(), "medium".into(), "high".into()],
-            current_thinking: "high".into(),
-            context_usage: None,
-            commands: Vec::new(),
             active_file: None,
             attach_active_file: false,
             quoted_selections: Vec::new(),
@@ -430,14 +372,10 @@ impl ChatPane {
             quote_bounds: Rc::new(Cell::new(Bounds::default())),
             pasted_images: Vec::new(),
             next_image_id: 1,
-            auto_approve_shell: false,
-            pending_ui: None,
             pending_ext_prefill: None,
             pending_composer_text: None,
             ext_input,
             ext_textarea,
-            ext_statuses: BTreeMap::new(),
-            ext_widgets: BTreeMap::new(),
             toast: None,
             toast_task: Task::ready(()),
             toast_anim_gen: 0,
@@ -454,13 +392,12 @@ impl ChatPane {
             last_input_text: String::new(),
             dismissed_slash_text: None,
             collapsed_tool_groups: HashSet::new(),
+            expanded_thinking: HashSet::new(),
+            expanded_diffs: HashSet::new(),
+            expanded_tag_receipts: HashSet::new(),
             expanded_approval_groups: HashSet::new(),
             toggled_task_processes: HashSet::new(),
             viewed_diff_files: HashSet::new(),
-            active_run_start: None,
-            active_thinking_start: None,
-            write_snapshots: HashMap::new(),
-            active_part_map: HashMap::new(),
             input,
             _math: math,
             _mermaid: mermaid,
@@ -475,16 +412,39 @@ impl ChatPane {
                 sub_mermaid,
                 sub_quote_escape,
             ],
-            _poll: poll,
         };
         pane
     }
 
     pub fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.client.is_none() {
-            self.start_rpc(cx);
-        }
         self.focus(window, cx);
+        cx.notify();
+    }
+
+    fn apply_session_changes(&mut self, changes: SessionChanges, cx: &mut Context<Self>) {
+        if changes.reset_transcript {
+            self.collapsed_tool_groups.clear();
+            self.expanded_thinking.clear();
+            self.expanded_diffs.clear();
+            self.expanded_tag_receipts.clear();
+            self.expanded_approval_groups.clear();
+            self.toggled_task_processes.clear();
+            self.viewed_diff_files.clear();
+            self.quote_popover = None;
+            self.quote_drag = None;
+        }
+        if changes.follow_output {
+            self.scroll_to_bottom();
+        }
+        if let Some((text, is_error)) = changes.toast {
+            self.show_toast(text, is_error, cx);
+        }
+        if let Some(prefill) = changes.extension_prefill {
+            self.pending_ext_prefill = Some(prefill);
+        }
+        if let Some(text) = changes.composer_text {
+            self.pending_composer_text = Some(text);
+        }
         cx.notify();
     }
 
@@ -550,7 +510,7 @@ impl ChatPane {
 
     fn export_answer(&mut self, markdown: &str, cx: &mut Context<Self>) {
         // This view owns its project's cwd, so exports stay with the source conversation.
-        let title: String = self.session_name.as_deref().unwrap_or(crate::i18n::ai::DEFAULT_NOTE_TITLE.get())
+        let title: String = self.session.borrow().session_name.as_deref().unwrap_or(crate::i18n::ai::DEFAULT_NOTE_TITLE.get())
             .chars()
             .filter(|ch| !ch.is_control() && !r#"<>:"/\|?*"#.contains(*ch))
             .take(48)
@@ -558,7 +518,7 @@ impl ChatPane {
         let title = title.trim_matches([' ', '.']);
         let title = if title.is_empty() { crate::i18n::ai::DEFAULT_NOTE_TITLE.get() } else { title };
         let filename = format!("{title}-{}.md", chrono::Local::now().format("%Y%m%d-%H%M%S-%3f"));
-        let path = self.cwd.join(&filename);
+        let path = self.session.borrow().cwd.join(&filename);
         let result = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)
             .and_then(|mut file| file.write_all(markdown.as_bytes()));
         match result {
@@ -643,24 +603,6 @@ impl ChatPane {
             .filter(|_| self.attach_active_file)
     }
 
-    fn start_rpc(&mut self, cx: &mut Context<Self>) {
-        self.startup_error = None;
-        let client = RpcClient::connect(self.host.clone(), &self.cwd, Some(self.runtime_id.clone()));
-        match client.send(serde_json::json!({"type":"snapshot"})) {
-            Ok(_) => {
-                let _ = client.get_available_models();
-                let _ = client.get_available_thinking_levels();
-                let _ = client.get_session_stats();
-                let _ = client.get_commands();
-                self.client = Some(client);
-            }
-            Err(err) => {
-                self.startup_error = Some(err);
-            }
-        }
-        cx.notify();
-    }
-
     fn show_toast(&mut self, text: String, is_error: bool, cx: &mut Context<Self>) {
         self.toast = Some((text, is_error));
         self.toast_anim_gen = self.toast_anim_gen.wrapping_add(1);
@@ -676,972 +618,6 @@ impl ChatPane {
         cx.notify();
     }
 
-    fn poll_rpc(&mut self, cx: &mut Context<Self>) {
-        let mut batch = Vec::new();
-        if let Some(client) = &self.client {
-            while let Ok(item) = client.inbound.try_recv() {
-                batch.push(item);
-            }
-        }
-        if batch.is_empty() {
-            return;
-        }
-        for item in batch {
-            if let RpcInbound::Event(ev) | RpcInbound::ExtensionUiRequest(ev) = &item {
-                if let Some(sequence) = ev["sequence"].as_u64() {
-                    if sequence <= self.last_sequence { continue; }
-                    self.last_sequence = sequence;
-                }
-            }
-            self.handle_inbound(item, cx);
-        }
-        cx.notify();
-    }
-
-    fn handle_inbound(&mut self, item: RpcInbound, cx: &mut Context<Self>) {
-        match item {
-            RpcInbound::Response {
-                command,
-                success,
-                data,
-                error,
-            } => {
-                if !success {
-                    if let Some(err) = error {
-                        self.messages.push(ChatMessage::Notice {
-                            text: crate::i18n::ai::command_failed(&command, &err),
-                            is_error: true,
-                        });
-                    }
-                    if command == "prompt" {
-                        self.is_streaming = false;
-                    }
-                    if command == "compact" {
-                        self.is_compacting = false;
-                    }
-                    return;
-                }
-                let Some(data) = data else {
-                    return;
-                };
-                match command.as_str() {
-                    "snapshot" => {
-                        // The input is ready while SDK startup runs; an earlier snapshot cannot erase a submitted prompt.
-                        let submitted_during_startup = self.is_streaming && data["isStreaming"].as_bool() != Some(true);
-                        if !submitted_during_startup { self.apply_messages(&data); }
-                        self.apply_state(&data);
-                        self.is_streaming |= submitted_during_startup;
-                        self.last_sequence = data["sequence"].as_u64().unwrap_or(0);
-                    }
-                    "get_state" => self.apply_state(&data),
-                    "get_available_models" => self.apply_models(&data),
-                    "get_available_thinking_levels" => self.apply_thinking_levels(&data),
-                    "get_session_stats" => self.apply_stats(&data),
-                    "get_commands" => self.apply_commands(&data),
-                    "get_messages" => self.apply_messages(&data),
-                    "set_model" => {
-                        if let Some(m) = parse_model(&data) {
-                            self.current_model = Some(m);
-                        }
-                        if let Some(client) = &self.client {
-                            let _ = client.get_available_thinking_levels();
-                        }
-                    }
-                    "compact" => {
-                        self.is_compacting = false;
-                        self.show_toast(crate::i18n::ai::CONTEXT_COMPACTED.get().into(), false, cx);
-                        if let Some(client) = &self.client {
-                            let _ = client.get_session_stats();
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            RpcInbound::Event(ev) => self.handle_session_event(&ev, cx),
-            RpcInbound::ExtensionUiRequest(req) => self.handle_ext_ui_request(&req, cx),
-            RpcInbound::Stderr(line) => {
-                if line.to_ascii_lowercase().contains("error") && self.messages.is_empty() {
-                    self.startup_error = Some(line);
-                }
-            }
-            RpcInbound::Exited(code) => {
-                self.client = None;
-                self.is_streaming = false;
-                self.pending_ui = None;
-                let detail = code.map(|c| format!(" (code {c})")).unwrap_or_default();
-                self.messages.push(ChatMessage::Notice {
-                    text: crate::i18n::ai::host_exited(&detail),
-                    is_error: true,
-                });
-            }
-        }
-    }
-
-    fn apply_state(&mut self, data: &Value) {
-        self.is_streaming = data.get("isStreaming").and_then(|v| v.as_bool()).unwrap_or(false);
-        self.is_compacting = data.get("isCompacting").and_then(|v| v.as_bool()).unwrap_or(false);
-        self.session_id = data.get("sessionId").and_then(|v| v.as_str()).map(str::to_owned);
-        self.session_file = data
-            .get("sessionFile")
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from);
-        self.session_name = data
-            .get("sessionName")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned);
-        if let Some(level) = data.get("thinkingLevel").and_then(|v| v.as_str()) {
-            self.current_thinking = level.to_owned();
-        }
-        if let Some(model_val) = data.get("model")
-            && let Some(m) = parse_model(model_val)
-        {
-            self.current_model = Some(m);
-        }
-    }
-
-    fn apply_models(&mut self, data: &Value) {
-        let Some(arr) = data.get("models").and_then(|v| v.as_array()) else {
-            return;
-        };
-        let mut models: Vec<ModelInfo> = arr.iter().filter_map(parse_model).collect();
-        models.sort_by(|a, b| {
-            let a_magpie = a.provider == "magpie";
-            let b_magpie = b.provider == "magpie";
-            b_magpie.cmp(&a_magpie).then_with(|| a.name.cmp(&b.name))
-        });
-        self.available_models = models;
-    }
-
-    fn apply_thinking_levels(&mut self, data: &Value) {
-        if let Some(arr) = data.get("levels").and_then(|v| v.as_array()) {
-            let levels: Vec<String> = arr
-                .iter()
-                .filter_map(|v| v.as_str().map(str::to_owned))
-                .collect();
-            if !levels.is_empty() {
-                self.thinking_levels = levels;
-            }
-        }
-    }
-
-    fn apply_commands(&mut self, data: &Value) {
-        let Some(arr) = data.get("commands").and_then(|v| v.as_array()) else {
-            return;
-        };
-        self.commands = arr
-            .iter()
-            .filter_map(|c| {
-                let name = c.get("name")?.as_str()?.to_owned();
-                let description = c
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_owned();
-                let source = c
-                    .get("source")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("extension")
-                    .to_owned();
-                Some(PiCommandInfo {
-                    name,
-                    description,
-                    source,
-                })
-            })
-            .collect();
-    }
-
-    fn apply_stats(&mut self, data: &Value) {
-        if let Some(cu) = data.get("contextUsage") {
-            let context_window = cu
-                .get("contextWindow")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            if context_window > 0 {
-                let tokens = cu.get("tokens").and_then(|v| v.as_u64());
-                let percent = cu
-                    .get("percent")
-                    .and_then(|v| v.as_f64())
-                    .map(|p| p.round().clamp(0.0, 100.0) as u64)
-                    .or_else(|| {
-                        tokens.map(|t| {
-                            ((t as f64 / context_window as f64) * 100.0)
-                                .round()
-                                .clamp(0.0, 100.0) as u64
-                        })
-                    });
-                self.context_usage = Some(ContextUsage {
-                    tokens,
-                    context_window,
-                    percent,
-                });
-            }
-        }
-    }
-
-    fn apply_messages(&mut self, data: &Value) {
-        let Some(arr) = data.get("messages").and_then(|v| v.as_array()) else {
-            return;
-        };
-        self.messages.clear();
-        self.collapsed_tool_groups.clear();
-        self.expanded_approval_groups.clear();
-        self.toggled_task_processes.clear();
-        self.viewed_diff_files.clear();
-        self.active_run_start = None;
-        self.active_thinking_start = None;
-        self.active_part_map.clear();
-        self.quote_popover = None;
-        self.quote_drag = None;
-        let mut pending_tool_results = HashMap::new();
-        for msg in arr {
-            if msg.get("role").and_then(|v| v.as_str()) == Some("toolResult")
-                && let Some(id) = msg.get("toolCallId").and_then(|v| v.as_str())
-            {
-                let text = extract_text_content(msg.get("content"));
-                let is_err = msg.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
-                let patch = msg.pointer("/details/patch").and_then(Value::as_str);
-                let approval = msg.get("details").and_then(TagApproval::from_result);
-                pending_tool_results.insert(id.to_owned(), (text, is_err, patch, approval));
-            }
-        }
-
-        for (message_index, msg) in arr.iter().enumerate() {
-            match msg.get("role").and_then(|v| v.as_str()) {
-                Some("user") => {
-                    let raw = extract_text_content(msg.get("content"));
-                    let (attached_file, mounted_skills, quotes, display_text) =
-                        split_injected_prompt(&raw);
-                    self.messages.push(ChatMessage::User {
-                        display_text,
-                        attached_file,
-                        mounted_skills,
-                        quotes,
-                        images: Vec::new(),
-                    });
-                }
-                Some("assistant") => {
-                    // A live snapshot must continue the same content blocks when subsequent deltas arrive.
-                    let active = data["partial"].as_bool() == Some(true) && message_index + 1 == arr.len();
-                    let mut parts = Vec::new();
-                    if let Some(blocks) = msg.get("content").and_then(|v| v.as_array()) {
-                        for (content_index, block) in blocks.iter().enumerate() {
-                            let part_index = parts.len();
-                            match block.get("type").and_then(|v| v.as_str()) {
-                                Some("thinking") => {
-                                    let t = block
-                                        .get("thinking")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_owned();
-                                    if !t.is_empty() || active {
-                                        parts.push(AssistantPart::Thinking {
-                                            text: t,
-                                            collapsed: !(active && content_index + 1 == blocks.len()),
-                                            duration_ms: None,
-                                            streaming: active && content_index + 1 == blocks.len(),
-                                        });
-                                    }
-                                }
-                                Some("text") => {
-                                    let t = block
-                                        .get("text")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_owned();
-                                    if !t.is_empty() || active {
-                                        parts.push(AssistantPart::Text(t));
-                                    }
-                                }
-                                Some("toolCall") => {
-                                    let id = block
-                                        .get("id")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_owned();
-                                    let name = block
-                                        .get("name")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("tool")
-                                        .to_owned();
-                                    let args = block
-                                        .get("arguments")
-                                        .cloned()
-                                        .unwrap_or(Value::Null);
-                                    let done = data["isStreaming"].as_bool() != Some(true) || pending_tool_results.contains_key(&id);
-                                    let (output, is_error, patch, approval) = pending_tool_results
-                                        .remove(&id)
-                                        .unwrap_or_default();
-                                    let diffs = build_diffs_for_tool(&name, &args, None, patch);
-                                    let summary = summarize_tool_call(&name, &args, &diffs);
-                                    parts.push(AssistantPart::Tool(ToolBlock {
-                                        id,
-                                        name,
-                                        args,
-                                        summary,
-                                        output,
-                                        is_error,
-                                        done,
-                                        duration_ms: None,
-                                        diffs,
-                                        expanded: false,
-                                        approval,
-                                    }));
-                                }
-                                _ => {}
-                            }
-                            if active && parts.len() > part_index {
-                                self.active_part_map.insert(content_index, part_index);
-                            }
-                        }
-                    }
-                    let error = msg
-                        .get("errorMessage")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned);
-                    self.messages.push(ChatMessage::Assistant {
-                        parts,
-                        error,
-                        streaming: active,
-                        duration_ms: None,
-                    });
-                }
-                _ => {}
-            }
-        }
-        self.scroll_to_bottom();
-    }
-
-    fn handle_session_event(&mut self, ev: &Value, cx: &mut Context<Self>) {
-        let kind = ev.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        match kind {
-            "agent_start" => {
-                self.is_streaming = true;
-                if self.active_run_start.is_none() {
-                    self.active_run_start = Some(std::time::Instant::now());
-                }
-            }
-            "agent_settled" => {
-                self.is_streaming = false;
-                let elapsed = self
-                    .active_run_start
-                    .take()
-                    .map(|t| t.elapsed().as_millis() as u64);
-                let think_elapsed = self
-                    .active_thinking_start
-                    .take()
-                    .map(|t| t.elapsed().as_millis() as u64);
-                for msg in self.messages.iter_mut().rev() {
-                    if let ChatMessage::Assistant {
-                        parts,
-                        streaming,
-                        duration_ms,
-                        ..
-                    } = msg
-                    {
-                        *streaming = false;
-                        if duration_ms.is_none() {
-                            *duration_ms = elapsed;
-                        }
-                        for p in parts.iter_mut() {
-                            if let AssistantPart::Thinking {
-                                collapsed,
-                                streaming: p_stream,
-                                duration_ms: p_dur,
-                                ..
-                            } = p
-                            {
-                                *p_stream = false;
-                                *collapsed = true;
-                                if p_dur.is_none() {
-                                    *p_dur = think_elapsed;
-                                }
-                            } else if let AssistantPart::Tool(block) = p {
-                                // Aborting argument generation produces no tool_execution_end event.
-                                if !block.done {
-                                    block.done = true;
-                                    block.is_error = true;
-                                    block.summary = crate::i18n::ai::TOOL_INCOMPLETE.get().into();
-                                }
-                            }
-                        }
-                        break;
-                    }
-                }
-                self.pending_ui = None;
-                if let Some(client) = &self.client {
-                    let _ = client.get_session_stats();
-                }
-            }
-            "thinking_level_changed" => {
-                if let Some(lvl) = ev.get("level").and_then(|v| v.as_str()) {
-                    self.current_thinking = lvl.to_owned();
-                }
-            }
-            "session_info_changed" => {
-                self.session_name = ev
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned);
-            }
-            "title_error" => {
-                self.show_toast(
-                    crate::i18n::ai::title_gen_failed(
-                        ev["error"].as_str().unwrap_or(crate::i18n::ai::REQUEST_FAILED.get()),
-                    ),
-                    true,
-                    cx,
-                );
-            }
-            "compaction_start" => {
-                self.is_compacting = true;
-            }
-            "compaction_end" => {
-                self.is_compacting = false;
-                if let Some(err) = ev.get("errorMessage").and_then(|v| v.as_str()) {
-                    self.show_toast(crate::i18n::ai::compact_failed(&err), true, cx);
-                } else {
-                    self.show_toast(crate::i18n::ai::CONTEXT_COMPACTED.get().into(), false, cx);
-                }
-                if let Some(client) = &self.client {
-                    let _ = client.get_session_stats();
-                }
-            }
-            "extension_error" => {
-                let err = ev
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(crate::i18n::ai::EXT_RUNTIME_ERROR.get());
-                self.show_toast(crate::i18n::ai::ext_error(err), true, cx);
-            }
-            "message_start" => {
-                if let Some(msg) = ev.get("message")
-                    && msg.get("role").and_then(|v| v.as_str()) == Some("assistant")
-                {
-                    self.active_part_map.clear();
-                    self.messages.push(ChatMessage::Assistant {
-                        parts: Vec::new(),
-                        error: None,
-                        streaming: true,
-                        duration_ms: None,
-                    });
-                    self.scroll_to_bottom();
-                }
-            }
-            "message_update" => {
-                if let Some(ame) = ev.get("assistantMessageEvent") {
-                    self.handle_assistant_delta(ame);
-                }
-            }
-            "message_end" => {
-                let think_elapsed = self
-                    .active_thinking_start
-                    .take()
-                    .map(|t| t.elapsed().as_millis() as u64);
-                if let Some(msg) = ev.get("message")
-                    && msg.get("role").and_then(|v| v.as_str()) == Some("assistant")
-                    && let Some(ChatMessage::Assistant {
-                        parts,
-                        error,
-                        streaming,
-                        ..
-                    }) = self.messages.last_mut()
-                {
-                    *streaming = false;
-                    if let Some(err) = msg
-                        .get("errorMessage")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                    {
-                        *error = Some(err.to_owned());
-                    }
-                    for p in parts.iter_mut() {
-                        if let AssistantPart::Thinking {
-                            collapsed,
-                            streaming: p_stream,
-                            duration_ms,
-                            ..
-                        } = p
-                        {
-                            *p_stream = false;
-                            *collapsed = true;
-                            if duration_ms.is_none() {
-                                *duration_ms = think_elapsed;
-                            }
-                        }
-                    }
-                }
-                self.scroll_to_bottom();
-            }
-            "tool_execution_start" => {
-                let call_id = ev
-                    .get("toolCallId")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_owned();
-                let name = ev
-                    .get("toolName")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_owned();
-                let args = ev.get("args").cloned().unwrap_or(Value::Null);
-
-                if name == "write"
-                    && let Some(old) = ev.get("writeBefore").and_then(|v| v.as_str())
-                {
-                    // The host captures this before execution; reading here races the actual write.
-                    self.write_snapshots.insert(call_id.clone(), old.to_owned());
-                }
-
-                self.ensure_tool_block(&call_id, &name, &args);
-                self.scroll_to_bottom();
-            }
-            "tool_execution_update" => {
-                let call_id = ev
-                    .get("toolCallId")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let partial = extract_text_content(
-                    ev.get("partialResult").and_then(|r| r.get("content")),
-                );
-                if let Some(block) = self.find_tool_mut(call_id) {
-                    block.output = partial;
-                }
-                self.scroll_to_bottom();
-            }
-            "tool_execution_end" => {
-                let call_id = ev
-                    .get("toolCallId")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let name = ev
-                    .get("toolName")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_owned();
-                let is_err = ev.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
-                let duration_ms = ev.get("durationMs").and_then(|v| v.as_u64());
-                let output =
-                    extract_text_content(ev.get("result").and_then(|r| r.get("content")));
-                let write_before = self.write_snapshots.remove(call_id);
-                let write_new_fallback = if name == "write" && !is_err {
-                    self.find_tool_mut(call_id)
-                        .map(|block| (block.name.clone(), block.args.clone()))
-                        .map(|(block_name, mut write_args)| {
-                            if write_args.get("content").and_then(|v| v.as_str()).is_none()
-                                && let Some(rel) = extract_path_arg(&write_args)
-                                && let Ok(disk_new) =
-                                    std::fs::read_to_string(self.resolve_tool_path(&rel))
-                                && let Some(obj) = write_args.as_object_mut()
-                            {
-                                obj.insert("content".to_owned(), Value::String(disk_new));
-                            }
-                            let diffs = build_diffs_for_tool(
-                                &block_name,
-                                &write_args,
-                                write_before.as_deref(),
-                                None,
-                            );
-                            (write_args, diffs)
-                        })
-                } else {
-                    None
-                };
-
-                if let Some(block) = self.find_tool_mut(call_id) {
-                    block.done = true;
-                    block.is_error = is_err;
-                    block.duration_ms = duration_ms;
-                    if let Some(approval) = ev.pointer("/result/details").and_then(TagApproval::from_result) {
-                        block.approval = Some(approval);
-                    }
-                    if !output.is_empty() {
-                        block.output = output;
-                    }
-                    if let Some((write_args, diffs)) = write_new_fallback {
-                        block.args = write_args;
-                        block.diffs = diffs;
-                    }
-                    if name == "edit" && !is_err
-                        && let Some(patch) = ev.pointer("/result/details/patch").and_then(Value::as_str)
-                    {
-                        block.diffs = build_diffs_for_tool(&name, &block.args, None, Some(patch));
-                    }
-                    if let Some(first_diff) = block.diffs.first() {
-                        let name_only = Path::new(&first_diff.path)
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| first_diff.path.clone());
-                        block.summary = crate::i18n::ai::edited_diff(
-                            &name_only,
-                            first_diff.added,
-                            first_diff.removed,
-                        );
-                    }
-                }
-                self.scroll_to_bottom();
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_assistant_delta(&mut self, ame: &Value) {
-        let ty = ame.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let content_index = ame
-            .get("contentIndex")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-
-        if !matches!(self.messages.last(), Some(ChatMessage::Assistant { .. })) {
-            self.messages.push(ChatMessage::Assistant {
-                parts: Vec::new(),
-                error: None,
-                streaming: true,
-                duration_ms: None,
-            });
-        }
-
-        match ty {
-            "thinking_start" => {
-                self.active_thinking_start = Some(std::time::Instant::now());
-                let idx = self.push_assistant_part(AssistantPart::Thinking {
-                    text: String::new(),
-                    collapsed: false,
-                    duration_ms: None,
-                    streaming: true,
-                });
-                self.active_part_map.insert(content_index, idx);
-            }
-            "thinking_delta" => {
-                let delta = ame.get("delta").and_then(|v| v.as_str()).unwrap_or("");
-                if self.active_thinking_start.is_none() {
-                    self.active_thinking_start = Some(std::time::Instant::now());
-                }
-                let idx = self.get_or_create_part(content_index, || AssistantPart::Thinking {
-                    text: String::new(),
-                    collapsed: false,
-                    duration_ms: None,
-                    streaming: true,
-                });
-                if let Some(ChatMessage::Assistant { parts, .. }) = self.messages.last_mut()
-                    && let Some(AssistantPart::Thinking {
-                        text, streaming, ..
-                    }) = parts.get_mut(idx)
-                {
-                    text.push_str(delta);
-                    *streaming = true;
-                }
-                self.scroll_to_bottom();
-            }
-            "thinking_end" => {
-                let elapsed = self
-                    .active_thinking_start
-                    .take()
-                    .map(|t| t.elapsed().as_millis() as u64);
-                if let Some(&idx) = self.active_part_map.get(&content_index)
-                    && let Some(ChatMessage::Assistant { parts, .. }) = self.messages.last_mut()
-                    && let Some(AssistantPart::Thinking {
-                        text,
-                        collapsed,
-                        duration_ms,
-                        streaming,
-                    }) = parts.get_mut(idx)
-                {
-                    if let Some(content) = ame.get("content").and_then(|v| v.as_str()) {
-                        *text = content.to_owned();
-                    }
-                    *streaming = false;
-                    *collapsed = true;
-                    if duration_ms.is_none() {
-                        *duration_ms = elapsed;
-                    }
-                }
-                self.scroll_to_bottom();
-            }
-            "text_start" => {
-                let idx = self.push_assistant_part(AssistantPart::Text(String::new()));
-                self.active_part_map.insert(content_index, idx);
-                self.scroll_to_bottom();
-            }
-            "text_delta" => {
-                let delta = ame.get("delta").and_then(|v| v.as_str()).unwrap_or("");
-                let idx = self.get_or_create_part(content_index, || AssistantPart::Text(String::new()));
-                if let Some(ChatMessage::Assistant { parts, .. }) = self.messages.last_mut()
-                    && let Some(AssistantPart::Text(text)) = parts.get_mut(idx)
-                {
-                    text.push_str(delta);
-                }
-                self.scroll_to_bottom();
-            }
-            "text_end" => {
-                if let Some(content) = ame.get("content").and_then(|v| v.as_str())
-                    && let Some(&idx) = self.active_part_map.get(&content_index)
-                    && let Some(ChatMessage::Assistant { parts, .. }) = self.messages.last_mut()
-                    && let Some(AssistantPart::Text(text)) = parts.get_mut(idx)
-                {
-                    *text = content.to_owned();
-                }
-                self.scroll_to_bottom();
-            }
-            "toolcall_start" | "toolcall_delta" | "toolcall_end" => {
-                // Pi carries live tool arguments in partial.content, not top-level id/toolName fields.
-                let tool_call = if ty == "toolcall_end" { ame.get("toolCall") }
-                    else { ame.get("partial").and_then(|partial| partial.get("content"))
-                        .and_then(|content| content.get(content_index)) };
-                if let Some(tc) = tool_call {
-                    let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                    let name = tc
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("tool")
-                        .to_owned();
-                    let args = tc.get("arguments").cloned().unwrap_or(Value::Null);
-                    let diffs = if ty == "toolcall_end" && name == "edit" {
-                        build_diffs_for_tool(&name, &args, None, None)
-                    } else {
-                        Vec::new()
-                    };
-                    let summary = summarize_tool_call(&name, &args, &diffs);
-                    let idx = self.get_or_create_part(content_index, || AssistantPart::Tool(ToolBlock {
-                        id: id.clone(), name: name.clone(), args: args.clone(), summary: summary.clone(),
-                        output: String::new(), is_error: false, done: false, duration_ms: None,
-                        diffs: Vec::new(), expanded: false, approval: None,
-                    }));
-                    if let Some(ChatMessage::Assistant { parts, .. }) = self.messages.last_mut()
-                        && let Some(AssistantPart::Tool(block)) = parts.get_mut(idx)
-                    {
-                        block.id = id;
-                        block.name = name;
-                        block.args = args;
-                        block.summary = summary;
-                        if !diffs.is_empty() {
-                            block.diffs = diffs;
-                        }
-                    }
-                }
-                self.scroll_to_bottom();
-            }
-            _ => {}
-        }
-    }
-
-    fn push_assistant_part(&mut self, part: AssistantPart) -> usize {
-        if let Some(ChatMessage::Assistant { parts, .. }) = self.messages.last_mut() {
-            parts.push(part);
-            return parts.len() - 1;
-        }
-        0
-    }
-
-    fn get_or_create_part<F: FnOnce() -> AssistantPart>(
-        &mut self,
-        content_index: usize,
-        make: F,
-    ) -> usize {
-        if let Some(&idx) = self.active_part_map.get(&content_index) {
-            return idx;
-        }
-        let idx = self.push_assistant_part(make());
-        self.active_part_map.insert(content_index, idx);
-        idx
-    }
-
-    fn ensure_tool_block(&mut self, call_id: &str, name: &str, args: &Value) {
-        let diffs = if name == "edit" {
-            build_diffs_for_tool(name, args, None, None)
-        } else {
-            Vec::new()
-        };
-        let summary = summarize_tool_call(name, args, &diffs);
-        if let Some(block) = self.find_tool_mut(call_id) {
-            block.args = args.clone();
-            block.summary = summary;
-            if !diffs.is_empty() {
-                block.diffs = diffs;
-            }
-            return;
-        }
-        self.push_assistant_part(AssistantPart::Tool(ToolBlock {
-            id: call_id.to_owned(),
-            name: name.to_owned(),
-            args: args.clone(),
-            summary,
-            output: String::new(),
-            is_error: false,
-            done: false,
-            duration_ms: None,
-            diffs,
-            expanded: false,
-            approval: None,
-        }));
-    }
-
-    fn find_tool_mut(&mut self, call_id: &str) -> Option<&mut ToolBlock> {
-        for msg in self.messages.iter_mut().rev() {
-            if let ChatMessage::Assistant { parts, .. } = msg {
-                for part in parts.iter_mut().rev() {
-                    if let AssistantPart::Tool(block) = part
-                        && block.id == call_id
-                    {
-                        return Some(block);
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    fn handle_ext_ui_request(&mut self, req: &Value, cx: &mut Context<Self>) {
-        let id = req.get("id").and_then(|v| v.as_str()).unwrap_or("").to_owned();
-        let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("");
-        match method {
-            "confirm" => {
-                let title = req
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(crate::i18n::ai::PROMPT_CONFIRM.get())
-                    .to_owned();
-                let message = req
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_owned();
-                let command_approval = req["commandApproval"].as_bool() == Some(true)
-                    || title.contains("bash")
-                    || title.contains("powershell");
-                let content = if command_approval {
-                    ConfirmationContent::Command(message)
-                } else {
-                    ConfirmationContent::Message(message)
-                };
-                if matches!(content, ConfirmationContent::Command(_)) && self.auto_approve_shell {
-                    if let Some(client) = &self.client {
-                        let _ = client.respond_extension_confirm(&id, true);
-                    }
-                    return;
-                }
-                self.pending_ui = Some(PendingExtensionUi {
-                    id,
-                    title,
-                    kind: PendingUiKind::Confirm(content),
-                });
-                self.scroll_to_bottom();
-            }
-            "select" => {
-                let title = req
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(crate::i18n::ai::PROMPT_SELECT.get())
-                    .to_owned();
-                let options = req
-                    .get("options")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(str::to_owned))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                self.pending_ui = Some(PendingExtensionUi {
-                    id,
-                    title,
-                    kind: PendingUiKind::Select { options },
-                });
-                self.scroll_to_bottom();
-            }
-            "input" => {
-                let title = req
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(crate::i18n::ai::PROMPT_INPUT.get())
-                    .to_owned();
-                let placeholder = req
-                    .get("placeholder")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_owned();
-                self.pending_ui = Some(PendingExtensionUi {
-                    id,
-                    title,
-                    kind: PendingUiKind::TextInput {
-                        placeholder,
-                        multiline: false,
-                    },
-                });
-                self.pending_ext_prefill = Some((String::new(), false));
-                self.scroll_to_bottom();
-            }
-            "editor" => {
-                let title = req
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(crate::i18n::ai::PROMPT_EDIT.get())
-                    .to_owned();
-                let prefill = req
-                    .get("prefill")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_owned();
-                self.pending_ext_prefill = Some((prefill.clone(), true));
-                self.pending_ui = Some(PendingExtensionUi {
-                    id,
-                    title,
-                    kind: PendingUiKind::TextInput {
-                        placeholder: prefill,
-                        multiline: true,
-                    },
-                });
-                self.scroll_to_bottom();
-            }
-            "notify" => {
-                let message = req
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_owned();
-                let is_error = req.get("notifyType").and_then(|v| v.as_str()) == Some("error");
-                if !message.is_empty() && is_error {
-                    self.show_toast(message, true, cx);
-                }
-            }
-            "setStatus" => {
-                if let Some(key) = req.get("statusKey").and_then(|v| v.as_str()) {
-                    match req.get("statusText").and_then(|v| v.as_str()) {
-                        Some(text) if !text.is_empty() => {
-                            self.ext_statuses.insert(key.to_owned(), text.to_owned());
-                        }
-                        _ => {
-                            self.ext_statuses.remove(key);
-                        }
-                    }
-                }
-            }
-            "setWidget" => {
-                if let Some(key) = req.get("widgetKey").and_then(|v| v.as_str()) {
-                    match req.get("widgetLines").and_then(|v| v.as_array()) {
-                        Some(lines) if !lines.is_empty() => {
-                            let collected = lines
-                                .iter()
-                                .filter_map(|v| v.as_str().map(str::to_owned))
-                                .collect();
-                            self.ext_widgets.insert(key.to_owned(), collected);
-                        }
-                        _ => {
-                            self.ext_widgets.remove(key);
-                        }
-                    }
-                }
-            }
-            "set_editor_text" => {
-                if let Some(text) = req.get("text").and_then(|v| v.as_str()) {
-                    self.pending_composer_text = Some(text.to_owned());
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn respond_confirm(
         &mut self,
         id: &str,
@@ -1649,47 +625,27 @@ impl ChatPane {
         auto_allow_shell: bool,
         cx: &mut Context<Self>,
     ) {
-        // A click from an old render must not confirm the next queued request.
-        let Some(pending) = self.pending_ui.take_if(|pending| pending.id == id) else {
-            return;
-        };
-        self.auto_approve_shell |= auto_allow_shell;
-        if let Some(client) = &self.client {
-            let _ = client.respond_extension_confirm(&pending.id, confirmed);
-        }
+        self.session.borrow_mut().respond_confirm(id, confirmed, auto_allow_shell);
         cx.notify();
     }
 
     fn respond_select(&mut self, option: String, cx: &mut Context<Self>) {
-        if let Some(pending) = self.pending_ui.take()
-            && let Some(client) = &self.client
-        {
-            let _ = client.respond_extension_value(&pending.id, &option);
-        }
+        self.session.borrow_mut().respond_extension(Some(&option));
         cx.notify();
     }
 
     fn submit_pending_ext_text(&mut self, multiline: bool, cx: &mut Context<Self>) {
-        let Some(pending) = self.pending_ui.take() else {
-            return;
-        };
         let value = if multiline {
             self.ext_textarea.read(cx).value().to_string()
         } else {
             self.ext_input.read(cx).value().to_string()
         };
-        if let Some(client) = &self.client {
-            let _ = client.respond_extension_value(&pending.id, &value);
-        }
+        self.session.borrow_mut().respond_extension(Some(&value));
         cx.notify();
     }
 
     fn cancel_pending_ext(&mut self, cx: &mut Context<Self>) {
-        if let Some(pending) = self.pending_ui.take()
-            && let Some(client) = &self.client
-        {
-            let _ = client.respond_extension_cancelled(&pending.id);
-        }
+        self.session.borrow_mut().respond_extension(None);
         cx.notify();
     }
 
@@ -1745,8 +701,7 @@ impl ChatPane {
     }
 
     fn slash_items(&self) -> Vec<SlashItem> {
-        let pct_label = self
-            .context_usage
+        let pct_label = self.session.borrow().context_usage
             .as_ref()
             .and_then(|cu| cu.percent)
             .map(crate::i18n::ai::compact_subtitle_used)
@@ -1780,7 +735,7 @@ impl ChatPane {
             action: SlashAction::Compact,
         });
 
-        for cmd in &self.commands {
+        for cmd in &self.session.borrow().commands {
             if cmd.source != "skill" {
                 continue;
             }
@@ -1877,7 +832,7 @@ impl ChatPane {
         }
         self.input.update(cx, |input, cx| {
             for path in paths {
-                let rel = path_for_prompt(&self.cwd, path);
+                let rel = path_for_prompt(&self.session.borrow().cwd, path);
                 if rel.trim().is_empty() {
                     continue;
                 }
@@ -1911,7 +866,7 @@ impl ChatPane {
     fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dialog = rfd::AsyncFileDialog::new()
             .set_parent(window)
-            .set_directory(&self.cwd)
+            .set_directory(&self.session.borrow().cwd)
             .set_title(crate::i18n::ai::DIALOG_PICK_ATTACHMENT.get());
         cx.spawn_in(window, async move |this, cx| {
             let Some(files) = dialog.pick_files().await else {
@@ -1997,7 +952,7 @@ impl ChatPane {
     }
 
     fn send_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_streaming {
+        if self.session.borrow().is_streaming {
             return;
         }
         let content = self.input.read(cx).content();
@@ -2012,13 +967,6 @@ impl ChatPane {
             self.compact_context(cx);
             return;
         }
-
-        if self.client.is_none() {
-            self.start_rpc(cx);
-        }
-        let Some(client) = &self.client else {
-            return;
-        };
 
         let mut skills: Vec<String> = Vec::new();
         let mut clean_body = String::with_capacity(raw_text.len());
@@ -2068,7 +1016,7 @@ impl ChatPane {
         if let Some(file) = &attached
             && !body_trimmed.starts_with('/')
         {
-            let rel = path_for_prompt(&self.cwd, &file.path);
+            let rel = path_for_prompt(&self.session.borrow().cwd, &file.path);
             payload.push('@');
             payload.push_str(&rel);
             payload.push_str("\n\n");
@@ -2076,55 +1024,46 @@ impl ChatPane {
         append_quotes(&mut payload, &quotes);
         payload.push_str(body_trimmed);
 
-        if let Err(err) = client.prompt_with_images(&payload, &rpc_images, body_trimmed) {
-            self.show_toast(crate::i18n::ai::send_failed(&err), true, cx);
-            return;
-        }
-
-        self.messages.push(ChatMessage::User {
+        let message = ChatMessage::User {
             display_text: body_trimmed.to_owned(),
             attached_file: attached.map(|f| f.display),
             mounted_skills: skills,
             quotes,
             images: msg_images,
-        });
+        };
+        let result = self.session.borrow_mut().submit_prompt(&payload, &rpc_images, body_trimmed, message);
+        match result {
+            Ok(true) => {}
+            Ok(false) => {
+                cx.notify();
+                return;
+            }
+            Err(err) => {
+                self.show_toast(crate::i18n::ai::send_failed(&err), true, cx);
+                return;
+            }
+        }
         self.quoted_selections.clear();
         self.pasted_images.clear();
         self.quote_popover = None;
         self.input.update(cx, |input, cx| {
             input.set_value(String::new(), window, cx);
         });
-        self.is_streaming = true;
-        self.active_run_start = Some(std::time::Instant::now());
         self.stick_to_bottom = true;
         self.scroll_to_bottom();
         cx.notify();
     }
 
     fn abort(&mut self, cx: &mut Context<Self>) {
-        if let Some(client) = &self.client {
+        if let Some(client) = &self.session.borrow().client {
             let _ = client.abort();
         }
         cx.notify();
     }
 
     fn compact_context(&mut self, cx: &mut Context<Self>) {
-        if let Some(client) = &self.client
-            && !self.is_compacting
-        {
-            self.is_compacting = true;
-            let _ = client.compact();
-            cx.notify();
-        }
-    }
-
-    fn resolve_tool_path(&self, raw: &str) -> PathBuf {
-        let p = Path::new(raw);
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            self.cwd.join(p)
-        }
+        self.session.borrow_mut().compact();
+        cx.notify();
     }
 
     fn scroll_to_bottom(&self) {
@@ -2442,7 +1381,7 @@ impl ChatPane {
                             // Relative citations belong to the conversation's workspace.
                             let path = if relative {
                                 let path = url.split(['#', '?']).next().expect("link has a path");
-                                Some(pane.cwd.join(crate::files::percent_decode(path)))
+                                Some(pane.session.borrow().cwd.join(crate::files::percent_decode(path)))
                             } else {
                                 url::Url::parse(url).ok().and_then(|uri| uri.to_file_path().ok())
                             };
@@ -2516,12 +1455,13 @@ impl ChatPane {
         let ps = ProcessStyle::from_theme(palette, typo);
         let (code_font, _) = crate::theme::tool_typography(&self.settings);
 
+        let session = self.session.borrow();
         let mut all_parts: Vec<(usize, usize, &AssistantPart)> = Vec::new();
         let mut run_streaming = false;
         let mut errors: Vec<String> = Vec::new();
         let mut recorded_duration_ms: Option<u64> = None;
 
-        for (m_idx, msg) in self.messages[run_start..run_end].iter().enumerate() {
+        for (m_idx, msg) in session.messages[run_start..run_end].iter().enumerate() {
             let abs_msg_idx = run_start + m_idx;
             if let ChatMessage::Assistant {
                 parts,
@@ -2553,7 +1493,7 @@ impl ChatPane {
             .iter()
             .any(|(_, _, p)| matches!(p, AssistantPart::Thinking { streaming, .. } if *streaming));
         let is_task_running =
-            run_streaming || any_tool_running || any_thinking_running || (is_last_run && self.is_streaming);
+            run_streaming || any_tool_running || any_thinking_running || (is_last_run && self.session.borrow().is_streaming);
 
         let run_has_error = !errors.is_empty()
             || all_parts
@@ -2589,7 +1529,6 @@ impl ChatPane {
             match part {
                 AssistantPart::Thinking {
                     text,
-                    collapsed,
                     duration_ms,
                     streaming,
                 } => {
@@ -2605,7 +1544,6 @@ impl ChatPane {
                         msg_idx: m_idx,
                         part_idx: p_idx,
                         text,
-                        collapsed: *collapsed,
                         duration_ms: *duration_ms,
                         streaming: *streaming,
                     });
@@ -2659,8 +1597,8 @@ impl ChatPane {
             || (show_tool_details != self.toggled_task_processes.contains(&run_start));
 
         let total_elapsed_ms = recorded_duration_ms.or_else(|| {
-            if is_last_run && self.is_streaming {
-                self.active_run_start
+            if is_last_run && self.session.borrow().is_streaming {
+                session.active_run_start
                     .map(|t| t.elapsed().as_millis() as u64)
             } else {
                 let summed = sum_tool_ms.saturating_add(sum_think_ms);
@@ -2924,7 +1862,6 @@ impl ChatPane {
                 msg_idx,
                 part_idx,
                 text,
-                collapsed,
                 duration_ms,
                 streaming,
             } = first
@@ -2938,7 +1875,8 @@ impl ChatPane {
             };
             let msg_idx = *msg_idx;
             let part_idx = *part_idx;
-            let expanded = !*collapsed || *streaming;
+            let running = *streaming;
+            let expanded = running || self.expanded_thinking.contains(&(msg_idx, part_idx));
             return div()
                 .flex()
                 .flex_col()
@@ -2954,14 +1892,10 @@ impl ChatPane {
                         ps,
                     )
                     .on_click(cx.listener(move |pane, _, _, cx| {
-                        if let Some(ChatMessage::Assistant { parts, .. }) =
-                            pane.messages.get_mut(msg_idx)
-                            && let Some(AssistantPart::Thinking { collapsed, .. }) =
-                                parts.get_mut(part_idx)
-                        {
-                            *collapsed = !*collapsed;
-                            cx.notify();
+                        if !running && !pane.expanded_thinking.remove(&(msg_idx, part_idx)) {
+                            pane.expanded_thinking.insert((msg_idx, part_idx));
                         }
+                        cx.notify();
                     })),
                 )
                 .when(expanded && !text.trim().is_empty(), |col| {
@@ -3031,13 +1965,13 @@ impl ChatPane {
                                 msg_idx,
                                 part_idx,
                                 text,
-                                collapsed,
                                 duration_ms,
                                 streaming,
                             } => {
                                 let msg_idx = *msg_idx;
                                 let part_idx = *part_idx;
-                                let expanded = !*collapsed || *streaming;
+                                let running = *streaming;
+                                let expanded = running || self.expanded_thinking.contains(&(msg_idx, part_idx));
                                 let label = if *streaming {
                                     crate::i18n::ai::STILL_THINKING.get().to_owned()
                                 } else if let Some(ms) = *duration_ms {
@@ -3062,16 +1996,10 @@ impl ChatPane {
                                             ps,
                                         )
                                         .on_click(cx.listener(move |pane, _, _, cx| {
-                                            if let Some(ChatMessage::Assistant { parts, .. }) =
-                                                pane.messages.get_mut(msg_idx)
-                                                && let Some(AssistantPart::Thinking {
-                                                    collapsed,
-                                                    ..
-                                                }) = parts.get_mut(part_idx)
-                                            {
-                                                *collapsed = !*collapsed;
-                                                cx.notify();
+                                            if !running && !pane.expanded_thinking.remove(&(msg_idx, part_idx)) {
+                                                pane.expanded_thinking.insert((msg_idx, part_idx));
                                             }
+                                            cx.notify();
                                         })),
                                     )
                                     .when(expanded && !text.trim().is_empty(), |box_| {
@@ -3170,7 +2098,7 @@ impl ChatPane {
                 .flex_col()
                 .gap(ps.row_gap)
                 .children(block.diffs.iter().enumerate().map(|(diff_idx, diff)| {
-                    let target = self.resolve_tool_path(&diff.path);
+                    let target = self.session.borrow().resolve_tool_path(&diff.path);
                     let diff_key = format!("{msg_idx}:{part_idx}:{diff_idx}:{}", diff.path);
                     let unviewed = !self.viewed_diff_files.contains(&diff_key);
                     let is_created = block.name == "write" && diff.removed == 0 && diff.added > 0;
@@ -3199,18 +2127,15 @@ impl ChatPane {
                             let diff_key = diff_key.clone();
                             move |pane, _, _, cx| {
                                 pane.viewed_diff_files.insert(diff_key.clone());
-                                if let Some(ChatMessage::Assistant { parts, .. }) =
-                                    pane.messages.get_mut(msg_idx)
-                                    && let Some(AssistantPart::Tool(b)) = parts.get_mut(part_idx)
-                                {
-                                    b.expanded = !b.expanded;
+                                if !pane.expanded_diffs.remove(&(msg_idx, part_idx)) {
+                                    pane.expanded_diffs.insert((msg_idx, part_idx));
                                 }
                                 cx.notify();
                             }
                         }),
                     );
                     div().min_w_0().flex().flex_col().child(row).when(
-                        block.expanded && (!diff.lines.is_empty()
+                        self.expanded_diffs.contains(&(msg_idx, part_idx)) && (!diff.lines.is_empty()
                             || diff.patch.as_ref().is_some_and(|patch| !patch.line_numbers.is_empty())),
                         |el| el.child(self.render_diff_card(
                             format!("ai-diff-{msg_idx}-{part_idx}-{diff_idx}-{}", block.id).into(),
@@ -3378,13 +2303,12 @@ impl ChatPane {
     }
 
     fn render_context_ring(&self, palette: Palette) -> AnyElement {
-        let pct = self
-            .context_usage
+        let pct = self.session.borrow().context_usage
             .as_ref()
             .and_then(|cu| cu.percent)
             .unwrap_or(0)
             .min(100);
-        let tip = match &self.context_usage {
+        let tip = match &self.session.borrow().context_usage {
             Some(cu) => {
                 let used = cu.tokens.unwrap_or(0) / 1000;
                 let total = cu.context_window / 1000;
@@ -3400,7 +2324,7 @@ impl ChatPane {
         } else {
             gpui_kit::rgb(palette.accent)
         };
-        let fraction = match &self.context_usage {
+        let fraction = match &self.session.borrow().context_usage {
             Some(cu) if cu.context_window > 0 => cu
                 .tokens
                 .map(|t| (t as f32 / cu.context_window as f32).clamp(0.0, 1.0))
@@ -3593,11 +2517,11 @@ impl ChatPane {
             .value()
             .trim()
             .to_ascii_lowercase();
-        let current_id = self.current_model.as_ref().map(|m| m.id.as_str());
-        let supports_thinking = self.current_model.as_ref().is_none_or(|m| m.reasoning);
+        let session = self.session.borrow();
+        let current_id = session.current_model.as_ref().map(|m| m.id.as_str());
+        let supports_thinking = session.current_model.as_ref().is_none_or(|m| m.reasoning);
 
-        let mut models: Vec<(bool, ModelInfo)> = self
-            .available_models
+        let mut models: Vec<(bool, ModelInfo)> = self.session.borrow().available_models
             .iter()
             .filter(|m| {
                 search_q.is_empty()
@@ -3722,7 +2646,7 @@ impl ChatPane {
                                         .py_4()
                                         .text_size(typo.sm)
                                         .text_color(gpui_kit::rgb(palette.muted))
-                                        .child(if self.available_models.is_empty() {
+                                        .child(if self.session.borrow().available_models.is_empty() {
                                             crate::i18n::ai::NO_MODELS_AVAILABLE.get()
                                         } else {
                                             crate::i18n::ai::NO_MATCHING_MODELS.get()
@@ -3749,7 +2673,7 @@ impl ChatPane {
                                         r.hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
                                     })
                                     .on_click(cx.listener(move |pane, _, _, cx| {
-                                        if let Some(client) = &pane.client {
+                                        if let Some(client) = &pane.session.borrow().client {
                                             let _ = client.set_model(&provider, &model_id);
                                         }
                                         cx.notify();
@@ -3856,9 +2780,9 @@ impl ChatPane {
                                 )
                             })
                             .when(supports_thinking, |col| {
-                                col.children(self.thinking_levels.iter().enumerate().map(
+                                col.children(self.session.borrow().thinking_levels.iter().enumerate().map(
                                     |(idx, lvl)| {
-                                        let checked = self.current_thinking == *lvl;
+                                        let checked = self.session.borrow().current_thinking == *lvl;
                                         let lvl_set = lvl.clone();
                                         div()
                                             .id(("ai-think-row", idx))
@@ -3875,10 +2799,7 @@ impl ChatPane {
                                                 r.hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
                                             })
                                             .on_click(cx.listener(move |pane, _, _, cx| {
-                                                pane.current_thinking = lvl_set.clone();
-                                                if let Some(client) = &pane.client {
-                                                    let _ = client.set_thinking_level(&lvl_set);
-                                                }
+                                                pane.session.borrow_mut().set_thinking(&lvl_set);
                                                 pane.model_popover_open = false;
                                                 cx.notify();
                                             }))
@@ -4068,13 +2989,13 @@ impl ChatPane {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let model_label = self
-            .current_model
+        let session = self.session.borrow();
+        let model_label = session.current_model
             .as_ref()
             .map(|m| short_model_name(&m.name))
             .unwrap_or_else(|| crate::i18n::ai::MODEL_FALLBACK.get().to_owned());
-        let selected_model = self.current_model.as_ref();
-        let supports_thinking = self.current_model.as_ref().is_none_or(|m| m.reasoning);
+        let selected_model = session.current_model.as_ref();
+        let supports_thinking = self.session.borrow().current_model.as_ref().is_none_or(|m| m.reasoning);
         let attached_chip = self.effective_attached_file().cloned();
         let has_chips = attached_chip.is_some()
             || !self.quoted_selections.is_empty()
@@ -4406,7 +3327,7 @@ impl ChatPane {
                                          _,
                                          cx| {
                                             if let Some(rel) = ev.token().id().strip_prefix("file:") {
-                                                let target = pane.resolve_tool_path(rel);
+                                                let target = pane.session.borrow().resolve_tool_path(rel);
                                                 cx.emit(AiPaneEvent::OpenFile(target));
                                             }
                                         },
@@ -4527,7 +3448,7 @@ impl ChatPane {
                                             .gap_1()
                                             .text_size(typo.sm)
                                             .text_color(gpui_kit::rgb(
-                                                if self.auto_approve_shell {
+                                                if self.session.borrow().auto_approve_shell {
                                                     palette.danger
                                                 } else {
                                                     palette.muted
@@ -4539,11 +3460,12 @@ impl ChatPane {
                                                     .build(window, cx)
                                             })
                                             .on_click(cx.listener(|pane, _, _, cx| {
-                                                pane.auto_approve_shell = !pane.auto_approve_shell;
+                                                let mut session = pane.session.borrow_mut();
+                                                session.auto_approve_shell = !session.auto_approve_shell;
                                                 cx.notify();
                                             }))
                                             .child(
-                                                crate::ui::icon(if self.auto_approve_shell {
+                                                crate::ui::icon(if self.session.borrow().auto_approve_shell {
                                                     IconName::ShieldAlert
                                                 } else {
                                                     IconName::Shield
@@ -4551,7 +3473,7 @@ impl ChatPane {
                                                 .w(px(13.))
                                                 .h(px(13.)),
                                             )
-                                            .child(if self.auto_approve_shell {
+                                            .child(if self.session.borrow().auto_approve_shell {
                                                 crate::i18n::ai::PERM_FULL_ACCESS.get()
                                             } else {
                                                 crate::i18n::ai::PERM_ASK.get()
@@ -4624,7 +3546,7 @@ impl ChatPane {
                                                         .flex_shrink_0()
                                                         .text_color(fg_alpha(palette.text, 0.40))
                                                         .child(thinking_short_label(
-                                                            &self.current_thinking,
+                                                            &self.session.borrow().current_thinking,
                                                         )),
                                                 )
                                             })
@@ -4651,7 +3573,7 @@ impl ChatPane {
                                                     ),
                                             )
                                     })
-                                    .child(if self.is_streaming {
+                                    .child(if self.session.borrow().is_streaming {
                                         div()
                                             .id("ai-abort")
                                             .size(px(28.))
@@ -4733,12 +3655,12 @@ impl Render for ChatPane {
         let typo = AiTypography::from_settings(&self.settings);
         let ui_font = crate::ui::sans_font(&self.settings.ai_font);
 
-        let is_welcome = self.messages.is_empty()
-            && self.startup_error.is_none()
-            && self.pending_ui.is_none()
-            && self.ext_widgets.is_empty();
+        let is_welcome = self.session.borrow().messages.is_empty()
+            && self.session.borrow().startup_error.is_none()
+            && self.session.borrow().pending_ui.is_none()
+            && self.session.borrow().ext_widgets.is_empty();
         let md_style = self.md_style(typo.body, cx);
-        let total_msgs = self.messages.len();
+        let total_msgs = self.session.borrow().messages.len();
 
         let user_bubble_bg = mix_color(
             palette.surface,
@@ -4803,7 +3725,7 @@ impl Render for ChatPane {
                 pane.insert_path_tokens(&dragged.0, window, cx);
             }))
             .on_drop(cx.listener(|pane, dragged: &DraggedFolder, window, cx| {
-                let full = pane.cwd.join(&dragged.0);
+                let full = pane.session.borrow().cwd.join(&dragged.0);
                 pane.insert_path_tokens(&[full], window, cx);
             }))
             .on_drop(cx.listener(|pane, external: &ExternalPaths, window, cx| {
@@ -4827,7 +3749,7 @@ impl Render for ChatPane {
                 root.child(self.render_welcome(palette, typo, &ui_font, window, cx))
             })
             .when(!is_welcome, |root| {
-                if self.is_streaming && self.stick_to_bottom {
+                if self.session.borrow().is_streaming && self.stick_to_bottom {
                     self.scroll.scroll_to_bottom();
                 }
                 let thumb_bg = if palette.is_dark() { 0x45474b } else { 0xd9d9d7 };
@@ -4866,7 +3788,7 @@ impl Render for ChatPane {
                                 .flex()
                                 .flex_col()
                                 .gap_3p5()
-                                .when_some(self.startup_error.clone(), |stream, err| {
+                                .when_some(self.session.borrow().startup_error.clone(), |stream, err| {
                                     stream.child(
                                         div()
                                             .p_2p5()
@@ -4888,7 +3810,8 @@ impl Render for ChatPane {
                                                     .compact()
                                                     .label(crate::i18n::common::RETRY.get())
                                                     .on_click(cx.listener(|pane, _, _, cx| {
-                                                        pane.start_rpc(cx);
+                                                        pane.session.borrow_mut().connect();
+                                                        cx.notify();
                                                     })),
                                             ),
                                     )
@@ -4898,8 +3821,8 @@ impl Render for ChatPane {
                         let mut msg_idx = 0usize;
                         while msg_idx < total_msgs {
                             // The startup banner is also an immediate scroll child and must count toward jump indices.
-                            let item = rendered_messages.len() + usize::from(self.startup_error.is_some());
-                            match &self.messages[msg_idx] {
+                            let item = rendered_messages.len() + usize::from(self.session.borrow().startup_error.is_some());
+                            match &self.session.borrow().messages[msg_idx] {
                                 ChatMessage::User {
                                     display_text,
                                     attached_file,
@@ -5088,13 +4011,13 @@ impl Render for ChatPane {
                                     let run_start = msg_idx;
                                     let mut run_end = msg_idx + 1;
                                     while matches!(
-                                        self.messages.get(run_end),
+                                        self.session.borrow().messages.get(run_end),
                                         Some(ChatMessage::Assistant { .. })
                                     ) {
                                         run_end += 1;
                                     }
                                     // Preview only visible prose; thinking and tool logs stay out of navigation cards.
-                                    let preview: String = self.messages[run_start..run_end].iter()
+                                    let preview: String = self.session.borrow().messages[run_start..run_end].iter()
                                         .flat_map(|message| match message {
                                             ChatMessage::Assistant { parts, .. } => parts.as_slice(),
                                             _ => &[],
@@ -5240,10 +4163,10 @@ impl Render for ChatPane {
                     ),
                 )
             })
-            .when_some(self.pending_ui.as_ref(), |root, pending| {
+            .when_some(self.session.borrow().pending_ui.as_ref(), |root, pending| {
                 root.child(self.render_pending_ui(pending, palette, cx))
             })
-            .when(!self.ext_widgets.is_empty(), |root| {
+            .when(!self.session.borrow().ext_widgets.is_empty(), |root| {
                 root.child(
                     div()
                         .mx_3()
@@ -5256,7 +4179,7 @@ impl Render for ChatPane {
                         .text_size(typo.sm)
                         .text_color(gpui_kit::rgb(palette.muted))
                         .children(
-                            self.ext_widgets
+                            self.session.borrow().ext_widgets
                                 .values()
                                 .flat_map(|lines| lines.iter().cloned())
                                 .map(|l| div().child(l)),
@@ -5376,7 +4299,6 @@ enum ProcessStep<'a> {
         msg_idx: usize,
         part_idx: usize,
         text: &'a str,
-        collapsed: bool,
         duration_ms: Option<u64>,
         streaming: bool,
     },
