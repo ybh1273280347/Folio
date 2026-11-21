@@ -332,6 +332,7 @@ pub struct Workspace {
     right_panel_selected: usize,
     sidebar_drag: Option<(f32, f32)>,
     right_panel_drag: Option<(f32, f32)>,
+    resize_save_task: Task<()>,
     preview: Option<PathBuf>,
     build_pdf: Option<Entity<PdfPane>>,
     pdf_panes: BTreeMap<String, Entity<PdfPane>>,
@@ -802,6 +803,7 @@ impl Workspace {
             right_panel_selected: 0,
             sidebar_drag: None,
             right_panel_drag: None,
+            resize_save_task: Task::ready(()),
             preview: None,
             build_pdf: None,
             pdf_panes: BTreeMap::new(),
@@ -920,6 +922,19 @@ impl Workspace {
 
     fn is_sidebar_open(&self) -> bool {
         self.settings.sidebar_open
+    }
+
+    fn schedule_resize_save(&mut self, cx: &mut Context<Self>) {
+        self.resize_save_task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if let Err(error) = storage::save_settings(&app.settings) {
+                    app.report(error, cx);
+                }
+            });
+        });
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -5679,12 +5694,10 @@ impl Render for Workspace {
                             return;
                         };
                         let delta = f32::from(event.event.position.x) - start_x;
-                        let next_w = (start_w - delta).clamp(280., 1600.);
-                        if (app.settings.terminal.panel_width - next_w).abs() > 0.5 {
+                        let next_w = (start_w - delta).clamp(280., 1600.).round();
+                        if (app.settings.terminal.panel_width - next_w).abs() >= 1.0 {
                             app.settings.terminal.panel_width = next_w;
-                            if let Err(error) = storage::save_settings(&app.settings) {
-                                app.report(error, cx);
-                            }
+                            app.schedule_resize_save(cx);
                             cx.notify();
                         }
                     },
@@ -6053,12 +6066,10 @@ impl Render for Workspace {
                                     return;
                                 };
                                 let delta = f32::from(event.event.position.x) - start_x;
-                                let next_w = (start_w + delta).clamp(170., 520.);
-                                if (app.settings.sidebar_width - next_w).abs() > 0.5 {
+                                let next_w = (start_w + delta).clamp(170., 520.).round();
+                                if (app.settings.sidebar_width - next_w).abs() >= 1.0 {
                                     app.settings.sidebar_width = next_w;
-                                    if let Err(error) = storage::save_settings(&app.settings) {
-                                        app.report(error, cx);
-                                    }
+                                    app.schedule_resize_save(cx);
                                     cx.notify();
                                 }
                             },
