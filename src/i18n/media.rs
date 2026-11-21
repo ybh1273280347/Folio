@@ -390,3 +390,37 @@ pub fn term_err_job(err: &dyn std::fmt::Display) -> String {
         Locale::En => format!("Failed to manage terminal process: {err}"),
     }
 }
+
+// Draw.io WebView2 editor (src/web_view/drawio.rs)
+pub const DRAWIO_INITIALIZING: BiText = BiText::new("正在初始化 draw.io…", "Initializing draw.io…");
+pub const DRAWIO_PAUSED: BiText = BiText::new("绘图视图已暂停显示", "Diagram editor paused");
+pub const DRAWIO_INIT_FAILED: BiText = BiText::new("draw.io 初始化失败", "draw.io initialization failed");
+pub const DRAWIO_STATUS_SAVED: BiText = BiText::new("已保存", "Saved");
+pub const DRAWIO_STATUS_SAVING: BiText = BiText::new("保存中…", "Saving…");
+pub const DRAWIO_STATUS_UNSAVED: BiText = BiText::new("未保存", "Unsaved");
+pub const DRAWIO_SAVE: BiText = BiText::new("保存", "Save");
+pub const DRAWIO_EXPORT_PDF: BiText = BiText::new("导出 PDF", "Export PDF");
+pub const DRAWIO_EXPORT_SVG: BiText = BiText::new("导出 SVG", "Export SVG");
+pub const DRAWIO_EXPORT_PNG: BiText = BiText::new("导出 PNG", "Export PNG");
+pub const DRAWIO_ERR_MISSING_ASSETS: BiText = BiText::new(
+    "未找到 draw.io 离线资源目录（resources/drawio），请先运行 scripts/install-drawio.ps1",
+    "draw.io offline assets (resources/drawio) not found; run scripts/install-drawio.ps1 first",
+);
+pub fn drawio_exported(path: &Path) -> String {
+    match locale() {
+        Locale::ZhCn => format!("已导出：{}", path.display()),
+        Locale::En => format!("Exported: {}", path.display()),
+    }
+}
+pub fn drawio_err_io(err: &dyn std::fmt::Display) -> String {
+    match locale() {
+        Locale::ZhCn => format!("draw.io 文件读写失败：{err}"),
+        Locale::En => format!("draw.io file I/O failed: {err}"),
+    }
+}
+pub fn drawio_err_export(err: &dyn std::fmt::Display) -> String {
+    match locale() {
+        Locale::ZhCn => format!("draw.io 导出失败：{err}"),
+        Locale::En => format!("draw.io export failed: {err}"),
+    }
+}

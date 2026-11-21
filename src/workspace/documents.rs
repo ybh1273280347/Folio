@@ -49,6 +49,7 @@ pub(super) struct Documents {
     pub(super) markdown_panes: BTreeMap<PaneKey, Entity<MarkdownPane>>,
     pub(super) pdf_panes: BTreeMap<PaneKey, Entity<PdfPane>>,
     pub(super) html_panes: BTreeMap<PaneKey, Entity<HtmlPane>>,
+    pub(super) drawio_panes: BTreeMap<PaneKey, Entity<DrawioPane>>,
     pub(super) markdown_changed: BTreeSet<String>,
     pub(super) source_version: u64,
     pub(super) document_watch: DocumentWatch,
@@ -102,17 +103,25 @@ impl Workspace {
 
 impl Workspace {
     pub(super) fn file_kind(path: &Path) -> FileKind {
+        if files::is_drawio(path) {
+            return FileKind::Asset;
+        }
         match path
             .extension()
             .and_then(|extension| extension.to_str())
             .map(str::to_ascii_lowercase)
             .as_deref()
         {
-            Some("pdf" | "png" | "jpg" | "jpeg" | "webp" | "gif" | "html" | "htm") => {
+            Some("pdf" | "png" | "jpg" | "jpeg" | "webp" | "gif" | "html" | "htm" | "drawio") => {
                 FileKind::Asset
             }
             _ => FileKind::Text,
         }
+    }
+
+    pub(super) fn is_drawio_path(path: &str) -> bool {
+        let lower = path.to_lowercase();
+        lower.ends_with(".drawio") || lower.ends_with(".drawio.svg")
     }
 
     pub(super) fn is_html_path(path: &str) -> bool {
@@ -173,6 +182,48 @@ impl Workspace {
         }
     }
 
+    fn add_drawio_pane(
+        &mut self,
+        key: PaneKey,
+        file_path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let is_reading = key.role == PaneRole::Reading;
+        let pane = cx.new(|cx| DrawioPane::new(file_path, is_reading, cx));
+        let close_key = key.path.clone();
+        cx.subscribe_in(
+            &pane,
+            window,
+            move |app, _, event: &DrawioPaneEvent, window, cx| match event {
+                DrawioPaneEvent::Close => {
+                    if is_reading {
+                        app.close_reading_pane(&close_key, window, cx);
+                    } else {
+                        app.close_tab(&close_key, window, cx);
+                    }
+                }
+                DrawioPaneEvent::OpenExternal(url) => cx.open_url(url),
+                DrawioPaneEvent::Notice(message) => app.report(message.clone(), cx),
+                DrawioPaneEvent::Error(message) => app.report(message.clone(), cx),
+            },
+        )
+        .detach();
+        self.documents.drawio_panes.insert(key, pane);
+    }
+
+    pub(super) fn release_drawio_pane(&mut self, key: &PaneKey, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pane) = self.documents.drawio_panes.remove(key) {
+            pane.update(cx, |pane, cx| pane.release(window, cx));
+        }
+    }
+
+    pub(super) fn release_all_drawio_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for (_, pane) in std::mem::take(&mut self.documents.drawio_panes) {
+            pane.update(cx, |pane, cx| pane.release(window, cx));
+        }
+    }
+
     pub(super) fn release_pdf_pane(&mut self, key: &PaneKey, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(pane) = self.documents.pdf_panes.remove(key) {
             pane.update(cx, |pane, cx| pane.release(window, cx));
@@ -214,6 +265,7 @@ impl Workspace {
         self.release_build_pdf(window, cx);
         self.release_all_pdf_panes(window, cx);
         self.release_all_html_panes(window, cx);
+        self.release_all_drawio_panes(window, cx);
         self.documents.open.clear();
         self.documents.tabs.clear();
         self.documents.active.clear();
@@ -269,7 +321,10 @@ impl Workspace {
 
     pub(super) fn supports_split_pane(path: &str) -> bool {
         let lower = path.to_ascii_lowercase();
-        lower.ends_with(".md") || lower.ends_with(".pdf") || Self::is_html_path(&lower)
+        lower.ends_with(".md")
+            || lower.ends_with(".pdf")
+            || Self::is_html_path(&lower)
+            || Self::is_drawio_path(&lower)
     }
 
     fn open_internal_link_file(
@@ -467,6 +522,9 @@ impl Workspace {
             let root_dir = self.html_root_dir(&full);
             self.add_html_pane(key.clone(), full.clone(), root_dir, window, cx);
         }
+        if Self::is_drawio_path(path) && !self.documents.drawio_panes.contains_key(key) {
+            self.add_drawio_pane(key.clone(), full.clone(), window, cx);
+        }
         if kind == FileKind::Text && !self.documents.open.contains_key(path) {
             let disk = if self.directory_workspace().is_some() {
                 files::read_document(
@@ -639,6 +697,8 @@ impl Workspace {
             if let Err(error) = self.save_file(&path, false, cx) {
                 self.report(error, cx);
             }
+        } else if let Some(pane) = self.documents.drawio_panes.get(&PaneKey::tab(&path)).cloned() {
+            pane.update(cx, |pane, cx| pane.save(cx));
         }
     }
     pub(super) fn save_all(&mut self, cx: &mut Context<Self>) -> bool {
@@ -725,6 +785,7 @@ impl Workspace {
         let tab = PaneKey::tab(path);
         self.release_pdf_pane(&tab, window, cx);
         self.release_html_pane(&tab, window, cx);
+        self.release_drawio_pane(&tab, window, cx);
         self.documents.markdown_panes.remove(&tab);
         if !self.documents.reading_panes.iter().any(|pane| pane == path) {
             self.documents.open.remove(path);
@@ -887,6 +948,12 @@ impl Workspace {
                     pane.update(cx, |pane, cx| pane.reload(window, cx));
                 }
             }
+            for pane in self.documents.drawio_panes.values() {
+                let file_path = pane.read(cx).file_path().to_path_buf();
+                if changed.contains(&file_path) {
+                    pane.update(cx, |pane, cx| pane.reload_if_external(cx));
+                }
+            }
         }
         cx.notify();
         Ok(())
@@ -946,6 +1013,9 @@ impl Workspace {
                                             Path::new(&key.path) == path
                                         })
                                         || self.documents.html_panes.values().any(|pane| {
+                                            pane.read(cx).file_path() == *path
+                                        })
+                                        || self.documents.drawio_panes.values().any(|pane| {
                                             pane.read(cx).file_path() == *path
                                         }))
                             }
@@ -1049,7 +1119,13 @@ impl Workspace {
                 self.release_html_pane(&old_key, window, cx);
                 if Self::is_html_path(&renamed) {
                     let root = self.html_root_dir(&full);
-                    self.add_html_pane(new_key, full.clone(), root, window, cx);
+                    self.add_html_pane(new_key.clone(), full.clone(), root, window, cx);
+                }
+            }
+            if self.documents.drawio_panes.contains_key(&old_key) {
+                self.release_drawio_pane(&old_key, window, cx);
+                if Self::is_drawio_path(&renamed) {
+                    self.add_drawio_pane(new_key, full.clone(), window, cx);
                 }
             }
         }
@@ -1110,6 +1186,7 @@ impl Workspace {
         self.documents.markdown_panes.remove(&key);
         self.release_pdf_pane(&key, window, cx);
         self.release_html_pane(&key, window, cx);
+        self.release_drawio_pane(&key, window, cx);
         if self.documents.focused_markdown.as_deref() == Some(path) {
             self.documents.focused_markdown = None;
         }
@@ -1173,6 +1250,8 @@ impl Workspace {
             pane = pane.child(div().flex_1().min_h_0().child(pdf.clone()));
         } else if let Some(html) = self.documents.html_panes.get(&key) {
             pane = pane.child(div().flex_1().min_h_0().child(html.clone()));
+        } else if let Some(drawio) = self.documents.drawio_panes.get(&key) {
+            pane = pane.child(div().flex_1().min_h_0().child(drawio.clone()));
         } else if let Some(markdown) = markdown {
             pane = pane.child(div().flex_1().min_h_0().child(markdown.clone()));
         }

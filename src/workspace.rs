@@ -14,7 +14,7 @@ use documents::{DocumentWatch, Documents, PaneKey, PaneRole};
 use crate::ai::{AiPane, AiPaneEvent, AttachedFile, WorkspaceToolKind, WorkspaceToolRequest};
 use gpui_kit::component::Sizable;
 use crate::theme::color as rgb;
-use crate::web_view::{HtmlPane, HtmlPaneEvent};
+use crate::web_view::{DrawioPane, DrawioPaneEvent, HtmlPane, HtmlPaneEvent};
 use crate::markdown::{MarkdownEvent, MarkdownPane};
 use crate::math::MathRenderer;
 use crate::pdf::{PdfPane, PdfPaneEvent};
@@ -1116,6 +1116,7 @@ impl Workspace {
             return false;
         }
         self.release_all_html_panes(window, cx);
+        self.release_all_drawio_panes(window, cx);
         true
     }
 
@@ -1134,6 +1135,9 @@ impl Workspace {
             return;
         }
         for pane in self.documents.html_panes.values() {
+            pane.update(cx, |pane, cx| pane.poll(window, cx));
+        }
+        for pane in self.documents.drawio_panes.values() {
             pane.update(cx, |pane, cx| pane.poll(window, cx));
         }
     }
@@ -1497,6 +1501,8 @@ impl Workspace {
             let tab = PaneKey::tab(&self.documents.active);
             if let Some(pane) = self.documents.html_panes.get(&tab) {
                 area = area.child(div().flex_1().min_h_0().child(pane.clone()));
+            } else if let Some(pane) = self.documents.drawio_panes.get(&tab) {
+                area = area.child(div().flex_1().min_h_0().child(pane.clone()));
             } else if let Some(pane) = self.documents.pdf_panes.get(&tab) {
                 area = area.child(div().flex_1().min_h_0().child(pane.clone()));
             } else {
@@ -1728,6 +1734,12 @@ impl Render for Workspace {
             || self.dialog_prompt.is_some()
             || self.dialog_open;
         for (key, pane) in &self.documents.html_panes {
+            let visible = !modal_open
+                && ((!self.zen_mode && key.role == PaneRole::Reading)
+                    || key.path == self.documents.active);
+            pane.update(cx, |pane, cx| pane.set_visible(visible, window, cx));
+        }
+        for (key, pane) in &self.documents.drawio_panes {
             let visible = !modal_open
                 && ((!self.zen_mode && key.role == PaneRole::Reading)
                     || key.path == self.documents.active);

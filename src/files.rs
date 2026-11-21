@@ -13,7 +13,9 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "txt", "md", "csv", "tsv", "dat", "tikz", "pgf", "asy", "json", "yaml", "yml", "toml", "eps",
     "svg",
 ];
-const ASSET_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "pdf", "html", "htm"];
+const ASSET_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "webp", "gif", "pdf", "html", "htm", "drawio",
+];
 pub const EXCLUDED_DIRECTORIES: &[&str] = &[
     ".git",
     ".pi",
@@ -55,8 +57,14 @@ fn hex_digit(byte: u8) -> Option<u8> {
     }
 }
 
+pub fn is_drawio(path: &Path) -> bool {
+    let lower = path.to_string_lossy().to_ascii_lowercase();
+    lower.ends_with(".drawio") || lower.ends_with(".drawio.svg")
+}
+
 pub fn is_relevant(path: &Path) -> bool {
     path.file_name().is_some_and(|name| name == ".latexmkrc")
+        || is_drawio(path)
         || extension_in(path, TEXT_EXTENSIONS)
         || extension_in(path, ASSET_EXTENSIONS)
 }
@@ -71,7 +79,9 @@ fn extension_in(path: &Path, extensions: &[&str]) -> bool {
 }
 
 pub(crate) fn is_text(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| name == ".latexmkrc") || extension_in(path, TEXT_EXTENSIONS)
+    !is_drawio(path)
+        && (path.file_name().is_some_and(|name| name == ".latexmkrc")
+            || extension_in(path, TEXT_EXTENSIONS))
 }
 
 pub fn project_path(root: &Path, relative: &str) -> io::Result<PathBuf> {
@@ -254,6 +264,34 @@ pub fn create_markdown_in(root: &Path, folder: Option<&str>) -> io::Result<Proje
                 return Ok(ProjectFile {
                     path: relative,
                     kind: FileKind::Text,
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => number += 1,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+pub fn create_drawio_in(root: &Path, folder: Option<&str>) -> io::Result<ProjectFile> {
+    let prefix = folder
+        .map(|folder| folder.trim().trim_matches(['/', '\\']))
+        .filter(|folder| !folder.is_empty());
+    let mut number = 1;
+    loop {
+        let name = if number == 1 {
+            crate::i18n::workspace::untitled_drawio(None)
+        } else {
+            crate::i18n::workspace::untitled_drawio(Some(number))
+        };
+        let relative = match prefix {
+            Some(folder) => format!("{folder}/{name}"),
+            None => name,
+        };
+        match create_file(root, &relative) {
+            Ok(()) => {
+                return Ok(ProjectFile {
+                    path: relative,
+                    kind: FileKind::Asset,
                 });
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => number += 1,
@@ -637,5 +675,18 @@ mod tests {
         assert_eq!(percent_decode("hello%20world+1.md"), "hello world+1.md");
         assert_eq!(percent_decode("%E7%AC%94%E8%AE%B0.md"), "笔记.md");
         assert_eq!(percent_decode("bad%ZZ%2"), "bad%ZZ%2");
+    }
+
+    #[test]
+    fn drawio_and_drawio_svg_are_relevant_assets() {
+        let temp = tempdir().unwrap();
+        let created = create_drawio_in(temp.path(), None).unwrap();
+        assert_eq!(created.kind, FileKind::Asset);
+        assert!(created.path.ends_with(".drawio"));
+        assert!(is_relevant(Path::new("diagram.drawio")));
+        assert!(is_relevant(Path::new("diagram.drawio.svg")));
+        assert!(!is_text(Path::new("diagram.drawio")));
+        assert!(!is_text(Path::new("diagram.drawio.svg")));
+        assert!(is_text(Path::new("plain.svg")));
     }
 }

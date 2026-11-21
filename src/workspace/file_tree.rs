@@ -190,6 +190,33 @@ impl Workspace {
         self.open_file(&file, window, cx)
     }
 
+    fn new_drawio_in(
+        &mut self,
+        folder: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> io::Result<()> {
+        if self.directory_workspace().is_none() {
+            if self.build.is_busy() {
+                return Ok(());
+            }
+            let target_folder = folder.map(ToOwned::to_owned);
+            if !self.confirm_drafts(window, cx, move |app, window, cx| {
+                if let Err(error) = app.new_drawio_in(target_folder.as_deref(), window, cx) {
+                    app.report(error, cx);
+                }
+            }) {
+                return Ok(());
+            }
+            self.select_project("__folio_default", window, cx)?;
+        }
+        let root = PathBuf::from(&self.directory_workspace().unwrap().folder);
+        let file = files::create_drawio_in(&root, folder)?;
+        self.files = files::list_files(&root)?;
+        self.expand_ancestors(&file.path);
+        self.open_file(&file, window, cx)
+    }
+
     pub(super) fn apply_name(&mut self, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
         let name = self.name_input.read(cx).value().trim().to_owned();
         match self.name_action.clone().expect("modal has action") {
@@ -334,6 +361,7 @@ impl Workspace {
                 let key = PaneKey::new(&path, role);
                 self.release_pdf_pane(&key, window, cx);
                 self.release_html_pane(&key, window, cx);
+                self.release_drawio_pane(&key, window, cx);
                 self.documents.markdown_panes.remove(&key);
             }
             self.documents.reading_panes.retain(|pane| pane != &path);
@@ -947,6 +975,8 @@ impl Workspace {
                             let app = app.clone();
                             let rename_app = app.clone();
                             let new_md_app = app.clone();
+                            let new_drawio_app = app.clone();
+                            let new_drawio_folder = new_md_folder.clone();
                             let create_file_app = app.clone();
                             let create_folder_app = app.clone();
                             let tag_folder = deleted.clone();
@@ -958,6 +988,20 @@ impl Workspace {
                                             app.focused_folder = Some(new_md_folder.clone());
                                             if let Err(error) = app.new_markdown_in(
                                                 Some(&new_md_folder),
+                                                window,
+                                                cx,
+                                            ) {
+                                                app.report(error, cx);
+                                            }
+                                        })
+                                    },
+                                ))
+                                .item(compact_menu_item(crate::i18n::workspace::MENU_NEW_DRAWIO.get()).on_click(
+                                    move |_, window, cx| {
+                                        new_drawio_app.update(cx, |app, cx| {
+                                            app.focused_folder = Some(new_drawio_folder.clone());
+                                            if let Err(error) = app.new_drawio_in(
+                                                Some(&new_drawio_folder),
                                                 window,
                                                 cx,
                                             ) {
@@ -1037,7 +1081,6 @@ impl Workspace {
                 let row_split = file.clone();
                 let selected_path = file.path.clone();
                 let clicked_path = file.path.clone();
-                let pdf_file = file.path.to_lowercase().ends_with(".pdf");
                 let name = Path::new(&file.path)
                     .file_name()
                     .expect("file has name")
@@ -1131,7 +1174,7 @@ impl Workspace {
                     )
                     .children(self.render_file_tags(path, depth, cx))
                     .when(
-                        pdf_file || Self::is_html_path(&file.path) || file.path.to_lowercase().ends_with(".md"),
+                        Self::supports_split_pane(&file.path),
                         |row| {
                             row.child(
                                 crate::ui::control(
@@ -1207,9 +1250,7 @@ impl Workspace {
                                 tags_app.update(cx, |app, cx| app.edit_file_tags(vec![tag_path.clone()], window, cx));
                             }))
                             .when(
-                                split.path.to_lowercase().ends_with(".pdf")
-                                    || Self::is_html_path(&split.path)
-                                    || split.path.to_lowercase().ends_with(".md"),
+                                Self::supports_split_pane(&split.path),
                                 |menu| {
                                     menu.item(compact_menu_item(crate::i18n::workspace::MENU_OPEN_IN_SPLIT.get()).on_click(
                                         move |_, window, cx| {
