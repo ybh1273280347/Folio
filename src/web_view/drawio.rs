@@ -41,7 +41,51 @@ const DRAWIO_BRIDGE_SCRIPT: &str = r#"
     window.__folioDrawioBridgeInstalled = true;
     const channel = new MessageChannel();
     const host = channel.port1;
+    let selectionExportPending = false;
+    const ensureSelectionHook = () => {
+        if (!window.__folioSelectionSvgHooked && typeof Graph !== 'undefined' && Graph.prototype && Graph.prototype.getSvg) {
+            window.__folioSelectionSvgHooked = true;
+            const origGetSvg = Graph.prototype.getSvg;
+            Graph.prototype.getSvg = function() {
+                if (
+                    selectionExportPending &&
+                    arguments[5] == null &&
+                    typeof this.isSelectionEmpty === 'function' &&
+                    !this.isSelectionEmpty()
+                ) {
+                    const args = Array.prototype.slice.call(arguments);
+                    args[5] = false;
+                    return origGetSvg.apply(this, args);
+                }
+                return origGetSvg.apply(this, arguments);
+            };
+        }
+        if (!window.__folioSelectionCanvasHooked && typeof Editor !== 'undefined' && Editor.prototype && Editor.prototype.exportToCanvas) {
+            window.__folioSelectionCanvasHooked = true;
+            const origExportToCanvas = Editor.prototype.exportToCanvas;
+            Editor.prototype.exportToCanvas = function() {
+                if (
+                    selectionExportPending &&
+                    arguments[6] == null &&
+                    this.graph &&
+                    typeof this.graph.isSelectionEmpty === 'function' &&
+                    !this.graph.isSelectionEmpty()
+                ) {
+                    const args = Array.prototype.slice.call(arguments);
+                    args[6] = false;
+                    return origExportToCanvas.apply(this, args);
+                }
+                return origExportToCanvas.apply(this, arguments);
+            };
+        }
+    };
     host.postMessage = (msg) => {
+        try {
+            const parsed = typeof msg === 'string' ? JSON.parse(msg) : msg;
+            if (parsed && parsed.event === 'export') {
+                selectionExportPending = false;
+            }
+        } catch (_) {}
         const text = typeof msg === 'string' ? msg : JSON.stringify(msg);
         if (window.ipc && typeof window.ipc.postMessage === 'function') {
             window.ipc.postMessage(text);
@@ -52,7 +96,18 @@ const DRAWIO_BRIDGE_SCRIPT: &str = r#"
         configurable: true,
     });
     window.__folioSendToDrawio = (payload) => {
-        const data = typeof payload === 'string' ? payload : JSON.stringify(payload);
+        ensureSelectionHook();
+        let data = typeof payload === 'string' ? payload : JSON.stringify(payload);
+        try {
+            const parsed = typeof payload === 'string' ? JSON.parse(payload) : payload;
+            if (parsed && parsed.action === 'export') {
+                selectionExportPending = parsed.selectionOnly === true;
+                if (parsed.selectionOnly !== undefined) {
+                    delete parsed.selectionOnly;
+                    data = JSON.stringify(parsed);
+                }
+            }
+        } catch (_) {}
         window.dispatchEvent(new MessageEvent('message', {
             data,
             origin: window.location.origin,
@@ -407,7 +462,10 @@ impl DrawioPane {
                 if svg_text.contains("<foreignObject") {
                     // `usvg` ignores HTML inside `<foreignObject>`; fall back to high-DPI PNG in PDF.
                     self.pending_exports.push_back(PendingExport::SidecarPdfFromPng(dest));
-                    self.send_action(json!({ "action": "export", "format": "png", "scale": 3 }), cx);
+                    self.send_action(
+                        json!({ "action": "export", "format": "png", "scale": 3, "selectionOnly": true }),
+                        cx,
+                    );
                     return;
                 }
                 match svg_to_pdf(&svg_text).and_then(|pdf| write_bytes(&dest, &pdf)) {
@@ -463,16 +521,22 @@ impl DrawioPane {
             "pdf" => {
                 self.pending_exports
                     .push_back(PendingExport::SidecarPdfFromSvg(dest));
-                self.send_action(json!({ "action": "export", "format": "svg" }), cx);
+                self.send_action(
+                    json!({ "action": "export", "format": "svg", "selectionOnly": true }),
+                    cx,
+                );
             }
             "svg" => {
                 self.pending_exports.push_back(PendingExport::SidecarSvg(dest));
-                self.send_action(json!({ "action": "export", "format": "svg" }), cx);
+                self.send_action(
+                    json!({ "action": "export", "format": "svg", "selectionOnly": true }),
+                    cx,
+                );
             }
             "png" => {
                 self.pending_exports.push_back(PendingExport::SidecarPng(dest));
                 self.send_action(
-                    json!({ "action": "export", "format": "png", "scale": 2 }),
+                    json!({ "action": "export", "format": "png", "scale": 2, "selectionOnly": true }),
                     cx,
                 );
             }
@@ -887,8 +951,9 @@ fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
 }
 
 fn svg_to_pdf(svg: &str) -> Result<Vec<u8>, String> {
+    let preprocessed = crate::image::svg_compat::preprocess_svg_bytes(svg.as_bytes());
     let options = crate::fonts::usvg_options();
-    let tree = usvg::Tree::from_str(svg, &options).map_err(|e| e.to_string())?;
+    let tree = usvg::Tree::from_data(&preprocessed.bytes, &options).map_err(|e| e.to_string())?;
     let raw_size = tree.size();
     let width = (raw_size.width() * 0.75).max(1.0);
     let height = (raw_size.height() * 0.75).max(1.0);
