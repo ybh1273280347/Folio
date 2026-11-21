@@ -27,6 +27,14 @@ const BORDER: u32 = 0xe8e7e3;
 const MUTED: u32 = 0x787774;
 const DRAWIO_HOST: &str = "folio-drawio.localhost";
 
+/// Global draw.io canvas grid defaults (sent via `configure=1` on editor startup).
+/// Adjust these values and rebuild to tune grid visibility or spacing across all diagrams.
+const DRAWIO_DEFAULT_GRID_COLOR: &str = "#b8c0cc";
+const DRAWIO_DEFAULT_DARK_GRID_COLOR: &str = "#525252";
+const DRAWIO_DEFAULT_GRID_ENABLED: bool = true;
+const DRAWIO_DEFAULT_GRID_SIZE: u32 = 10;
+const DRAWIO_GRID_STEPS: u32 = 4;
+
 const DRAWIO_BRIDGE_SCRIPT: &str = r#"
 (() => {
     if (window.__folioDrawioBridgeInstalled) return;
@@ -256,6 +264,9 @@ impl DrawioPane {
             return;
         };
         match event {
+            "configure" => {
+                self.send_configure(cx);
+            }
             "init" => {
                 self.ready = true;
                 self.loading = false;
@@ -434,6 +445,10 @@ impl DrawioPane {
         }
     }
 
+    fn send_configure(&self, cx: &App) {
+        self.send_action(drawio_configure_payload(), cx);
+    }
+
     fn send_load(&self, xml: &str, cx: &App) {
         self.send_action(
             json!({
@@ -482,7 +497,7 @@ impl DrawioPane {
 
         // Always load draw.io UI in Simplified Chinese while keeping outer Folio controls synced with `locale()`.
         let entry_url = format!(
-            "https://{DRAWIO_HOST}/index.html?embed=1&proto=json&spin=1&offline=1&libraries=1&noExitBtn=1&saveAndExit=0&lang=zh"
+            "https://{DRAWIO_HOST}/index.html?embed=1&proto=json&configure=1&spin=1&offline=1&libraries=1&noExitBtn=1&saveAndExit=0&lang=zh"
         );
 
         let task = cx.spawn_in(window, async move |this, cx| {
@@ -742,6 +757,23 @@ impl Render for DrawioPane {
     }
 }
 
+fn drawio_configure_payload() -> serde_json::Value {
+    let version = format!(
+        "folio:{DRAWIO_DEFAULT_GRID_COLOR}:{DRAWIO_DEFAULT_DARK_GRID_COLOR}:{DRAWIO_DEFAULT_GRID_ENABLED}:{DRAWIO_DEFAULT_GRID_SIZE}:{DRAWIO_GRID_STEPS}"
+    );
+    json!({
+        "action": "configure",
+        "config": {
+            "version": version,
+            "defaultGridColor": DRAWIO_DEFAULT_GRID_COLOR,
+            "defaultDarkGridColor": DRAWIO_DEFAULT_DARK_GRID_COLOR,
+            "defaultGridEnabled": DRAWIO_DEFAULT_GRID_ENABLED,
+            "defaultGridSize": DRAWIO_DEFAULT_GRID_SIZE,
+            "gridSteps": DRAWIO_GRID_STEPS,
+        }
+    })
+}
+
 fn resolve_drawio_dir() -> Result<PathBuf, String> {
     if let Ok(exe) = std::env::current_exe()
         && let Some(parent) = exe.parent()
@@ -892,5 +924,15 @@ mod tests {
             decode_data_url("data:image/svg+xml;utf8,<svg/>").unwrap(),
             b"<svg/>"
         );
+    }
+
+    #[test]
+    fn configure_payload_exposes_grid_defaults_and_version() {
+        let payload = super::drawio_configure_payload();
+        assert_eq!(payload["action"], "configure");
+        assert_eq!(payload["config"]["defaultGridColor"], super::DRAWIO_DEFAULT_GRID_COLOR);
+        assert_eq!(payload["config"]["defaultGridEnabled"], super::DRAWIO_DEFAULT_GRID_ENABLED);
+        assert_eq!(payload["config"]["defaultGridSize"], super::DRAWIO_DEFAULT_GRID_SIZE);
+        assert_eq!(payload["config"]["gridSteps"], super::DRAWIO_GRID_STEPS);
     }
 }
