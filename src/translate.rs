@@ -1007,7 +1007,7 @@ fn md5_hex(input: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{default_target_lang, md5_hex, parse_baidu_response, parse_google_response};
 
     #[test]
     fn parses_google_sentences_lang_and_dict() {
