@@ -633,6 +633,13 @@ pub fn file_icon(path: &str, asset: bool, main: bool) -> AnyElement {
             .flex_shrink_0()
             .into_any_element();
     }
+    if lower.ends_with(".drawio") || lower.ends_with(".drawio.svg") {
+        return div()
+            .flex_shrink_0()
+            .text_color(rgb(0xd97706))
+            .child(icon(IconName::LayoutGrid))
+            .into_any_element();
+    }
     if lower.ends_with(".html") || lower.ends_with(".htm") {
         return div()
             .flex_shrink_0()

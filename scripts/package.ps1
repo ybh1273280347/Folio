@@ -48,6 +48,13 @@ foreach ($hostDestination in @((Join-Path $destination 'pi-host'), (Join-Path $s
     & robocopy.exe $sdkSource $hostDestination /E /XD test __pycache__ .pytest_cache /XF *.log *.tmp /COPY:DAT /DCOPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "Copying pi-host failed with robocopy exit code $LASTEXITCODE." }
 }
+$drawioSource = Join-Path $projectDirectory 'resources\drawio'
+if (-not (Test-Path -LiteralPath (Join-Path $drawioSource 'index.html'))) { throw 'The offline draw.io assets are missing; run scripts/install-drawio.ps1.' }
+foreach ($drawioDestination in @((Join-Path $destination 'drawio'), (Join-Path $stableDirectory 'drawio'))) {
+    $null = New-Item -ItemType Directory -Path $drawioDestination -Force
+    & robocopy.exe $drawioSource $drawioDestination /E /COPY:DAT /DCOPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "Copying draw.io assets failed with robocopy exit code $LASTEXITCODE." }
+}
 $null = New-Item -ItemType Directory -Path $stableDirectory -Force
 Copy-Item -LiteralPath $executable -Destination $stableExecutable -Force
 Copy-Item -LiteralPath $webview2Loader.FullName -Destination (Join-Path $stableDirectory 'WebView2Loader.dll') -Force

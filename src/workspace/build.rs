@@ -238,6 +238,7 @@ impl Workspace {
         if let Some(completed) = self.build.poll() {
             if self.close_requested {
                 self.release_all_html_panes(window, cx);
+                self.release_all_drawio_panes(window, cx);
                 window.remove_window();
                 cx.quit();
                 return true;

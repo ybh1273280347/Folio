@@ -261,6 +261,7 @@ pub const MENU_COPY_FULL_PATH: BiText = BiText::new("复制完整路径", "Copy 
 pub const MENU_EDIT_TAGS: BiText = BiText::new("编辑标签…", "Edit Tags…");
 pub const MENU_RENAME: BiText = BiText::new("重命名…", "Rename…");
 pub const MENU_NEW_MARKDOWN: BiText = BiText::new("新建 Markdown", "New Markdown");
+pub const MENU_NEW_DRAWIO: BiText = BiText::new("新建绘图 (.drawio)", "New Diagram (.drawio)");
 pub const MENU_NEW_FILE: BiText = BiText::new("新建文件…", "New File…");
 pub const MENU_NEW_FOLDER: BiText = BiText::new("新建文件夹…", "New Folder…");
 pub const MENU_BATCH_FOLDER_TAGS: BiText = BiText::new("批量编辑文件夹标签…", "Batch Edit Folder Tags…");
@@ -362,5 +363,14 @@ pub fn err_invalid_link(raw: &str) -> String {
     match locale() {
         Locale::ZhCn => format!("无效链接：{raw}"),
         Locale::En => format!("Invalid link: {raw}"),
+    }
+}
+
+pub fn untitled_drawio(number: Option<usize>) -> String {
+    match (locale(), number) {
+        (Locale::ZhCn, None) => "未命名绘图.drawio".to_owned(),
+        (Locale::ZhCn, Some(n)) => format!("未命名绘图 {n}.drawio"),
+        (Locale::En, None) => "Untitled.drawio".to_owned(),
+        (Locale::En, Some(n)) => format!("Untitled {n}.drawio"),
     }
 }

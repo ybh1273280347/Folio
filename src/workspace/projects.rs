@@ -263,7 +263,9 @@ impl Workspace {
             .set_title(crate::i18n::workspace::DIALOG_OPEN_DOCUMENT.get())
             .add_filter(
                 crate::i18n::workspace::DIALOG_SUPPORTED_FILES.get(),
-                &["pdf", "md", "tex", "ltx", "bib", "sty", "cls", "html", "htm"],
+                &[
+                    "pdf", "md", "tex", "ltx", "bib", "sty", "cls", "html", "htm", "drawio",
+                ],
             );
         self.dialog_open = true;
         cx.spawn_in(window, async move |this, cx| {
