@@ -495,11 +495,15 @@ impl Workspace {
         .detach();
         cx.subscribe_in(&preferences, window, |app, _, event: &SettingsChanged, window, cx| {
             let image_changed = app.settings.background_image != event.0.background_image;
-            if image_changed || app.settings.background_image_opacity != event.0.background_image_opacity {
+            let opacity_changed =
+                app.settings.background_image_opacity != event.0.background_image_opacity;
+            if image_changed || opacity_changed {
                 app.settings.background_image.clone_from(&event.0.background_image);
                 app.settings.background_image_opacity = event.0.background_image_opacity;
                 if image_changed {
                     app.load_background_image(window, cx);
+                } else {
+                    app.sync_backdrop_visible(cx);
                 }
                 // Slider updates redraw the backdrop without resyncing editors and their themes.
                 if app.settings == event.0 {
@@ -727,6 +731,17 @@ impl Workspace {
         }));
     }
 
+    fn has_visible_background(&self) -> bool {
+        self.background_image.is_some() && self.settings.background_image_opacity > 0
+    }
+
+    fn sync_backdrop_visible(&self, cx: &mut Context<Self>) {
+        let visible = self.has_visible_background();
+        for pane in self.markdown_panes.values() {
+            pane.update(cx, |pane, cx| pane.set_backdrop_visible(visible, cx));
+        }
+    }
+
     fn set_background_image(
         &mut self,
         image: Option<Arc<RenderImage>>,
@@ -736,11 +751,8 @@ impl Workspace {
         if let Some(previous) = std::mem::replace(&mut self.background_image, image) {
             cx.drop_image(previous, Some(window));
         }
-        // Document surfaces follow the decoded image, including while a replacement is loading.
-        let visible = self.background_image.is_some();
-        for pane in self.markdown_panes.values() {
-            pane.update(cx, |pane, cx| pane.set_backdrop_visible(visible, cx));
-        }
+        // Document surfaces follow the decoded image only when its opacity is non-zero.
+        self.sync_backdrop_visible(cx);
         cx.notify();
     }
 
@@ -1623,7 +1635,7 @@ impl Workspace {
         let settings = self.settings.clone();
         let math = self.math.clone();
         let pane = cx.new(|cx| MarkdownPane::new(text, full, settings, math, reading, window, cx));
-        if self.background_image.is_some() {
+        if self.has_visible_background() {
             pane.update(cx, |pane, cx| pane.set_backdrop_visible(true, cx));
         }
         cx.subscribe_in(&pane, window, move |app, pane, event: &MarkdownEvent, window, cx| {
@@ -3454,7 +3466,7 @@ impl Workspace {
         let is_pdf = path.to_ascii_lowercase().ends_with(".pdf");
         let key = format!("reading:{path}");
         let markdown = self.markdown_panes.get(&key);
-        let show_background = self.background_image.is_some() && markdown.is_some();
+        let show_background = self.has_visible_background() && markdown.is_some();
         let source = self.document_path(path);
         let filename = Path::new(path)
             .file_name()
@@ -4877,7 +4889,7 @@ impl Workspace {
 
     fn render_editor(&self, cx: &mut Context<Self>) -> AnyElement {
         let document = self.documents.get(&self.active);
-        let show_background = self.background_image.is_some()
+        let show_background = self.has_visible_background()
             && (self.active.is_empty() || document.is_some());
         let mut area = div()
             .flex()
@@ -5341,27 +5353,30 @@ impl Render for Workspace {
                         .child(drawer_child),
                 )
             });
+        let show_backdrop = self.has_visible_background();
         let mut app = div()
             .children(exports)
             .relative()
             .size_full()
             .flex()
             .flex_col()
-            .bg(if self.background_image.is_some() {
-                gpui_kit::rgb(self.settings.theme.palette.background)
+            .bg(if show_backdrop {
+                gpui_kit::rgb(self.settings.theme.palette.surface)
             } else {
                 rgb(BG)
             })
             // Paint once at window coordinates so text panes share the same crop as they scroll.
-            .when_some(self.background_image.clone(), |app, image| {
-                app.child(
-                    img(image)
-                        .absolute()
-                        .inset_0()
-                        .size_full()
-                        .object_fit(ObjectFit::Cover)
-                        .opacity(f32::from(self.settings.background_image_opacity) / 100.),
-                )
+            .when(show_backdrop, |app| {
+                app.when_some(self.background_image.clone(), |app, image| {
+                    app.child(
+                        img(image)
+                            .absolute()
+                            .inset_0()
+                            .size_full()
+                            .object_fit(ObjectFit::Cover)
+                            .opacity(f32::from(self.settings.background_image_opacity) / 100.),
+                    )
+                })
             })
             .text_color(rgb(0x37352f))
             .text_size(px(14.))
