@@ -1,7 +1,6 @@
 //! Workspace orchestration: disk-backed drafts, project actions and asynchronous builds.
 //! Disk revisions arbitrate external edits; conflicted drafts never autosave over them.
 mod annotations;
-mod agent_compile;
 mod agent_tags;
 mod appearance;
 mod build;
@@ -277,7 +276,7 @@ struct DialogPrompt {
 
 pub struct Workspace {
     annotation_requests: BTreeSet<String>,
-    compile_requests: agent_compile::CompileRequests,
+    compile_requests: tools::CompileRequests,
     drawio_requests: std::collections::HashMap<String, WorkspaceToolRequest>,
     tag_proposals: agent_tags::TagProposals,
     default_workspace: Project,
