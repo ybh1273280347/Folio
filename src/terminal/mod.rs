@@ -128,7 +128,7 @@ fn terminal_control(id: impl Into<ElementId>, name: IconName, palette: Palette) 
 }
 
 pub enum TerminalPaneEvent {
-    Hide,
+    BackToHub,
     ToggleMaximize,
 }
 impl EventEmitter<TerminalPaneEvent> for TerminalPane {}
@@ -155,6 +155,10 @@ pub struct TerminalPane {
 }
 
 impl TerminalPane {
+    pub fn session_count(&self) -> usize {
+        self.sessions.len()
+    }
+
     fn drop_paths(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
         if let Some(view) = self.sessions.iter().find(|tab| Some(tab.id) == self.active).and_then(|tab| tab.view.as_ref()) {
             // Use the terminal's paste path so bracketed-paste applications receive the right protocol.
@@ -525,6 +529,16 @@ impl Render for TerminalPane {
                     .border_b_1()
                     .border_color(gpui_kit::rgb(palette.border))
                     .child(
+                        terminal_control("terminal-back-to-hub", IconName::ChevronLeft, palette)
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new("返回功能栏")
+                                    .build(window, cx)
+                            })
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(TerminalPaneEvent::BackToHub)
+                            })),
+                    )
+                    .child(
                         div()
                             .id("terminal-tabs")
                             .flex_1()
@@ -541,10 +555,6 @@ impl Render for TerminalPane {
                             .on_click(cx.listener(|_, _, _, cx| {
                                 cx.emit(TerminalPaneEvent::ToggleMaximize)
                             })),
-                    )
-                    .child(
-                        terminal_control("hide-terminal", IconName::PanelRightOpen, palette)
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(TerminalPaneEvent::Hide))),
                     ),
             )
             .child(

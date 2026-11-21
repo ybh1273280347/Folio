@@ -14,6 +14,7 @@ mod mermaid;
 mod model;
 mod pdf;
 mod preferences;
+mod right_panel;
 mod storage;
 mod tags;
 mod theme;

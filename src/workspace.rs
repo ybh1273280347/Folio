@@ -214,9 +214,10 @@ pub fn bind_shortcuts(settings: &AppSettings, cx: &mut App) {
     cx.bind_keys(bindings);
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum RightDrawerTab {
-    Terminal,
+enum RightPanelView {
+    Hub,
     Ai,
+    Terminal,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -306,9 +307,19 @@ pub struct Workspace {
     show_logs: bool,
     terminal: Entity<TerminalPane>,
     ai: Entity<AiPane>,
-    show_terminal: bool,
-    terminal_maximized: bool,
-    right_drawer_tab: RightDrawerTab,
+    right_panel_open: bool,
+    right_panel_maximized: bool,
+    right_panel_view: RightPanelView,
+    right_panel_closing: bool,
+    right_panel_animating: bool,
+    right_panel_anim_gen: u64,
+    right_panel_anim_task: Task<()>,
+    right_panel_search: Entity<InputState>,
+    right_panel_selected: usize,
+    sidebar_closing: bool,
+    sidebar_animating: bool,
+    sidebar_anim_gen: u64,
+    sidebar_anim_task: Task<()>,
     preview: Option<PathBuf>,
     build_pdf: Option<Entity<PdfPane>>,
     pdf_panes: BTreeMap<String, Entity<PdfPane>>,
@@ -459,14 +470,12 @@ impl Workspace {
         let terminal = cx.new(|cx| TerminalPane::new(settings.terminal.clone(), settings.theme.palette, cx));
         cx.subscribe_in(&terminal, window, |app, _, event: &TerminalPaneEvent, window, cx| {
             match event {
-                TerminalPaneEvent::Hide => {
-                    app.show_terminal = false;
-                    app.terminal_maximized = false;
-                    app.terminal.update(cx, |pane, _| pane.hide());
-                    app.focus.focus(window, cx);
+                TerminalPaneEvent::BackToHub => {
+                    app.open_right_panel(RightPanelView::Hub, window, cx);
+                    return;
                 }
                 TerminalPaneEvent::ToggleMaximize => {
-                    app.terminal_maximized = !app.terminal_maximized;
+                    app.right_panel_maximized = !app.right_panel_maximized;
                 }
             }
             cx.notify();
@@ -481,14 +490,11 @@ impl Workspace {
             AiPaneEvent::OpenFile(path) => {
                 app.open_path_from_ai(path, window, cx);
             }
-            AiPaneEvent::ToggleMaximize => {
-                app.terminal_maximized = !app.terminal_maximized;
-                cx.notify();
+            AiPaneEvent::BackToHub => {
+                app.open_right_panel(RightPanelView::Hub, window, cx);
             }
-            AiPaneEvent::Hide => {
-                app.show_terminal = false;
-                app.terminal_maximized = false;
-                app.focus.focus(window, cx);
+            AiPaneEvent::ToggleMaximize => {
+                app.right_panel_maximized = !app.right_panel_maximized;
                 cx.notify();
             }
         })
@@ -565,6 +571,37 @@ impl Workspace {
             cx.notify();
         })
             .detach();
+        let right_panel_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("搜索功能、命令或文件…"));
+        cx.subscribe_in(
+            &right_panel_search,
+            window,
+            |app, _, event: &InputEvent, window, cx| {
+                match event {
+                    InputEvent::Change => {
+                        app.right_panel_selected = 0;
+                        cx.notify();
+                    }
+                    InputEvent::PressEnter { .. } => {
+                        if app.right_panel_open
+                            && !app.right_panel_closing
+                            && app.right_panel_view == RightPanelView::Hub
+                        {
+                            let props = app.hub_props(cx);
+                            let items = crate::right_panel::filtered_actions(&props);
+                            if let Some(item) = items
+                                .get(app.right_panel_selected.min(items.len().saturating_sub(1)))
+                            {
+                                let action = item.action.clone();
+                                app.execute_right_panel_action(action, window, cx);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            },
+        )
+        .detach();
         let tags = tags::TagPanel::new(window, cx);
         let entity = cx.entity();
         window.on_window_should_close(cx, move |window, cx| {
@@ -588,21 +625,85 @@ impl Workspace {
         // Handle Escape for overlays before their focused inputs consume it.
         let history_escape = cx.intercept_keystrokes(move |event, window, cx| {
             if window.window_handle() == workspace_window
-                && event.keystroke.key == "escape"
                 && event.keystroke.modifiers.number_of_modifiers() == 0
             {
-                let _ = this.update(cx, |app, cx| {
-                    if app.tags.is_editing() {
-                        app.close_tag_panel(window, cx);
-                        cx.stop_propagation();
-                        return;
-                    }
-                    if !app.show_preferences && app.show_terminal && app.right_drawer_tab == RightDrawerTab::Ai
-                        && app.ai.update(cx, |pane, cx| pane.dismiss_history(window, cx))
-                    {
-                        cx.stop_propagation();
-                    }
-                });
+                let key = event.keystroke.key.as_str();
+                if matches!(key, "escape" | "up" | "down") {
+                    let _ = this.update(cx, |app, cx| {
+                        if key == "escape" && app.tags.is_editing() {
+                            app.close_tag_panel(window, cx);
+                            cx.stop_propagation();
+                            return;
+                        }
+                        if app.right_panel_open
+                            && !app.right_panel_closing
+                            && app.right_panel_view == RightPanelView::Hub
+                            && !app.show_preferences
+                        {
+                            let hub_focused = app
+                                .right_panel_search
+                                .read(cx)
+                                .focus_handle(cx)
+                                .is_focused(window);
+                            if hub_focused {
+                                match key {
+                                    "up" => {
+                                        let len = crate::right_panel::filtered_actions(
+                                            &app.hub_props(cx),
+                                        )
+                                        .len();
+                                        if len > 0 {
+                                            app.right_panel_selected =
+                                                if app.right_panel_selected == 0 {
+                                                    len - 1
+                                                } else {
+                                                    app.right_panel_selected - 1
+                                                };
+                                            cx.stop_propagation();
+                                            cx.notify();
+                                        }
+                                        return;
+                                    }
+                                    "down" => {
+                                        let len = crate::right_panel::filtered_actions(
+                                            &app.hub_props(cx),
+                                        )
+                                        .len();
+                                        if len > 0 {
+                                            app.right_panel_selected =
+                                                (app.right_panel_selected + 1) % len;
+                                            cx.stop_propagation();
+                                            cx.notify();
+                                        }
+                                        return;
+                                    }
+                                    "escape" => {
+                                        if !app.right_panel_search.read(cx).value().is_empty() {
+                                            app.right_panel_search.update(cx, |input, cx| {
+                                                input.set_value("", window, cx);
+                                            });
+                                            app.right_panel_selected = 0;
+                                        } else {
+                                            app.close_right_panel(window, cx);
+                                        }
+                                        cx.stop_propagation();
+                                        return;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if key == "escape"
+                            && !app.show_preferences
+                            && app.right_panel_open
+                            && !app.right_panel_closing
+                            && app.right_panel_view == RightPanelView::Ai
+                            && app.ai.update(cx, |pane, cx| pane.dismiss_history(window, cx))
+                        {
+                            cx.stop_propagation();
+                        }
+                    });
+                }
             }
         });
         let mut app = Self {
@@ -666,9 +767,19 @@ impl Workspace {
             show_logs: false,
             terminal,
             ai,
-            show_terminal: false,
-            terminal_maximized: false,
-            right_drawer_tab: RightDrawerTab::Terminal,
+            right_panel_open: false,
+            right_panel_maximized: false,
+            right_panel_view: RightPanelView::Hub,
+            right_panel_closing: false,
+            right_panel_animating: false,
+            right_panel_anim_gen: 0,
+            right_panel_anim_task: Task::ready(()),
+            right_panel_search,
+            right_panel_selected: 0,
+            sidebar_closing: false,
+            sidebar_animating: false,
+            sidebar_anim_gen: 0,
+            sidebar_anim_task: Task::ready(()),
             preview: None,
             build_pdf: None,
             pdf_panes: BTreeMap::new(),
@@ -778,33 +889,207 @@ impl Workspace {
             .unwrap_or_else(|| dirs::home_dir().expect("user home"))
     }
 
-    fn toggle_right_drawer(&mut self, tab: RightDrawerTab, window: &mut Window, cx: &mut Context<Self>) {
-        if self.show_terminal && self.right_drawer_tab == tab {
-            self.show_terminal = false;
-            self.terminal_maximized = false;
-            self.terminal.update(cx, |pane, _| pane.hide());
-            self.focus.focus(window, cx);
+    fn is_right_panel_open(&self) -> bool {
+        self.right_panel_open && !self.right_panel_closing
+    }
+
+    fn is_sidebar_open(&self) -> bool {
+        self.settings.sidebar_open && !self.sidebar_closing
+    }
+
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        let opening = !self.is_sidebar_open();
+        self.sidebar_anim_gen = self.sidebar_anim_gen.wrapping_add(1);
+        let anim_gen = self.sidebar_anim_gen;
+        let duration = Duration::from_millis(crate::right_panel::ANIMATION_MS + 10);
+        if opening {
+            self.settings.sidebar_open = true;
+            self.sidebar_closing = false;
+            self.sidebar_animating = true;
+            self.sidebar_anim_task = cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(duration).await;
+                let _ = this.update(cx, |app, cx| {
+                    if app.sidebar_anim_gen == anim_gen && !app.sidebar_closing {
+                        app.sidebar_animating = false;
+                        cx.notify();
+                    }
+                });
+            });
         } else {
-            self.show_terminal = true;
-            self.terminal_maximized = false;
-            self.right_drawer_tab = tab;
-            let directory = self.terminal_directory();
-            match tab {
-                RightDrawerTab::Terminal => {
-                    self.terminal.update(cx, |pane, cx| pane.open(directory, window, cx));
-                }
-                RightDrawerTab::Ai => {
-                    self.terminal.update(cx, |pane, _| pane.hide());
-                    let project_name = self.active_project_name();
-                    self.ai.update(cx, |pane, cx| {
-                        pane.set_directory(directory, cx);
-                        pane.set_project_name(project_name, cx);
-                        pane.open(window, cx);
-                    });
-                }
+            self.sidebar_closing = true;
+            self.sidebar_animating = true;
+            self.sidebar_anim_task = cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(duration).await;
+                let _ = this.update(cx, |app, cx| {
+                    if app.sidebar_anim_gen == anim_gen && app.sidebar_closing {
+                        app.settings.sidebar_open = false;
+                        app.sidebar_closing = false;
+                        app.sidebar_animating = false;
+                        if let Err(error) = storage::save_settings(&app.settings) {
+                            app.report(error, cx);
+                        }
+                        cx.notify();
+                    }
+                });
+            });
+        }
+        if opening {
+            if let Err(error) = storage::save_settings(&self.settings) {
+                self.report(error, cx);
             }
         }
         cx.notify();
+    }
+
+    fn open_right_panel(
+        &mut self,
+        view: RightPanelView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let was_closed = !self.is_right_panel_open();
+        self.right_panel_open = true;
+        self.right_panel_closing = false;
+        self.right_panel_maximized = false;
+        self.right_panel_view = view;
+
+        if was_closed {
+            self.right_panel_animating = true;
+            self.right_panel_anim_gen = self.right_panel_anim_gen.wrapping_add(1);
+            let anim_gen = self.right_panel_anim_gen;
+            let duration = Duration::from_millis(crate::right_panel::ANIMATION_MS + 10);
+            self.right_panel_anim_task = cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(duration).await;
+                let _ = this.update(cx, |app, cx| {
+                    if app.right_panel_anim_gen == anim_gen && !app.right_panel_closing {
+                        app.right_panel_animating = false;
+                        cx.notify();
+                    }
+                });
+            });
+        }
+
+        let directory = self.terminal_directory();
+        match view {
+            RightPanelView::Hub => {
+                self.terminal.update(cx, |pane, _| pane.hide());
+                self.right_panel_selected = 0;
+                self.right_panel_search.update(cx, |input, cx| {
+                    input.set_value("", window, cx);
+                    input.focus(window, cx);
+                });
+            }
+            RightPanelView::Terminal => {
+                self.terminal
+                    .update(cx, |pane, cx| pane.open(directory, window, cx));
+            }
+            RightPanelView::Ai => {
+                self.terminal.update(cx, |pane, _| pane.hide());
+                let project_name = self.active_project_name();
+                self.ai.update(cx, |pane, cx| {
+                    pane.set_directory(directory, cx);
+                    pane.set_project_name(project_name, cx);
+                    pane.open(window, cx);
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    fn close_right_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_right_panel_open() {
+            return;
+        }
+        self.right_panel_closing = true;
+        self.right_panel_maximized = false;
+        self.right_panel_animating = true;
+        self.right_panel_anim_gen = self.right_panel_anim_gen.wrapping_add(1);
+        let anim_gen = self.right_panel_anim_gen;
+        let duration = Duration::from_millis(crate::right_panel::ANIMATION_MS + 10);
+        self.terminal.update(cx, |pane, _| pane.hide());
+        self.focus.focus(window, cx);
+        self.right_panel_anim_task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(duration).await;
+            let _ = this.update(cx, |app, cx| {
+                if app.right_panel_anim_gen == anim_gen && app.right_panel_closing {
+                    app.right_panel_open = false;
+                    app.right_panel_closing = false;
+                    app.right_panel_animating = false;
+                    cx.notify();
+                }
+            });
+        });
+        cx.notify();
+    }
+
+    fn toggle_right_shortcut(
+        &mut self,
+        view: RightPanelView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_right_panel_open() && self.right_panel_view == view {
+            self.close_right_panel(window, cx);
+        } else {
+            self.open_right_panel(view, window, cx);
+        }
+    }
+
+    fn hub_props(&self, cx: &App) -> crate::right_panel::RightPanelHubProps {
+        crate::right_panel::RightPanelHubProps {
+            query: self.right_panel_search.read(cx).value().to_string(),
+            selected_index: self.right_panel_selected,
+            preview_open: self.show_build_preview,
+            logs_open: self.show_logs,
+            build_running: self.build_started.is_some(),
+            build_failed: matches!(self.build_status, BuildStatus::Failed),
+            build_target: self.build_target.clone(),
+            ai_shortcut: AppSettings::format_key_badge(&self.settings.key_for("toggle_ai")),
+            terminal_shortcut: AppSettings::format_key_badge(
+                &self.settings.key_for("toggle_terminal"),
+            ),
+            terminal_sessions: self.terminal.read(cx).session_count(),
+            ai_tasks: self.ai.read(cx).active_tasks(cx),
+        }
+    }
+
+    fn execute_right_panel_action(
+        &mut self,
+        action: crate::right_panel::RightPanelAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::right_panel::RightPanelAction;
+        match action {
+            RightPanelAction::OpenAi => {
+                self.open_right_panel(RightPanelView::Ai, window, cx);
+            }
+            RightPanelAction::OpenTerminal => {
+                self.open_right_panel(RightPanelView::Terminal, window, cx);
+            }
+            RightPanelAction::TogglePreview => {
+                self.show_build_preview = !self.show_build_preview;
+                cx.notify();
+            }
+            RightPanelAction::ToggleLogs => {
+                self.show_logs = !self.show_logs;
+                cx.notify();
+            }
+            RightPanelAction::OpenFile => {
+                self.open_file_dialog(window, cx);
+            }
+            RightPanelAction::OpenPreferences => {
+                self.preferences.update(cx, |panel, cx| {
+                    panel.sync(&self.settings, window, cx);
+                });
+                self.show_preferences = true;
+                cx.notify();
+            }
+            RightPanelAction::ActivateAiTask(id) => {
+                self.open_right_panel(RightPanelView::Ai, window, cx);
+                self.ai.update(cx, |pane, cx| pane.activate(id, cx));
+            }
+        }
     }
 
     fn focused_attached_file(&self) -> Option<AttachedFile> {
@@ -829,9 +1114,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.show_terminal = true;
-        self.right_drawer_tab = RightDrawerTab::Ai;
-        self.terminal.update(cx, |pane, _| pane.hide());
+        self.open_right_panel(RightPanelView::Ai, window, cx);
         let directory = self.terminal_directory();
         let attached = file_path.map(|path| AttachedFile {
             display: path
@@ -5203,9 +5486,11 @@ impl Render for Workspace {
             .map(|file| file.path.clone())
             .collect();
         let resize_app = cx.entity();
+        let right_panel_visible = self.is_right_panel_open();
+        let sidebar_visible = self.is_sidebar_open();
         let area_width = f32::from(window.viewport_size().width)
-            - if self.show_terminal && !self.terminal_maximized { self.settings.terminal.panel_width } else { 0. }
-            - if self.settings.sidebar_open {
+            - if right_panel_visible && !self.right_panel_maximized { self.settings.terminal.panel_width } else { 0. }
+            - if sidebar_visible {
                 self.settings.sidebar_width + 16.
             } else {
                 16.
@@ -5315,44 +5600,139 @@ impl Render for Workspace {
                     }))),
             );
         }
-        let editor_with_terminal = h_resizable(match (self.show_terminal, self.terminal_maximized) {
-            (true, true) => "terminal-maximized",
-            (true, false) => "editor-with-terminal",
-            _ => "editor-without-terminal",
-        })
+        let panel_rendered = self.right_panel_open || self.right_panel_closing;
+        let panel_width = self.settings.terminal.panel_width.clamp(280., 1600.);
+        let right_panel_content = panel_rendered.then(|| match self.right_panel_view {
+            RightPanelView::Hub => {
+                let props = self.hub_props(cx);
+                let action_app = cx.entity();
+                let clear_app = cx.entity();
+                crate::right_panel::render_hub(
+                    &props,
+                    &self.right_panel_search,
+                    self.settings.theme.palette,
+                    window,
+                    cx,
+                    move |action, window, cx| {
+                        action_app.update(cx, |app, cx| {
+                            app.execute_right_panel_action(action, window, cx);
+                        });
+                    },
+                    move |window, cx| {
+                        clear_app.update(cx, |app, cx| {
+                            app.right_panel_search.update(cx, |input, cx| {
+                                input.set_value("", window, cx);
+                                input.focus(window, cx);
+                            });
+                            app.right_panel_selected = 0;
+                            cx.notify();
+                        });
+                    },
+                )
+            }
+            RightPanelView::Ai => self.ai.clone().into_any_element(),
+            RightPanelView::Terminal => self.terminal.clone().into_any_element(),
+        });
+
+        let editor_with_terminal: AnyElement = if panel_rendered && self.right_panel_animating {
+            let closing = self.right_panel_closing;
+            let anim_gen = self.right_panel_anim_gen;
+            let duration = Duration::from_millis(crate::right_panel::ANIMATION_MS);
+            let sliding_inner = div()
+                .relative()
+                .w(px(panel_width))
+                .h_full()
+                .flex_shrink_0()
+                .children(right_panel_content)
+                .with_animation(
+                    ("right-panel-slide", anim_gen),
+                    Animation::new(duration).with_easing(crate::right_panel::ease_out_cubic),
+                    move |el, t| {
+                        let progress = if closing { 1.0 - t } else { t };
+                        el.left(px(panel_width * (1.0 - progress)))
+                    },
+                );
+            let animated_panel = div()
+                .h_full()
+                .flex_shrink_0()
+                .overflow_hidden()
+                .child(sliding_inner)
+                .with_animation(
+                    ("right-panel-width", anim_gen),
+                    Animation::new(duration).with_easing(crate::right_panel::ease_out_cubic),
+                    move |el, t| {
+                        let progress = if closing { 1.0 - t } else { t };
+                        el.w(px(panel_width * progress))
+                    },
+                );
+            div()
+                .flex()
+                .size_full()
+                .min_w_0()
+                .min_h_0()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .child(vertical_work_area),
+                )
+                .child(animated_panel)
+                .into_any_element()
+        } else {
+            let maximized = right_panel_visible && self.right_panel_maximized;
+            h_resizable(match (panel_rendered, maximized) {
+                (true, true) => "terminal-maximized",
+                (true, false) => "editor-with-terminal",
+                _ => "editor-without-terminal",
+            })
             .on_resize({
                 let app = cx.entity();
                 move |state, _, cx| {
                     let width = state.read(cx).sizes().last().map(|size| f32::from(*size));
                     app.update(cx, |app, cx| {
-                        if app.show_terminal && !app.terminal_maximized && let Some(width) = width {
+                        if app.is_right_panel_open()
+                            && !app.right_panel_animating
+                            && !app.right_panel_maximized
+                            && let Some(width) = width
+                        {
                             app.settings.terminal.panel_width = width;
-                            if let Err(error) = storage::save_settings(&app.settings) { app.report(error, cx); }
+                            if let Err(error) = storage::save_settings(&app.settings) {
+                                app.report(error, cx);
+                            }
                         }
                     });
                 }
             })
-            .when(!self.show_terminal || !self.terminal_maximized, |body| {
-                body.child(resizable_panel().child(div().flex().flex_col().size_full().min_w_0().min_h_0()
-                    .child(vertical_work_area)))
+            .when(!maximized, |body| {
+                body.child(
+                    resizable_panel().child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .size_full()
+                            .min_w_0()
+                            .min_h_0()
+                            .child(vertical_work_area),
+                    ),
+                )
             })
-            .when(self.show_terminal, |body| {
-                let drawer_child = if self.right_drawer_tab == RightDrawerTab::Ai {
-                    self.ai.clone().into_any_element()
-                } else {
-                    self.terminal.clone().into_any_element()
-                };
+            .when_some(right_panel_content, |body, drawer_child| {
                 body.child(
                     resizable_panel()
-                        .when(!self.terminal_maximized, |panel| {
+                        .when(!maximized, |panel| {
                             panel
-                                .size(px(self.settings.terminal.panel_width))
+                                .size(px(panel_width))
                                 .size_range(px(280.)..px(1600.))
                                 .fixed()
                         })
                         .child(drawer_child),
                 )
-            });
+            })
+            .into_any_element()
+        };
         let show_backdrop = self.has_visible_background();
         let mut app = div()
             .children(exports)
@@ -5388,14 +5768,14 @@ impl Render for Workspace {
                     cx.propagate();
                     return;
                 }
-                app.toggle_right_drawer(RightDrawerTab::Ai, window, cx);
+                app.toggle_right_shortcut(RightPanelView::Ai, window, cx);
             }))
             .on_action(cx.listener(|app, _: &ToggleTerminal, window, cx| {
                 if app.show_preferences {
                     cx.propagate();
                     return;
                 }
-                app.toggle_right_drawer(RightDrawerTab::Terminal, window, cx);
+                app.toggle_right_shortcut(RightPanelView::Terminal, window, cx);
             }))
             .on_action(cx.listener(Self::save_active))
             .on_action(cx.listener(Self::add_project))
@@ -5418,11 +5798,7 @@ impl Render for Workspace {
                 app.close_tab(&path, window, cx);
             }))
             .on_action(cx.listener(|app, _: &ToggleSidebar, _, cx| {
-                app.settings.sidebar_open = !app.settings.sidebar_open;
-                if let Err(error) = storage::save_settings(&app.settings) {
-                    app.report(error, cx);
-                }
-                cx.notify();
+                app.toggle_sidebar(cx);
             }))
             .child(
                 div()
@@ -5454,18 +5830,14 @@ impl Render for Workspace {
                     .child(
                         crate::ui::control(
                             "toggle-sidebar",
-                            if self.settings.sidebar_open {
+                            if sidebar_visible {
                                 IconName::PanelLeftClose
                             } else {
                                 IconName::PanelLeftOpen
                             },
                         )
                         .on_click(cx.listener(|app, _, _, cx| {
-                            app.settings.sidebar_open = !app.settings.sidebar_open;
-                            if let Err(error) = storage::save_settings(&app.settings) {
-                                app.report(error, cx);
-                            }
-                            cx.notify();
+                            app.toggle_sidebar(cx);
                         })),
                     )
                     .child(
@@ -5591,56 +5963,32 @@ impl Render for Workspace {
                             }),
                     )
                     .child(
-                        crate::ui::control("logs", IconName::ListTree)
-                        .tooltip(|window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new("编译日志")
+                        crate::ui::control("toggle-right-panel", IconName::PanelRightOpen)
+                            .when(right_panel_visible, |c| {
+                                let palette = self.settings.theme.palette;
+                                c.bg(if palette.is_dark() {
+                                    gpui_kit::rgb(palette.hover)
+                                } else {
+                                    rgb(0xe8e7e4)
+                                })
+                                .text_color(gpui_kit::rgb(palette.text))
+                            })
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(if right_panel_visible {
+                                    "收起右侧功能栏"
+                                } else {
+                                    "展开右侧功能栏"
+                                })
                                 .build(window, cx)
-                        })
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.show_logs = !app.show_logs;
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        crate::ui::control("toggle-ai", IconName::Sparkles)
-                            .when(self.show_terminal && self.right_drawer_tab == RightDrawerTab::Ai, |c| {
-                                c.bg(rgb(0xe8e7e4)).text_color(rgb(0x1f2328))
-                            })
-                            .tooltip({
-                                let key = AppSettings::format_key_badge(&self.settings.key_for("toggle_ai"));
-                                move |window, cx| {
-                                    gpui_kit::component::tooltip::Tooltip::new(format!("AI 助手 ({key})"))
-                                        .build(window, cx)
-                                }
                             })
                             .on_click(cx.listener(|app, _, window, cx| {
-                                app.toggle_right_drawer(RightDrawerTab::Ai, window, cx);
-                            })),
-                    )
-                    .child(
-                        crate::ui::control("toggle-terminal", IconName::Terminal)
-                            .when(self.show_terminal && self.right_drawer_tab == RightDrawerTab::Terminal, |c| {
-                                c.bg(rgb(0xe8e7e4)).text_color(rgb(0x1f2328))
-                            })
-                            .tooltip({
-                                let key = AppSettings::format_key_badge(&self.settings.key_for("toggle_terminal"));
-                                move |window, cx| {
-                                    gpui_kit::component::tooltip::Tooltip::new(format!("终端 ({key})"))
-                                        .build(window, cx)
+                                if app.is_right_panel_open() {
+                                    app.close_right_panel(window, cx);
+                                } else {
+                                    app.open_right_panel(RightPanelView::Hub, window, cx);
                                 }
-                            })
-                            .on_click(cx.listener(|app, _, window, cx| {
-                                app.toggle_right_drawer(RightDrawerTab::Terminal, window, cx);
                             })),
                     )
-                    .when(!self.show_build_preview, |header| {
-                        header.child(button("show-build-preview", "◫").on_click(cx.listener(
-                            |app, _, _, cx| {
-                                app.show_build_preview = true;
-                                cx.notify();
-                            },
-                        )))
-                    })
                     .child(
                         div()
                             .flex()
@@ -5673,38 +6021,96 @@ impl Render for Workspace {
             )
             .child(
                 // Constrain the resize group to the space below the title bar.
-                div().flex_1().min_h_0().overflow_hidden().child(
-                    h_resizable(if self.settings.sidebar_open {
-                        "workspace-with-sidebar"
+                div().flex_1().min_h_0().overflow_hidden().child({
+                    let main_content = if self.show_trash {
+                        self.render_trash(cx)
                     } else {
-                        "workspace-no-sidebar"
-                    })
-                    .on_resize({
-                        let app = cx.entity();
-                        move |state, _, cx| {
-                            let sidebar_width = f32::from(state.read(cx).sizes()[0]);
-                            app.update(cx, |app, cx| {
-                                if app.settings.sidebar_open {
-                                    app.settings.sidebar_width = sidebar_width;
-                                    if let Err(error) = storage::save_settings(&app.settings) {
-                                        app.report(error, cx);
+                        editor_with_terminal
+                    };
+                    let sidebar_rendered = self.settings.sidebar_open || self.sidebar_closing;
+                    let sidebar_width = self.settings.sidebar_width.clamp(170., 520.);
+                    if sidebar_rendered && self.sidebar_animating {
+                        let closing = self.sidebar_closing;
+                        let anim_gen = self.sidebar_anim_gen;
+                        let duration = Duration::from_millis(crate::right_panel::ANIMATION_MS);
+                        let sliding_sidebar = div()
+                            .relative()
+                            .w(px(sidebar_width))
+                            .h_full()
+                            .flex_shrink_0()
+                            .child(self.render_sidebar(cx))
+                            .with_animation(
+                                ("left-sidebar-slide", anim_gen),
+                                Animation::new(duration)
+                                    .with_easing(crate::right_panel::ease_out_cubic),
+                                move |el, t| {
+                                    let progress = if closing { 1.0 - t } else { t };
+                                    el.left(px(-sidebar_width * (1.0 - progress)))
+                                },
+                            );
+                        let animated_sidebar = div()
+                            .h_full()
+                            .flex_shrink_0()
+                            .overflow_hidden()
+                            .child(sliding_sidebar)
+                            .with_animation(
+                                ("left-sidebar-width", anim_gen),
+                                Animation::new(duration)
+                                    .with_easing(crate::right_panel::ease_out_cubic),
+                                move |el, t| {
+                                    let progress = if closing { 1.0 - t } else { t };
+                                    el.w(px(sidebar_width * progress))
+                                },
+                            );
+                        div()
+                            .flex()
+                            .size_full()
+                            .min_w_0()
+                            .min_h_0()
+                            .child(animated_sidebar)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .min_h_0()
+                                    .child(main_content),
+                            )
+                            .into_any_element()
+                    } else {
+                        h_resizable(if sidebar_rendered {
+                            "workspace-with-sidebar"
+                        } else {
+                            "workspace-no-sidebar"
+                        })
+                        .on_resize({
+                            let app = cx.entity();
+                            move |state, _, cx| {
+                                let sidebar_width = f32::from(state.read(cx).sizes()[0]);
+                                app.update(cx, |app, cx| {
+                                    if app.is_sidebar_open() && !app.sidebar_animating {
+                                        app.settings.sidebar_width = sidebar_width;
+                                        if let Err(error) = storage::save_settings(&app.settings) {
+                                            app.report(error, cx);
+                                        }
+                                        cx.notify();
                                     }
-                                    cx.notify();
-                                }
-                            });
-                        }
-                    })
-                    .when(self.settings.sidebar_open, |body| {
-                        body.child(
-                            resizable_panel()
-                                .size(px(self.settings.sidebar_width))
-                                .size_range(px(170.)..px(520.))
-                                .fixed()
-                                .child(self.render_sidebar(cx)),
-                        )
-                    })
-                    .child(resizable_panel().child(if self.show_trash { self.render_trash(cx) } else { editor_with_terminal.into_any_element() })),
-                ),
+                                });
+                            }
+                        })
+                        .when(sidebar_rendered, |body| {
+                            body.child(
+                                resizable_panel()
+                                    .size(px(sidebar_width))
+                                    .size_range(px(170.)..px(520.))
+                                    .fixed()
+                                    .child(self.render_sidebar(cx)),
+                            )
+                        })
+                        .child(resizable_panel().child(main_content))
+                        .into_any_element()
+                    }
+                }),
             )
             .when(self.tags.is_editing(), |app| app.child(self.render_tag_editor(cx)))
             .when_some(self.notice.clone(), |app, notice| {

@@ -245,7 +245,45 @@ impl AiPane {
             self.command(json!({"type":"create_session"}), cx);
         }
     }
-    fn activate(&mut self, id: String, cx: &mut Context<Self>) {
+    pub fn active_tasks(&self, cx: &App) -> Vec<(String, String, bool)> {
+        let project = self.project();
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        if let Some(entries) = self.histories.get(&project) {
+            for entry in entries {
+                let view = self
+                    .views
+                    .get(&(project.clone(), entry.id.clone()))
+                    .map(|v| v.read(cx));
+                let waiting = view.is_some_and(|v| v.pending_ui.is_some()) || entry.waiting;
+                let running = view.is_some_and(|v| v.is_streaming) || entry.running;
+                if running || waiting {
+                    let title = view
+                        .and_then(|v| v.session_name.clone())
+                        .unwrap_or_else(|| entry.title());
+                    seen.insert(entry.id.clone());
+                    out.push((entry.id.clone(), title, waiting));
+                }
+            }
+        }
+        for ((proj, id), view) in &self.views {
+            if proj != &project || seen.contains(id) {
+                continue;
+            }
+            let v = view.read(cx);
+            let waiting = v.pending_ui.is_some();
+            if v.is_streaming || waiting {
+                let title = v
+                    .session_name
+                    .clone()
+                    .unwrap_or_else(|| "新会话".into());
+                out.push((id.clone(), title, waiting));
+            }
+        }
+        out
+    }
+
+    pub fn activate(&mut self, id: String, cx: &mut Context<Self>) {
         let project = self.project();
         if self.views.contains_key(&(project.clone(), id.clone())) {
             self.command(json!({"type":"retain", "sessionId":id}), cx);
@@ -623,7 +661,7 @@ impl AiPane {
                 unreachable!("workspace tool requests use the project control route"),
             AiPaneEvent::UndoTags(items) => cx.emit(AiPaneEvent::UndoTags(items.clone())),
             AiPaneEvent::OpenFile(path) => cx.emit(AiPaneEvent::OpenFile(path.clone())),
-            AiPaneEvent::Hide => cx.emit(AiPaneEvent::Hide),
+            AiPaneEvent::BackToHub => cx.emit(AiPaneEvent::BackToHub),
             AiPaneEvent::ToggleMaximize => cx.emit(AiPaneEvent::ToggleMaximize),
         });
         let observe = cx.observe(&view, |_, _, cx| cx.notify());
@@ -787,6 +825,17 @@ impl Render for AiPane {
                     .border_b_1()
                     .border_color(gpui_kit::rgb(palette.border))
                     .child(
+                        Button::new("ai-back-to-hub")
+                            .ghost()
+                            .compact()
+                            .with_size(px(16.))
+                            .w(px(22.))
+                            .h(px(22.))
+                            .icon(crate::ui::icon(IconName::ChevronLeft))
+                            .tooltip("返回功能栏")
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(AiPaneEvent::BackToHub))),
+                    )
+                    .child(
                         Button::new("ai-history")
                             .ghost()
                             .compact()
@@ -933,17 +982,6 @@ impl Render for AiPane {
                             .on_click(
                                 cx.listener(|_, _, _, cx| cx.emit(AiPaneEvent::ToggleMaximize)),
                             ),
-                    )
-                    .child(
-                        Button::new("ai-hide")
-                            .ghost()
-                            .compact()
-                            .with_size(px(16.))
-                            .w(px(22.))
-                            .h(px(22.))
-                            .icon(crate::ui::icon(IconName::PanelRightOpen))
-                            .tooltip("收起")
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(AiPaneEvent::Hide))),
                     ),
             )
             .when_some(self.error.clone(), |root, error| {
