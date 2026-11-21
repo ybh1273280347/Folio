@@ -135,7 +135,7 @@ impl Workspace {
             // Update both editing/reading panes without changing tabs or keyboard focus.
             for pane in self.documents.markdown_panes.values() {
                 if dunce::canonicalize(pane.read(cx).path()).ok().as_deref() == Some(path) {
-                    pane.update(cx, |pane, cx| pane.sync(text, &self.settings, window, cx));
+                    pane.update(cx, |pane, cx| pane.sync(text, window, cx));
                 }
             }
         }

@@ -3,7 +3,6 @@ use crate::i18n::{Locale, common as common_i18n, preferences as p};
 use crate::theme::color as rgb;
 use crate::{
     model::{AppSettings, InternalLinkOpenTarget, MathFont, SHORTCUT_DEFS, ToolExecutionView},
-    storage,
     theme::ColorRole,
 };
 use gpui_kit::{
@@ -30,9 +29,39 @@ pub enum PreferencesTab {
     Api,
 }
 
-pub struct SettingsChanged(pub AppSettings);
+/// A preference edit is relative to the panel's last published values. Layout
+/// and editor shortcuts can update the authoritative copy independently.
+pub struct SettingsChanged {
+    previous: AppSettings,
+    next: AppSettings,
+}
+
+impl SettingsChanged {
+    pub(crate) fn apply_to(&self, current: &AppSettings) -> AppSettings {
+        let mut merged = current.clone();
+        macro_rules! merge {
+            ($($field:ident),+ $(,)?) => {
+                $(if self.previous.$field != self.next.$field {
+                    merged.$field.clone_from(&self.next.$field);
+                })+
+            };
+        }
+        merge!(
+            locale, theme, background_image, background_image_opacity,
+            interface_font, editor_font, markdown_font, ai_font, cjk_fallback_font,
+            inline_code_font, block_code_font, inline_code_scale, block_code_scale,
+            interface_font_size, editor_font_size, markdown_font_size, ai_font_size,
+            math_scale, inline_math_scale, math_font, line_width_limited,
+            internal_link_open_target, tool_execution_view, show_line_numbers,
+            terminal, translate, ai, keybindings,
+        );
+        merged
+    }
+}
+
 pub struct Preferences {
     settings: AppSettings,
+    published_settings: AppSettings,
     tab: PreferencesTab,
     appearance_expanded: bool,
     recording: Option<&'static str>,
@@ -460,6 +489,7 @@ impl Preferences {
             if matches!(event,InputEvent::Change) { panel.settings.ai.baidu_qianfan_api_key=input.read(cx).value().trim().to_owned(); panel.changed(cx); }
         }).detach();
         Self {
+            published_settings: settings.clone(),
             settings,
             tab: PreferencesTab::Fonts,
             appearance_expanded: true,
@@ -501,6 +531,7 @@ impl Preferences {
         }
     }
     pub fn sync(&mut self, settings: &AppSettings, window: &mut Window, cx: &mut Context<Self>) {
+        self.published_settings.clone_from(settings);
         self.settings = settings.clone();
         self.background_image_opacity.update(cx, |state, cx| {
             state.set_value(f32::from(settings.background_image_opacity), window, cx)
@@ -660,12 +691,19 @@ impl Preferences {
     }
 
     fn changed(&mut self, cx: &mut Context<Self>) {
-        crate::i18n::apply_settings(&self.settings);
-        self.error = storage::save_settings(&self.settings)
-            .err()
-            .map(|error| error.to_string());
-        cx.emit(SettingsChanged(self.settings.clone()));
+        if self.published_settings != self.settings {
+            let next = self.settings.clone();
+            let previous = std::mem::replace(&mut self.published_settings, next.clone());
+            cx.emit(SettingsChanged { previous, next });
+        }
         cx.notify();
+    }
+
+    pub(crate) fn set_save_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
+        if self.error != error {
+            self.error = error;
+            cx.notify();
+        }
     }
 
     fn sync_theme_colors(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -841,9 +879,9 @@ impl Preferences {
                             panel.settings.inline_math_scale = defaults.inline_math_scale;
                             panel.settings.terminal.font_family = defaults.terminal.font_family;
                             panel.settings.terminal.font_size = defaults.terminal.font_size;
+                            panel.changed(cx);
                             let settings = panel.settings.clone();
                             panel.sync(&settings, window, cx);
-                            panel.changed(cx);
                         },
                     )),
                 ),
@@ -871,12 +909,10 @@ impl Preferences {
                             .flex_none()
                             .children(locales.iter().map(|loc| Radio::new(loc.label()).label(loc.label())))
                             .selected_index(locales.iter().position(|&loc| loc == self.settings.locale))
-                            .on_change(cx.listener(move |panel, index: &usize, window, cx| {
+                            .on_change(cx.listener(move |panel, index: &usize, _, cx| {
                                 let next = locales[*index];
                                 if panel.settings.locale != next {
                                     panel.settings.locale = next;
-                                    crate::i18n::apply_settings(&panel.settings);
-                                    panel.refresh_locale(window, cx);
                                     panel.changed(cx);
                                 }
                             })),

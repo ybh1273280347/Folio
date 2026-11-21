@@ -555,12 +555,9 @@ impl Workspace {
                 }
                 MarkdownEvent::Focus => app.documents.focused_markdown = reading.then(|| file.clone()),
                 MarkdownEvent::Zoom(size) => {
-                    app.settings.markdown_font_size = *size;
-                    app.math.update(cx, |renderer, cx| renderer.set_appearance(&app.settings, cx));
-                    if let Err(error) = storage::save_settings(&app.settings) {
-                        app.report(error, cx);
-                    }
-                    app.documents.markdown_changed.extend(app.documents.open.keys().cloned());
+                    let mut settings = app.settings.clone();
+                    settings.markdown_font_size = *size;
+                    app.apply_settings(settings, window, cx);
                 }
                 MarkdownEvent::OpenLink(url) => {
                     app.open_markdown_link(&full, url, window, cx);
@@ -898,7 +895,7 @@ impl Workspace {
                 for role in [PaneRole::Tab, PaneRole::Reading] {
                     if let Some(pane) = self.documents.markdown_panes.get(&PaneKey::new(&path, role)) {
                         pane.update(cx, |pane, cx| {
-                            pane.sync(&document.buffer.text, &self.settings, window, cx)
+                            pane.sync(&document.buffer.text, window, cx)
                         });
                     }
                 }

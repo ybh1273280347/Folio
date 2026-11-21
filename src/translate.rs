@@ -19,6 +19,8 @@ use url::form_urlencoded;
 
 const POPOVER_WIDTH: f32 = 368.0;
 
+impl gpui::Global for TranslateSettings {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TranslateDictEntry {
     pub pos: String,
@@ -142,9 +144,7 @@ impl TranslatePopover {
             pop.error = None;
             (pop.request_id, pop.source_text.clone(), pop.target_lang)
         };
-        let settings = crate::storage::load_settings()
-            .map(|s| s.translate)
-            .unwrap_or_default();
+        let settings = cx.global::<TranslateSettings>().clone();
         cx.notify();
 
         let task_bg = cx

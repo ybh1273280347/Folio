@@ -38,8 +38,9 @@ fn main() {
         gpui_kit::init(cx);
         math_layout::register_fonts(cx);
         markdown_editor::init(cx);
-        let initial_settings = storage::load_settings().unwrap_or_default();
+        let initial_settings = storage::load_settings().expect(i18n::workspace::ERR_LOAD_SETTINGS.get());
         i18n::apply_settings(&initial_settings);
+        cx.set_global(initial_settings.translate.clone());
         theme::apply_settings(&initial_settings, cx);
         workspace::bind_shortcuts(&initial_settings, cx);
         gpui_kit::open_window(
@@ -58,7 +59,7 @@ fn main() {
                 ..Default::default()
             },
             cx,
-            |window, cx| cx.new(|cx| Workspace::new(window, cx)),
+            move |window, cx| cx.new(|cx| Workspace::new(initial_settings, window, cx)),
         )
         .expect(i18n::workspace::ERR_OPEN_WINDOW.get());
     });
