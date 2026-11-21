@@ -113,6 +113,30 @@ pub fn save_annotations(target_file: &Path, items: &[AnnotationItem]) -> io::Res
     write_json(&store, &all)
 }
 
+pub fn relocate_annotations(source: &Path, target: &Path) -> io::Result<()> {
+    let store = annotations_store_path(source);
+    let old = source.file_name().expect("source file name").to_string_lossy();
+    let new = target.file_name().expect("target file name").to_string_lossy();
+    let mut entries: Vec<AnnotationItem> = read_json(&store)?;
+    if !entries.iter().any(|item| item.file == old) {
+        return Ok(());
+    }
+    if store == annotations_store_path(target) {
+        // A rename within a directory replaces the filename in one sidecar write.
+        entries.retain(|item| item.file != new);
+        for item in entries.iter_mut().filter(|item| item.file == old) {
+            item.file = new.to_string();
+        }
+        write_json(&store, &entries)
+    } else {
+        let (moved, remaining): (Vec<_>, Vec<_>) =
+            entries.into_iter().partition(|item| item.file == old);
+        // Preserve the source records if the destination cannot be written.
+        save_annotations(target, &moved)?;
+        write_json(&store, &remaining)
+    }
+}
+
 pub fn add_project(config: &mut ProjectConfig, folder: &Path) -> io::Result<Project> {
     let folder = files::validate_folder(folder)?;
     let normalized = folder.to_string_lossy().to_string();

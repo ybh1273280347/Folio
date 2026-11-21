@@ -58,6 +58,23 @@ fn annotation_store_merges_files_and_preserves_existing_comments() {
 }
 
 #[test]
+fn annotation_relocation_preserves_other_files_in_the_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("old.md");
+    let target = dir.path().join("new.md");
+    let sibling = dir.path().join("sibling.md");
+    let note = prepare_markdown("target", &request("target"), MarkdownExtensions::default()).unwrap().item;
+    storage::save_annotations(&source, std::slice::from_ref(&note)).unwrap();
+    storage::save_annotations(&sibling, std::slice::from_ref(&note)).unwrap();
+
+    storage::relocate_annotations(&source, &target).unwrap();
+
+    assert!(storage::try_load_annotations(&source).unwrap().is_empty());
+    assert_eq!(storage::try_load_annotations(&target).unwrap()[0].comment, note.comment);
+    assert_eq!(storage::try_load_annotations(&sibling).unwrap().len(), 1);
+}
+
+#[test]
 fn annotation_damaged_store_is_reported_without_overwriting_it() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("note.md");

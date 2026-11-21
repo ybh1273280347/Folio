@@ -215,3 +215,219 @@ mod tests {
         assert!(build.logs.contains("stopped"));
     }
 }
+
+use super::{Workspace, Compile, PaneKey};
+use crate::{compiler, model::{Engine, Project}, storage};
+use gpui_kit::{Context, Window};
+use sha2::Digest;
+use std::{collections::BTreeSet, path::Path, thread};
+
+impl Workspace {
+    pub(super) fn release_build_pdf(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pane) = self.build_pdf.take() {
+            pane.update(cx, |pane, cx| pane.release(window, cx));
+        }
+    }
+
+    /// Returns true when a cancelled build has settled and the window can exit.
+    pub(super) fn poll_build(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // Keep the duration current even during quiet compiler phases.
+        if self.build.is_running() {
+            cx.notify();
+        }
+        if let Some(completed) = self.build.poll() {
+            if self.close_requested {
+                self.release_all_html_panes(window, cx);
+                window.remove_window();
+                cx.quit();
+                return true;
+            }
+            if let Some(path) = completed.preview {
+                self.release_build_pdf(window, cx);
+                self.build_pdf = Some(self.new_pdf_pane(path.clone(), window, cx));
+                self.preview = Some(path);
+            }
+            if let Some(error) = completed.error {
+                self.report(error, cx);
+            }
+            self.show_logs = self.build.status == BuildStatus::Failed;
+            if let Some(target) = completed.next_target {
+                self.prepare_batch_target(target, window, cx);
+            }
+        }
+        if let Some(target) = self.build.take_ready_target() {
+            self.start_build(target, cx);
+        }
+        false
+    }
+    pub(super) fn compile_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.build.is_busy() {
+            return;
+        }
+        let targets: Vec<_> = self
+            .selected_files
+            .iter()
+            .filter(|path| {
+                let lower = path.to_lowercase();
+                lower.ends_with(".tex") || lower.ends_with(".md")
+            })
+            .cloned()
+            .collect();
+        if targets.is_empty() {
+            self.report(crate::i18n::workspace::ERR_SELECT_COMPILE_FILE.get(), cx);
+            return;
+        }
+        let mut outputs = BTreeSet::new();
+        if targets.iter().any(|target| {
+            !outputs.insert(
+                Path::new(target)
+                    .with_extension("pdf")
+                    .to_string_lossy()
+                    .to_lowercase(),
+            )
+        }) {
+            self.report(crate::i18n::workspace::ERR_SAME_PDF_OUTPUT.get(), cx);
+            return;
+        }
+        if !self.save_all(cx) {
+            return;
+        }
+        let target = self.build.begin_batch(targets);
+        self.prepare_batch_target(target, window, cx);
+    }
+
+    fn prepare_batch_target(&mut self, target: String, window: &mut Window, cx: &mut Context<Self>) {
+        let file = self.files.iter().find(|file| file.path == target).cloned();
+        let result = file
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    crate::i18n::workspace::ERR_COMPILE_TARGET_MISSING.get(),
+                )
+            })
+            .and_then(|file| self.open_file(&file, window, cx));
+        if let Err(error) = result {
+            self.build.abort_batch();
+            self.report(error, cx);
+            return;
+        }
+        self.build.wait_for_paint(target);
+        cx.notify();
+    }
+
+    pub(super) fn compile_target(&self) -> Option<&str> {
+        let focused = self.documents.focused_markdown.as_deref().unwrap_or(&self.documents.active);
+        let lower = focused.to_lowercase();
+        if lower.ends_with(".md") || (self.config.active_id.is_none() && lower.ends_with(".tex")) {
+            Some(focused)
+        } else {
+            self.directory_workspace()
+                .map(|project| project.main_file.as_str())
+                .filter(|file| !file.is_empty())
+        }
+    }
+
+    pub(super) fn compile(&mut self, _: &Compile, _: &mut Window, cx: &mut Context<Self>) {
+        if self.build.is_busy() {
+            self.build.cancel();
+            cx.notify();
+            return;
+        }
+        // Match the original app: a focused Markdown split overrides the active
+        // tab; other files use the project's configured TeX entry point.
+        let Some(target) = self.compile_target().map(str::to_owned) else {
+            self.report(crate::i18n::workspace::ERR_SELECT_MAIN_TEX.get(), cx);
+            return;
+        };
+        self.start_build(target, cx);
+    }
+
+    fn start_build(&mut self, target: String, cx: &mut Context<Self>) {
+        let mut project = self.directory_workspace().cloned().unwrap_or_else(|| {
+            let source = PathBuf::from(&target);
+            let root = source.parent().expect("standalone document has a parent");
+            // The synthetic compile context only supplies latexmk's working directory;
+            // it is never stored in the user's project list.
+            let hash = sha2::Sha256::digest(source.as_os_str().to_string_lossy().as_bytes());
+            let id = hash
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            Project {
+                id: format!("standalone-{id}"),
+                name: source
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                folder: root.to_string_lossy().into_owned(),
+                main_file: source
+                    .file_name()
+                    .expect("standalone document has a name")
+                    .to_string_lossy()
+                    .into_owned(),
+                engine: Engine::default(),
+            }
+        });
+        if !self.save_all(cx) {
+            self.build.abort_batch();
+            return;
+        }
+        let mut build_root = match storage::data_directory() {
+            Ok(path) => path.join("builds"),
+            Err(error) => {
+                self.build.abort_batch();
+                self.report(error, cx);
+                return;
+            }
+        };
+        if self.build.is_batch() {
+            use sha2::{Digest, Sha256};
+            // Different directories can contain TeX sources with the same stem;
+            // their latexmk work files must not share an output directory.
+            let hash: String = Sha256::digest(target.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            build_root = build_root.join(format!("batch-{hash}"));
+        }
+        let markdown = target
+            .to_lowercase()
+            .ends_with(".md")
+            .then(|| target.clone());
+        if markdown.is_none() && self.directory_workspace().is_some() {
+            project.main_file = target.clone();
+        }
+        let capture = markdown.as_ref().map(|file| {
+            self.documents.markdown_panes.get(&PaneKey::reading(file))
+                .unwrap_or_else(|| &self.documents.markdown_panes[&PaneKey::tab(file)]).clone()
+        });
+        let (cancelled, sender) = self.build.start(target, self.documents.source_version, capture.clone());
+        self.show_build_preview = true;
+        self.notice = None;
+        if let Some((file, pane)) = markdown.zip(capture) {
+            let request = crate::markdown_pdf::ExportRequest {
+                destination: PathBuf::from(&project.folder)
+                    .join(&file)
+                    .with_extension("pdf"),
+                preview: build_root.join(&project.id).join("preview.pdf"),
+                cancelled,
+                complete: Box::new(move |result| {
+                    let _ = sender.send(BuildEvent::Finished(result));
+                }),
+                started: Instant::now(),
+            };
+            pane.update(cx, |pane, cx| pane.export_pdf(request, cx));
+        } else {
+            thread::spawn(move || {
+                let log_sender = sender.clone();
+                let on_log = move |line: &str| {
+                    let _ = log_sender.send(BuildEvent::Log(line.to_owned()));
+                };
+                let result = compiler::compile_tex(&project, &build_root, cancelled, on_log);
+                let _ = sender.send(BuildEvent::Finished(result));
+            });
+        }
+        cx.notify();
+    }
+}
