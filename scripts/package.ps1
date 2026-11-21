@@ -45,13 +45,8 @@ if (-not (Test-Path -LiteralPath (Join-Path $sdkSource 'node_modules'))) { throw
 if (-not (Test-Path -LiteralPath (Join-Path $sdkSource '.venv/Scripts/python.exe'))) { throw 'The web fetch Python environment is missing; run scripts/setup-ai.ps1.' }
 foreach ($hostDestination in @((Join-Path $destination 'pi-host'), (Join-Path $stableDirectory 'pi-host'))) {
     $null = New-Item -ItemType Directory -Path $hostDestination -Force
-    foreach ($hostFile in @('host.mjs', 'web-tools.mjs', 'annotation-tools.mjs', 'tag-tools.mjs', 'python-tool.mjs', 'workspace-tool-bridge.mjs', 'fetch.py', 'package.json', 'package-lock.json', 'requirements.txt', 'requirements.lock')) {
-        Copy-Item -LiteralPath (Join-Path $sdkSource $hostFile) -Destination $hostDestination -Force
-    }
-    foreach ($dependency in @('node_modules', '.venv', 'skills')) {
-        & robocopy.exe (Join-Path $sdkSource $dependency) (Join-Path $hostDestination $dependency) /E /COPY:DAT /DCOPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
-        if ($LASTEXITCODE -ge 8) { throw "Copying SDK dependency failed: $dependency" }
-    }
+    & robocopy.exe $sdkSource $hostDestination /E /XD test __pycache__ .pytest_cache /XF *.log *.tmp /COPY:DAT /DCOPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "Copying pi-host failed with robocopy exit code $LASTEXITCODE." }
 }
 $null = New-Item -ItemType Directory -Path $stableDirectory -Force
 Copy-Item -LiteralPath $executable -Destination $stableExecutable -Force
