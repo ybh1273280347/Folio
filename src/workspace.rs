@@ -1,7 +1,6 @@
 //! Workspace orchestration: disk-backed drafts, project actions and asynchronous builds.
 //! Disk revisions arbitrate external edits; conflicted drafts never autosave over them.
 mod annotations;
-mod agent_tags;
 mod appearance;
 mod build;
 mod documents;
@@ -278,7 +277,7 @@ pub struct Workspace {
     annotation_requests: BTreeSet<String>,
     compile_requests: tools::CompileRequests,
     drawio_requests: std::collections::HashMap<String, WorkspaceToolRequest>,
-    tag_proposals: agent_tags::TagProposals,
+    tag_proposals: tools::TagProposals,
     default_workspace: Project,
     config: ProjectConfig,
     workspace_sessions: BTreeMap<String, WorkspaceSession>,

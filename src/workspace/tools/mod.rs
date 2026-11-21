@@ -2,5 +2,7 @@
 
 mod compile;
 mod drawio;
+mod tags;
 
 pub(super) use compile::CompileRequests;
+pub(super) use tags::TagProposals;

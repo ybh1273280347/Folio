@@ -216,8 +216,7 @@ enum Identity {
     },
 }
 
-/// Display data for the exact proposal that the user is being asked to approve.
-/// The approval transport keeps the proposal ID and the actual write plan separate.
+/// Tool-facing change summary reused as the receipt for undo.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TagConfirmation {
@@ -255,6 +254,76 @@ pub struct TagColorDelta {
     pub from: Option<u8>,
     pub to: u8,
     pub affected: usize,
+}
+
+impl TagConfirmation {
+    /// Replay inverse edits in order. Each lookup uses the snapshot after the
+    /// previous edit, including when that edit failed and left the snapshot intact.
+    pub(crate) fn undo<State>(
+        &self,
+        state: &mut State,
+        snapshot: impl Fn(&State) -> &Snapshot,
+        mut apply: impl FnMut(&mut State, Change<'_>),
+    ) {
+        let tag_id = |state: &State, name: &str| {
+            let key = name_key(name);
+            snapshot(state)
+                .tags
+                .iter()
+                .find(|tag| name_key(&tag.name) == key)
+                .map(|tag| tag.id.clone())
+        };
+        match self {
+            Self::Files { files, created_tags, color_changes, .. } => {
+                let mut remove_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+                let mut add_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+                for delta in files {
+                    for tag in &delta.add {
+                        remove_map.entry(tag.clone()).or_default().push(delta.path.clone());
+                    }
+                    for tag in &delta.remove {
+                        add_map.entry(tag.clone()).or_default().push(delta.path.clone());
+                    }
+                }
+                for (name, paths) in remove_map {
+                    if let Some(id) = tag_id(state, &name) {
+                        apply(state, Change::Assign { tag: &id, paths: &paths, add: false });
+                    }
+                }
+                for (name, paths) in add_map {
+                    if let Some(id) = tag_id(state, &name) {
+                        apply(state, Change::Assign { tag: &id, paths: &paths, add: true });
+                    } else {
+                        apply(state, Change::Create { name: &name, paths: &paths });
+                    }
+                }
+                for change in color_changes {
+                    if let Some(color) = change.from
+                        && let Some(id) = tag_id(state, &change.tag)
+                    {
+                        apply(state, Change::Color { tag: &id, color });
+                    }
+                }
+                for name in created_tags {
+                    if let Some(id) = tag_id(state, name)
+                        && !snapshot(state).assigned.values().any(|ids| ids.contains(&id))
+                    {
+                        apply(state, Change::Delete(&id));
+                    }
+                }
+            }
+            Self::Rename { from, to, .. } => {
+                if let Some(id) = tag_id(state, to) {
+                    apply(state, Change::Rename { tag: &id, name: from });
+                }
+            }
+            Self::Color { tag, from, .. } => {
+                if let Some(id) = tag_id(state, tag) {
+                    apply(state, Change::Color { tag: &id, color: *from });
+                }
+            }
+        }
+    }
 }
 
 impl Proposal {
@@ -994,6 +1063,41 @@ fn stale() -> Failure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn undo_removes_unused_created_labels_and_preserves_shared_labels() {
+        let project = tempfile::tempdir().unwrap();
+        fs::write(project.path().join("first.md"), "first").unwrap();
+        fs::write(project.path().join("second.md"), "second").unwrap();
+        let store = Store::project(project.path());
+        store.change(Change::Create {
+            name: "Only first",
+            paths: &["first.md".into()],
+        }).unwrap();
+        let mut snapshot = store.change(Change::Create {
+            name: "Shared",
+            paths: &["first.md".into(), "second.md".into()],
+        }).unwrap();
+        let shared_id = tag_named(&snapshot, "Shared").unwrap().id.clone();
+        let receipt = TagConfirmation::Files {
+            files: vec![FileTagDelta {
+                path: "first.md".into(),
+                add: vec!["Only first".into(), "Shared".into()],
+                remove: vec![],
+            }],
+            created_tags: vec!["Only first".into(), "Shared".into()],
+            color_changes: vec![],
+            label_colors: BTreeMap::new(),
+        };
+
+        receipt.undo(&mut snapshot, |snapshot| snapshot, |snapshot, change| {
+            *snapshot = store.change(change).unwrap();
+        });
+
+        assert!(snapshot.tags.iter().all(|tag| tag.name != "Only first"));
+        assert!(!snapshot.has("first.md", &shared_id));
+        assert!(snapshot.has("second.md", &shared_id));
+    }
     use crate::files::list_files;
 
     #[test]
