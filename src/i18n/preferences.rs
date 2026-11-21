@@ -76,6 +76,11 @@ pub const FONT_FALLBACK_HINT: BiText = BiText::new(
     "界面、终端、Markdown 预览和 AI 面板的主字体缺少字形时，优先使用此字体。",
     "Preferred fallback font when primary UI, terminal, Markdown, or AI fonts lack glyphs.",
 );
+pub const CJK_FONT_SCALE: BiText = BiText::new("中西文字体比例", "CJK Font Scale");
+pub const CJK_FONT_SCALE_HINT: BiText = BiText::new(
+    "按比例缩放中文及全角标点字号，用于平衡中文字体相对英文偏小的问题。",
+    "Scale CJK characters and fullwidth punctuation relative to Latin text.",
+);
 pub const FALLBACK_FONT_SAMPLE: BiText = BiText::new("Aa 中文字体预览", "Aa CJK & Latin Font Preview");
 pub const RESET_FONTS: BiText = BiText::new("恢复默认字体", "Reset Default Fonts");
 

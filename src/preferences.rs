@@ -72,6 +72,7 @@ pub struct Preferences {
     markdown_font: Entity<SelectState<SearchableVec<String>>>,
     ai_font: Entity<SelectState<SearchableVec<String>>>,
     cjk_fallback_font: Entity<SelectState<SearchableVec<String>>>,
+    cjk_font_scale: Entity<SliderState>,
     inline_code_font: Entity<SelectState<SearchableVec<String>>>,
     block_code_font: Entity<SelectState<SearchableVec<String>>>,
     inline_code_scale: Entity<SliderState>,
@@ -241,6 +242,20 @@ impl Preferences {
         let markdown_font = font_selector();
         let ai_font = font_selector();
         let cjk_fallback_font = font_selector();
+        let cjk_font_scale = cx.new(|_| {
+            SliderState::new()
+                .min(0.8)
+                .max(1.4)
+                .step(0.02)
+                .default_value(settings.cjk_font_scale)
+        });
+        cx.subscribe(&cjk_font_scale, |panel, _, event: &SliderEvent, cx| {
+            if let SliderEvent::Change(value) = event {
+                panel.settings.cjk_font_scale = (value.end() * 50.).round() / 50.;
+                panel.changed(cx);
+            }
+        })
+        .detach();
         fonts[0] = p::DEFAULT_MONOSPACE.get().into();
         let inline_code_font = cx.new(|cx| {
             SelectState::new(SearchableVec::new(fonts.clone()), None, window, cx).searchable(true)
@@ -501,6 +516,7 @@ impl Preferences {
             markdown_font,
             ai_font,
             cjk_fallback_font,
+            cjk_font_scale,
             inline_code_font,
             block_code_font,
             inline_code_scale,
@@ -558,6 +574,9 @@ impl Preferences {
                 );
             });
         }
+        self.cjk_font_scale.update(cx, |state, cx| {
+            state.set_value(settings.cjk_font_scale, window, cx)
+        });
         self.inline_code_scale.update(cx, |state, cx| {
             state.set_value(settings.inline_code_scale, window, cx)
         });
@@ -847,7 +866,15 @@ impl Preferences {
             .child(div().flex().flex_col().gap_2()
                 .child(Select::new(&self.cjk_fallback_font).w_full())
                 .child(div().text_sm().text_color(rgb(palette.muted))
-                    .child(p::FONT_FALLBACK_HINT.get()))
+                    .child(p::FONT_FALLBACK_HINT.get())))
+            .child(div().flex().flex_col().gap_2()
+                .child(slider_row(
+                    p::CJK_FONT_SCALE.get(),
+                    format!("{:.0}%", settings.cjk_font_scale * 100.),
+                    &self.cjk_font_scale,
+                ))
+                .child(div().text_sm().text_color(rgb(palette.muted))
+                    .child(p::CJK_FONT_SCALE_HINT.get()))
                 .child(div().p_3().rounded(px(5.)).bg(rgb(palette.background))
                     .child(p::FALLBACK_FONT_SAMPLE.get())));
         div().flex().flex_col().gap_5()
@@ -866,6 +893,7 @@ impl Preferences {
                             panel.settings.markdown_font = defaults.markdown_font;
                             panel.settings.ai_font = defaults.ai_font;
                             panel.settings.cjk_fallback_font = defaults.cjk_fallback_font;
+                            panel.settings.cjk_font_scale = defaults.cjk_font_scale;
                             panel.settings.inline_code_font = defaults.inline_code_font;
                             panel.settings.block_code_font = defaults.block_code_font;
                             panel.settings.math_font = defaults.math_font;

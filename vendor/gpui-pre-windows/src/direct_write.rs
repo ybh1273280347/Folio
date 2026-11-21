@@ -66,6 +66,7 @@ struct DirectWriteState {
     // Keep the keyed IDWriteFontFace3 alive so DirectWrite cannot free it and reuse its address for another face.
     font_info_cache: HashMap<usize, (IDWriteFontFace3, FontId)>,
     layout_line_scratch: Vec<u16>,
+    cjk_font_scale: f32,
 }
 
 impl DirectWriteTextSystem {
@@ -117,12 +118,17 @@ impl DirectWriteTextSystem {
                 font_to_font_id: HashMap::default(),
                 font_info_cache: HashMap::default(),
                 layout_line_scratch: Vec::new(),
+                cjk_font_scale: 1.0,
             }),
         })
     }
 }
 
 impl PlatformTextSystem for DirectWriteTextSystem {
+    fn set_cjk_font_scale(&self, scale: f32) {
+        self.state.write().cjk_font_scale = scale;
+    }
+
     fn font_data(&self, id: FontId) -> Result<(Vec<u8>, u32)> {
         let state = self.state.read();
         let face = &state.fonts[id.0].font_face;
@@ -574,15 +580,6 @@ impl DirectWriteState {
                 layout
             };
 
-            let (ascent, descent) = {
-                let mut first_metrics = [DWRITE_LINE_METRICS::default(); 4];
-                let mut line_count = 0u32;
-                text_layout.GetLineMetrics(Some(&mut first_metrics), &mut line_count)?;
-                (
-                    px(first_metrics[0].baseline),
-                    px(first_metrics[0].height - first_metrics[0].baseline),
-                )
-            };
             let mut break_ligatures = true;
             for run in &font_runs[1..] {
                 let font_info = &self.fonts[run.font_id.0];
@@ -610,6 +607,48 @@ impl DirectWriteState {
 
                 break_ligatures = !break_ligatures;
             }
+
+            if (self.cjk_font_scale - 1.0).abs() > f32::EPSILON {
+                let cjk_size = font_size.as_f32() * self.cjk_font_scale;
+                let mut utf16_pos = 0u32;
+                let mut run_start: Option<u32> = None;
+                for ch in text.chars() {
+                    let ch_len = ch.len_utf16() as u32;
+                    if gpui::is_cjk_char(ch) {
+                        if run_start.is_none() {
+                            run_start = Some(utf16_pos);
+                        }
+                    } else if let Some(start) = run_start.take() {
+                        text_layout.SetFontSize(
+                            cjk_size,
+                            DWRITE_TEXT_RANGE {
+                                startPosition: start,
+                                length: utf16_pos - start,
+                            },
+                        )?;
+                    }
+                    utf16_pos += ch_len;
+                }
+                if let Some(start) = run_start {
+                    text_layout.SetFontSize(
+                        cjk_size,
+                        DWRITE_TEXT_RANGE {
+                            startPosition: start,
+                            length: utf16_pos - start,
+                        },
+                    )?;
+                }
+            }
+
+            let (ascent, descent) = {
+                let mut first_metrics = [DWRITE_LINE_METRICS::default(); 4];
+                let mut line_count = 0u32;
+                text_layout.GetLineMetrics(Some(&mut first_metrics), &mut line_count)?;
+                (
+                    px(first_metrics[0].baseline),
+                    px(first_metrics[0].height - first_metrics[0].baseline),
+                )
+            };
 
             let mut runs = Vec::new();
             let mut renderer_context = RendererContext {
@@ -2173,6 +2212,68 @@ mod tests {
                 "fallback run should not have synthetic oblique simulation"
             );
         }
+        Ok(())
+    }
+
+    #[gpui::test]
+    fn test_cjk_font_scale_scales_only_cjk_characters() -> Result<()> {
+        let platform_text_system = Arc::new(DirectWriteTextSystem::new()?);
+        let text_system = Arc::new(TextSystem::new(platform_text_system));
+        let window_text = WindowTextSystem::new(text_system.clone());
+        let font = Font {
+            family: "Segoe UI".into(),
+            fallbacks: Some(gpui::FontFallbacks::from_fonts(vec![
+                "Microsoft YaHei".to_owned(),
+            ])),
+            ..Default::default()
+        };
+
+        let en_base = window_text.layout_line(
+            "Hello",
+            px(16.0),
+            &[TextRun {
+                len: "Hello".len(),
+                font: font.clone(),
+                ..Default::default()
+            }],
+            None,
+        );
+        let mixed_base = window_text.layout_line(
+            "Hello中文，",
+            px(16.0),
+            &[TextRun {
+                len: "Hello中文，".len(),
+                font: font.clone(),
+                ..Default::default()
+            }],
+            None,
+        );
+
+        text_system.set_cjk_font_scale(1.25);
+
+        let en_scaled = window_text.layout_line(
+            "Hello",
+            px(16.0),
+            &[TextRun {
+                len: "Hello".len(),
+                font: font.clone(),
+                ..Default::default()
+            }],
+            None,
+        );
+        let mixed_scaled = window_text.layout_line(
+            "Hello中文，",
+            px(16.0),
+            &[TextRun {
+                len: "Hello中文，".len(),
+                font,
+                ..Default::default()
+            }],
+            None,
+        );
+
+        assert_eq!(en_base.width, en_scaled.width);
+        assert!(mixed_scaled.width > mixed_base.width);
         Ok(())
     }
 }

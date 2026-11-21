@@ -559,6 +559,8 @@ fn paint_line(
         let mut current_underline: Option<(Point<Pixels>, UnderlineStyle, Range<usize>)> = None;
         let mut current_strikethrough: Option<(Point<Pixels>, StrikethroughStyle)> = None;
         let text_system = cx.text_system().clone();
+        let cjk_scale = text_system.cjk_font_scale();
+        let has_cjk_scale = (cjk_scale - 1.0).abs() > f32::EPSILON;
         let mut glyph_origin = point(
             aligned_origin_x(
                 origin,
@@ -575,7 +577,7 @@ fn paint_line(
         let mut first_glyph_x = origin.x;
         let mut exported_clusters = std::collections::HashSet::new();
         for (run_ix, run) in layout.runs.iter().enumerate() {
-            max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size).size;
+            max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size * cjk_scale.max(1.0)).size;
 
             for (glyph_ix, glyph) in run.glyphs.iter().enumerate() {
                 glyph_origin.x += glyph.position.x - prev_glyph_position.x;
@@ -744,19 +746,28 @@ fn paint_line(
                         }
                     }
                     let vertical_offset = point(px(0.0), glyph.position.y);
+                    let glyph_font_size = if has_cjk_scale
+                        && text
+                            .and_then(|t| t.get(glyph.index..)?.chars().next())
+                            .is_some_and(crate::is_cjk_char)
+                    {
+                        layout.font_size * cjk_scale
+                    } else {
+                        layout.font_size
+                    };
                     if glyph.is_emoji {
                         window.paint_emoji(
                             glyph_origin + baseline_offset + vertical_offset,
                             run.font_id,
                             glyph.id,
-                            layout.font_size,
+                            glyph_font_size,
                         )?;
                     } else {
                         window.paint_glyph(
                             glyph_origin + baseline_offset + vertical_offset,
                             run.font_id,
                             glyph.id,
-                            layout.font_size,
+                            glyph_font_size,
                             color,
                         )?;
                     }
@@ -826,6 +837,7 @@ fn paint_line_background(
         let mut run_end = 0;
         let mut current_background: Option<(Point<Pixels>, Hsla)> = None;
         let text_system = cx.text_system().clone();
+        let cjk_scale = text_system.cjk_font_scale();
         let mut glyph_origin = point(
             aligned_origin_x(
                 origin,
@@ -840,7 +852,7 @@ fn paint_line_background(
         let mut prev_glyph_position = Point::default();
         let mut max_glyph_size = size(px(0.), px(0.));
         for (run_ix, run) in layout.runs.iter().enumerate() {
-            max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size).size;
+            max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size * cjk_scale.max(1.0)).size;
 
             for (glyph_ix, glyph) in run.glyphs.iter().enumerate() {
                 glyph_origin.x += glyph.position.x - prev_glyph_position.x;

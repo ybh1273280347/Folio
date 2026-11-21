@@ -428,6 +428,8 @@ pub struct AppSettings {
     pub ai_font: String,
     /// Shared glyph fallback. Empty lets the platform choose fallback faces.
     pub cjk_fallback_font: String,
+    /// Scale factor applied to CJK characters relative to Latin text.
+    pub cjk_font_scale: f32,
     /// Empty selects the renderer's default monospace family.
     pub inline_code_font: String,
     /// Empty keeps the renderer's default monospace family for fenced code blocks.
@@ -505,6 +507,7 @@ impl Default for AppSettings {
             markdown_font: String::new(),
             ai_font: String::new(),
             cjk_fallback_font: String::new(),
+            cjk_font_scale: 1.0,
             inline_code_font: String::new(),
             block_code_font: String::new(),
             inline_code_scale: 0.875,
