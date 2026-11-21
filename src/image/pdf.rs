@@ -12,7 +12,7 @@ use image::GenericImageView;
 use krilla::{Document, geom::Size as KrillaSize, page::PageSettings};
 use krilla_svg::{SurfaceExt, SvgSettings};
 
-use crate::{compiler::BuildResult, model::BuildStatus};
+use crate::build::{BuildResult, BuildStatus};
 
 const MAX_PDF_POINTS: f32 = 14400.0;
 

@@ -297,14 +297,6 @@ impl DocumentBuffer {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BuildStatus {
-    Idle,
-    Success,
-    Failed,
-    Cancelled,
-}
-
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum MathFont {

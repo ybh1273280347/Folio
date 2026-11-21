@@ -3,7 +3,7 @@
 #![recursion_limit = "256"]
 mod ai;
 mod annotations;
-mod compiler;
+mod build;
 mod build_log;
 mod files;
 mod image;

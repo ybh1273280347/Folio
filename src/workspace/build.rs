@@ -1,7 +1,7 @@
 //! Owns build progress, cancellation and batch sequencing. The window opens
 //! batch targets and publishes the resulting preview.
 
-use crate::{compiler::BuildResult, markdown::MarkdownPane, model::BuildStatus};
+use crate::{build::{BuildResult, BuildStatus, compiler}, markdown::MarkdownPane};
 use gpui_kit::Entity;
 use std::{
     collections::VecDeque,
@@ -217,7 +217,7 @@ mod tests {
 }
 
 use super::{Workspace, Compile, PaneKey};
-use crate::{compiler, model::{Engine, Project}, storage};
+use crate::{model::{Engine, Project}, storage};
 use gpui_kit::{Context, Window};
 use sha2::Digest;
 use std::{collections::BTreeSet, path::Path, thread};

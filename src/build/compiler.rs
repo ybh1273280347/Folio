@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{self, BufRead, BufReader, Read},
-    path::{Path, PathBuf},
+    path::Path,
     process::{Child, Command, Stdio},
     sync::{
         Arc,
@@ -12,20 +12,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{
-    files,
-    model::{BuildStatus, Project},
-};
+use super::{BuildResult, BuildStatus};
+use crate::{files, model::Project};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-
-pub struct BuildResult {
-    pub status: BuildStatus,
-    pub elapsed: Duration,
-    pub log: String,
-    pub preview: Option<PathBuf>,
-}
 
 pub fn compile_tex(
     project: &Project,
