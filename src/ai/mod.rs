@@ -2717,6 +2717,15 @@ fn summarize_tool_call(name: &str, args: &Value, diffs: &[FileDiff]) -> String {
             }
         }
         "folio_tags_manage" => crate::i18n::ai::tool_manage_tag(args["tag"].as_str().unwrap_or_default()),
+        "folio_tex_compile" => {
+            if let Some(folder) = args["under_directory"].as_str() {
+                crate::i18n::ai::tool_compile_tex_folder(folder)
+            } else if let Some(paths) = args["paths"].as_array() {
+                crate::i18n::ai::tool_compile_tex_files(paths.len())
+            } else {
+                crate::i18n::ai::TOOL_COMPILE_TEX.get().into()
+            }
+        }
         "run_python" => crate::i18n::ai::TOOL_RUN_PYTHON.get().into(),
         "bash" | "powershell" => args
             .get("command")

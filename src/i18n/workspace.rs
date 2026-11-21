@@ -334,6 +334,15 @@ pub const LABEL_MAIN_FILE: BiText = BiText::new("编译主文件", "Main File");
 pub const TOOLTIP_COLLAPSE_RIGHT_HUB: BiText = BiText::new("收起右侧功能栏", "Collapse right panel");
 pub const TOOLTIP_EXPAND_RIGHT_HUB: BiText = BiText::new("展开右侧功能栏", "Expand right panel");
 
+pub fn exit_zen_label(shortcut: &str) -> String {
+    match (locale(), shortcut.is_empty()) {
+        (Locale::ZhCn, true) => "退出 Zen".to_owned(),
+        (Locale::ZhCn, false) => format!("退出 Zen · {shortcut}"),
+        (Locale::En, true) => "Exit Zen".to_owned(),
+        (Locale::En, false) => format!("Exit Zen · {shortcut}"),
+    }
+}
+
 // Name modal titles
 pub const MODAL_CREATE_FILE: BiText = BiText::new("新建文件", "New File");
 pub const MODAL_CREATE_FOLDER: BiText = BiText::new("新建文件夹", "New Folder");

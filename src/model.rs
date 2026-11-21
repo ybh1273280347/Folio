@@ -67,6 +67,12 @@ pub const SHORTCUT_DEFS: &[ShortcutDef] = &[
         default_key: "ctrl-`",
     },
     ShortcutDef {
+        id: "toggle_zen",
+        category: pref_i18n::CAT_WORKSPACE,
+        label: pref_i18n::SC_TOGGLE_ZEN,
+        default_key: "f11",
+    },
+    ShortcutDef {
         id: "close_tab",
         category: pref_i18n::CAT_WORKSPACE,
         label: pref_i18n::SC_CLOSE_TAB,

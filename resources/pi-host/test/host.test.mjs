@@ -123,6 +123,33 @@ test('annotation tools cross the real SDK and JSONL request/reply boundary', { t
   assert.deepEqual(JSON.parse(requests[1].messages.at(-1).content), result);
 });
 
+test('compile tool crosses the real SDK and JSONL request/reply boundary', { timeout: 45000 }, async t => {
+  const {client, project, sessionId, requests, run} = await runWorkspaceTool(t, {
+    name: 'folio_tex_compile',
+    args: {paths:['chapters/ch1.tex', 'chapters/ch2.tex'], engine:'xelatex'},
+    message: '批量编译这两章 tex',
+  });
+  const pending = await client.event(sessionId, 'compile_request');
+  assert.equal(pending.projectKey, project.projectKey);
+  assert.equal(pending.operation, 'compile_tex');
+  assert.deepEqual(pending.params, {paths:['chapters/ch1.tex', 'chapters/ch2.tex'], engine:'xelatex'});
+  const result = {
+    status: 'ok',
+    summary: {total:2, succeeded:2, failed:0, cancelled:0, elapsed_ms:320},
+    results: [
+      {source:'chapters/ch1.tex', pdf:'chapters/ch1.pdf', engine:'xelatex', status:'success', elapsed_ms:150},
+      {source:'chapters/ch2.tex', pdf:'chapters/ch2.pdf', engine:'xelatex', status:'success', elapsed_ms:170},
+    ],
+  };
+  assert.equal((await client.request({...project, sessionId, type:'compile_response', id:pending.id, result})).success, true);
+  const ended = await client.event(sessionId, 'tool_execution_end');
+  assert.equal(ended.isError, false);
+  assert.deepEqual(JSON.parse(ended.result.content[0].text), result);
+  await client.event(sessionId, 'agent_settled');
+  assert.equal((await run).success, true);
+  assert.deepEqual(JSON.parse(requests[1].messages.at(-1).content), result);
+});
+
 test('the tag tool commits its exact preview directly in the originating SDK session', {timeout:45000}, async t => {
   const args = {under_directory:'Notes', add:['已掌握'], remove:['待复习'], create_missing:true,
     tag_colors:[{tag:'已掌握', color:'green'}]};

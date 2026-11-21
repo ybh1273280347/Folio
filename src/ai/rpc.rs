@@ -33,6 +33,8 @@ pub enum RpcInbound {
 pub enum WorkspaceToolKind {
     AnnotationRequest,
     AnnotationCancel,
+    CompileRequest,
+    CompileCancel,
     TagRequest,
     TagCancel,
 }
@@ -176,7 +178,12 @@ impl Host {
                         error: value["error"].as_str().map(str::to_owned),
                     },
                     "extension_ui_request" => RpcInbound::ExtensionUiRequest(value.clone()),
-                    "annotation_request" | "annotation_cancel" | "tag_request" | "tag_cancel" => {
+                    "annotation_request"
+                    | "annotation_cancel"
+                    | "compile_request"
+                    | "compile_cancel"
+                    | "tag_request"
+                    | "tag_cancel" => {
                         match serde_json::from_value(value.clone()) {
                             Ok(request) => RpcInbound::WorkspaceTool(request),
                             Err(error) => RpcInbound::Stderr(crate::i18n::ai::err_rpc_protocol(&error)),
@@ -270,6 +277,32 @@ mod tests {
         assert_eq!(request.sequence, 0);
         assert_eq!(request.arguments["operation"], "preview_files");
         assert_eq!(request.arguments["params"]["proposal_id"], "proposal-1");
+    }
+
+    #[test]
+    fn compile_request_and_cancel_deserialize_to_workspace_tool() {
+        let request: WorkspaceToolRequest = serde_json::from_value(json!({
+            "type": "compile_request",
+            "id": "compile-1",
+            "projectKey": "project-root",
+            "sessionId": "session-1",
+            "operation": "compile_tex",
+            "params": { "paths": ["main.tex"], "engine": "xelatex" }
+        }))
+        .unwrap();
+        assert_eq!(request.kind, WorkspaceToolKind::CompileRequest);
+        assert_eq!(request.arguments["operation"], "compile_tex");
+        assert_eq!(request.arguments["params"]["paths"][0], "main.tex");
+
+        let cancel: WorkspaceToolRequest = serde_json::from_value(json!({
+            "type": "compile_cancel",
+            "id": "compile-1",
+            "projectKey": "project-root",
+            "sessionId": "session-1"
+        }))
+        .unwrap();
+        assert_eq!(cancel.kind, WorkspaceToolKind::CompileCancel);
+        assert_eq!(cancel.id, "compile-1");
     }
 }
 impl Drop for Host {
