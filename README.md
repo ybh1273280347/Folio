@@ -1,6 +1,6 @@
 # Folio (GPUI)
 
-基于 [GPUI](https://www.gpui.rs/) 与 Rust 编写的 Windows 原生 LaTeX / Markdown 个人工作台，另附一个独立的离线 Android 版。
+基于 [GPUI](https://www.gpui.rs/) 与 Rust 编写的 Windows 原生 LaTeX / Markdown 个人工作台。
 
 写文档和论文时，希望有一款轻量、启动快、内存占用低的本地编辑工具，于是用 GPUI 做了这套原生工作台。界面、编辑器、公式排版、PDF 预览与导出均在进程内完成；AI 助手同样是原生 GPUI 面板，只把模型与工具宿主放到独立的 Node 进程；打开 `.html` 文件时才按需调用系统 WebView2。
 
@@ -9,7 +9,7 @@
 ## 💡 设计特点
 
 - **原生渲染为主**：界面、编辑器、数学公式与 PDF 的排版/预览/导出全部基于 GPUI 原生渲染，不打包 Electron/Chromium。WebView 只用于两处按需场景：打开 `.html/.htm` 与离线 draw.io 绘图，均复用**系统 WebView2**（Edge Chromium 内核），惰性创建、关闭即释放；draw.io 资源随应用打包并经虚拟宿主映射，不访问在线服务。
-- **进程内数学公式排版**：Markdown 内嵌的 LaTeX 公式基于 `latex-rust` 盒模型在进程内解析与布局，直接由 GPUI 绘制字形与矢量横线，无需生成 SVG 或拉起 KaTeX / WebView。内置 STIX Two、Latin Modern、TeX Gyre Pagella 三套数学字体，中文缺字回退系统字体。
+- **进程内数学公式排版**：Markdown 内嵌的 LaTeX 公式基于 `latex-rust` 盒模型在进程内解析与布局，直接由 GPUI 绘制字形与矢量横线。内置 STIX Two、Latin Modern、TeX Gyre Pagella 三套数学字体，中文缺字回退系统字体。
 - **矢量 PDF 导出**：Markdown 导出 PDF 复用文档绘制操作并通过 `krilla` 输出，正文与公式均保留为可选择、可复制的矢量文字，不调用无头浏览器。
 - **纯 Rust PDF 预览**：通过 vendored `gpui-pdf`（渲染后端 `hayro`）实现页面虚拟化、按需光栅化、目录导航、缩略图与高亮批注；文本层支持搜索、选择与复制。
 - **克制的资源管理**：PDF 仅缓存视口附近页面，缩放或改窗口时丢弃未完成的旧渲染任务，隐藏标签/分屏时释放资源；文件监听（`notify`）只比对当前打开文件，目录结构变动才重扫文件树；编辑器草稿随击键更新，不做定时全量轮询。
@@ -178,27 +178,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package.ps1
 .\启动 Folio.cmd
 ```
 
-`scripts/package.ps1` 会把可执行文件、`WebView2Loader.dll`、图标、字体与许可证打包到带时间戳的 `dist\releases\Folio-<时间>\`，同时更新稳定目录 `dist\Folio\`，并在桌面创建“Folio GPUI”快捷方式。它还会把 `pi-host/`（含 `node_modules`、`.venv` 与内置技能）和 `drawio/` 离线资源复制到发布与稳定目录，因此打包前必须先跑 `setup-ai.ps1` 并确保 `resources/drawio/` 存在（缺失则拒绝打包）；`-KeepRunning` 可在 Folio 仍运行时跳过关闭检查。文件关联只注册当前用户，可用 `scripts/register-file-associations.ps1 -Unregister` 撤销。仓库内的 `runtime/` 与 PDFium 解包脚本是旧版遗留，当前 PDF 渲染不依赖 PDFium。
-
-### Android 版
-
-独立于桌面 Rust 工程，详见 [android/README.md](android/README.md) 与 [android/README-native.md](android/README-native.md)。构建需 JDK 17、Gradle 8.11.1、Android SDK 35、Node.js：
-
-```powershell
-.\scripts\build-android.ps1
-```
-
-产物为 `dist\android\Folio-Android-0.1.0.apk`（最低 Android 8.0 / API 26）。Android 版只做 Markdown 阅读与编辑（ProseMirror + KaTeX），不含桌面版的 LaTeX 编译、PDF 批注、原生终端和多分屏。
+`scripts/package.ps1` 会把可执行文件、`WebView2Loader.dll`、图标、字体与许可证打包到带时间戳的 `dist\releases\Folio-<时间>\`，同时更新稳定目录 `dist\Folio\`，并在桌面创建“Folio GPUI”快捷方式。它还会把 `pi-host/`（含 `node_modules`、`.venv` 与内置技能）和 `drawio/` 离线资源复制到发布与稳定目录，因此打包前必须先跑 `setup-ai.ps1` 并确保 `resources/drawio/` 存在（缺失则拒绝打包）；`-KeepRunning` 可在 Folio 仍运行时跳过关闭检查。文件关联只注册当前用户，可用 `scripts/register-file-associations.ps1 -Unregister` 撤销。
 
 ### 测试
 
 ```powershell
 cargo test                       # Rust：tests/fold_callouts.rs、tests/appearance.rs、tests/annotations.rs
-cd android/web; npm ci; npm test; npm run test:ui; npm run build   # Android 前端
 npm test --prefix resources/pi-host   # AI 宿主 JSONL 协议、标签 / 批注 / 编译 / draw.io 工具（受控 OpenAI 兼容服务）
 ```
 
-Rust 集成测试覆盖折叠标注的 Markdown 往返与输入规则、主题/自定义配色持久化、块级代码随正文缩放，以及批注的 Markdown / PDF 定位、歧义拒绝与越界路径防护；AI 宿主测试覆盖多会话并行、实时快照、项目隔离、标题与删除保护、联网工具选项与取消，以及标签 / 批注工具的请求—应答往返与会话隔离，不使用固定等待；Android 前端测试覆盖公式分隔符、转义与浏览器端交互。打包脚本本身不运行测试。
+Rust 集成测试覆盖折叠标注的 Markdown 往返与输入规则、主题/自定义配色持久化、块级代码随正文缩放，以及批注的 Markdown / PDF 定位、歧义拒绝与越界路径防护；AI 宿主测试覆盖多会话并行、实时快照、项目隔离、标题与删除保护、联网工具选项与取消，以及标签 / 批注工具的请求—应答往返与会话隔离，不使用固定等待。打包脚本本身不运行测试。
 
 ---
 
@@ -217,14 +206,12 @@ Rust 集成测试覆盖折叠标注的 Markdown 往返与输入规则、主题/�
 ├── src/i18n/                  # 中英双语文案
 ├── vendor/                    # vendored 与打补丁的 crate：latex-rust、gpui-pdf、gpui-xterm、
 │                              #   gpui-kit-markdown-editor、gpui-pre(-windows)；补丁见 FOLIO-PATCHES.md
-├── resources/                 # 应用图标、编译期内嵌的数学字体、katex 资源
+├── resources/                 # 应用图标与编译期内嵌的数学字体
 ├── resources/pi-host/         # Pi SDK Node 宿主、网页抓取 / Python / 标签 / 批注 / 编译 / draw.io 工具、内置技能与扩展指南（README.md）
 ├── resources/drawio/          # draw.io v32.7.4 离线静态资源（WebView2 虚拟宿主映射）
 ├── resources/pi-skills/       # PDF/Word/PPT 选页渲染脚本与 Windows 说明
-├── scripts/                   # 打包 / AI 宿主与文档渲染安装 / draw.io 资源拉取 / Android 构建 / 文件关联 / PDFium 辅助脚本
-├── runtime/                   # PDFium 解包产物（旧版遗留，当前渲染不使用）
-├── dist/                      # 发布产物（releases/、稳定目录 Folio/、android/ APK）
-├── android/                   # 独立 Android 工程（原生外壳 + web 前端）
+├── scripts/                   # 打包、AI 宿主与文档渲染安装、draw.io 资源拉取、文件关联
+├── dist/                      # 发布产物（releases/、稳定目录 Folio/）
 ├── docs/                      # 技术调研与规范（AI 运行时、公式排版评测、主题、终端方案）
 ├── tests/                     # Rust 集成测试（折叠标注、外观持久化、批注定位）
 ├── fixtures/                  # 冒烟样例（.tex / .md / .pdf）
