@@ -211,7 +211,7 @@ impl HtmlPane {
             raw_window_handle::HasWindowHandle::window_handle(window).map(|h| h.as_raw())
         else {
             self.loading = false;
-            self.error = Some("无法获取父窗口句柄".into());
+            self.error = Some(crate::i18n::media::HTML_ERR_NO_HWND.get().into());
             return;
         };
         let parent = ParentWindowHandle(raw_handle);
@@ -323,7 +323,7 @@ impl HtmlPane {
                     }
                     Err(err) => {
                         pane.loading = false;
-                        pane.error = Some(format!("无法启动 WebView2：{err}"));
+                        pane.error = Some(crate::i18n::media::html_err_start(&err));
                     }
                 }
                 cx.notify();
@@ -349,9 +349,9 @@ impl Render for HtmlPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let filename = self.display_name();
         let status_label = if self.error.is_some() {
-            Some("加载失败")
+            Some(crate::i18n::media::HTML_STATUS_FAILED.get())
         } else if self.loading {
-            Some("正在加载…")
+            Some(crate::i18n::media::HTML_STATUS_LOADING.get())
         } else {
             None
         };
@@ -376,7 +376,7 @@ impl Render for HtmlPane {
             .child(
                 ui::control("html-back", IconName::ChevronLeft)
                     .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new("后退").build(window, cx)
+                        gpui_kit::component::tooltip::Tooltip::new(crate::i18n::media::HTML_BACK.get()).build(window, cx)
                     })
                     .on_click(cx.listener(|pane, _, _, cx| {
                         if let Some(wv) = &pane.webview {
@@ -389,7 +389,7 @@ impl Render for HtmlPane {
             .child(
                 ui::control("html-forward", IconName::ChevronRight)
                     .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new("前进").build(window, cx)
+                        gpui_kit::component::tooltip::Tooltip::new(crate::i18n::media::HTML_FORWARD.get()).build(window, cx)
                     })
                     .on_click(cx.listener(|pane, _, _, cx| {
                         if let Some(wv) = &pane.webview {
@@ -402,7 +402,7 @@ impl Render for HtmlPane {
             .child(
                 ui::control("html-reload", IconName::RotateCcw)
                     .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new("刷新页面").build(window, cx)
+                        gpui_kit::component::tooltip::Tooltip::new(crate::i18n::media::HTML_REFRESH.get()).build(window, cx)
                     })
                     .on_click(cx.listener(|pane, _, window, cx| {
                         pane.reload(window, cx);
@@ -435,7 +435,7 @@ impl Render for HtmlPane {
             .child(
                 ui::control("html-external", IconName::ExternalLink)
                     .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new("在默认浏览器中打开")
+                        gpui_kit::component::tooltip::Tooltip::new(crate::i18n::media::HTML_OPEN_BROWSER.get())
                             .build(window, cx)
                     })
                     .on_click(cx.listener(|pane, _, _, cx| {
@@ -447,7 +447,7 @@ impl Render for HtmlPane {
             toolbar = toolbar.child(
                 ui::control("html-close", IconName::Close)
                     .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new("关闭标签页").build(window, cx)
+                        gpui_kit::component::tooltip::Tooltip::new(crate::i18n::media::HTML_CLOSE_TAB.get()).build(window, cx)
                     })
                     .on_click(cx.listener(|_, _, _, cx| {
                         cx.emit(HtmlPaneEvent::Close);
@@ -474,14 +474,14 @@ impl Render for HtmlPane {
                             .text_sm()
                             .font_semibold()
                             .text_color(rgb(0x37352f))
-                            .child("WebView2 初始化失败"),
+                            .child(crate::i18n::media::HTML_INIT_FAILED.get()),
                     )
                     .child(div().text_xs().max_w(px(460.)).child(err.clone()))
                     .child(
                         div()
                             .flex()
                             .gap_2()
-                            .child(ui::button_secondary("html-retry", "重试").on_click(
+                            .child(ui::button_secondary("html-retry", crate::i18n::common::RETRY.get()).on_click(
                                 cx.listener(|pane, _, window, cx| {
                                     pane.attempted = false;
                                     pane.error = None;
@@ -490,7 +490,7 @@ impl Render for HtmlPane {
                                 }),
                             ))
                             .child(
-                                ui::button_primary("html-open-browser", "在默认浏览器中打开")
+                                ui::button_primary("html-open-browser", crate::i18n::media::HTML_OPEN_BROWSER.get())
                                     .on_click(cx.listener(|pane, _, _, cx| {
                                         pane.open_in_external_browser(cx);
                                     })),
@@ -507,7 +507,7 @@ impl Render for HtmlPane {
                     .justify_center()
                     .text_xs()
                     .text_color(rgb(MUTED))
-                    .child("网页视图已暂停显示"),
+                    .child(crate::i18n::media::HTML_PAUSED.get()),
             );
         } else if let Some(webview) = &self.webview {
             root = root.child(div().flex_1().min_h_0().w_full().child(webview.clone()));
@@ -521,7 +521,7 @@ impl Render for HtmlPane {
                     .justify_center()
                     .text_xs()
                     .text_color(rgb(MUTED))
-                    .child("正在初始化 WebView2…"),
+                    .child(crate::i18n::media::HTML_INITIALIZING.get()),
             );
         }
 
@@ -604,8 +604,8 @@ async fn create_environment_for_dir(
         move |error_code, environment| {
             let outcome = match error_code {
                 Ok(()) => environment
-                    .ok_or_else(|| "WebView2 环境回调返回空指针".to_owned()),
-                Err(err) => Err(format!("WebView2 环境创建失败：{err}")),
+                    .ok_or_else(|| crate::i18n::media::HTML_ERR_ENV_NULL.get().to_owned()),
+                Err(err) => Err(crate::i18n::media::html_err_env_create(&err)),
             };
             let mut guard = sender.lock().expect("oneshot mutex");
             guard.value = Some(outcome);
@@ -619,7 +619,7 @@ async fn create_environment_for_dir(
     unsafe {
         CreateCoreWebView2EnvironmentWithOptions(PCWSTR::null(), &dir_h, None, &handler)
     }
-    .map_err(|e| format!("CreateCoreWebView2EnvironmentWithOptions 调用失败：{e}"))?;
+    .map_err(|e| crate::i18n::media::html_err_env_options(&e))?;
 
     OneshotFuture(state).await
 }
@@ -637,7 +637,7 @@ async fn get_or_create_environment_async(
         Err(first_err) => {
             let isolated = primary.with_file_name(format!("webview2-{}", std::process::id()));
             create_environment_for_dir(&isolated).await.map_err(|second_err| {
-                format!("{first_err}；隔离目录重试仍失败：{second_err}")
+                crate::i18n::media::html_err_isolated_retry(&first_err, &second_err)
             })?
         }
     };
@@ -658,7 +658,7 @@ fn apply_virtual_host_mapping(webview: &WebView, host: &str, folder: &Path) -> R
     let core = webview.raw().webview();
     let core3: ICoreWebView2_3 = core
         .cast()
-        .map_err(|e| format!("无法获取 ICoreWebView2_3 接口：{e}"))?;
+        .map_err(|e| crate::i18n::media::html_err_webview2_3(&e))?;
     let host_h = HSTRING::from(host);
     let folder_h = HSTRING::from(folder.to_string_lossy().as_ref());
     unsafe {
@@ -668,7 +668,7 @@ fn apply_virtual_host_mapping(webview: &WebView, host: &str, folder: &Path) -> R
             COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW,
         )
     }
-    .map_err(|e| format!("SetVirtualHostNameToFolderMapping 失败：{e}"))
+    .map_err(|e| crate::i18n::media::html_err_host_mapping(&e))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -677,5 +677,5 @@ fn apply_virtual_host_mapping(
     _host: &str,
     _folder: &Path,
 ) -> Result<(), String> {
-    Err("非 Windows 平台暂不支持 WebView2 虚拟主机映射".into())
+    Err(crate::i18n::media::HTML_ERR_NON_WINDOWS.get().into())
 }

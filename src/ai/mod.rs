@@ -221,7 +221,6 @@ const AI_WELCOME_ICON_TITLE_GAP: Pixels = px(18.);
 const AI_COPY_BUTTON_SIZE: Pixels = px(20.);
 const AI_COPY_ICON_SIZE: Pixels = px(12.);
 const AI_COPY_BUTTON_RADIUS: Pixels = px(5.);
-const AI_INPUT_PLACEHOLDER: &str = "随心输入，/ 呼出命令…";
 
 struct ChatPane {
     host: Arc<rpc::Host>,
@@ -334,9 +333,9 @@ impl ChatPane {
                 .auto_grow(2, 7)
                 .submit_on_enter(true)
         });
-        let model_search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search models..."));
-        let ext_input = cx.new(|cx| InputState::new(window, cx).placeholder("输入内容…"));
-        let ext_textarea = cx.new(|cx| TextareaState::new(window, cx).placeholder("编辑文本…"));
+        let model_search_input = cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::ai::MODEL_SEARCH_PLACEHOLDER.get()));
+        let ext_input = cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::ai::EXT_INPUT_PLACEHOLDER.get()));
+        let ext_textarea = cx.new(|cx| TextareaState::new(window, cx).placeholder(crate::i18n::ai::EXT_TEXTAREA_PLACEHOLDER.get()));
 
         let sub_input = cx.subscribe_in(
             &input,
@@ -545,29 +544,29 @@ impl ChatPane {
                     pane.focus(window, cx);
                     cx.notify();
                 }))
-                .child("添加到对话"),
+                .child(crate::i18n::ai::ADD_TO_CHAT.get()),
         ).with_priority(4).into_any_element())
     }
 
     fn export_answer(&mut self, markdown: &str, cx: &mut Context<Self>) {
         // This view owns its project's cwd, so exports stay with the source conversation.
-        let title: String = self.session_name.as_deref().unwrap_or("AI回答")
+        let title: String = self.session_name.as_deref().unwrap_or(crate::i18n::ai::DEFAULT_NOTE_TITLE.get())
             .chars()
             .filter(|ch| !ch.is_control() && !r#"<>:"/\|?*"#.contains(*ch))
             .take(48)
             .collect();
         let title = title.trim_matches([' ', '.']);
-        let title = if title.is_empty() { "AI回答" } else { title };
+        let title = if title.is_empty() { crate::i18n::ai::DEFAULT_NOTE_TITLE.get() } else { title };
         let filename = format!("{title}-{}.md", chrono::Local::now().format("%Y%m%d-%H%M%S-%3f"));
         let path = self.cwd.join(&filename);
         let result = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)
             .and_then(|mut file| file.write_all(markdown.as_bytes()));
         match result {
             Ok(()) => {
-                self.show_toast(format!("已导出为笔记：{filename}"), false, cx);
+                self.show_toast(crate::i18n::ai::export_note_ok(&filename), false, cx);
                 cx.emit(AiPaneEvent::OpenFile(path));
             }
-            Err(error) => self.show_toast(format!("导出笔记失败：{error}"), true, cx),
+            Err(error) => self.show_toast(crate::i18n::ai::export_note_err(&error), true, cx),
         }
     }
 
@@ -578,6 +577,18 @@ impl ChatPane {
         }
         self.project_name = name;
         cx.notify();
+    }
+
+    pub fn refresh_locale(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.model_search_input.update(cx, |input, cx| {
+            input.set_placeholder(crate::i18n::ai::MODEL_SEARCH_PLACEHOLDER.get(), window, cx);
+        });
+        self.ext_input.update(cx, |input, cx| {
+            input.set_placeholder(crate::i18n::ai::EXT_INPUT_PLACEHOLDER.get(), window, cx);
+        });
+        self.ext_textarea.update(cx, |input, cx| {
+            input.set_placeholder(crate::i18n::ai::EXT_TEXTAREA_PLACEHOLDER.get(), window, cx);
+        });
     }
 
     pub fn sync_settings(&mut self, settings: &AppSettings, cx: &mut Context<Self>) {
@@ -698,7 +709,7 @@ impl ChatPane {
                 if !success {
                     if let Some(err) = error {
                         self.messages.push(ChatMessage::Notice {
-                            text: format!("{command} 失败：{err}"),
+                            text: crate::i18n::ai::command_failed(&command, &err),
                             is_error: true,
                         });
                     }
@@ -738,7 +749,7 @@ impl ChatPane {
                     }
                     "compact" => {
                         self.is_compacting = false;
-                        self.show_toast("上下文已压缩".into(), false, cx);
+                        self.show_toast(crate::i18n::ai::CONTEXT_COMPACTED.get().into(), false, cx);
                         if let Some(client) = &self.client {
                             let _ = client.get_session_stats();
                         }
@@ -757,11 +768,9 @@ impl ChatPane {
                 self.client = None;
                 self.is_streaming = false;
                 self.pending_ui = None;
+                let detail = code.map(|c| format!(" (code {c})")).unwrap_or_default();
                 self.messages.push(ChatMessage::Notice {
-                    text: format!(
-                        "AI 宿主已退出{}",
-                        code.map(|c| format!(" (code {c})")).unwrap_or_default()
-                    ),
+                    text: crate::i18n::ai::host_exited(&detail),
                     is_error: true,
                 });
             }
@@ -1053,7 +1062,7 @@ impl ChatPane {
                                 if !block.done {
                                     block.done = true;
                                     block.is_error = true;
-                                    block.summary = "工具调用未完成".into();
+                                    block.summary = crate::i18n::ai::TOOL_INCOMPLETE.get().into();
                                 }
                             }
                         }
@@ -1077,7 +1086,13 @@ impl ChatPane {
                     .map(str::to_owned);
             }
             "title_error" => {
-                self.show_toast(format!("标题生成失败，可手动重命名：{}", ev["error"].as_str().unwrap_or("请求失败")), true, cx);
+                self.show_toast(
+                    crate::i18n::ai::title_gen_failed(
+                        ev["error"].as_str().unwrap_or(crate::i18n::ai::REQUEST_FAILED.get()),
+                    ),
+                    true,
+                    cx,
+                );
             }
             "compaction_start" => {
                 self.is_compacting = true;
@@ -1085,9 +1100,9 @@ impl ChatPane {
             "compaction_end" => {
                 self.is_compacting = false;
                 if let Some(err) = ev.get("errorMessage").and_then(|v| v.as_str()) {
-                    self.show_toast(format!("压缩失败：{err}"), true, cx);
+                    self.show_toast(crate::i18n::ai::compact_failed(&err), true, cx);
                 } else {
-                    self.show_toast("上下文已压缩".into(), false, cx);
+                    self.show_toast(crate::i18n::ai::CONTEXT_COMPACTED.get().into(), false, cx);
                 }
                 if let Some(client) = &self.client {
                     let _ = client.get_session_stats();
@@ -1097,8 +1112,8 @@ impl ChatPane {
                 let err = ev
                     .get("error")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("扩展运行错误");
-                self.show_toast(format!("扩展异常：{err}"), true, cx);
+                    .unwrap_or(crate::i18n::ai::EXT_RUNTIME_ERROR.get());
+                self.show_toast(crate::i18n::ai::ext_error(err), true, cx);
             }
             "message_start" => {
                 if let Some(msg) = ev.get("message")
@@ -1258,9 +1273,10 @@ impl ChatPane {
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_else(|| first_diff.path.clone());
-                        block.summary = format!(
-                            "已编辑 {} +{} -{}",
-                            name_only, first_diff.added, first_diff.removed
+                        block.summary = crate::i18n::ai::edited_diff(
+                            &name_only,
+                            first_diff.added,
+                            first_diff.removed,
                         );
                     }
                 }
@@ -1484,7 +1500,7 @@ impl ChatPane {
                 let title = req
                     .get("title")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("请求确认")
+                    .unwrap_or(crate::i18n::ai::PROMPT_CONFIRM.get())
                     .to_owned();
                 let message = req
                     .get("message")
@@ -1516,7 +1532,7 @@ impl ChatPane {
                 let title = req
                     .get("title")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("请选择")
+                    .unwrap_or(crate::i18n::ai::PROMPT_SELECT.get())
                     .to_owned();
                 let options = req
                     .get("options")
@@ -1538,7 +1554,7 @@ impl ChatPane {
                 let title = req
                     .get("title")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("请输入")
+                    .unwrap_or(crate::i18n::ai::PROMPT_INPUT.get())
                     .to_owned();
                 let placeholder = req
                     .get("placeholder")
@@ -1560,7 +1576,7 @@ impl ChatPane {
                 let title = req
                     .get("title")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("编辑内容")
+                    .unwrap_or(crate::i18n::ai::PROMPT_EDIT.get())
                     .to_owned();
                 let prefill = req
                     .get("prefill")
@@ -1733,24 +1749,24 @@ impl ChatPane {
             .context_usage
             .as_ref()
             .and_then(|cu| cu.percent)
-            .map(|p| format!("压缩此聊天的上下文（已使用 {p}%）"))
-            .unwrap_or_else(|| "压缩此聊天的上下文".to_owned());
+            .map(crate::i18n::ai::compact_subtitle_used)
+            .unwrap_or_else(|| crate::i18n::ai::COMPACT_SUBTITLE_DEFAULT.get().to_owned());
 
         let mut items = Vec::new();
         if let Some(file) = &self.active_file {
             if self.attach_active_file {
                 items.push(SlashItem {
                     id: "detach-active-context".into(),
-                    title: "取消当前上下文".into(),
-                    subtitle: format!("移除 @{}", file.display),
+                    title: crate::i18n::ai::DETACH_CURRENT_CTX_TITLE.get().into(),
+                    subtitle: crate::i18n::ai::detach_ctx_subtitle(&file.display),
                     icon: IconName::FileText,
                     action: SlashAction::ToggleActiveContext,
                 });
             } else {
                 items.push(SlashItem {
                     id: "attach-active-context".into(),
-                    title: "附加当前上下文".into(),
-                    subtitle: format!("附加 @{}", file.display),
+                    title: crate::i18n::ai::ATTACH_CURRENT_CTX_TITLE.get().into(),
+                    subtitle: crate::i18n::ai::attach_ctx_subtitle(&file.display),
                     icon: IconName::FileText,
                     action: SlashAction::ToggleActiveContext,
                 });
@@ -1758,7 +1774,7 @@ impl ChatPane {
         }
         items.push(SlashItem {
             id: "compact".into(),
-            title: "压缩".into(),
+            title: crate::i18n::ai::COMPACT_TITLE.get().into(),
             subtitle: pct_label,
             icon: IconName::CircleDot,
             action: SlashAction::Compact,
@@ -1896,7 +1912,7 @@ impl ChatPane {
         let dialog = rfd::AsyncFileDialog::new()
             .set_parent(window)
             .set_directory(&self.cwd)
-            .set_title("选择附加文件");
+            .set_title(crate::i18n::ai::DIALOG_PICK_ATTACHMENT.get());
         cx.spawn_in(window, async move |this, cx| {
             let Some(files) = dialog.pick_files().await else {
                 return;
@@ -2061,7 +2077,7 @@ impl ChatPane {
         payload.push_str(body_trimmed);
 
         if let Err(err) = client.prompt_with_images(&payload, &rpc_images, body_trimmed) {
-            self.show_toast(format!("发送失败：{err}"), true, cx);
+            self.show_toast(crate::i18n::ai::send_failed(&err), true, cx);
             return;
         }
 
@@ -2150,7 +2166,11 @@ impl ChatPane {
                 let is_hovered = self.hovered_anchor == Some(item);
                 let scroll = self.scroll.clone();
                 let preview = anchor.preview.clone();
-                let label = if user { "你的消息" } else { "AI 回答" };
+                let label = if user {
+                    crate::i18n::ai::YOUR_MESSAGE.get()
+                } else {
+                    crate::i18n::ai::AI_ANSWER_SOURCE.get()
+                };
                 let row = div()
                     .id(("ai-message-anchor", item))
                     .flex_1()
@@ -2340,7 +2360,7 @@ impl ChatPane {
                             .into_any_element()
                     }))
                     .when(diff.lines.len() > 120, |el| el.child(
-                        div().px_2().py_1().text_color(muted).child("仅显示前 120 行预览"),
+                        div().px_2().py_1().text_color(muted).child(crate::i18n::ai::PREVIEW_FIRST_120_LINES.get()),
                     )),
             )
             .into_any_element()
@@ -2381,7 +2401,11 @@ impl ChatPane {
                     let _ = view.update(cx, |pane, cx| {
                         pane.stick_to_bottom = false;
                         pane.quote_popover = Some(AnswerQuotePopover {
-                            quote: SelectionQuote { source: "AI 回答".into(), text: text.to_owned(), answer: Some(answer) },
+                            quote: SelectionQuote {
+                                source: crate::i18n::ai::AI_ANSWER_SOURCE.get().into(),
+                                text: text.to_owned(),
+                                answer: Some(answer),
+                            },
                             position,
                             scroll_offset: pane.scroll.offset(),
                         });
@@ -2425,7 +2449,7 @@ impl ChatPane {
                             if let Some(path) = path {
                                 cx.emit(AiPaneEvent::OpenFile(path));
                             } else {
-                                pane.show_toast("无法解析文件引用".into(), true, cx);
+                                pane.show_toast(crate::i18n::ai::ERR_RESOLVE_FILE_REF.get().into(), true, cx);
                             }
                         });
                     })
@@ -2453,8 +2477,8 @@ impl ChatPane {
                                 SharedString::from(format!(
                                     "ai-copy-code-{msg_idx}-{part_idx}-{span_start}"
                                 )),
-                                "复制代码",
-                                "已复制",
+                                crate::i18n::ai::COPY_CODE.get(),
+                                crate::i18n::common::COPIED.get(),
                                 code,
                             ))
                     })
@@ -2469,8 +2493,8 @@ impl ChatPane {
                                 SharedString::from(format!(
                                     "ai-copy-table-{msg_idx}-{part_idx}-{span_start}"
                                 )),
-                                "复制表格",
-                                "已复制",
+                                crate::i18n::ai::COPY_TABLE.get(),
+                                crate::i18n::common::COPIED.get(),
                                 md,
                             ))
                     }),
@@ -2649,13 +2673,13 @@ impl ChatPane {
             && timeline.len() == 1
         {
             match total_elapsed_ms {
-                Some(ms) => format!("工作了 {}", format_thinking_duration(ms)),
-                None => "工作过程".to_owned(),
+                Some(ms) => crate::i18n::ai::worked_for(&format_thinking_duration(ms)),
+                None => crate::i18n::ai::WORK_PROCESS.get().to_owned(),
             }
         } else if let Some(ms) = total_elapsed_ms {
-            format!("用时 {}", format_duration_compact(ms))
+            crate::i18n::ai::elapsed_for(&format_duration_compact(ms))
         } else {
-            format!("已完成 {process_step_count} 个步骤")
+            crate::i18n::ai::completed_steps(process_step_count)
         };
 
         let mut rendered_process: Vec<AnyElement> = Vec::new();
@@ -2802,8 +2826,8 @@ impl ChatPane {
                         .pt_1()
                         .child(ai_copy_button(
                             SharedString::from(format!("ai-copy-msg-{run_start}")),
-                            "复制回答",
-                            "已复制",
+                            crate::i18n::ai::COPY_ANSWER.get(),
+                            crate::i18n::common::COPIED.get(),
                             full_answer.clone(),
                         ))
                         .child(
@@ -2818,7 +2842,7 @@ impl ChatPane {
                                 .text_color(fg_alpha(palette.text, 0.55))
                                 .hover(move |style| style.bg(fg_alpha(palette.text, 0.06)).text_color(fg_alpha(palette.text, 0.85)))
                                 .child(crate::ui::icon(IconName::NotebookPen).w(AI_COPY_ICON_SIZE).h(AI_COPY_ICON_SIZE))
-                                .tooltip(|window, cx| Tooltip::new("导出为笔记").build(window, cx))
+                                .tooltip(|window, cx| Tooltip::new(crate::i18n::ai::EXPORT_AS_NOTE.get()).build(window, cx))
                                 .on_click(cx.listener(move |pane, _, _, cx| pane.export_answer(&full_answer, cx))),
                         ),
                 )
@@ -2860,7 +2884,7 @@ impl ChatPane {
                                         el.opacity(a)
                                     },
                                 )
-                                .child("思考中…"),
+                                .child(crate::i18n::ai::THINKING_ELLIPSIS.get()),
                         ),
                 )
             })
@@ -2906,11 +2930,11 @@ impl ChatPane {
             } = first
         {
             let title = if *streaming {
-                "正在思考…".to_owned()
+                crate::i18n::ai::STILL_THINKING.get().to_owned()
             } else if let Some(ms) = *duration_ms {
-                format!("思考了 {}", format_thinking_duration(ms))
+                crate::i18n::ai::thought_for(&format_thinking_duration(ms))
             } else {
-                "思考过程".to_owned()
+                crate::i18n::ai::THINKING_PROCESS.get().to_owned()
             };
             let msg_idx = *msg_idx;
             let part_idx = *part_idx;
@@ -3015,11 +3039,11 @@ impl ChatPane {
                                 let part_idx = *part_idx;
                                 let expanded = !*collapsed || *streaming;
                                 let label = if *streaming {
-                                    "正在思考…".to_owned()
+                                    crate::i18n::ai::STILL_THINKING.get().to_owned()
                                 } else if let Some(ms) = *duration_ms {
-                                    format!("思考了 {}", format_thinking_duration(ms))
+                                    crate::i18n::ai::thought_for(&format_thinking_duration(ms))
                                 } else {
-                                    "思考过程".to_owned()
+                                    crate::i18n::ai::THINKING_PROCESS.get().to_owned()
                                 };
                                 div()
                                     .flex()
@@ -3109,20 +3133,7 @@ impl ChatPane {
         };
         let row_id = SharedString::from(format!("ai-cmd-row-{msg_idx}-{part_idx}"));
         if mode == ToolExecutionView::Minimal {
-            let text = match (block.name.as_str(), block.done, block.is_error) {
-                ("edit" | "write", _, true) => "编辑文件失败".into(),
-                ("edit" | "write", true, false) => "编辑了文件".into(),
-                ("edit" | "write", false, false) => "正在编辑文件".into(),
-                ("run_python", _, true) => "Python 脚本执行失败".into(),
-                ("run_python", true, false) => "运行了 Python 脚本".into(),
-                ("run_python", false, false) => "正在运行 Python 脚本".into(),
-                ("bash" | "powershell", _, true) => "命令执行失败".into(),
-                ("bash" | "powershell", true, false) => "执行了命令".into(),
-                ("bash" | "powershell", false, false) => "正在执行命令".into(),
-                (name, _, true) => format!("{name} 执行失败"),
-                (name, true, false) => format!("已执行 {name}"),
-                (name, false, false) => format!("正在执行 {name}"),
-            };
+            let text = crate::i18n::ai::tool_status_label(&block.name, block.done, block.is_error);
             return render_command_detail_row(
                 row_id, icon, text, block.done, block.is_error, None, ui_font, code_font, ps,
             ).into_any_element();
@@ -3133,10 +3144,10 @@ impl ChatPane {
             && (!block.args.is_null() || !block.output.is_empty())).then(|| {
             div().flex().flex_col().gap(ps.row_gap).children(
                 [
-                    ("input", "输入参数", (!block.args.is_null()).then(|| {
+                    ("input", crate::i18n::ai::INPUT_ARGS_LABEL.get(), (!block.args.is_null()).then(|| {
                         serde_json::to_string_pretty(&block.args).expect("tool arguments are JSON")
                     }), ps.fg_secondary),
-                    ("output", "输出", (!block.output.is_empty()).then(|| block.output.clone()),
+                    ("output", crate::i18n::ai::OUTPUT_LABEL.get(), (!block.output.is_empty()).then(|| block.output.clone()),
                         if block.is_error { ps.error_fg } else { ps.fg_secondary }),
                 ].into_iter().filter_map(|(kind, title, text, color)| {
                     let text = text?;
@@ -3311,7 +3322,7 @@ impl ChatPane {
                             Button::new("ext-select-cancel")
                                 .ghost()
                                 .compact()
-                                .label("取消")
+                                .label(crate::i18n::common::CANCEL.get())
                                 .on_click(cx.listener(|pane, _, _, cx| {
                                     pane.cancel_pending_ext(cx);
                                 })),
@@ -3346,7 +3357,7 @@ impl ChatPane {
                                 Button::new("ext-input-cancel")
                                     .ghost()
                                     .compact()
-                                    .label("取消")
+                                    .label(crate::i18n::common::CANCEL.get())
                                     .on_click(cx.listener(|pane, _, _, cx| {
                                         pane.cancel_pending_ext(cx);
                                     })),
@@ -3355,7 +3366,7 @@ impl ChatPane {
                                 Button::new("ext-input-submit")
                                     .primary()
                                     .compact()
-                                    .label("提交")
+                                    .label(crate::i18n::common::SUBMIT.get())
                                     .on_click(cx.listener(move |pane, _, _, cx| {
                                         pane.submit_pending_ext_text(is_multi, cx);
                                     })),
@@ -3378,9 +3389,9 @@ impl ChatPane {
                 let used = cu.tokens.unwrap_or(0) / 1000;
                 let total = cu.context_window / 1000;
                 let rem = 100u64.saturating_sub(pct);
-                format!("上下文窗口：{pct}% 已用（剩余 {rem}%）· {used}k / {total}k")
+                crate::i18n::ai::context_window_stats(pct, rem, used as usize, total as usize)
             }
-            None => "上下文窗口：尚无统计".to_owned(),
+            None => crate::i18n::ai::CONTEXT_WINDOW_EMPTY.get().to_owned(),
         };
 
         let track_color: Rgba = gpui_kit::rgb(palette.border);
@@ -3712,9 +3723,9 @@ impl ChatPane {
                                         .text_size(typo.sm)
                                         .text_color(gpui_kit::rgb(palette.muted))
                                         .child(if self.available_models.is_empty() {
-                                            "暂无可用模型"
+                                            crate::i18n::ai::NO_MODELS_AVAILABLE.get()
                                         } else {
-                                            "无匹配模型"
+                                            crate::i18n::ai::NO_MATCHING_MODELS.get()
                                         }),
                                 )
                             })
@@ -3841,7 +3852,7 @@ impl ChatPane {
                                         .py_2()
                                         .text_size(typo.xs)
                                         .text_color(gpui_kit::rgb(palette.muted))
-                                        .child("当前模型不支持调节"),
+                                        .child(crate::i18n::ai::MODEL_NO_THINKING_LEVEL.get()),
                                 )
                             })
                             .when(supports_thinking, |col| {
@@ -3986,7 +3997,7 @@ impl ChatPane {
                     div()
                         .flex_shrink_0()
                         .text_color(fg_alpha(palette.text, 0.72))
-                        .child("你想在 "),
+                        .child(crate::i18n::ai::HERO_PREFIX.get()),
                 )
                 .child(
                     div()
@@ -4000,7 +4011,7 @@ impl ChatPane {
                     div()
                         .flex_shrink_0()
                         .text_color(fg_alpha(palette.text, 0.72))
-                        .child(" 里做什么？"),
+                        .child(crate::i18n::ai::HERO_SUFFIX.get()),
                 )
                 .into_any_element()
         } else {
@@ -4011,7 +4022,7 @@ impl ChatPane {
                 .text_size(px(22.))
                 .font_medium()
                 .text_color(gpui_kit::rgb(palette.text))
-                .child("今天想做点什么？")
+                .child(crate::i18n::ai::HERO_EMPTY.get())
                 .into_any_element()
         };
 
@@ -4061,7 +4072,7 @@ impl ChatPane {
             .current_model
             .as_ref()
             .map(|m| short_model_name(&m.name))
-            .unwrap_or_else(|| "模型".to_owned());
+            .unwrap_or_else(|| crate::i18n::ai::MODEL_FALLBACK.get().to_owned());
         let selected_model = self.current_model.as_ref();
         let supports_thinking = self.current_model.as_ref().is_none_or(|m| m.reasoning);
         let attached_chip = self.effective_attached_file().cloned();
@@ -4285,10 +4296,9 @@ impl ChatPane {
                                                     .flex_1()
                                                     .min_w_0()
                                                     .text_ellipsis()
-                                                    .child(format!(
-                                                        "引用 {}: {}",
-                                                        q.source,
-                                                        q.text.replace('\n', " ")
+                                                    .child(crate::i18n::ai::quote_prefix(
+                                                        &q.source,
+                                                        &q.text.replace('\n', " "),
                                                     )),
                                             )
                                             .child(
@@ -4360,7 +4370,7 @@ impl ChatPane {
                                 Textarea::new(&self.input)
                                     .appearance(false)
                                     .bordered(false)
-                                    .aria_label(AI_INPUT_PLACEHOLDER)
+                                    .aria_label(crate::i18n::ai::INPUT_PLACEHOLDER.get())
                                     .font_family(ui_font.clone())
                                     .text_size(typo.body)
                                     .on_paste(move |item, window, cx| {
@@ -4415,7 +4425,7 @@ impl ChatPane {
                                         .text_size(typo.body)
                                         .line_height(rems(1.25))
                                         .text_color(fg_alpha(palette.text, 0.40))
-                                        .child(AI_INPUT_PLACEHOLDER),
+                                        .child(crate::i18n::ai::INPUT_PLACEHOLDER.get()),
                                 )
                             }),
                     )
@@ -4437,7 +4447,7 @@ impl ChatPane {
                                             .w(px(26.))
                                             .h(px(26.))
                                             .icon(crate::ui::icon(IconName::Plus))
-                                            .tooltip("选择文件附加")
+                                            .tooltip(crate::i18n::ai::TOOLTIP_ATTACH_FILE.get())
                                             .on_click(cx.listener(|pane, _, window, cx| {
                                                 pane.pick_files(window, cx);
                                             })),
@@ -4447,12 +4457,12 @@ impl ChatPane {
                                         let active_ctx = has_file && self.attach_active_file;
                                         let ctx_tip = match &self.active_file {
                                             Some(f) if active_ctx => {
-                                                format!("已附加 @{}（点击取消）", f.display)
+                                                crate::i18n::ai::attached_file_tooltip(&f.display)
                                             }
                                             Some(f) => {
-                                                format!("附加当前文件 @{}", f.display)
+                                                crate::i18n::ai::attach_current_file_tooltip(&f.display)
                                             }
-                                            None => "当前无打开文件".to_owned(),
+                                            None => crate::i18n::ai::NO_OPEN_FILE.get().to_owned(),
                                         };
                                         let ctx_bg = if active_ctx {
                                             mix_color(
@@ -4525,7 +4535,7 @@ impl ChatPane {
                                             ))
                                             .hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
                                             .tooltip(|window, cx| {
-                                                Tooltip::new("切换命令与脚本的确认权限")
+                                                Tooltip::new(crate::i18n::ai::TOOLTIP_PERM_MODE.get())
                                                     .build(window, cx)
                                             })
                                             .on_click(cx.listener(|pane, _, _, cx| {
@@ -4542,9 +4552,9 @@ impl ChatPane {
                                                 .h(px(13.)),
                                             )
                                             .child(if self.auto_approve_shell {
-                                                "完全访问"
+                                                crate::i18n::ai::PERM_FULL_ACCESS.get()
                                             } else {
-                                                "需确认"
+                                                crate::i18n::ai::PERM_ASK.get()
                                             }),
                                     ),
                             )
@@ -4876,7 +4886,7 @@ impl Render for ChatPane {
                                                 Button::new("ai-retry-start")
                                                     .ghost()
                                                     .compact()
-                                                    .label("重试")
+                                                    .label(crate::i18n::common::RETRY.get())
                                                     .on_click(cx.listener(|pane, _, _, cx| {
                                                         pane.start_rpc(cx);
                                                     })),
@@ -4902,7 +4912,7 @@ impl Render for ChatPane {
                                     } else if let Some(quote) = quotes.first() {
                                         quote.text.as_str()
                                     } else {
-                                        attached_file.as_deref().unwrap_or("图片消息")
+                                        attached_file.as_deref().unwrap_or(crate::i18n::ai::IMAGE_MESSAGE.get())
                                     };
                                     navigation.push(MessageAnchor { item, user: true,
                                         preview: text.chars().take(160).collect() });
@@ -5064,8 +5074,8 @@ impl Render for ChatPane {
                                                 SharedString::from(format!(
                                                     "ai-copy-user-{msg_idx}"
                                                 )),
-                                                "复制消息",
-                                                "已复制",
+                                                crate::i18n::ai::COPY_MESSAGE.get(),
+                                                crate::i18n::common::COPIED.get(),
                                                 display_text.clone(),
                                             )),
                                     )
@@ -5097,7 +5107,7 @@ impl Render for ChatPane {
                                         .take(160)
                                         .collect();
                                     navigation.push(MessageAnchor { item, user: false,
-                                        preview: if preview.trim().is_empty() { "思考与工具调用".into() } else { preview } });
+                                        preview: if preview.trim().is_empty() { crate::i18n::ai::THINKING_AND_TOOLS.get().into() } else { preview } });
                                     rendered_messages.push(self.render_assistant_run(
                                         run_start,
                                         run_end,
@@ -5208,7 +5218,7 @@ impl Render for ChatPane {
                                             .hover(|s| s.bg(gpui_kit::rgb(palette.hover)))
                                             .active(|s| s.bg(gpui_kit::rgb(palette.pressed)))
                                             .tooltip(|window, cx| {
-                                                Tooltip::new("回到底部").build(window, cx)
+                                                Tooltip::new(crate::i18n::ai::SCROLL_TO_BOTTOM.get()).build(window, cx)
                                             })
                                             .child(
                                                 crate::ui::icon(IconName::ArrowDown)
@@ -5403,12 +5413,7 @@ fn format_duration_compact(ms: u64) -> String {
 }
 
 fn format_thinking_duration(ms: u64) -> String {
-    let total_secs = (ms / 1000).max(1);
-    if total_secs < 60 {
-        format!("{total_secs} 秒")
-    } else {
-        format!("{} 分 {} 秒", total_secs / 60, total_secs % 60)
-    }
+    crate::i18n::ai::format_duration_zh_en((ms / 1000).max(1))
 }
 
 fn process_group_title(steps: &[ProcessStep<'_>], is_running: bool) -> String {
@@ -5433,39 +5438,39 @@ fn process_group_title(steps: &[ProcessStep<'_>], is_running: bool) -> String {
     let mut verbs: Vec<&'static str> = Vec::new();
     if is_running {
         if has_edit {
-            verbs.push("正在编辑文件");
+            verbs.push(crate::i18n::ai::VERB_EDITING_FILE.get());
         }
         if has_cmd {
-            verbs.push("正在运行命令");
+            verbs.push(crate::i18n::ai::VERB_RUNNING_CMD.get());
         }
         if has_read && verbs.is_empty() {
-            verbs.push("正在查阅文件");
+            verbs.push(crate::i18n::ai::VERB_READING_FILE.get());
         }
         if has_other && verbs.is_empty() {
-            verbs.push("正在调用工具");
+            verbs.push(crate::i18n::ai::VERB_CALLING_TOOL.get());
         }
         if verbs.is_empty() && has_thinking {
-            return "正在思考…".to_owned();
+            return crate::i18n::ai::STILL_THINKING.get().to_owned();
         }
         return format!("{}…", verbs.join(" · "));
     }
 
     if has_edit {
-        verbs.push("编辑了文件");
+        verbs.push(crate::i18n::ai::VERB_EDITED_FILE.get());
     }
     if has_cmd {
-        verbs.push("运行了命令");
+        verbs.push(crate::i18n::ai::VERB_RAN_CMD.get());
     }
     if has_read && !has_edit && !has_cmd {
-        verbs.push("查阅了文件");
+        verbs.push(crate::i18n::ai::VERB_READ_FILE.get());
     } else if has_read && verbs.len() < 2 {
-        verbs.push("查阅了文件");
+        verbs.push(crate::i18n::ai::VERB_READ_FILE.get());
     }
     if has_other {
-        verbs.push("调用了工具");
+        verbs.push(crate::i18n::ai::VERB_CALLED_TOOL.get());
     }
     if verbs.is_empty() && has_thinking {
-        return "思考过程".to_owned();
+        return crate::i18n::ai::THINKING_PROCESS.get().to_owned();
     }
     verbs.join(" · ")
 }
@@ -5698,7 +5703,11 @@ fn render_file_edit_row(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| diff.path.clone());
-    let verb = if is_created { "已创建" } else { "已编辑" };
+    let verb = if is_created {
+        crate::i18n::ai::VERB_CREATED.get()
+    } else {
+        crate::i18n::ai::VERB_EDITED.get()
+    };
     let file_path: SharedString = diff.path.clone().into();
 
     div()
@@ -6169,11 +6178,11 @@ fn is_image_file_path(path: &Path) -> bool {
 
 fn convert_bytes_to_png(bytes: &[u8], src_format: image::ImageFormat) -> Result<Vec<u8>, String> {
     let decoded = image::load_from_memory_with_format(bytes, src_format)
-        .map_err(|e| format!("无法解析图片：{e}"))?;
+        .map_err(|e| crate::i18n::ai::err_decode_image(&e))?;
     let mut out = Vec::new();
     decoded
         .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
-        .map_err(|e| format!("PNG 转码失败：{e}"))?;
+        .map_err(|e| crate::i18n::ai::err_encode_png(&e))?;
     Ok(out)
 }
 
@@ -6193,9 +6202,9 @@ fn clipboard_image_to_pasted(id: u64, img: &gpui::Image) -> Result<PastedImage, 
             "image/png",
             convert_bytes_to_png(&img.bytes, image::ImageFormat::Tiff)?,
         ),
-        ImageFormat::Svg => return Err("不支持直接粘贴 SVG 矢量图片".to_owned()),
+        ImageFormat::Svg => return Err(crate::i18n::ai::ERR_PASTE_SVG.get().to_owned()),
         ImageFormat::Ico | ImageFormat::Pnm => {
-            return Err("不支持直接粘贴该图片格式".to_owned())
+            return Err(crate::i18n::ai::ERR_PASTE_IMAGE_FORMAT.get().to_owned())
         }
     };
     let data_b64 = encode_base64(&bytes);
@@ -6205,12 +6214,12 @@ fn clipboard_image_to_pasted(id: u64, img: &gpui::Image) -> Result<PastedImage, 
         image: render_img,
         mime_type: mime.to_owned(),
         data_b64,
-        label: format!("图片 #{id}"),
+        label: crate::i18n::ai::image_label(id),
     })
 }
 
 fn file_path_to_pasted_image(id: u64, path: &Path) -> Result<PastedImage, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("读取图片失败：{e}"))?;
+    let bytes = std::fs::read(path).map_err(|e| crate::i18n::ai::err_read_image(&e))?;
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -6226,12 +6235,12 @@ fn file_path_to_pasted_image(id: u64, path: &Path) -> Result<PastedImage, String
             "image/png",
             convert_bytes_to_png(&bytes, image::ImageFormat::Bmp)?,
         ),
-        _ => return Err("不支持的图片格式".to_owned()),
+        _ => return Err(crate::i18n::ai::ERR_UNSUPPORTED_IMAGE_FORMAT.get().to_owned()),
     };
     let label = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| format!("图片 #{id}"));
+        .unwrap_or_else(|| crate::i18n::ai::image_label(id));
     let data_b64 = encode_base64(&final_bytes);
     let render_img = Arc::new(gpui::Image::from_bytes(gpui_fmt, final_bytes));
     Ok(PastedImage {
@@ -6327,20 +6336,20 @@ fn summarize_tool_call(name: &str, args: &Value, diffs: &[FileDiff]) -> String {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| first.path.clone());
-        return format!("已编辑 {} +{} -{}", fname, first.added, first.removed);
+        return crate::i18n::ai::edited_diff(&fname, first.added, first.removed);
     }
     match name {
-        "folio_tags_list" => "查看 Folio 标签".into(),
-        "folio_files_query" => "查找 Folio 文件及标签".into(),
+        "folio_tags_list" => crate::i18n::ai::TOOL_TAGS_LIST.get().into(),
+        "folio_files_query" => crate::i18n::ai::TOOL_FILES_QUERY.get().into(),
         "folio_file_tags_update" => {
             if let Some(folder) = args["under_directory"].as_str() {
-                format!("编辑目录「{folder}」下的文件标签")
+                crate::i18n::ai::tool_edit_folder_tags(folder)
             } else {
-                format!("编辑 {} 个文件的标签", args["paths"].as_array().map_or(0, Vec::len))
+                crate::i18n::ai::tool_edit_files_tags(args["paths"].as_array().map_or(0, Vec::len))
             }
         }
-        "folio_tags_manage" => format!("管理标签：{}", args["tag"].as_str().unwrap_or_default()),
-        "run_python" => "运行 Python 脚本".into(),
+        "folio_tags_manage" => crate::i18n::ai::tool_manage_tag(args["tag"].as_str().unwrap_or_default()),
+        "run_python" => crate::i18n::ai::TOOL_RUN_PYTHON.get().into(),
         "bash" | "powershell" => args
             .get("command")
             .and_then(|v| v.as_str())

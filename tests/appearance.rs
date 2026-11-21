@@ -1,5 +1,7 @@
 //! Appearance contracts can run without starting a GPU window or opening user files.
 #![allow(dead_code)]
+#[path = "../src/i18n/mod.rs"]
+mod i18n;
 #[path = "../src/model.rs"]
 mod model;
 #[path = "../src/theme.rs"]

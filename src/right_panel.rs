@@ -1,4 +1,5 @@
 //! Antigravity-inspired right-side feature hub and smooth slide-in/out drawer helpers.
+use crate::i18n::right_panel as rp;
 use crate::theme::Palette;
 use gpui_kit::{
     assets::IconName,
@@ -50,11 +51,11 @@ fn fg_alpha(hex: u32, alpha: f32) -> Rgba {
 }
 
 pub(crate) fn filtered_actions(props: &RightPanelHubProps) -> Vec<HubActionItem> {
-    let preview_badge = props.preview_open.then(|| "已开启".to_string());
+    let preview_badge = props.preview_open.then(|| rp::BADGE_OPENED.get().to_string());
     let logs_badge = if props.logs_open {
-        Some("已展开".to_string())
+        Some(rp::BADGE_EXPANDED.get().to_string())
     } else if props.build_failed {
-        Some("编译失败".to_string())
+        Some(rp::BADGE_BUILD_FAILED.get().to_string())
     } else {
         None
     };
@@ -63,7 +64,7 @@ pub(crate) fn filtered_actions(props: &RightPanelHubProps) -> Vec<HubActionItem>
         HubActionItem {
             action: RightPanelAction::OpenAi,
             icon: IconName::Sparkles,
-            label: "AI 助手",
+            label: rp::ACTION_AI.get(),
             keywords: "ai assistant chat 对话 智能 助手",
             badge: (!props.ai_shortcut.is_empty()).then(|| props.ai_shortcut.clone()),
             active: false,
@@ -72,7 +73,7 @@ pub(crate) fn filtered_actions(props: &RightPanelHubProps) -> Vec<HubActionItem>
         HubActionItem {
             action: RightPanelAction::OpenTerminal,
             icon: IconName::Terminal,
-            label: "终端",
+            label: rp::ACTION_TERMINAL.get(),
             keywords: "terminal shell console cmd 终端 命令行",
             badge: (!props.terminal_shortcut.is_empty()).then(|| props.terminal_shortcut.clone()),
             active: false,
@@ -81,7 +82,7 @@ pub(crate) fn filtered_actions(props: &RightPanelHubProps) -> Vec<HubActionItem>
         HubActionItem {
             action: RightPanelAction::TogglePreview,
             icon: IconName::PanelRightOpen,
-            label: "PDF 预览",
+            label: rp::ACTION_PDF_PREVIEW.get(),
             keywords: "pdf preview 预览 分栏",
             badge: preview_badge,
             active: props.preview_open,
@@ -90,7 +91,7 @@ pub(crate) fn filtered_actions(props: &RightPanelHubProps) -> Vec<HubActionItem>
         HubActionItem {
             action: RightPanelAction::ToggleLogs,
             icon: IconName::ListTree,
-            label: "编译日志",
+            label: rp::ACTION_BUILD_LOGS.get(),
             keywords: "log build output 日志 编译 输出",
             badge: logs_badge,
             active: props.logs_open,
@@ -99,7 +100,7 @@ pub(crate) fn filtered_actions(props: &RightPanelHubProps) -> Vec<HubActionItem>
         HubActionItem {
             action: RightPanelAction::OpenFile,
             icon: IconName::FolderOpen,
-            label: "打开文件",
+            label: rp::ACTION_OPEN_FILE.get(),
             keywords: "open file 打开 文件",
             badge: Some("Ctrl+Shift+O".into()),
             active: false,
@@ -108,7 +109,7 @@ pub(crate) fn filtered_actions(props: &RightPanelHubProps) -> Vec<HubActionItem>
         HubActionItem {
             action: RightPanelAction::OpenPreferences,
             icon: IconName::Settings,
-            label: "偏好设置",
+            label: rp::ACTION_PREFERENCES.get(),
             keywords: "settings preferences config 设置 偏好 主题",
             badge: None,
             active: false,
@@ -215,7 +216,7 @@ pub(crate) fn render_hub(
             .py(px(12.))
             .text_size(px(12.5))
             .text_color(gpui_kit::rgb(palette.muted))
-            .child("没有匹配的功能")
+            .child(rp::NO_MATCHING_FEATURES.get())
             .into_any_element()
     } else {
         div()
@@ -289,15 +290,15 @@ pub(crate) fn render_hub(
         Vec::new();
     if props.build_running {
         let target = if props.build_target.is_empty() {
-            "项目".to_string()
+            rp::DEFAULT_BUILD_TARGET.get().to_string()
         } else {
             props.build_target.clone()
         };
         task_rows.push((
             "hub-task-build".into(),
             IconName::RefreshCw,
-            format!("正在编译 {target}"),
-            Some(("运行中".into(), false)),
+            rp::compiling_target(&target),
+            Some((rp::STATUS_RUNNING.get().into(), false)),
             RightPanelAction::ToggleLogs,
         ));
     }
@@ -308,9 +309,9 @@ pub(crate) fn render_hub(
             format!("AI · {title}"),
             Some((
                 if *waiting {
-                    "等待操作".into()
+                    rp::STATUS_WAITING.get().into()
                 } else {
-                    "生成中".into()
+                    rp::STATUS_GENERATING.get().into()
                 },
                 *waiting,
             )),
@@ -321,7 +322,7 @@ pub(crate) fn render_hub(
         task_rows.push((
             "hub-task-terminal".into(),
             IconName::Terminal,
-            format!("终端 · {} 个活跃会话", props.terminal_sessions),
+            rp::terminal_active_sessions(props.terminal_sessions),
             None,
             RightPanelAction::OpenTerminal,
         ));
@@ -367,7 +368,7 @@ pub(crate) fn render_hub(
                                             .text_size(px(12.))
                                             .font_medium()
                                             .text_color(gpui_kit::rgb(palette.muted))
-                                            .child("运行中任务"),
+                                            .child(rp::RUNNING_TASKS.get()),
                                     )
                                     .child(
                                         div()

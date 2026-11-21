@@ -17,7 +17,7 @@ pub fn data_directory() -> io::Result<PathBuf> {
     dirs::config_dir()
         // The native migration must never write Electron's application data.
         .map(|directory| directory.join("folio-gpui"))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "找不到应用数据目录。"))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, crate::i18n::workspace::ERR_DATA_DIR_NOT_FOUND.get()))
 }
 
 fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> io::Result<T> {

@@ -389,7 +389,7 @@ impl Store {
             .transpose()?;
         let names = request.tags.as_deref().unwrap_or_default();
         if names.len() > 20 {
-            return Err(Failure::new("invalid_request", "每次最多查询 20 个标签。"));
+            return Err(Failure::new("invalid_request", crate::i18n::tags::ERR_AGENT_TAG_MAX_QUERY.get()));
         }
         let name = request
             .name_contains
@@ -409,7 +409,7 @@ impl Store {
         {
             return Err(Failure::new(
                 "invalid_request",
-                "请至少指定 paths、under_directory、tags、name_contains 或 extension。",
+                crate::i18n::tags::ERR_AGENT_TAG_FILTER_REQUIRED.get(),
             ));
         }
         let mut db = self.open(false).map_err(Failure::storage)?;
@@ -570,7 +570,7 @@ impl Store {
                 {
                     return Err(Failure::new(
                         "invalid_request",
-                        "请指定要添加或移除的标签，每组最多 20 个。",
+                        crate::i18n::tags::ERR_AGENT_TAG_ADD_REMOVE_REQUIRED.get(),
                     ));
                 }
                 let mut add = BTreeMap::new();
@@ -591,7 +591,7 @@ impl Store {
                     if add.contains_key(&key) {
                         return Err(Failure::new(
                             "invalid_request",
-                            format!("不能同时添加和移除「{}」。", tag.name),
+                            crate::i18n::tags::err_agent_tag_both_add_remove(&tag.name),
                         ));
                     }
                     remove.insert(key, tag);
@@ -599,7 +599,7 @@ impl Store {
                 if edit.tag_colors.len() > 20 {
                     return Err(Failure::new(
                         "invalid_request",
-                        "一次最多指定 20 个标签颜色。",
+                        crate::i18n::tags::ERR_AGENT_TAG_MAX_COLORS.get(),
                     ));
                 }
                 let mut colors = BTreeMap::new();
@@ -608,13 +608,13 @@ impl Store {
                     let label = add.get(&key).ok_or_else(|| {
                         Failure::new(
                             "invalid_request",
-                            format!("tag_colors 中的「{}」也需要出现在 add 中。", request.tag),
+                            crate::i18n::tags::err_agent_tag_color_must_be_in_add(&request.tag),
                         )
                     })?;
                     if colors.insert(key, (label, request.color)).is_some() {
                         return Err(Failure::new(
                             "invalid_request",
-                            format!("重复指定了「{}」的颜色。", label.name()),
+                            crate::i18n::tags::err_agent_tag_duplicate_color(label.name()),
                         ));
                     }
                 }
@@ -634,19 +634,19 @@ impl Store {
                     _ => {
                         return Err(Failure::new(
                             "invalid_request",
-                            "请在 paths 和 under_directory 中二选一。",
+                            crate::i18n::tags::ERR_AGENT_TAG_PATHS_OR_DIR.get(),
                         ));
                     }
                 };
                 let mut result = Vec::with_capacity(targets.len());
                 for path in targets {
                     let full = crate::files::project_path(self.project_root(), &path).map_err(
-                        |error| Failure::new("file_unavailable", format!("{path}：{error}")),
+                        |error| Failure::new("file_unavailable", format!("{path}: {error}")),
                     )?;
                     if full != self.absolute(&path) || !full.is_file() {
                         return Err(Failure::new(
                             "file_unavailable",
-                            format!("文件路径已变化：{path}"),
+                            crate::i18n::tags::err_agent_tag_path_changed(&path),
                         ));
                     }
                     let metadata = fs::metadata(&full).map_err(Failure::storage)?;
@@ -724,7 +724,7 @@ impl Store {
                         {
                             return Err(Failure::new(
                                 "tag_exists",
-                                format!("已存在标签「{new_name}」。"),
+                                crate::i18n::tags::err_agent_tag_exists(new_name),
                             ));
                         }
                         (tag, DefinitionChange::Name(new_name.to_owned()))
@@ -853,7 +853,7 @@ impl Store {
             } else {
                 "directory_not_found"
             };
-            Failure::new(code, format!("无法打开目录 {input}：{error}"))
+            Failure::new(code, crate::i18n::tags::err_agent_open_dir(input, &error))
         })?;
         let relative = full
             .strip_prefix(root)
@@ -867,7 +867,7 @@ impl Store {
         {
             return Err(Failure::new(
                 "directory_not_found",
-                format!("工作区中没有此可访问目录：{input}"),
+                crate::i18n::tags::err_agent_dir_not_in_workspace(input),
             ));
         }
         Ok(relative.to_owned())
@@ -877,7 +877,7 @@ impl Store {
         if input.is_empty() || input.len() > 100 {
             return Err(Failure::new(
                 "invalid_request",
-                "每次请选择 1 到 100 个具体文件。",
+                crate::i18n::tags::ERR_AGENT_FILE_COUNT.get(),
             ));
         }
         let inventory: BTreeSet<_> = visible.iter().map(|file| file.path.as_str()).collect();
@@ -890,7 +890,7 @@ impl Store {
                     io::ErrorKind::NotFound => "file_not_found",
                     _ => "file_unavailable",
                 };
-                Failure::new(code, format!("{path}：{error}"))
+                Failure::new(code, format!("{path}: {error}"))
             })?;
             let relative = full
                 .strip_prefix(root)
@@ -900,13 +900,13 @@ impl Store {
             if full.is_dir() {
                 return Err(Failure::new(
                     "file_not_found",
-                    format!("paths 仅接受文件。查询或处理目录 {path} 时请使用 under_directory。"),
+                    crate::i18n::tags::err_agent_paths_files_only(path),
                 ));
             }
             if !inventory.contains(relative.as_str()) || !full.is_file() {
                 return Err(Failure::new(
                     "file_not_found",
-                    format!("项目文件树中没有此受支持文件：{path}"),
+                    crate::i18n::tags::err_agent_unsupported_file(path),
                 ));
             }
             targets.insert(relative);
@@ -950,7 +950,7 @@ fn tag_named<'a>(data: &'a Snapshot, name: &str) -> ToolResult<&'a Tag> {
         .ok_or_else(|| {
             Failure::new(
                 "unknown_tag",
-                format!("找不到标签「{}」，请查看当前空间的标签。", name.trim()),
+                crate::i18n::tags::err_agent_tag_not_found(name.trim()),
             )
         })
 }
@@ -967,7 +967,7 @@ fn page_limit(limit: Option<usize>) -> ToolResult<usize> {
     } else {
         Err(Failure::new(
             "invalid_request",
-            "每页数量必须在 1 到 100 之间。",
+            crate::i18n::tags::ERR_AGENT_LIMIT_RANGE.get(),
         ))
     }
 }
@@ -987,7 +987,7 @@ fn next_page(rows: &mut Vec<(String, Value)>, limit: usize) -> Option<String> {
 fn stale() -> Failure {
     Failure::new(
         "stale_preview",
-        "确认期间目标文件或标签发生了变化，请重新检索并预览。",
+        crate::i18n::tags::ERR_AGENT_STALE_PREVIEW.get(),
     )
 }
 

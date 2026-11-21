@@ -85,7 +85,7 @@ impl Host {
             .join("node_modules")
             .is_dir()
         {
-            return Err("SDK 宿主依赖未安装，请运行 scripts/setup-ai.ps1".into());
+            return Err(crate::i18n::ai::ERR_RPC_DEPS_MISSING.get().into());
         }
         let mut command = Command::new("node");
         command
@@ -108,7 +108,7 @@ impl Host {
         }
         let mut child = command
             .spawn()
-            .map_err(|e| format!("启动 SDK 宿主失败：{e}"))?;
+            .map_err(|e| crate::i18n::ai::err_rpc_spawn(&e))?;
         #[cfg(windows)]
         let job = ProcessJob::attach(&child).map_err(|e| e.to_string())?;
         let mut stdin = child.stdin.take().expect("piped stdin");
@@ -136,7 +136,7 @@ impl Host {
                         for route in dispatch.lock().expect("routes lock").values() {
                             let _ = route
                                 .sender
-                                .send(RpcInbound::Stderr(format!("宿主协议错误：{error}")));
+                                .send(RpcInbound::Stderr(crate::i18n::ai::err_rpc_protocol(&error)));
                         }
                         continue;
                     }
@@ -257,12 +257,12 @@ impl RpcClient {
         obj.entry("sessionId")
             .or_insert_with(|| json!(self.session));
         if !self.host.alive.load(Ordering::Acquire) {
-            return Err("SDK 宿主已退出，重新打开会话以恢复历史".into());
+            return Err(crate::i18n::ai::ERR_RPC_HOST_EXITED.get().into());
         }
         self.host
             .stdin
             .send(serde_json::to_string(&payload).map_err(|e| e.to_string())?)
-            .map_err(|_| "SDK 宿主输入通道已关闭".to_owned())?;
+            .map_err(|_| crate::i18n::ai::ERR_RPC_STDIN_CLOSED.get().to_owned())?;
         Ok(id)
     }
     pub fn send_raw(&self, payload: Value) -> Result<(), String> {

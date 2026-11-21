@@ -1,3 +1,4 @@
+use crate::i18n::{BiText, Locale, preferences as pref_i18n};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -5,124 +6,124 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug)]
 pub struct ShortcutDef {
     pub id: &'static str,
-    pub category: &'static str,
-    pub label: &'static str,
+    pub category: BiText,
+    pub label: BiText,
     pub default_key: &'static str,
 }
 
 pub const SHORTCUT_DEFS: &[ShortcutDef] = &[
     ShortcutDef {
         id: "save",
-        category: "工作区与全局",
-        label: "保存当前文件",
+        category: pref_i18n::CAT_WORKSPACE,
+        label: pref_i18n::SC_SAVE,
         default_key: "ctrl-s",
     },
     ShortcutDef {
         id: "save_all",
-        category: "工作区与全局",
-        label: "保存全部文件",
+        category: pref_i18n::CAT_WORKSPACE,
+        label: pref_i18n::SC_SAVE_ALL,
         default_key: "ctrl-alt-s",
     },
     ShortcutDef {
         id: "open_project",
-        category: "工作区与全局",
-        label: "打开本地项目",
+        category: pref_i18n::CAT_WORKSPACE,
+        label: pref_i18n::SC_OPEN_PROJECT,
         default_key: "ctrl-o",
     },
     ShortcutDef {
         id: "open_file",
-        category: "工作区与全局",
-        label: "打开本地文件",
+        category: pref_i18n::CAT_WORKSPACE,
+        label: pref_i18n::SC_OPEN_FILE,
         default_key: "ctrl-shift-o",
     },
     ShortcutDef {
         id: "compile",
-        category: "工作区与全局",
-        label: "编译文档",
+        category: pref_i18n::CAT_WORKSPACE,
+        label: pref_i18n::SC_COMPILE,
         default_key: "ctrl-enter",
     },
     ShortcutDef {
         id: "toggle_sidebar",
-        category: "工作区与全局",
-        label: "显示 / 隐藏左侧栏",
+        category: pref_i18n::CAT_WORKSPACE,
+        label: pref_i18n::SC_TOGGLE_SIDEBAR,
         default_key: "ctrl-\\",
     },
     ShortcutDef {
         id: "find_file",
-        category: "工作区与全局",
-        label: "查找项目文件",
+        category: pref_i18n::CAT_WORKSPACE,
+        label: pref_i18n::SC_FIND_FILE,
         default_key: "ctrl-p",
     },
     ShortcutDef {
         id: "toggle_ai",
-        category: "工作区与全局",
-        label: "打开 / 收起 AI 助手",
+        category: pref_i18n::CAT_WORKSPACE,
+        label: pref_i18n::SC_TOGGLE_AI,
         default_key: "ctrl-shift-a",
     },
     ShortcutDef {
         id: "toggle_terminal",
-        category: "工作区与全局",
-        label: "打开 / 收起终端",
+        category: pref_i18n::CAT_WORKSPACE,
+        label: pref_i18n::SC_TOGGLE_TERMINAL,
         default_key: "ctrl-`",
     },
     ShortcutDef {
         id: "close_tab",
-        category: "工作区与全局",
-        label: "关闭当前标签页",
+        category: pref_i18n::CAT_WORKSPACE,
+        label: pref_i18n::SC_CLOSE_TAB,
         default_key: "ctrl-w",
     },
     ShortcutDef {
         id: "toggle_source",
-        category: "Markdown 编辑",
-        label: "切换源码 / 所见即所得",
+        category: pref_i18n::CAT_MARKDOWN,
+        label: pref_i18n::SC_TOGGLE_SOURCE,
         default_key: "ctrl-/",
     },
     ShortcutDef {
         id: "md_bold",
-        category: "Markdown 编辑",
-        label: "加粗",
+        category: pref_i18n::CAT_MARKDOWN,
+        label: pref_i18n::SC_MD_BOLD,
         default_key: "ctrl-b",
     },
     ShortcutDef {
         id: "md_italic",
-        category: "Markdown 编辑",
-        label: "斜体",
+        category: pref_i18n::CAT_MARKDOWN,
+        label: pref_i18n::SC_MD_ITALIC,
         default_key: "ctrl-i",
     },
     ShortcutDef {
         id: "md_underline",
-        category: "Markdown 编辑",
-        label: "下划线",
+        category: pref_i18n::CAT_MARKDOWN,
+        label: pref_i18n::SC_MD_UNDERLINE,
         default_key: "ctrl-u",
     },
     ShortcutDef {
         id: "md_strikethrough",
-        category: "Markdown 编辑",
-        label: "删除线",
+        category: pref_i18n::CAT_MARKDOWN,
+        label: pref_i18n::SC_MD_STRIKETHROUGH,
         default_key: "ctrl-shift-s",
     },
     ShortcutDef {
         id: "md_code",
-        category: "Markdown 编辑",
-        label: "行内代码",
+        category: pref_i18n::CAT_MARKDOWN,
+        label: pref_i18n::SC_MD_CODE,
         default_key: "ctrl-e",
     },
     ShortcutDef {
         id: "md_highlight",
-        category: "Markdown 编辑",
-        label: "荧光笔高亮",
+        category: pref_i18n::CAT_MARKDOWN,
+        label: pref_i18n::SC_MD_HIGHLIGHT,
         default_key: "ctrl-shift-h",
     },
     ShortcutDef {
         id: "md_link",
-        category: "Markdown 编辑",
-        label: "插入 / 编辑链接",
+        category: pref_i18n::CAT_MARKDOWN,
+        label: pref_i18n::SC_MD_LINK,
         default_key: "ctrl-k",
     },
     ShortcutDef {
         id: "md_find",
-        category: "Markdown 编辑",
-        label: "文档内查找",
+        category: pref_i18n::CAT_MARKDOWN,
+        label: pref_i18n::SC_MD_FIND,
         default_key: "ctrl-f",
     },
 ];
@@ -413,6 +414,8 @@ impl Default for AiSettings {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
+    /// Interface language (Simplified Chinese or English).
+    pub locale: Locale,
     /// Themes store colors only; typography and layout remain independent settings.
     pub theme: crate::theme::ThemeSettings,
     /// A local image path enables the workspace backdrop.
@@ -493,6 +496,7 @@ impl AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            locale: Locale::default(),
             theme: crate::theme::ThemeSettings::default(),
             background_image: None,
             background_image_opacity: 35,

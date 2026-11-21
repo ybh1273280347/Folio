@@ -93,14 +93,14 @@ impl Render for PathsPreview {
                     .font_family(self.font.clone()).text_size(px(self.font_size as f32)).shadow_sm()
                     .child(div().flex().items_center().gap_1()
                         .child(crate::ui::icon(IconName::Copy).w(px(14.)).h(px(14.)))
-                    .child(if over_trash && !self.can_trash { "禁止删除：独立文件不支持删除".into() } else if over_trash { format!("移入废纸篓 {count} 项") } else if invalid_folder { "不能移入自身或子文件夹".into() } else if over_root { format!("移动到项目根目录 {count} 项") } else if over_folder { format!("移动到文件夹 {count} 项") } else if count == 1 { "复制路径".into() } else { format!("复制 {count} 个路径") }))
+                    .child(if over_trash && !self.can_trash { crate::i18n::media::TERM_NO_DELETE_LOOSE.get().into() } else if over_trash { crate::i18n::media::term_move_to_trash(count) } else if invalid_folder { crate::i18n::media::TERM_INVALID_FOLDER_DROP.get().into() } else if over_root { crate::i18n::media::term_move_to_root(count) } else if over_folder { crate::i18n::media::term_move_to_folder(count) } else if count == 1 { crate::i18n::media::TERM_COPY_PATH.get().into() } else { crate::i18n::media::term_copy_paths(count) }))
                     .children(self.paths.iter().take(4).map(|path| {
                         let name = path.file_name().expect("file has name").to_string_lossy().into_owned();
                         div().flex().items_center().gap_2().min_w_0()
                             .child(if self.is_folder { div().child(crate::ui::icon(IconName::Folder)).into_any_element() } else { crate::ui::file_icon(&name, false, false) })
                             .child(div().min_w_0().text_ellipsis().child(name))
                     }))
-                    .when(count > 4, |preview| preview.child(div().text_color(gpui_kit::rgb(0x787774)).child(format!("还有 {} 项", count - 4)))),
+                    .when(count > 4, |preview| preview.child(div().text_color(gpui_kit::rgb(0x787774)).child(crate::i18n::media::term_more_items(count - 4)))),
             )
     }
 }
@@ -187,15 +187,15 @@ impl TerminalPane {
                             match result {
                                 Some(Ok(result)) => {
                                     tab.status = match result {
-                                        Ok(status) => format!("已退出 · {}", status.exit_code()),
-                                        Err(error) => format!("读取退出状态失败：{error}"),
+                                        Ok(status) => crate::i18n::media::term_exited_code(status.exit_code()),
+                                        Err(error) => crate::i18n::media::term_exit_status_err(&error),
                                     };
                                     // Release the job after shell exit to reap remaining descendants.
                                     tab.process = None;
                                     changed = true;
                                 }
                                 Some(Err(TryRecvError::Disconnected)) => {
-                                    tab.status = "终端进程已结束".into();
+                                    tab.status = crate::i18n::media::TERM_PROCESS_ENDED.get().into();
                                     tab.process = None;
                                     changed = true;
                                 }
@@ -288,13 +288,13 @@ impl TerminalPane {
         let settings = self.settings.clone();
         let initial_title = match harness {
             Some(h) => format!("{} {id}", h.label()),
-            None => format!("终端 {id}"),
+            None => crate::i18n::media::term_default_title(id),
         };
         self.sessions.push(SessionTab {
             id,
             title: initial_title,
             cwd: directory.clone(),
-            status: "正在启动…".into(),
+            status: crate::i18n::media::TERM_STARTING.get().into(),
             view: None,
             process: None,
             _starting: Task::ready(()),
@@ -443,7 +443,7 @@ impl Render for TerminalPane {
             .w(px(26.))
             .h(px(26.))
             .icon(crate::ui::icon(IconName::Plus).text_color(gpui_kit::rgb(palette.muted)))
-            .tooltip("新建终端或启动 Agent")
+            .tooltip(crate::i18n::media::TERM_NEW_OR_AGENT.get())
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                 let pane_term = pane_entity.clone();
                 let mut menu = menu
@@ -531,7 +531,7 @@ impl Render for TerminalPane {
                     .child(
                         terminal_control("terminal-back-to-hub", IconName::ChevronLeft, palette)
                             .tooltip(|window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new("返回功能栏")
+                                gpui_kit::component::tooltip::Tooltip::new(crate::i18n::common::BACK_TO_HUB.get())
                                     .build(window, cx)
                             })
                             .on_click(cx.listener(|_, _, _, cx| {
@@ -568,7 +568,7 @@ impl Render for TerminalPane {
                     .when(current.is_none(), |area| {
                         area.p_4()
                             .text_color(gpui_kit::rgb(palette.muted))
-                            .child("点击“+”新建终端")
+                            .child(crate::i18n::media::TERM_CLICK_PLUS_HINT.get())
                     }),
             )
             .when_some(current, |area, tab| {

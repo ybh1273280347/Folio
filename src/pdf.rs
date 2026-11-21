@@ -49,7 +49,7 @@ impl PdfPane {
             TextareaState::new(window, cx)
                 .auto_grow(2, 8)
                 .submit_on_enter(true)
-                .placeholder("输入 PDF 批注内容（回车保存）…")
+                .placeholder(crate::i18n::media::PDF_ANN_PLACEHOLDER.get())
         });
         let sub = cx.subscribe_in(
             &annotation_comment_input,
@@ -70,7 +70,7 @@ impl PdfPane {
             TextareaState::new(window, cx)
                 .auto_grow(2, 8)
                 .submit_on_enter(true)
-                .placeholder("输入 PDF 批注内容（回车保存）…")
+                .placeholder(crate::i18n::media::PDF_ANN_PLACEHOLDER.get())
         });
         let drawer_sub = cx.subscribe_in(
             &drawer_comment_input,
@@ -381,16 +381,25 @@ impl PdfPane {
         }
     }
 
+    pub fn refresh_locale(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.annotation_comment_input.update(cx, |input, cx| {
+            input.set_placeholder(crate::i18n::media::PDF_ANN_PLACEHOLDER.get(), window, cx);
+        });
+        self.drawer_comment_input.update(cx, |input, cx| {
+            input.set_placeholder(crate::i18n::media::PDF_ANN_PLACEHOLDER.get(), window, cx);
+        });
+    }
+
     fn render_active_annotation_popover(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let active_id = self.active_annotation_id?;
         let item = self.annotations.iter().find(|a| a.id == active_id)?;
         let quote_preview = if item.quote.is_empty() {
-            format!("第 {} 页 · 框选区域批注", item.page + 1)
+            crate::i18n::media::pdf_ann_page_region(item.page + 1)
         } else if item.quote.chars().count() > 60 {
             let s: String = item.quote.chars().take(60).collect();
-            format!("第 {} 页 · “{s}…”", item.page + 1)
+            crate::i18n::media::pdf_ann_page_quote(item.page + 1, &s, true)
         } else {
-            format!("第 {} 页 · “{}”", item.page + 1, item.quote)
+            crate::i18n::media::pdf_ann_page_quote(item.page + 1, &item.quote, false)
         };
         let active_color = item.color.clone();
 
@@ -450,7 +459,7 @@ impl PdfPane {
                                 .flex()
                                 .gap(px(4.))
                                 .child(
-                                    ui::button_danger_soft("pdf-ann-delete", "删除")
+                                    ui::button_danger_soft("pdf-ann-delete", crate::i18n::common::DELETE.get())
                                         .on_click(cx.listener(move |this, _, _window, cx| {
                                             this.delete_annotation(active_id, cx);
                                         })),
@@ -509,7 +518,7 @@ impl PdfPane {
                                 .text_size(px(12.))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(rgb(0x37352f))
-                                .child(format!("PDF 批注 ({})", pdf_annotations.len())),
+                                .child(crate::i18n::media::pdf_ann_count(pdf_annotations.len())),
                         )
                         .child(
                             ui::button("pdf-ann-drawer-close", "×").on_click(cx.listener(
@@ -536,14 +545,14 @@ impl PdfPane {
                                     .p(px(12.))
                                     .text_size(px(12.))
                                     .text_color(rgb(0x9b9a97))
-                                    .child("暂无批注。直接拖拽选中 PDF 文字，或点击顶部 ⬚（或按住 Alt 拖拽框选）即可高亮与批注区域内的有效内容。"),
+                                    .child(crate::i18n::media::PDF_ANN_EMPTY.get()),
                             )
                         })
                         .children(pdf_annotations.iter().enumerate().map(|(idx, item)| {
                             let id = item.id;
                             let page = item.page;
                             let quote = if item.quote.is_empty() {
-                                "框选区域".to_string()
+                                crate::i18n::media::PDF_ANN_REGION_LABEL.get().to_string()
                             } else {
                                 item.quote.clone()
                             };
@@ -707,7 +716,7 @@ impl PdfPane {
                                                     .justify_end()
                                                     .gap(px(6.))
                                                     .child(
-                                                        ui::button("cancel-pdf-drawer-ann", "取消")
+                                                        ui::button("cancel-pdf-drawer-ann", crate::i18n::common::CANCEL.get())
                                                             .on_click(cx.listener(
                                                                 |this, _, window, cx| {
                                                                     this.editing_drawer_annotation_id =
@@ -721,7 +730,7 @@ impl PdfPane {
                                                     .child(
                                                         ui::button_primary(
                                                             "save-pdf-drawer-ann",
-                                                            "保存",
+                                                            crate::i18n::common::SAVE.get(),
                                                         )
                                                         .on_click(cx.listener(
                                                             move |this, _, window, cx| {

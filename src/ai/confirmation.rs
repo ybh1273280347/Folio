@@ -80,7 +80,7 @@ impl ChatPane {
                     .child(message.clone())
                     .into_any_element(),
                 false,
-                "允许",
+                crate::i18n::ai::APPROVE.get(),
             ),
             ConfirmationContent::Command(command) => {
                 let (font, size) = crate::theme::tool_typography(&self.settings);
@@ -88,7 +88,7 @@ impl ChatPane {
                     IconName::Terminal,
                     crate::ui::approval_command_body(command, font.into(), size, palette),
                     true,
-                    "运行命令",
+                    crate::i18n::ai::RUN_COMMAND.get(),
                 )
             }
         };
@@ -104,14 +104,14 @@ impl ChatPane {
         .icon(icon)
         .action(
             "deny",
-            "拒绝",
+            crate::i18n::ai::DECLINE.get(),
             crate::ui::ApprovalActionKind::GhostDanger,
             cx.listener(move |pane, _, _, cx| pane.respond_confirm(&deny, false, false, cx)),
         );
         if shell {
             card = card.action(
                 "allow-session",
-                "此会话始终允许",
+                crate::i18n::ai::ALLOW_FOR_SESSION.get(),
                 crate::ui::ApprovalActionKind::Secondary,
                 cx.listener(move |pane, _, _, cx| {
                     pane.respond_confirm(&session, true, true, cx)
@@ -174,14 +174,14 @@ impl ChatPane {
         }
         let summary = if all_undone {
             if total_files > 0 {
-                format!("已撤销 {total_files} 个文件的标签")
+                crate::i18n::ai::batch_undone_files(total_files)
             } else {
-                format!("已撤销 {} 项标签变更", blocks.len())
+                crate::i18n::ai::batch_undone_changes(blocks.len())
             }
         } else if total_files > 0 {
-            format!("已更新 {total_files} 个文件的标签")
+            crate::i18n::ai::batch_updated_files(total_files)
         } else {
-            format!("已完成 {} 项标签变更", blocks.len())
+            crate::i18n::ai::batch_completed_changes(blocks.len())
         };
         let success = if palette.is_dark() { 0x8ccaa6 } else { 0x32664b };
         let muted = gpui_kit::rgb(palette.muted);
@@ -219,7 +219,7 @@ impl ChatPane {
                 .text_size(header_size)
                 .text_color(muted)
                 .flex_shrink_0()
-                .child("已撤销")
+                .child(crate::i18n::ai::UNDONE.get())
                 .into_any_element()
         } else {
             let undo_ids = applied_ids;
@@ -249,7 +249,7 @@ impl ChatPane {
                         cx.notify();
                     }
                 }))
-                .child("撤销")
+                .child(crate::i18n::ai::UNDO.get())
                 .into_any_element()
         };
 
@@ -392,7 +392,7 @@ impl ChatPane {
                                 cx.notify();
                             }
                         }))
-                        .child("撤销")
+                        .child(crate::i18n::ai::UNDO.get())
                         .into_any_element(),
                 )
             }
@@ -401,7 +401,7 @@ impl ChatPane {
                     .text_size(header_size)
                     .text_color(muted)
                     .flex_shrink_0()
-                    .child("已撤销")
+                    .child(crate::i18n::ai::UNDONE.get())
                     .into_any_element(),
             ),
             _ => None,
@@ -484,7 +484,7 @@ fn review_heading(
     };
     let (label, tone) = match state {
         ApprovalState::Pending => (
-            "待确认",
+            crate::i18n::common::PENDING_APPROVAL.get(),
             if palette.is_dark() {
                 0xf3c680
             } else {
@@ -492,10 +492,10 @@ fn review_heading(
             },
         ),
         ApprovalState::Applied | ApprovalState::Undone => ("", success),
-        ApprovalState::Declined => ("已拒绝", palette.muted),
-        ApprovalState::Expired => ("已过期", palette.muted),
-        ApprovalState::Cancelled => ("已取消", palette.muted),
-        ApprovalState::Failed => ("未应用", palette.danger),
+        ApprovalState::Declined => (crate::i18n::ai::STATE_DECLINED.get(), palette.muted),
+        ApprovalState::Expired => (crate::i18n::ai::STATE_EXPIRED.get(), palette.muted),
+        ApprovalState::Cancelled => (crate::i18n::ai::STATE_CANCELLED.get(), palette.muted),
+        ApprovalState::Failed => (crate::i18n::ai::STATE_FAILED.get(), palette.danger),
     };
     let glyph = crate::ui::icon(icon)
         .size(px(12.5))
@@ -587,60 +587,29 @@ fn review_summary(preview: &TagConfirmation, state: ApprovalState) -> String {
             ..
         } => {
             if files.is_empty() {
-                return format!(
-                    "{} {} 个标签的颜色",
-                    if undone {
-                        "已撤销更改"
-                    } else if applied {
-                        "已更改"
-                    } else {
-                        "更改"
-                    },
-                    color_changes.len()
-                );
+                return crate::i18n::ai::review_color_changes(color_changes.len(), applied, undone);
             }
             let count = files.len();
             match common_delta(files) {
                 Some(delta) if delta.remove.is_empty() => {
-                    if undone {
-                        format!("已撤销「{}」的 {count} 个文件标签", delta.add.join("、"))
-                    } else if applied {
-                        format!("已为 {count} 个文件添加")
-                    } else {
-                        format!("为 {count} 个文件添加标签")
-                    }
+                    crate::i18n::ai::review_add_tags(&delta.add, count, applied, undone)
                 }
                 Some(delta) if delta.add.is_empty() => {
-                    if undone {
-                        format!("已撤销「{}」的 {count} 个文件标签", delta.remove.join("、"))
-                    } else if applied {
-                        format!("已从 {count} 个文件移除")
-                    } else {
-                        format!("从 {count} 个文件移除标签")
-                    }
+                    crate::i18n::ai::review_remove_tags(&delta.remove, count, applied, undone)
                 }
-                _ => format!(
-                    "{} {count} 个文件的标签",
-                    if undone {
-                        "已撤销"
-                    } else if applied {
-                        "已更新"
-                    } else {
-                        "调整"
-                    }
-                ),
+                _ => crate::i18n::ai::review_update_tags(count, applied, undone),
             }
         }
         TagConfirmation::Rename { from, to, .. } if undone => {
-            format!("已撤销将「{from}」重命名为「{to}」")
+            crate::i18n::ai::review_rename_undone(from, to)
         }
         TagConfirmation::Rename { from, to, .. } if applied => {
-            format!("已将「{from}」重命名为「{to}」")
+            crate::i18n::ai::review_rename_applied(from, to)
         }
-        TagConfirmation::Color { tag, .. } if undone => format!("已撤销更改「{tag}」的颜色"),
-        TagConfirmation::Color { tag, .. } if applied => format!("已更改「{tag}」的颜色"),
-        TagConfirmation::Rename { .. } => "重命名标签".into(),
-        TagConfirmation::Color { .. } => "更改标签颜色".into(),
+        TagConfirmation::Color { tag, .. } if undone => crate::i18n::ai::review_color_undone(tag),
+        TagConfirmation::Color { tag, .. } if applied => crate::i18n::ai::review_color_applied(tag),
+        TagConfirmation::Rename { .. } => crate::i18n::ai::TAG_RENAME_TITLE.get().into(),
+        TagConfirmation::Color { .. } => crate::i18n::ai::TAG_COLOR_TITLE.get().into(),
     }
 }
 
@@ -675,7 +644,7 @@ fn uniform_tag_chips(
                         div()
                             .text_size(typo.xs)
                             .text_color(muted)
-                            .child("· 新建")
+                            .child(crate::i18n::ai::NEW_BADGE_DOT.get())
                             .into_any_element(),
                     ]
                 } else {
@@ -745,7 +714,7 @@ fn tag_preview(
                         .items_center()
                         .text_size(typo.xs)
                         .text_color(muted)
-                        .child("新建")
+                        .child(crate::i18n::ai::NEW_BADGE.get())
                         .children(created_tags.iter().map(|tag| {
                             tag_swatch(*label_colors.get(tag).unwrap_or(&0), tag, typo)
                         })),
@@ -762,10 +731,7 @@ fn tag_preview(
                         .items_center()
                         .text_size(typo.xs)
                         .text_color(muted)
-                        .child(format!(
-                            "「{}」换色，影响 {} 个关联文件",
-                            change.tag, change.affected
-                        ))
+                        .child(crate::i18n::ai::tag_recolor_affected(&change.tag, change.affected))
                         .child(tag_transition(
                             color_swatch(from, typo),
                             color_swatch(change.to, typo),
@@ -780,7 +746,7 @@ fn tag_preview(
                         .pb_0p5()
                         .text_size(typo.xs)
                         .text_color(muted)
-                        .child(format!("{common_dir} · {} 个文件", files.len())),
+                        .child(crate::i18n::ai::dir_file_count(&common_dir, files.len())),
                 );
             }
             let list = div()
@@ -844,7 +810,7 @@ fn tag_preview(
                 div()
                     .text_size(typo.xs)
                     .text_color(muted)
-                    .child(format!("影响 {affected} 个关联文件")),
+                    .child(crate::i18n::ai::affects_files(*affected)),
             ),
         TagConfirmation::Color {
             tag,
@@ -856,7 +822,7 @@ fn tag_preview(
                 div()
                     .text_size(typo.xs)
                     .text_color(muted)
-                    .child(format!("「{tag}」，影响 {affected} 个关联文件")),
+                    .child(crate::i18n::ai::tag_affects_files(tag, *affected)),
             )
             .child(tag_transition(
                 color_swatch(*from, typo),
@@ -867,9 +833,10 @@ fn tag_preview(
 }
 
 fn swatch_colors(index: u8) -> (&'static str, u32, u32) {
-    *crate::ui::TAG_COLORS
+    let (label, bg, ink) = *crate::ui::TAG_COLORS
         .get(index as usize)
-        .unwrap_or(&crate::ui::TAG_COLORS[0])
+        .unwrap_or(&crate::ui::TAG_COLORS[0]);
+    (label.get(), bg, ink)
 }
 
 fn color_swatch(index: u8, typo: AiTypography) -> Div {

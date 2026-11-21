@@ -61,11 +61,11 @@ fn sync_parent(path: &Path) -> io::Result<()> {
 
 fn entry_directory(id: &str) -> io::Result<PathBuf> {
     let parsed = Uuid::parse_str(id)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "无效的废纸篓条目 ID。"))?;
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, crate::i18n::workspace::ERR_TRASH_INVALID_ID.get()))?;
     if parsed.to_string() != id {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "无效的废纸篓条目 ID。",
+            crate::i18n::workspace::ERR_TRASH_INVALID_ID.get(),
         ));
     }
     Ok(trash_directory()?.join(id))
@@ -78,7 +78,7 @@ fn read_entry(directory: &Path) -> io::Result<TrashEntry> {
     if directory_id != Some(entry.id.as_str()) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "废纸篓条目 ID 与存储目录不匹配。",
+            crate::i18n::workspace::ERR_TRASH_MISMATCH_DIR.get(),
         ));
     }
     Ok(entry)
@@ -156,7 +156,7 @@ pub fn put(
     if !source_metadata.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "只能将文件移入 Folio 废纸篓。",
+            crate::i18n::workspace::ERR_TRASH_FILES_ONLY.get(),
         ).into());
     }
 

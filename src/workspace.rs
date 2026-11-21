@@ -80,10 +80,7 @@ struct TreeSelectionDrag {
 }
 
 #[derive(Clone)]
-struct SidebarResizeDrag {
-    start_x: f32,
-    start_w: f32,
-}
+struct SidebarResizeDrag;
 
 impl Render for SidebarResizeDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -92,10 +89,7 @@ impl Render for SidebarResizeDrag {
 }
 
 #[derive(Clone)]
-struct RightPanelResizeDrag {
-    start_x: f32,
-    start_w: f32,
-}
+struct RightPanelResizeDrag;
 
 impl Render for RightPanelResizeDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -336,6 +330,8 @@ pub struct Workspace {
     right_panel_view: RightPanelView,
     right_panel_search: Entity<InputState>,
     right_panel_selected: usize,
+    sidebar_drag: Option<(f32, f32)>,
+    right_panel_drag: Option<(f32, f32)>,
     preview: Option<PathBuf>,
     build_pdf: Option<Entity<PdfPane>>,
     pdf_panes: BTreeMap<String, Entity<PdfPane>>,
@@ -449,8 +445,9 @@ impl Workspace {
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let config = storage::load_projects().expect("无法读取项目列表");
-        let mut workspace_sessions = storage::load_workspace_sessions().expect("无法读取工作区标签页");
+        let config = storage::load_projects().expect(crate::i18n::workspace::ERR_LOAD_PROJECTS.get());
+        let mut workspace_sessions =
+            storage::load_workspace_sessions().expect(crate::i18n::workspace::ERR_LOAD_SESSIONS.get());
         // The old default session contained external paths, never default-space files.
         if let Some(session) = workspace_sessions.remove("default") {
             workspace_sessions.insert("loose".into(), session);
@@ -479,7 +476,7 @@ impl Workspace {
             main_file: String::new(),
             engine: Engine::Xelatex,
         };
-        let settings = storage::load_settings().expect("无法读取界面设置");
+        let settings = storage::load_settings().expect(crate::i18n::workspace::ERR_LOAD_SETTINGS.get());
         let math = cx.new(MathRenderer::new);
         math.update(cx, |renderer, cx| renderer.set_appearance(&settings, cx));
         let preferences = cx.new(|cx| Preferences::new(settings.clone(), window, cx));
@@ -545,7 +542,9 @@ impl Workspace {
                 }
             }
             let fallback_changed = app.settings.cjk_fallback_font != event.0.cjk_fallback_font;
+            let locale_changed = app.settings.locale != event.0.locale;
             app.settings = event.0.clone();
+            crate::i18n::apply_settings(&app.settings);
             app.terminal.update(cx, |pane, cx| pane.sync(&app.settings.terminal, app.settings.theme.palette, cx));
             app.ai.update(cx, |pane, cx| pane.sync_settings(&app.settings, cx));
             for document in app.documents.values() {
@@ -554,7 +553,23 @@ impl Workspace {
                 });
             }
             crate::theme::apply_settings(&app.settings, cx);
-            if fallback_changed {
+            if locale_changed {
+                app.right_panel_search.update(cx, |input, cx| {
+                    input.set_placeholder(crate::i18n::workspace::SEARCH_HUB_PLACEHOLDER.get(), window, cx);
+                });
+                app.tags.refresh_locale(window, cx);
+                app.ai.update(cx, |pane, cx| pane.refresh_locale(window, cx));
+                for pane in app.markdown_panes.values() {
+                    pane.update(cx, |pane, cx| pane.refresh_locale(window, cx));
+                }
+                for pane in app.pdf_panes.values() {
+                    pane.update(cx, |pane, cx| pane.refresh_locale(window, cx));
+                }
+                if let Some(pane) = &app.build_pdf {
+                    pane.update(cx, |pane, cx| pane.refresh_locale(window, cx));
+                }
+            }
+            if fallback_changed || locale_changed {
                 // Terminal cells and mounted views may reuse their draws when only glyph fallback changes.
                 window.refresh();
             }
@@ -587,8 +602,10 @@ impl Workspace {
             cx.notify();
         })
             .detach();
-        let right_panel_search =
-            cx.new(|cx| InputState::new(window, cx).placeholder("搜索功能、命令或文件…"));
+        let right_panel_search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(crate::i18n::workspace::SEARCH_HUB_PLACEHOLDER.get())
+        });
         cx.subscribe_in(
             &right_panel_search,
             window,
@@ -783,6 +800,8 @@ impl Workspace {
             right_panel_view: RightPanelView::Hub,
             right_panel_search,
             right_panel_selected: 0,
+            sidebar_drag: None,
+            right_panel_drag: None,
             preview: None,
             build_pdf: None,
             pdf_panes: BTreeMap::new(),
@@ -839,7 +858,10 @@ impl Workspace {
             let _ = this.update_in(cx, |app, window, cx| match result {
                 Ok(image) => app.set_background_image(Some(image), window, cx),
                 Err(error) => app.preferences.update(cx, |panel, cx| {
-                    panel.set_background_image_error(Some(format!("无法读取背景图：{error}")), cx);
+                    panel.set_background_image_error(
+                        Some(crate::i18n::workspace::err_read_background_image(&error)),
+                        cx,
+                    );
                 }),
             });
         }));
@@ -1068,11 +1090,11 @@ impl Workspace {
 
     fn open_path_from_ai(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
         let Ok(resolved) = dunce::canonicalize(path) else {
-            self.report(format!("找不到文件：{}", path.display()), cx);
+            self.report(crate::i18n::workspace::err_file_not_found(path), cx);
             return;
         };
         if !resolved.is_file() || !files::is_relevant(&resolved) {
-            self.report(format!("Folio 不支持打开此文件：{}", resolved.display()), cx);
+            self.report(crate::i18n::workspace::err_unsupported_open(&resolved), cx);
             return;
         }
         if let Some(project) = self.directory_workspace()
@@ -1214,7 +1236,7 @@ impl Workspace {
     fn export_pdf(&mut self, source: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let dialog = rfd::AsyncFileDialog::new()
             .set_parent(window)
-            .set_title("导出 PDF")
+            .set_title(crate::i18n::workspace::DIALOG_EXPORT_PDF.get())
             .set_file_name(
                 source
                     .file_name()
@@ -1393,7 +1415,7 @@ impl Workspace {
         }
         let dialog = rfd::AsyncFileDialog::new()
             .set_parent(window)
-            .set_title("选择本地项目文件夹");
+            .set_title(crate::i18n::workspace::DIALOG_SELECT_PROJECT_FOLDER.get());
         self.dialog_open = true;
         cx.spawn_in(window, async move |this, cx| {
             let folder = dialog.pick_folder().await;
@@ -1410,9 +1432,9 @@ impl Workspace {
     fn open_file_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dialog = rfd::AsyncFileDialog::new()
             .set_parent(window)
-            .set_title("打开文档")
+            .set_title(crate::i18n::workspace::DIALOG_OPEN_DOCUMENT.get())
             .add_filter(
-                "Folio 支持的文件",
+                crate::i18n::workspace::DIALOG_SUPPORTED_FILES.get(),
                 &["pdf", "md", "tex", "ltx", "bib", "sty", "cls", "html", "htm"],
             );
         self.dialog_open = true;
@@ -1455,7 +1477,7 @@ impl Workspace {
             return;
         }
         if paths.iter().any(|path| path.is_dir()) {
-            self.report("请一次打开一个项目文件夹，或选择多个文档。", cx);
+            self.report(crate::i18n::workspace::ERR_SINGLE_PROJECT_OR_DOCS.get(), cx);
             return;
         }
         let mut project_files = Vec::new();
@@ -1467,7 +1489,7 @@ impl Workspace {
         for path in paths {
             if !files::is_relevant(&path) {
                 self.report(
-                    format!("此文件类型不能在 Folio 中打开：{}", path.display()),
+                    crate::i18n::workspace::err_unsupported_file_type(&path),
                     cx,
                 );
                 return;
@@ -1560,7 +1582,7 @@ impl Workspace {
         if !full.is_file() || !files::is_relevant(&full) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "请选择受支持的本地文件。",
+                crate::i18n::workspace::ERR_SELECT_SUPPORTED_LOCAL_FILE.get(),
             ));
         }
         self.watch_standalone_parent(full.parent().expect("canonical file has a parent"))?;
@@ -1645,13 +1667,16 @@ impl Workspace {
         };
         let (candidate, anchor) = target;
         let Ok(resolved) = dunce::canonicalize(&candidate) else {
-            self.report(format!("找不到链接目标：{}", candidate.display()), cx);
+            self.report(
+                crate::i18n::workspace::err_link_target_not_found(&candidate),
+                cx,
+            );
             return;
         };
         if resolved.is_dir() {
             match url::Url::from_directory_path(&resolved) {
                 Ok(dir_url) => cx.open_url(dir_url.as_str()),
-                Err(()) => self.report(format!("无法打开目录：{}", resolved.display()), cx),
+                Err(()) => self.report(crate::i18n::workspace::err_open_dir(&resolved), cx),
             }
             return;
         }
@@ -1683,7 +1708,7 @@ impl Workspace {
         }
         match url::Url::from_file_path(&resolved) {
             Ok(file_url) => cx.open_url(file_url.as_str()),
-            Err(()) => self.report(format!("无法打开文件：{}", resolved.display()), cx),
+            Err(()) => self.report(crate::i18n::workspace::err_open_file(&resolved), cx),
         }
     }
 
@@ -1864,7 +1889,7 @@ impl Workspace {
                 MarkdownEvent::RenameTitle(title) => {
                     let name = format!("{title}.md");
                     if title.is_empty() {
-                        app.report("标题不能为空。", cx);
+                        app.report(crate::i18n::workspace::ERR_EMPTY_TITLE.get(), cx);
                     } else if let Err(error) = app.rename_markdown(&file, &name, window, cx) {
                         app.report(error, cx);
                     } else {
@@ -1929,7 +1954,7 @@ impl Workspace {
             .expect("save only opened text files");
         if document.buffer.deleted {
             return Err(io::Error::other(
-                "文件已被删除，请在原位置恢复文件后保存草稿。",
+                crate::i18n::workspace::ERR_FILE_DELETED_RESTORE_FIRST.get(),
             ));
         }
         if document.buffer.conflict.is_some() && !overwrite {
@@ -2070,8 +2095,8 @@ impl Workspace {
         }
         match self.ask(
             Dialog::Drafts,
-            "处理未保存的修改".into(),
-            "保存全部修改、放弃修改，或返回继续编辑。".into(),
+            crate::i18n::workspace::DIALOG_UNSAVED_ALL_TITLE.get().into(),
+            crate::i18n::workspace::DIALOG_UNSAVED_ALL_BODY.get().into(),
             DialogButtons::SaveDiscardCancel,
             window,
             cx,
@@ -2134,8 +2159,8 @@ impl Workspace {
             let retry_path = path.to_owned();
             match self.ask(
                 Dialog::CloseTab,
-                format!("关闭 {path} 前保存修改？"),
-                "保存文件、放弃修改，或返回继续编辑。".into(),
+                crate::i18n::workspace::dialog_close_unsaved_title(path),
+                crate::i18n::workspace::DIALOG_UNSAVED_FILE_BODY.get().into(),
                 DialogButtons::SaveDiscardCancel,
                 window,
                 cx,
@@ -2549,7 +2574,7 @@ impl Workspace {
             .cloned()
             .collect();
         if targets.is_empty() {
-            self.report("请选择要编译的 .tex 或 .md 文件。", cx);
+            self.report(crate::i18n::workspace::ERR_SELECT_COMPILE_FILE.get(), cx);
             return;
         }
         let mut outputs = BTreeSet::new();
@@ -2561,7 +2586,7 @@ impl Workspace {
                     .to_lowercase(),
             )
         }) {
-            self.report("所选文件会生成同名 PDF，请分开编译。", cx);
+            self.report(crate::i18n::workspace::ERR_SAME_PDF_OUTPUT.get(), cx);
             return;
         }
         if !self.save_all(cx) {
@@ -2578,7 +2603,12 @@ impl Workspace {
         let target = self.batch_queue.pop_front().unwrap();
         let file = self.files.iter().find(|file| file.path == target).cloned();
         let result = file
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "待编译文件不存在"))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    crate::i18n::workspace::ERR_COMPILE_TARGET_MISSING.get(),
+                )
+            })
             .and_then(|file| self.open_file(&file, window, cx));
         if let Err(error) = result {
             self.batch_running = false;
@@ -2632,7 +2662,7 @@ impl Workspace {
             .take()
             .or_else(|| self.compile_target().map(str::to_owned))
         else {
-            self.report("请选择一个 .tex 文件作为编译主文件。", cx);
+            self.report(crate::i18n::workspace::ERR_SELECT_MAIN_TEX.get(), cx);
             return;
         };
         let mut project = self.directory_workspace().cloned().unwrap_or_else(|| {
@@ -2827,12 +2857,12 @@ impl Workspace {
     }
 
     fn move_tree_files(&mut self, dragged: &crate::terminal::DraggedPaths, folder: &str, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
-        let project = self.directory_workspace().ok_or_else(|| io::Error::other("请选择来源项目。"))?;
+        let project = self.directory_workspace().ok_or_else(|| io::Error::other(crate::i18n::workspace::ERR_SELECT_SOURCE_PROJECT.get()))?;
         if dragged.1.as_deref() != Some(project.id.as_str()) {
-            return Err(io::Error::other("仅支持移动同项目文件，独立文件只能复制路径。"));
+            return Err(io::Error::other(crate::i18n::workspace::ERR_MOVE_SAME_PROJECT_FILE_ONLY.get()));
         }
         if self.cancellation.is_some() || self.batch_running {
-            return Err(io::Error::other("请等待编译结束后移动文件。"));
+            return Err(io::Error::other(crate::i18n::workspace::ERR_WAIT_BUILD_MOVE_FILE.get()));
         }
         let root = PathBuf::from(&project.folder);
         // The empty relative directory denotes the project root, never an absolute file key.
@@ -2841,12 +2871,12 @@ impl Workspace {
         let mut targets = BTreeSet::new();
         // Preflight the whole selection before touching disk; existing targets are never replaced.
         for source in &dragged.0 {
-            let relative = source.strip_prefix(&root).map_err(|_| io::Error::other("来源文件不属于当前项目。"))?.to_string_lossy().replace('\\', "/");
+            let relative = source.strip_prefix(&root).map_err(|_| io::Error::other(crate::i18n::workspace::ERR_SOURCE_NOT_IN_PROJECT.get()))?.to_string_lossy().replace('\\', "/");
             let source = files::project_path(&root, &relative)?;
             let target = destination.join(source.file_name().expect("dragged file has name"));
             if source == target { continue; }
             if target.exists() || !targets.insert(target.to_string_lossy().to_lowercase()) {
-                return Err(io::Error::other(format!("目标存在同名文件，未移动：{}", target.display())));
+                return Err(io::Error::other(crate::i18n::workspace::err_target_exists_unmoved(&target)));
             }
             let name = source.file_name().unwrap().to_string_lossy();
             let renamed = if folder.is_empty() { name.into_owned() } else { format!("{folder}/{name}") };
@@ -2879,12 +2909,12 @@ impl Workspace {
     }
 
     fn move_tree_folder(&mut self, dragged: &crate::terminal::DraggedFolder, folder: &str, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
-        let project = self.directory_workspace().ok_or_else(|| io::Error::other("请选择来源项目。"))?;
+        let project = self.directory_workspace().ok_or_else(|| io::Error::other(crate::i18n::workspace::ERR_SELECT_SOURCE_PROJECT.get()))?;
         if dragged.1 != project.id {
-            return Err(io::Error::other("仅支持移动同一项目内的文件夹。"));
+            return Err(io::Error::other(crate::i18n::workspace::ERR_MOVE_SAME_PROJECT_FOLDER_ONLY.get()));
         }
         if self.cancellation.is_some() || self.batch_running {
-            return Err(io::Error::other("请等待编译结束后移动文件夹。"));
+            return Err(io::Error::other(crate::i18n::workspace::ERR_WAIT_BUILD_MOVE_FOLDER.get()));
         }
         let root = PathBuf::from(&project.folder);
         let renamed = files::move_folder_into(&root, &dragged.0, folder)?;
@@ -3282,7 +3312,7 @@ impl Workspace {
             }
             NameAction::RenameProject(id) => {
                 if name.is_empty() {
-                    return Err(io::Error::other("项目名称不能为空。"));
+                    return Err(io::Error::other(crate::i18n::workspace::ERR_PROJECT_NAME_EMPTY.get()));
                 }
                 self.config
                     .projects
@@ -3328,9 +3358,9 @@ impl Workspace {
         let retry = paths.clone();
         if self.ask(
             Dialog::DeleteSelected,
-            format!("将 {} 个文件移入废纸篓？", paths.len()),
-            "文件保留 7 天，可在废纸篓恢复。文件夹内仅处理受支持的项目文件。".into(),
-            DialogButtons::Confirm("移入废纸篓".into()),
+            crate::i18n::workspace::dialog_trash_title(paths.len()),
+            crate::i18n::workspace::DIALOG_TRASH_BODY.get().into(),
+            DialogButtons::Confirm(crate::i18n::workspace::DIALOG_TRASH_CONFIRM.get().into()),
             window,
             cx,
             move |app, window, cx| app.confirm_trash(retry, window, cx),
@@ -3415,7 +3445,7 @@ impl Workspace {
         }
         self.file_tree_focus.focus(window, cx);
         if !failed {
-            self.report("已移入废纸篓，按 Ctrl+Z 撤销。", cx);
+            self.report(crate::i18n::workspace::REPORT_MOVED_TO_TRASH.get(), cx);
         }
         cx.notify();
     }
@@ -3435,9 +3465,9 @@ impl Workspace {
             let count = paths.len();
             cx.write_to_clipboard(ClipboardItem::new_string(paths.join("\n")));
             if count == 1 {
-                self.report("已复制完整路径。", cx);
+                self.report(crate::i18n::workspace::REPORT_COPIED_PATH.get(), cx);
             } else {
-                self.report(format!("已复制 {count} 个文件的完整路径。"), cx);
+                self.report(crate::i18n::workspace::report_copied_paths(count), cx);
             }
             return;
         }
@@ -3448,7 +3478,7 @@ impl Workspace {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 full.to_string_lossy().into_owned(),
             ));
-            self.report("已复制文件夹完整路径。", cx);
+            self.report(crate::i18n::workspace::REPORT_COPIED_FOLDER_PATH.get(), cx);
             return;
         }
         if !self.active.is_empty() {
@@ -3456,7 +3486,7 @@ impl Workspace {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 full.to_string_lossy().into_owned(),
             ));
-            self.report("已复制完整路径。", cx);
+            self.report(crate::i18n::workspace::REPORT_COPIED_PATH.get(), cx);
         }
     }
 
@@ -3508,13 +3538,21 @@ impl Workspace {
                 continue;
             };
             if !entry.project_root.is_dir() {
-                self.report("原项目目录不存在，文件仍保留在废纸篓。", cx);
+                self.report(crate::i18n::workspace::REPORT_TRASH_PARENT_MISSING.get(), cx);
                 return;
             }
             let mut target = entry.project_root.join(&entry.relative);
             if target.exists() {
                 let retry = ids.clone();
-                let Some(choice) = self.ask(Dialog::TrashConflict, "原位置已有同名文件".into(), target.display().to_string(), DialogButtons::RestoreConflict, window, cx, move |app, window, cx| app.restore_trash(retry, window, cx)) else { return; };
+                let Some(choice) = self.ask(
+                    Dialog::TrashConflict,
+                    crate::i18n::workspace::DIALOG_TRASH_CONFLICT_TITLE.get().into(),
+                    target.display().to_string(),
+                    DialogButtons::RestoreConflict,
+                    window,
+                    cx,
+                    move |app, window, cx| app.restore_trash(retry, window, cx),
+                ) else { return; };
                 match choice {
                     rfd::MessageDialogResult::Yes => {
                         if self.directory_workspace().is_some_and(|project| project.id == entry.project_id && Path::new(&project.folder) == entry.project_root) {
@@ -3563,7 +3601,15 @@ impl Workspace {
         if ids.is_empty() { return; }
         let all = ids.len() > 1 || ids.len() == self.trash_entries.len();
         let retry = ids.clone();
-        if self.ask(if all { Dialog::TrashClear } else { Dialog::TrashPurge }, format!("彻底删除 {} 个文件？", ids.len()), "删除后无法从 Folio 废纸篓恢复。".into(), DialogButtons::Confirm("彻底删除".into()), window, cx, move |app, window, cx| app.purge_trash(retry, window, cx)) != Some(rfd::MessageDialogResult::Ok) { return; }
+        if self.ask(
+            if all { Dialog::TrashClear } else { Dialog::TrashPurge },
+            crate::i18n::workspace::dialog_purge_title(ids.len()),
+            crate::i18n::workspace::DIALOG_PURGE_BODY.get().into(),
+            DialogButtons::Confirm(crate::i18n::workspace::DIALOG_PURGE_CONFIRM.get().into()),
+            window,
+            cx,
+            move |app, window, cx| app.purge_trash(retry, window, cx),
+        ) != Some(rfd::MessageDialogResult::Ok) { return; }
         for id in ids {
             if let Some(entry) = self.trash_entries.iter().find(|entry| entry.id == id).cloned() {
                 if let Err(error) = crate::trash::purge(&entry) { self.report(error, cx); return; }
@@ -3712,9 +3758,11 @@ impl Workspace {
             .child(div().flex_1());
         if is_pdf {
             let source = source.clone();
-            titlebar = titlebar.child(button("export-reading-pdf", "导出").on_click(
-                cx.listener(move |app, _, window, cx| app.export_pdf(source.clone(), window, cx)),
-            ));
+            titlebar = titlebar.child(
+                button("export-reading-pdf", crate::i18n::workspace::EXPORT_BTN.get()).on_click(
+                    cx.listener(move |app, _, window, cx| app.export_pdf(source.clone(), window, cx)),
+                ),
+            );
         }
         titlebar = titlebar.child(
             crate::ui::control(
@@ -3753,9 +3801,9 @@ impl Workspace {
         let retry_id = id.to_owned();
         if self.ask(
             Dialog::RemoveProject,
-            "从工作台移除项目？".into(),
-            "文件夹和文件保留在磁盘上。".into(),
-            DialogButtons::Confirm("移除项目".into()),
+            crate::i18n::workspace::DIALOG_REMOVE_PROJECT_TITLE.get().into(),
+            crate::i18n::workspace::DIALOG_REMOVE_PROJECT_BODY.get().into(),
+            DialogButtons::Confirm(crate::i18n::workspace::DIALOG_REMOVE_PROJECT_CONFIRM.get().into()),
             window,
             cx,
             move |app, window, cx| app.remove_project(&retry_id, window, cx),
@@ -3799,22 +3847,22 @@ impl Workspace {
                 .child(div().flex_1().min_w_0().flex().flex_col().gap_1()
                     .child(div().text_ellipsis().child(Path::new(&entry.relative).file_name().expect("file name").to_string_lossy().into_owned()))
                     .child(div().text_xs().text_color(rgb(MUTED)).text_ellipsis().child(entry.project_root.join(&entry.relative).display().to_string()))
-                    .child(div().text_xs().text_color(rgb(MUTED)).child(format!("删除：{}  ·  清理：{}", date(entry.deleted_at), date(entry.deleted_at + 7 * 24 * 3600)))))
-                .child(crate::ui::button_secondary(SharedString::from(format!("trash-restore-{}", entry.id)), "恢复")
+                    .child(div().text_xs().text_color(rgb(MUTED)).child(crate::i18n::workspace::trash_dates(&date(entry.deleted_at), &date(entry.deleted_at + 7 * 24 * 3600)))))
+                .child(crate::ui::button_secondary(SharedString::from(format!("trash-restore-{}", entry.id)), crate::i18n::workspace::TRASH_RESTORE.get())
                     .on_click(cx.listener(move |app, _, window, cx| app.restore_trash(vec![restore.clone()], window, cx))))
-                .child(crate::ui::button_danger_soft(SharedString::from(format!("trash-purge-{}", entry.id)), "彻底删除")
+                .child(crate::ui::button_danger_soft(SharedString::from(format!("trash-purge-{}", entry.id)), crate::i18n::workspace::TRASH_PURGE.get())
                     .on_click(cx.listener(move |app, _, window, cx| app.purge_trash(vec![purge.clone()], window, cx))))
         });
         div().size_full().flex().flex_col().bg(rgb(0xffffff))
             .child(div().flex().items_center().justify_between().px_5().py_4().border_b_1().border_color(rgb(BORDER))
-                .child(div().font_semibold().child(format!("废纸篓 · {} 项", self.trash_entries.len())))
-                .child(crate::ui::button_danger_soft("trash-clear", "清空废纸篓")
+                .child(div().font_semibold().child(crate::i18n::workspace::trash_title(self.trash_entries.len())))
+                .child(crate::ui::button_danger_soft("trash-clear", crate::i18n::workspace::TRASH_CLEAR.get())
                     .on_click(cx.listener(|app, _, window, cx| {
                         let ids = app.trash_entries.iter().map(|entry| entry.id.clone()).collect();
                         app.purge_trash(ids, window, cx);
                     }))))
             .child(div().id("trash-list").flex_1().min_h_0().overflow_y_scroll()
-                .when(self.trash_entries.is_empty(), |area| area.p_5().text_color(rgb(MUTED)).child("废纸篓为空"))
+                .when(self.trash_entries.is_empty(), |area| area.p_5().text_color(rgb(MUTED)).child(crate::i18n::workspace::TRASH_EMPTY.get()))
                 .children(entries))
             .into_any_element()
     }
@@ -3865,11 +3913,11 @@ impl Workspace {
                     let remove_id = id.clone();
                     menu.min_w(px(90.))
                         .item(
-                            compact_menu_item("在资源管理器中显示")
+                            compact_menu_item(crate::i18n::workspace::MENU_REVEAL_IN_EXPLORER.get())
                                 .on_click(move |_, _, cx| reveal_path(&root, cx)),
                         )
                         .item(
-                            compact_menu_item("重命名项目…").on_click(move |_, window, cx| {
+                            compact_menu_item(crate::i18n::workspace::MENU_RENAME_PROJECT.get()).on_click(move |_, window, cx| {
                                 app.update(cx, |app, cx| {
                                     app.start_name(
                                         NameAction::RenameProject(id.clone()),
@@ -3882,7 +3930,7 @@ impl Workspace {
                         )
                         .separator()
                         .item(
-                            compact_menu_item("移除项目…").on_click(move |_, window, cx| {
+                            compact_menu_item(crate::i18n::workspace::MENU_REMOVE_PROJECT.get()).on_click(move |_, window, cx| {
                                 remove_app
                                     .update(cx, |app, cx| app.remove_project(&remove_id, window, cx))
                             }),
@@ -4067,15 +4115,15 @@ impl Workspace {
                             let tags_app = tags_app.clone();
                             let tag_path = tag_path.clone();
                             menu.min_w(px(90.))
-                                .item(compact_menu_item("在资源管理器中显示").on_click(move |_, _, cx| reveal_path(&reveal, cx)))
-                                .item(compact_menu_item("复制完整路径").on_click(move |_, _, cx| {
+                                .item(compact_menu_item(crate::i18n::workspace::MENU_REVEAL_IN_EXPLORER.get()).on_click(move |_, _, cx| reveal_path(&reveal, cx)))
+                                .item(compact_menu_item(crate::i18n::workspace::MENU_COPY_FULL_PATH.get()).on_click(move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(copy.to_string_lossy().into_owned()));
                                 }))
-                                .item(compact_menu_item("编辑标签…").on_click(move |_, window, cx| {
+                                .item(compact_menu_item(crate::i18n::workspace::MENU_EDIT_TAGS.get()).on_click(move |_, window, cx| {
                                     tags_app.update(cx, |app, cx| app.edit_file_tags(vec![tag_path.clone()], window, cx));
                                 }))
                                 .when(path.to_lowercase().ends_with(".md"), |menu| {
-                                    menu.item(compact_menu_item("重命名…").on_click(move |_, window, cx| {
+                                    menu.item(compact_menu_item(crate::i18n::workspace::MENU_RENAME.get()).on_click(move |_, window, cx| {
                                         app.update(cx, |app, cx| app.start_name(NameAction::RenameFile(path.clone()), &name, window, cx));
                                     }))
                                 })
@@ -4187,7 +4235,7 @@ impl Workspace {
                             let tag_folder = deleted.clone();
                             let tags_app = app.clone();
                             menu.min_w(px(90.))
-                                .item(compact_menu_item("新建 Markdown").on_click(
+                                .item(compact_menu_item(crate::i18n::workspace::MENU_NEW_MARKDOWN.get()).on_click(
                                     move |_, window, cx| {
                                         new_md_app.update(cx, |app, cx| {
                                             app.focused_folder = Some(new_md_folder.clone());
@@ -4201,7 +4249,7 @@ impl Workspace {
                                         })
                                     },
                                 ))
-                                .item(compact_menu_item("新建文件…").on_click(
+                                .item(compact_menu_item(crate::i18n::workspace::MENU_NEW_FILE.get()).on_click(
                                     move |_, window, cx| {
                                         create_file_app.update(cx, |app, cx| {
                                             app.start_name(
@@ -4213,7 +4261,7 @@ impl Workspace {
                                         })
                                     },
                                 ))
-                                .item(compact_menu_item("新建文件夹…").on_click(
+                                .item(compact_menu_item(crate::i18n::workspace::MENU_NEW_FOLDER.get()).on_click(
                                     move |_, window, cx| {
                                         create_folder_app.update(cx, |app, cx| {
                                             app.start_name(
@@ -4227,16 +4275,16 @@ impl Workspace {
                                 ))
                                 .separator()
                                 .item(
-                                    compact_menu_item("在资源管理器中显示")
+                                    compact_menu_item(crate::i18n::workspace::MENU_REVEAL_IN_EXPLORER.get())
                                         .on_click(move |_, _, cx| reveal_path(&full, cx)),
                                 )
-                                .item(compact_menu_icon_item(IconName::Tag, "批量编辑文件夹标签…")
+                                .item(compact_menu_icon_item(IconName::Tag, crate::i18n::workspace::MENU_BATCH_FOLDER_TAGS.get())
                                     .on_click(move |_, window, cx| {
                                         tags_app.update(cx, |app, cx| app.edit_folder_tags(&tag_folder, window, cx));
                                     }))
                                 .separator()
                                 .item(
-                                    compact_menu_item("重命名…").on_click(move |_, window, cx| {
+                                    compact_menu_item(crate::i18n::workspace::MENU_RENAME.get()).on_click(move |_, window, cx| {
                                         rename_app.update(cx, |app, cx| {
                                             app.start_name(
                                                 NameAction::RenameFolder(renamed_path.clone()),
@@ -4248,7 +4296,7 @@ impl Workspace {
                                     }),
                                 )
                                 .item(
-                                    compact_menu_item("删除文件夹…").on_click(move |_, window, cx| {
+                                    compact_menu_item(crate::i18n::workspace::MENU_DELETE_FOLDER.get()).on_click(move |_, window, cx| {
                                         app.update(cx, |app, cx| {
                                             app.delete_folder(&deleted, window, cx)
                                         })
@@ -4421,16 +4469,16 @@ impl Workspace {
                         let tag_path = rename.clone();
                         menu.min_w(px(90.))
                             .item(
-                                compact_menu_item("在资源管理器中显示")
+                                compact_menu_item(crate::i18n::workspace::MENU_REVEAL_IN_EXPLORER.get())
                                     .on_click(move |_, _, cx| reveal_path(&reveal, cx)),
                             )
                             .item(
-                                compact_menu_item("复制完整路径").on_click(move |_, _, cx| {
+                                compact_menu_item(crate::i18n::workspace::MENU_COPY_FULL_PATH.get()).on_click(move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))
                                 }),
                             )
                             .when(batch_tags, |menu| {
-                                menu.item(compact_menu_icon_item(IconName::Tag, "批量编辑标签…")
+                                menu.item(compact_menu_icon_item(IconName::Tag, crate::i18n::workspace::MENU_BATCH_TAGS.get())
                                     .on_click(move |_, window, cx| {
                                         batch_tags_app.update(cx, |app, cx| {
                                             let paths = app.selected_files.iter().cloned().collect();
@@ -4438,7 +4486,7 @@ impl Workspace {
                                         });
                                     }))
                             })
-                            .item(compact_menu_item("编辑此文件的标签…").on_click(move |_, window, cx| {
+                            .item(compact_menu_item(crate::i18n::workspace::MENU_EDIT_FILE_TAGS.get()).on_click(move |_, window, cx| {
                                 tags_app.update(cx, |app, cx| app.edit_file_tags(vec![tag_path.clone()], window, cx));
                             }))
                             .when(
@@ -4446,7 +4494,7 @@ impl Workspace {
                                     || Self::is_html_path(&split.path)
                                     || split.path.to_lowercase().ends_with(".md"),
                                 |menu| {
-                                    menu.item(compact_menu_item("在分屏中打开").on_click(
+                                    menu.item(compact_menu_item(crate::i18n::workspace::MENU_OPEN_IN_SPLIT.get()).on_click(
                                         move |_, window, cx| {
                                             split_app.update(cx, |app, cx| {
                                                 app.open_reading_pane(&split, window, cx)
@@ -4456,7 +4504,7 @@ impl Workspace {
                                 },
                             )
                             .when(user_project && main.to_lowercase().ends_with(".tex"), |menu| {
-                                menu.item(compact_menu_item("设为编译主文件").on_click(
+                                menu.item(compact_menu_item(crate::i18n::workspace::MENU_SET_MAIN_FILE.get()).on_click(
                                     move |_, _, cx| {
                                         main_app.update(cx, |app, cx| {
                                             if app.cancellation.is_some() {
@@ -4480,7 +4528,7 @@ impl Workspace {
                             })
                             .separator()
                             .item(
-                                compact_menu_item("重命名…").on_click(move |_, window, cx| {
+                                compact_menu_item(crate::i18n::workspace::MENU_RENAME.get()).on_click(move |_, window, cx| {
                                     rename_app.update(cx, |app, cx| {
                                         app.start_name(
                                             NameAction::RenameFile(rename.clone()),
@@ -4491,7 +4539,7 @@ impl Workspace {
                                     })
                                 }),
                             )
-                            .item(compact_menu_item("删除…").on_click(move |_, window, cx| {
+                            .item(compact_menu_item(crate::i18n::workspace::MENU_DELETE.get()).on_click(move |_, window, cx| {
                                 delete_app.update(cx, |app, cx| app.delete_file(&delete, window, cx))
                             }))
                     })
@@ -4520,9 +4568,9 @@ impl Workspace {
             .when(!self.show_trash && self.config.active_workspace == Some(WorkspaceLocation::Default), |row| row.bg(rgb(0xe8e7e4)))
             .hover(|style| style.bg(rgb(0xefefed)))
             .child(crate::ui::icon(IconName::NotebookPen))
-            .child(div().flex_1().child("默认空间"))
+            .child(div().flex_1().child(crate::i18n::workspace::DEFAULT_SPACE.get()))
             .child(crate::ui::control("default-new-markdown", IconName::Plus)
-                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("在默认空间新建 Markdown").build(window, cx))
+                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(crate::i18n::workspace::TOOLTIP_NEW_MD_DEFAULT.get()).build(window, cx))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|app, _, window, cx| {
                     cx.stop_propagation();
@@ -4550,7 +4598,7 @@ impl Workspace {
                 .when(!self.show_trash && self.directory_workspace().is_none(), |row| row.bg(rgb(0xe8e7e4)))
                 .hover(|style| style.bg(rgb(0xefefed)))
                 .child(crate::ui::icon(IconName::Files))
-                .child(div().flex_1().child("独立文件"))
+                .child(div().flex_1().child(crate::i18n::workspace::LOOSE_FILES.get()))
                 .when(loose_count > 0, |row| row.pr_1().child(div().text_xs().text_color(rgb(MUTED)).child(loose_count.to_string())))
                 .on_click(cx.listener(|app, _, window, cx| {
                 app.show_trash = false;
@@ -4563,12 +4611,12 @@ impl Workspace {
             .child(div().relative().flex_1().min_h_0().overflow_hidden().child(
                 div().id("sidebar-content-scroll").flex().flex_col().size_full().overflow_y_scroll()
                 .track_scroll(&self.sidebar_scroll)
-                .child(div().pt_5().pb_2().px_4().flex_shrink_0().text_xs().text_color(rgb(MUTED)).child("项目"))
+                .child(div().pt_5().pb_2().px_4().flex_shrink_0().text_xs().text_color(rgb(MUTED)).child(crate::i18n::workspace::PROJECTS_HEADER.get()))
                 .children(projects)
                 .child(div().id("add-project").flex().flex_shrink_0().items_center().gap_2().mx_2().px_2().h(px(32.))
                     .rounded(px(4.)).cursor_pointer().text_color(rgb(MUTED))
                     .hover(|style| style.bg(rgb(0xefefed)))
-                    .child(crate::ui::icon(IconName::Plus)).child("添加本地项目")
+                    .child(crate::ui::icon(IconName::Plus)).child(crate::i18n::workspace::ADD_LOCAL_PROJECT.get())
                     .on_click(cx.listener(|app, _, window, cx| app.add_project(&OpenProject, window, cx))))
             .child(
                 div()
@@ -4581,12 +4629,12 @@ impl Workspace {
                     .pb_2()
                     .text_xs()
                     .text_color(rgb(MUTED))
-                    .child("文件")
+                    .child(crate::i18n::workspace::FILES_HEADER.get())
                     .child(self.render_tag_toggle(cx))
                     .child(button("new-markdown", "+ Markdown").on_click(cx.listener(|app, _, window, cx| {
                         if let Err(error) = app.new_markdown(window, cx) { app.report(error, cx); }
                     })))
-                    .when(self.directory_workspace().is_none(), |header| header.child(button("open-file", "打开文件").on_click(
+                    .when(self.directory_workspace().is_none(), |header| header.child(button("open-file", crate::i18n::workspace::OPEN_FILE.get()).on_click(
                         cx.listener(|app, _, window, cx| app.open_file_dialog(window, cx)),
                     )))
                     .when(self.directory_workspace().is_some(), |header| {
@@ -4596,7 +4644,7 @@ impl Workspace {
                                 .gap_1()
                                 .child(crate::ui::control("refresh-files", IconName::RotateCcw)
                                     .tooltip(|window, cx| {
-                                        gpui_kit::component::tooltip::Tooltip::new("刷新文件列表")
+                                        gpui_kit::component::tooltip::Tooltip::new(crate::i18n::workspace::REFRESH_FILES_TOOLTIP.get())
                                             .build(window, cx)
                                     })
                                     .on_click(cx.listener(|app, _, window, cx| {
@@ -4610,7 +4658,7 @@ impl Workspace {
                                                 app.selected_files.retain(|path| {
                                                     app.files.iter().any(|file| &file.path == path)
                                                 });
-                                                app.report("已刷新文件列表。", cx);
+                                                app.report(crate::i18n::workspace::FILES_REFRESHED.get(), cx);
                                             }
                                             Err(error) => app.report(error, cx),
                                         }
@@ -4682,7 +4730,7 @@ impl Workspace {
                                 div()
                                     .text_xs()
                                     .text_color(rgb(0x787774))
-                                    .child(format!("已选 {sel_count} 项")),
+                                    .child(crate::i18n::workspace::selected_count(sel_count)),
                             ),
                         )
                         .child(
@@ -4691,12 +4739,12 @@ impl Workspace {
                                 .items_center()
                                 .gap_1()
                                 .child(crate::ui::control("batch-tags", IconName::Tag)
-                                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("批量编辑标签（Alt+T）").build(window, cx))
+                                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(crate::i18n::workspace::BATCH_EDIT_TAGS_TOOLTIP.get()).build(window, cx))
                                     .on_click(cx.listener(|app, _, window, cx| {
                                         app.edit_file_tags(app.selected_files.iter().cloned().collect(), window, cx);
                                     })))
                                 .child(
-                                    crate::ui::button_secondary("batch-compile", "编译")
+                                    crate::ui::button_secondary("batch-compile", crate::i18n::workspace::COMPILE_BTN.get())
                                         .min_h(px(22.))
                                         .py_0p5()
                                         .text_xs()
@@ -4713,7 +4761,7 @@ impl Workspace {
                                         .child(
                                             crate::ui::icon(IconName::Trash).w(px(11.)).h(px(11.)),
                                         )
-                                        .child("删除")
+                                        .child(crate::i18n::common::DELETE.get())
                                         .on_click(cx.listener(|app, _, window, cx| {
                                             app.delete_selected(window, cx)
                                         })),
@@ -4786,7 +4834,7 @@ impl Workspace {
                         }
                         app.file_tree_focus.focus(window, cx);
                     }))
-                    .when(no_tag_results, |tree| tree.child(div().px_3().py_2().text_xs().text_color(rgb(MUTED)).child("没有匹配的文件")))
+                    .when(no_tag_results, |tree| tree.child(div().px_3().py_2().text_xs().text_color(rgb(MUTED)).child(crate::i18n::workspace::NO_MATCHING_FILES.get())))
                     .children(rows)
                     .when_some(self.directory_workspace(), |tree, project| {
                         let project_id = project.id.clone();
@@ -4844,20 +4892,20 @@ impl Workspace {
                     .drag_over::<crate::terminal::DraggedPaths>(|style, _, _, _| style.bg(rgb(0xdde9f6)))
                     .drag_over::<crate::terminal::DraggedFolder>(|style, _, _, _| style.bg(rgb(0xdde9f6)))
                     .child(crate::ui::icon(IconName::Trash))
-                    .child("废纸篓")
+                    .child(crate::i18n::workspace::TRASH_LABEL.get())
                     .child(canvas(move |area, _, _| { *bounds.lock().expect("trash bounds") = Some(area); }, |_, _, _, _| {}).absolute().size_full())
                     .on_click(cx.listener(|app, _, _, cx| { app.show_trash = true; cx.notify(); }))
                     .on_drop(cx.listener(|app, dragged: &crate::terminal::DraggedPaths, window, cx| {
-                        if dragged.1.is_none() { app.report("独立文件不支持删除。", cx); return; }
+                        if dragged.1.is_none() { app.report(crate::i18n::workspace::ERR_LOOSE_FILE_NO_DELETE.get(), cx); return; }
                         let Some(project) = app.directory_workspace() else { return; };
-                        if Some(project.id.as_str()) != dragged.1.as_deref() { app.report("来源项目已切换，请重新拖动。", cx); return; }
+                        if Some(project.id.as_str()) != dragged.1.as_deref() { app.report(crate::i18n::workspace::ERR_SOURCE_PROJECT_CHANGED.get(), cx); return; }
                         let root = PathBuf::from(&project.folder);
                         let paths: Vec<String> = dragged.0.iter().filter_map(|path| path.strip_prefix(&root).ok().map(|path| path.to_string_lossy().replace('\\', "/"))).collect();
                         if paths.len() == dragged.0.len() { app.confirm_trash(paths, window, cx); }
                     }))
                     .on_drop(cx.listener(|app, dragged: &crate::terminal::DraggedFolder, window, cx| {
                         if app.directory_workspace().is_none_or(|project| project.id != dragged.1) {
-                            app.report("来源项目已切换，请重新拖动。", cx);
+                            app.report(crate::i18n::workspace::ERR_SOURCE_PROJECT_CHANGED.get(), cx);
                             return;
                         }
                         // A folder is a projection of supported files; its other contents remain in place.
@@ -4867,7 +4915,7 @@ impl Workspace {
             .child(div().id("preferences").flex().flex_shrink_0().items_center().gap_2()
                 .mx_2().mb_2().px_2().h(px(32.)).rounded(px(4.)).cursor_pointer()
                 .text_color(rgb(MUTED)).hover(|style| style.bg(rgb(0xefefed)))
-                .child(crate::ui::icon(IconName::Settings)).child("设置")
+                .child(crate::ui::icon(IconName::Settings)).child(crate::i18n::workspace::SETTINGS_LABEL.get())
                 .on_click(cx.listener(|app, _, window, cx| {
                     app.preferences.update(cx, |panel, cx| panel.sync(&app.settings, window, cx));
                     app.show_preferences = true;
@@ -4913,9 +4961,9 @@ impl Workspace {
                     .when(outline_open, |b| b.bg(fg_alpha(palette.text, 0.08)))
                     .icon(crate::ui::icon(IconName::ListTree))
                     .tooltip(if outline_open {
-                        "收起文档大纲"
+                        crate::i18n::workspace::TOOLTIP_COLLAPSE_OUTLINE.get()
                     } else {
-                        "展开文档大纲"
+                        crate::i18n::workspace::TOOLTIP_EXPAND_OUTLINE.get()
                     })
                     .on_click(move |_, window, cx| {
                         outline_pane.update(cx, |pane, cx| {
@@ -5001,7 +5049,7 @@ impl Workspace {
                                 .h(px(18.))
                                 .flex_shrink_0()
                                 .icon(crate::ui::icon(IconName::Close))
-                                .tooltip("关闭标签")
+                                .tooltip(crate::i18n::workspace::TOOLTIP_CLOSE_TAB.get())
                                 .on_click(cx.listener(move |app, _, window, cx| {
                                     cx.stop_propagation();
                                     app.close_tab(&close_path, window, cx);
@@ -5057,9 +5105,9 @@ impl Workspace {
                         .when(is_source, |b| b.bg(fg_alpha(palette.text, 0.08)))
                         .icon(crate::ui::icon(IconName::CodeXml))
                         .tooltip(if is_source {
-                            "切换到可视化视图"
+                            crate::i18n::workspace::TOOLTIP_SWITCH_WYSIWYG.get()
                         } else {
-                            "切换到源码视图"
+                            crate::i18n::workspace::TOOLTIP_SWITCH_SOURCE.get()
                         })
                         .on_click(move |_, window, cx| {
                             source_pane.update(cx, |pane, cx| pane.toggle_source(window, cx));
@@ -5073,7 +5121,7 @@ impl Workspace {
                 .path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "源码".to_owned());
+                .unwrap_or_else(|| crate::i18n::workspace::SOURCE_LABEL.get().to_owned());
             bar = bar
                 .child(
                     Button::new("ask-ai-source")
@@ -5083,7 +5131,7 @@ impl Workspace {
                         .w(px(22.))
                         .h(px(22.))
                         .icon(crate::ui::icon(IconName::Sparkles))
-                        .tooltip("将当前选中内容（或当前文件）发送到 AI 助手")
+                        .tooltip(crate::i18n::workspace::TOOLTIP_SEND_TO_AI.get())
                         .on_click(cx.listener(move |app, _, window, cx| {
                             let selected = ask_editor.read(cx).selected_text().to_string();
                             app.open_ai_with_selection(
@@ -5127,7 +5175,7 @@ impl Workspace {
                         .px_4()
                         .py_2()
                         .bg(rgb(0xfff4e5))
-                        .child("文件已从磁盘删除，草稿已保留。"),
+                        .child(crate::i18n::workspace::BANNER_FILE_DELETED.get()),
                 );
             } else if document.buffer.conflict.is_some() {
                 let reload = self.active.clone();
@@ -5141,11 +5189,11 @@ impl Workspace {
                             .px_4()
                             .py_2()
                             .bg(rgb(0xfff4e5))
-                            .child("磁盘文件已被外部修改。")
-                            .child(button("load-disk", "使用磁盘版本").on_click(cx.listener(
+                            .child(crate::i18n::workspace::BANNER_DISK_MODIFIED.get())
+                            .child(button("load-disk", crate::i18n::workspace::BTN_LOAD_DISK.get()).on_click(cx.listener(
                                 move |app, _, window, cx| app.reload_disk(&reload, window, cx),
                             )))
-                            .child(button("overwrite-disk", "保留草稿并覆盖").on_click(
+                            .child(button("overwrite-disk", crate::i18n::workspace::BTN_OVERWRITE_DISK.get()).on_click(
                                 cx.listener(move |app, _, _, cx| {
                                     if let Err(error) = app.save_file(&overwrite, true, cx) {
                                         app.report(error, cx);
@@ -5240,17 +5288,17 @@ impl Workspace {
                     .text_color(rgb(MUTED))
                     .child(div().text_xl().child("Folio"))
                     .child(if self.directory_workspace().is_none() {
-                        "打开文件，或点击 + Markdown 开始写作"
+                        crate::i18n::workspace::EMPTY_LOOSE_HINT.get()
                     } else {
-                        "选择文件，或点击 + Markdown 开始写作"
+                        crate::i18n::workspace::EMPTY_PROJECT_HINT.get()
                     })
-                    .when(self.directory_workspace().is_none(), |area| area.child(button("welcome-open-file", "打开文件").on_click(
+                    .when(self.directory_workspace().is_none(), |area| area.child(button("welcome-open-file", crate::i18n::workspace::OPEN_FILE.get()).on_click(
                         cx.listener(|app, _, window, cx| app.open_file_dialog(window, cx)),
                     )))
                     .child(if self.directory_workspace().is_none() {
-                        "Ctrl+Shift+O 打开文件  ·  Ctrl+O 打开项目  ·  Ctrl+S 保存"
+                        crate::i18n::workspace::SHORTCUTS_BAR_LOOSE.get()
                     } else {
-                        "Ctrl+O 打开项目  ·  Ctrl+S 保存"
+                        crate::i18n::workspace::SHORTCUTS_BAR_PROJECT.get()
                     }),
             );
         }
@@ -5275,10 +5323,10 @@ impl Workspace {
                         .border_b_1()
                         .border_color(rgb(BORDER))
                         .child(crate::ui::icon(IconName::FileText))
-                        .child("编译预览")
+                        .child(crate::i18n::workspace::COMPILE_PREVIEW_TITLE.get())
                         .child(div().flex_1())
                         .when_some(self.preview.clone(), |bar, path| {
-                            bar.child(button("export-build-pdf", "导出").on_click(cx.listener(
+                            bar.child(button("export-build-pdf", crate::i18n::workspace::EXPORT_BTN.get()).on_click(cx.listener(
                                 move |app, _, window, cx| app.export_pdf(path.clone(), window, cx),
                             )))
                         })
@@ -5316,11 +5364,11 @@ impl Workspace {
                             .items_center()
                             .gap_2()
                             .child(crate::ui::icon(IconName::FileText))
-                            .child("预览"),
+                            .child(crate::i18n::workspace::PREVIEW_TITLE.get()),
                     )
                     .when_some(self.preview.clone(), |toolbar, path| {
                         toolbar.child(
-                            button("reveal-output", "在资源管理器中显示")
+                            button("reveal-output", crate::i18n::workspace::MENU_REVEAL_IN_EXPLORER.get())
                                 .on_click(move |_, _, cx| reveal_path(&path, cx)),
                         )
                     })
@@ -5343,15 +5391,15 @@ impl Workspace {
                     .gap_4()
                     .text_color(rgb(MUTED))
                     .child(if self.cancellation.is_some() {
-                        "正在编译…"
+                        crate::i18n::workspace::STATUS_COMPILING.get()
                     } else if self.preview.is_some() {
-                        "编译成功，PDF 已生成"
+                        crate::i18n::workspace::STATUS_COMPILE_OK.get()
                     } else {
-                        "编译后在此查看文档"
+                        crate::i18n::workspace::STATUS_COMPILE_IDLE.get()
                     })
                     .when_some(self.preview.clone(), |area, path| {
                         area.child(
-                            crate::ui::button_secondary("open-output", "打开生成的 PDF").on_click(
+                            crate::ui::button_secondary("open-output", crate::i18n::workspace::BTN_OPEN_OUTPUT_PDF.get()).on_click(
                                 move |_, _, cx| {
                                     cx.open_url(&format!(
                                         "file:///{}",
@@ -5412,7 +5460,7 @@ impl Render for Workspace {
             .directory_workspace()
             .map(|project| project.main_file.clone())
             .filter(|path| !path.is_empty())
-            .unwrap_or_else(|| "选择主文件".into());
+            .unwrap_or_else(|| crate::i18n::workspace::SELECT_MAIN_FILE.get().into());
         let main_files: Vec<_> = self
             .files
             .iter()
@@ -5499,9 +5547,9 @@ impl Render for Workspace {
                 work_area.child(resizable_panel().child(self.render_reading_pane(path, cx)));
         }
         let label = if self.cancellation.is_some() {
-            "■  停止"
+            crate::i18n::workspace::BTN_STOP_BUILD.get()
         } else {
-            "▶  编译"
+            crate::i18n::workspace::BTN_COMPILE_BUILD.get()
         };
         let status = if self.build_started.is_some() {
             format!(
@@ -5512,9 +5560,9 @@ impl Render for Workspace {
                     .expect("running build owns cancellation")
                     .load(Ordering::Relaxed)
                 {
-                    "正在停止"
+                    crate::i18n::workspace::STATUS_STOPPING.get()
                 } else {
-                    "正在编译"
+                    crate::i18n::workspace::STATUS_BUILDING.get()
                 },
                 self.build_duration.as_secs_f32()
             )
@@ -5525,14 +5573,16 @@ impl Render for Workspace {
                     "✓ {:.1}s{}",
                     self.build_duration.as_secs_f32(),
                     if self.source_version != self.build_version {
-                        " · 需重新编译"
+                        crate::i18n::workspace::STATUS_NEEDS_REBUILD.get()
                     } else {
                         ""
                     }
                 ),
-                BuildStatus::Failed => format!("失败 · {:.1}s", self.build_duration.as_secs_f32()),
+                BuildStatus::Failed => {
+                    crate::i18n::workspace::status_failed_secs(self.build_duration.as_secs_f32())
+                }
                 BuildStatus::Cancelled => {
-                    format!("已取消 · {:.1}s", self.build_duration.as_secs_f32())
+                    crate::i18n::workspace::status_cancelled_secs(self.build_duration.as_secs_f32())
                 }
             }
         };
@@ -5625,9 +5675,11 @@ impl Render for Workspace {
                 .min_h_0()
                 .on_drag_move(cx.listener(
                     |app, event: &DragMoveEvent<RightPanelResizeDrag>, _, cx| {
-                        let drag = event.drag(cx);
-                        let delta = f32::from(event.event.position.x) - drag.start_x;
-                        let next_w = (drag.start_w - delta).clamp(280., 1600.);
+                        let Some((start_x, start_w)) = app.right_panel_drag else {
+                            return;
+                        };
+                        let delta = f32::from(event.event.position.x) - start_x;
+                        let next_w = (start_w - delta).clamp(280., 1600.);
                         if (app.settings.terminal.panel_width - next_w).abs() > 0.5 {
                             app.settings.terminal.panel_width = next_w;
                             if let Err(error) = storage::save_settings(&app.settings) {
@@ -5663,23 +5715,23 @@ impl Render for Workspace {
                                     .children(right_panel_content),
                             )
                             .when(right_panel_visible && right_progress >= 0.999, |panel| {
+                                let drag_app = cx.entity();
                                 panel.child(
                                     resize_handle("right-panel-resize", Axis::Horizontal)
                                         .inside(HandleEdge::Leading)
-                                        .on_drag(
-                                            RightPanelResizeDrag {
-                                                start_x: 0.0,
-                                                start_w: right_target_w,
-                                            },
-                                            |drag, pos, _, cx| {
-                                                let start_x = f32::from(pos.x);
-                                                let start_w = drag.start_w;
-                                                cx.new(move |_| RightPanelResizeDrag {
+                                        .on_drag(RightPanelResizeDrag, move |_, _, window, cx| {
+                                            let start_x = f32::from(window.mouse_position().x);
+                                            drag_app.update(cx, |app, _| {
+                                                app.right_panel_drag = Some((
                                                     start_x,
-                                                    start_w,
-                                                })
-                                            },
-                                        ),
+                                                    app.settings
+                                                        .terminal
+                                                        .panel_width
+                                                        .clamp(280., 1600.),
+                                                ));
+                                            });
+                                            cx.new(|_| RightPanelResizeDrag)
+                                        }),
                                 )
                             }),
                     )
@@ -5811,12 +5863,14 @@ impl Render for Workspace {
                             button("compile", label)
                                 .text_color(rgb(0x4b7b59))
                                 .tooltip({
-                                    let target =
-                                        self.compile_target().unwrap_or("主文件").to_owned();
+                                    let target = self
+                                        .compile_target()
+                                        .unwrap_or_else(|| crate::i18n::workspace::MAIN_FILE_FALLBACK.get())
+                                        .to_owned();
                                     move |window, cx| {
-                                        gpui_kit::component::tooltip::Tooltip::new(format!(
-                                            "编译 {target} · Ctrl+Enter"
-                                        ))
+                                        gpui_kit::component::tooltip::Tooltip::new(
+                                            crate::i18n::workspace::tooltip_compile_target(&target),
+                                        )
                                         .build(window, cx)
                                     }
                                 })
@@ -5829,13 +5883,15 @@ impl Render for Workspace {
                         header.child(
                             Button::new("compile-settings")
                                 .icon(crate::ui::icon(IconName::SlidersHorizontal))
-                                .tooltip("编译设置")
+                                .tooltip(crate::i18n::workspace::TOOLTIP_BUILD_SETTINGS.get())
                                 .dropdown_menu(move |menu, _, _| {
                                     let menu =
                                         [Engine::Xelatex, Engine::Pdflatex, Engine::Lualatex]
                                             .into_iter()
                                             .fold(
-                                                menu.item(PopupMenuItem::label("编译引擎")),
+                                                menu.item(PopupMenuItem::label(
+                                                    crate::i18n::workspace::LABEL_COMPILE_ENGINE.get(),
+                                                )),
                                                 |menu, choice| {
                                                     let app = engine_app.clone();
                                                     menu.item(
@@ -5850,7 +5906,9 @@ impl Render for Workspace {
                                                 },
                                             );
                                     main_files.iter().fold(
-                                        menu.separator().item(PopupMenuItem::label("编译主文件")),
+                                        menu.separator().item(PopupMenuItem::label(
+                                            crate::i18n::workspace::LABEL_MAIN_FILE.get(),
+                                        )),
                                         |menu, file| {
                                             let app = main_app.clone();
                                             let file = file.clone();
@@ -5909,7 +5967,9 @@ impl Render for Workspace {
                                 status.child(
                                     Progress::new("build-progress")
                                         .loading(true)
-                                        .accessibility_label("正在编译")
+                                        .accessibility_label(
+                                            crate::i18n::workspace::STATUS_BUILDING.get(),
+                                        )
                                         .color(rgb(crate::ui::MAIN_TEX_COLOR))
                                         .h(px(3.)),
                                 )
@@ -5928,9 +5988,9 @@ impl Render for Workspace {
                             })
                             .tooltip(move |window, cx| {
                                 gpui_kit::component::tooltip::Tooltip::new(if right_panel_visible {
-                                    "收起右侧功能栏"
+                                    crate::i18n::workspace::TOOLTIP_COLLAPSE_RIGHT_HUB.get()
                                 } else {
-                                    "展开右侧功能栏"
+                                    crate::i18n::workspace::TOOLTIP_EXPAND_RIGHT_HUB.get()
                                 })
                                 .build(window, cx)
                             })
@@ -5989,9 +6049,11 @@ impl Render for Workspace {
                         .min_h_0()
                         .on_drag_move(cx.listener(
                             |app, event: &DragMoveEvent<SidebarResizeDrag>, _, cx| {
-                                let drag = event.drag(cx);
-                                let delta = f32::from(event.event.position.x) - drag.start_x;
-                                let next_w = (drag.start_w + delta).clamp(170., 520.);
+                                let Some((start_x, start_w)) = app.sidebar_drag else {
+                                    return;
+                                };
+                                let delta = f32::from(event.event.position.x) - start_x;
+                                let next_w = (start_w + delta).clamp(170., 520.);
                                 if (app.settings.sidebar_width - next_w).abs() > 0.5 {
                                     app.settings.sidebar_width = next_w;
                                     if let Err(error) = storage::save_settings(&app.settings) {
@@ -6020,21 +6082,25 @@ impl Render for Workspace {
                                     .when(
                                         sidebar_visible && sidebar_progress >= 0.999,
                                         |panel| {
+                                            let drag_app = cx.entity();
                                             panel.child(
                                                 resize_handle("sidebar-resize", Axis::Horizontal)
                                                     .inside(HandleEdge::Trailing)
                                                     .on_drag(
-                                                        SidebarResizeDrag {
-                                                            start_x: 0.0,
-                                                            start_w: sidebar_target_w,
-                                                        },
-                                                        |drag, pos, _, cx| {
-                                                            let start_x = f32::from(pos.x);
-                                                            let start_w = drag.start_w;
-                                                            cx.new(move |_| SidebarResizeDrag {
-                                                                start_x,
-                                                                start_w,
-                                                            })
+                                                        SidebarResizeDrag,
+                                                        move |_, _, window, cx| {
+                                                            let start_x = f32::from(
+                                                                window.mouse_position().x,
+                                                            );
+                                                            drag_app.update(cx, |app, _| {
+                                                                app.sidebar_drag = Some((
+                                                                    start_x,
+                                                                    app.settings
+                                                                        .sidebar_width
+                                                                        .clamp(170., 520.),
+                                                                ));
+                                                            });
+                                                            cx.new(|_| SidebarResizeDrag)
                                                         },
                                                     ),
                                             )
@@ -6094,11 +6160,11 @@ impl Render for Workspace {
             });
         if let Some(action) = &self.name_action {
             let title = match action {
-                NameAction::Create => "新建文件",
-                NameAction::CreateFolder => "新建文件夹",
-                NameAction::RenameFile(_) => "重命名文件",
-                NameAction::RenameFolder(_) => "重命名文件夹",
-                NameAction::RenameProject(_) => "重命名项目",
+                NameAction::Create => crate::i18n::workspace::MODAL_CREATE_FILE.get(),
+                NameAction::CreateFolder => crate::i18n::workspace::MODAL_CREATE_FOLDER.get(),
+                NameAction::RenameFile(_) => crate::i18n::workspace::MODAL_RENAME_FILE.get(),
+                NameAction::RenameFolder(_) => crate::i18n::workspace::MODAL_RENAME_FOLDER.get(),
+                NameAction::RenameProject(_) => crate::i18n::workspace::MODAL_RENAME_PROJECT.get(),
             };
             app = app.child(
                 div()
@@ -6142,14 +6208,14 @@ impl Render for Workspace {
                                     .justify_end()
                                     .gap_3()
                                     .child(
-                                        crate::ui::button_secondary("cancel-name", "取消")
+                                        crate::ui::button_secondary("cancel-name", crate::i18n::common::CANCEL.get())
                                             .on_click(cx.listener(|app, _, _, cx| {
                                                 app.name_action = None;
                                                 cx.notify();
                                             })),
                                     )
                                     .child(
-                                        crate::ui::button_primary("apply-name", "确定").on_click(
+                                        crate::ui::button_primary("apply-name", crate::i18n::common::CONFIRM.get()).on_click(
                                             cx.listener(|app, _, window, cx| {
                                                 if let Err(error) = app.apply_name(window, cx) {
                                                     app.report(error, cx);
@@ -6217,21 +6283,45 @@ impl Render for Workspace {
             let choices = match prompt.buttons {
                 DialogButtons::SaveDiscardCancel => vec![
                     (
-                        "继续编辑".to_string(),
+                        crate::i18n::workspace::BTN_KEEP_EDITING.get().to_string(),
                         rfd::MessageDialogResult::Cancel,
                         false,
                     ),
-                    ("放弃修改".to_string(), rfd::MessageDialogResult::No, false),
-                    ("保存".to_string(), rfd::MessageDialogResult::Yes, true),
+                    (
+                        crate::i18n::workspace::BTN_DISCARD_CHANGES.get().to_string(),
+                        rfd::MessageDialogResult::No,
+                        false,
+                    ),
+                    (
+                        crate::i18n::common::SAVE.get().to_string(),
+                        rfd::MessageDialogResult::Yes,
+                        true,
+                    ),
                 ],
                 DialogButtons::Confirm(confirm) => vec![
-                    ("取消".to_string(), rfd::MessageDialogResult::Cancel, false),
+                    (
+                        crate::i18n::common::CANCEL.get().to_string(),
+                        rfd::MessageDialogResult::Cancel,
+                        false,
+                    ),
                     (confirm, rfd::MessageDialogResult::Ok, true),
                 ],
                 DialogButtons::RestoreConflict => vec![
-                    ("跳过".to_string(), rfd::MessageDialogResult::Cancel, false),
-                    ("保留两个".to_string(), rfd::MessageDialogResult::No, false),
-                    ("替换".to_string(), rfd::MessageDialogResult::Yes, true),
+                    (
+                        crate::i18n::common::SKIP.get().to_string(),
+                        rfd::MessageDialogResult::Cancel,
+                        false,
+                    ),
+                    (
+                        crate::i18n::common::KEEP_BOTH.get().to_string(),
+                        rfd::MessageDialogResult::No,
+                        false,
+                    ),
+                    (
+                        crate::i18n::common::REPLACE.get().to_string(),
+                        rfd::MessageDialogResult::Yes,
+                        true,
+                    ),
                 ],
             };
             let choices =
@@ -6314,7 +6404,7 @@ fn classify_markdown_link(
 ) -> MarkdownLinkTarget {
     let raw = raw_url.trim();
     if raw.is_empty() {
-        return MarkdownLinkTarget::Invalid("空链接。".to_owned());
+        return MarkdownLinkTarget::Invalid(crate::i18n::workspace::ERR_EMPTY_LINK.get().to_owned());
     }
     if let Ok(parsed) = url::Url::parse(raw) {
         if parsed.scheme().eq_ignore_ascii_case("file") {
@@ -6323,7 +6413,9 @@ fn classify_markdown_link(
                     path,
                     anchor: parsed.fragment().map(str::to_owned),
                 },
-                Err(()) => MarkdownLinkTarget::Invalid(format!("无法解析本地链接：{raw}")),
+                Err(()) => MarkdownLinkTarget::Invalid(
+                    crate::i18n::workspace::err_resolve_local_link(raw),
+                ),
             };
         }
         // Ignore 1-character schemes so Windows drive paths like `C:\...` stay local.
@@ -6337,7 +6429,7 @@ fn classify_markdown_link(
     };
     let decoded = files::percent_decode(path_part);
     if decoded.is_empty() {
-        return MarkdownLinkTarget::Invalid(format!("无效链接：{raw}"));
+        return MarkdownLinkTarget::Invalid(crate::i18n::workspace::err_invalid_link(raw));
     }
     let candidate = if let Some(ws_rel) = decoded.strip_prefix('/')
         && !ws_rel.starts_with('/')

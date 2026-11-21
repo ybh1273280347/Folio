@@ -41,7 +41,7 @@ impl HistoryEntry {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| {
                 if self.preview.trim().is_empty() {
-                    "新会话".into()
+                    crate::i18n::ai::NEW_SESSION.get().into()
                 } else {
                     self.preview.chars().take(48).collect()
                 }
@@ -89,8 +89,8 @@ impl AiPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索会话标题…"));
-        let rename = cx.new(|cx| InputState::new(window, cx).placeholder("会话名称"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::ai::SEARCH_SESSIONS_PLACEHOLDER.get()));
+        let rename = cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::ai::SESSION_NAME_PLACEHOLDER.get()));
         let search_sub = cx.subscribe(&search, |_, _, _: &InputEvent, cx| cx.notify());
         let rename_sub = cx.subscribe(&rename, |pane, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
@@ -187,7 +187,7 @@ impl AiPane {
             std::fs::rename(temp, location)
         })();
         if let Err(error) = result {
-            self.error = Some(format!("保存标签失败：{error}"));
+            self.error = Some(crate::i18n::ai::err_save_tags(&error));
         }
     }
 
@@ -276,7 +276,7 @@ impl AiPane {
                 let title = v
                     .session_name
                     .clone()
-                    .unwrap_or_else(|| "新会话".into());
+                    .unwrap_or_else(|| crate::i18n::ai::NEW_SESSION.get().into());
                 out.push((id.clone(), title, waiting));
             }
         }
@@ -390,7 +390,7 @@ impl AiPane {
                                 }
                                 self.histories.insert(project.clone(), history);
                             }
-                            Err(error) => self.set_error(format!("会话列表格式错误：{error}"), cx),
+                            Err(error) => self.set_error(crate::i18n::ai::err_sessions_json(&error), cx),
                         },
                         "create_session" => {
                             self.creating.remove(&project);
@@ -464,7 +464,7 @@ impl AiPane {
                 }
                 RpcInbound::Exited(_) => {
                     self.set_error(
-                        "AI 宿主已退出；重新打开 AI 面板以恢复历史，任务不会自动重发。",
+                        crate::i18n::ai::HOST_EXITED_REOPEN_BANNER.get(),
                         cx,
                     );
                     self.controls.clear();
@@ -568,6 +568,18 @@ impl AiPane {
         }
         cx.notify();
     }
+    pub fn refresh_locale(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.update(cx, |input, cx| {
+            input.set_placeholder(crate::i18n::ai::SEARCH_SESSIONS_PLACEHOLDER.get(), window, cx);
+        });
+        self.rename.update(cx, |input, cx| {
+            input.set_placeholder(crate::i18n::ai::SESSION_NAME_PLACEHOLDER.get(), window, cx);
+        });
+        for view in self.views.values() {
+            view.update(cx, |view, cx| view.refresh_locale(window, cx));
+        }
+    }
+
     pub fn sync_settings(&mut self, settings: &AppSettings, cx: &mut Context<Self>) {
         self.settings = settings.clone();
         if self.host.is_some() {
@@ -710,7 +722,15 @@ impl AiPane {
                     let id = entry.id.clone(); let open = id.clone(); let pin = id.clone(); let rename = id.clone(); let delete = id.clone();
                     let running = entry.running; let waiting = entry.waiting;
                     let title = entry.title(); let initial = title.clone(); let pinned = entry.pinned;
-                    let status = if waiting { "等待操作" } else if running { "运行中" } else if entry.failed { "失败" } else { "" };
+                    let status = if waiting {
+                        crate::i18n::ai::SESSION_STATUS_WAITING.get()
+                    } else if running {
+                        crate::i18n::ai::SESSION_STATUS_RUNNING.get()
+                    } else if entry.failed {
+                        crate::i18n::ai::SESSION_STATUS_FAILED.get()
+                    } else {
+                        ""
+                    };
                     div().id(SharedString::from(format!("history-{id}"))).px_2().py_1p5().rounded(px(6.))
                         .when(pinned, |row| row.bg(mix_color(palette.surface, palette.accent, 0.045)))
                         .cursor_pointer().hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
@@ -720,14 +740,14 @@ impl AiPane {
                         .child(div().flex().items_center().gap_1()
                             .child(if self.renaming.as_ref() == Some(&id) { div().flex_1().min_w_0().on_mouse_down(MouseButton::Left, |_,_,cx| cx.stop_propagation()).child(Input::new(&self.rename).small().text_size(px(font_size))).into_any_element() }
                                 else { div().flex_1().min_w_0().text_ellipsis().child(title).into_any_element() })
-                            .child(Button::new(SharedString::from(format!("pin-{id}"))).ghost().when(pinned, |button| button.custom(pinned_style)).compact().with_size(px(font_size / 0.75)).w(px(font_size + 6.)).h(px(font_size + 6.)).icon(crate::ui::icon(IconName::Pin)).tooltip(if pinned { "取消置顶" } else { "置顶" })
+                            .child(Button::new(SharedString::from(format!("pin-{id}"))).ghost().when(pinned, |button| button.custom(pinned_style)).compact().with_size(px(font_size / 0.75)).w(px(font_size + 6.)).h(px(font_size + 6.)).icon(crate::ui::icon(IconName::Pin)).tooltip(if pinned { crate::i18n::ai::UNPIN.get() } else { crate::i18n::ai::PIN.get() })
                                 .on_click(cx.listener(move |pane, _, _, cx| { cx.stop_propagation(); pane.command(json!({"type":"set_pinned","sessionId":pin,"pinned":!pinned}), cx); })))
-                            .child(Button::new(SharedString::from(format!("rename-{id}"))).ghost().compact().with_size(px(font_size / 0.75)).w(px(font_size + 6.)).h(px(font_size + 6.)).icon(crate::ui::icon(IconName::PencilLine)).tooltip("重命名")
+                            .child(Button::new(SharedString::from(format!("rename-{id}"))).ghost().compact().with_size(px(font_size / 0.75)).w(px(font_size + 6.)).h(px(font_size + 6.)).icon(crate::ui::icon(IconName::PencilLine)).tooltip(crate::i18n::ai::RENAME.get())
                                 .on_click(cx.listener(move |pane, _, window, cx| { cx.stop_propagation(); pane.renaming = Some(rename.clone()); pane.rename.update(cx, |input,cx| { input.set_value(initial.clone(),window,cx); input.focus(window,cx); }); cx.notify(); })))
-                            .child(Button::new(SharedString::from(format!("delete-{id}"))).ghost().compact().with_size(px(font_size / 0.75)).w(px(font_size + 6.)).h(px(font_size + 6.)).icon(crate::ui::icon(IconName::Trash)).tooltip("删除会话")
+                            .child(Button::new(SharedString::from(format!("delete-{id}"))).ghost().compact().with_size(px(font_size / 0.75)).w(px(font_size + 6.)).h(px(font_size + 6.)).icon(crate::ui::icon(IconName::Trash)).tooltip(crate::i18n::ai::DELETE_SESSION.get())
                                 .on_click(cx.listener(move |pane, _, _, cx| { cx.stop_propagation(); pane.pending_deletion = Some((delete.clone(), running || waiting)); cx.notify(); }))))
                         .child(div().flex().justify_between().text_size(px((font_size - 2.).max(9.))).text_color(metadata_color)
-                            .child(format!("{}{} 条 {}", if pinned { "置顶 · " } else { "" }, entry.count, status))
+                            .child(crate::i18n::ai::session_meta_line(pinned, entry.count, status))
                             .child(chrono::DateTime::parse_from_rfc3339(&entry.modified).map(|t| t.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()).unwrap_or_default()))
                 })))
                 .child(div().absolute().right_0().top_0().bottom_0().child(Scrollbar::vertical(&self.history_scroll).mode(ScrollbarMode::Always)
@@ -832,7 +852,7 @@ impl Render for AiPane {
                             .w(px(22.))
                             .h(px(22.))
                             .icon(crate::ui::icon(IconName::ChevronLeft))
-                            .tooltip("返回功能栏")
+                            .tooltip(crate::i18n::common::BACK_TO_HUB.get())
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(AiPaneEvent::BackToHub))),
                     )
                     .child(
@@ -843,7 +863,7 @@ impl Render for AiPane {
                             .w(px(22.))
                             .h(px(22.))
                             .icon(crate::ui::icon(IconName::Clock))
-                            .tooltip("会话历史")
+                            .tooltip(crate::i18n::ai::SESSION_HISTORY.get())
                             .on_click(cx.listener(|pane, _, _, cx| {
                                 pane.drawer = !pane.drawer;
                                 if pane.drawer {
@@ -875,7 +895,7 @@ impl Render for AiPane {
                                 let title = view
                                     .and_then(|v| v.session_name.clone())
                                     .or_else(|| entry.map(HistoryEntry::title))
-                                    .unwrap_or_else(|| "新会话".into());
+                                    .unwrap_or_else(|| crate::i18n::ai::NEW_SESSION.get().into());
                                 let waiting = view.is_some_and(|v| v.pending_ui.is_some())
                                     || entry.is_some_and(|e| e.waiting);
                                 let running = view.is_some_and(|v| v.is_streaming)
@@ -948,7 +968,7 @@ impl Render for AiPane {
                                             .h(px(18.))
                                             .flex_shrink_0()
                                             .icon(crate::ui::icon(IconName::Close))
-                                            .tooltip("关闭标签，任务继续运行")
+                                            .tooltip(crate::i18n::ai::CLOSE_TAB_KEEP_RUNNING.get())
                                             .on_click(cx.listener(move |pane, _, _, cx| {
                                                 cx.stop_propagation();
                                                 pane.close(&close, cx);
@@ -966,7 +986,7 @@ impl Render for AiPane {
                                     .flex_shrink_0()
                                     .ml_1()
                                     .icon(crate::ui::icon(IconName::Plus))
-                                    .tooltip("新建会话")
+                                    .tooltip(crate::i18n::ai::NEW_SESSION.get())
                                     .on_click(cx.listener(|pane, _, _, cx| pane.create(cx))),
                             ),
                     )
@@ -978,7 +998,7 @@ impl Render for AiPane {
                             .w(px(22.))
                             .h(px(22.))
                             .icon(crate::ui::icon(IconName::Maximize2))
-                            .tooltip("最大化 / 还原")
+                            .tooltip(crate::i18n::ai::MAXIMIZE_RESTORE.get())
                             .on_click(
                                 cx.listener(|_, _, _, cx| cx.emit(AiPaneEvent::ToggleMaximize)),
                             ),
@@ -1006,7 +1026,7 @@ impl Render for AiPane {
                                 .h(px(18.))
                                 .flex_shrink_0()
                                 .icon(crate::ui::icon(IconName::Close))
-                                .tooltip("关闭")
+                                .tooltip(crate::i18n::common::CLOSE.get())
                                 .on_click(cx.listener(|pane, _, _, cx| pane.clear_error(cx))),
                         ),
                 )
@@ -1029,11 +1049,15 @@ impl Render for AiPane {
             })
             .when_some(self.pending_deletion.clone(), |root, (id, active_task)| {
                 let prompt = if active_task {
-                    "停止任务并删除该会话？"
+                    crate::i18n::ai::DELETE_ACTIVE_SESSION_MSG.get()
                 } else {
-                    "确认删除该会话？此操作不可恢复。"
+                    crate::i18n::ai::DELETE_SESSION_MSG.get()
                 };
-                let confirm_label = if active_task { "停止并删除" } else { "删除" };
+                let confirm_label = if active_task {
+                    crate::i18n::ai::STOP_AND_DELETE.get()
+                } else {
+                    crate::i18n::common::DELETE.get()
+                };
                 root.child(
                     deferred(
                         div()
@@ -1061,7 +1085,7 @@ impl Render for AiPane {
                                     .child(
                                         Button::new("cancel-ai-delete")
                                             .small()
-                                            .label("取消")
+                                            .label(crate::i18n::common::CANCEL.get())
                                             .on_click(cx.listener(|pane, _, _, cx| {
                                                 pane.pending_deletion = None;
                                                 cx.notify();

@@ -247,6 +247,34 @@ fn extract_slash_query(prefix: &str) -> Option<(usize, String)> {
     Some((query.len() + 1, query.to_lowercase()))
 }
 
+fn slash_command_title(cmd: &SlashCommand) -> String {
+    if let Some(name) = cmd.id.strip_prefix("emoji:") {
+        return match crate::i18n::locale() {
+            crate::i18n::Locale::ZhCn => cmd.title.to_owned(),
+            crate::i18n::Locale::En => name.replace('_', " "),
+        };
+    }
+    match cmd.id {
+        "text" => crate::i18n::markdown::SLASH_TEXT.get().to_owned(),
+        "h1" => crate::i18n::markdown::SLASH_H1.get().to_owned(),
+        "h2" => crate::i18n::markdown::SLASH_H2.get().to_owned(),
+        "h3" => crate::i18n::markdown::SLASH_H3.get().to_owned(),
+        "h4" => crate::i18n::markdown::SLASH_H4.get().to_owned(),
+        "bullet" => crate::i18n::markdown::SLASH_BULLET.get().to_owned(),
+        "ordered" => crate::i18n::markdown::SLASH_ORDERED.get().to_owned(),
+        "todo" => crate::i18n::markdown::SLASH_TODO.get().to_owned(),
+        "quote" => crate::i18n::markdown::SLASH_QUOTE.get().to_owned(),
+        "details" => crate::i18n::markdown::SLASH_DETAILS.get().to_owned(),
+        "code" => crate::i18n::markdown::SLASH_CODE.get().to_owned(),
+        "table" => crate::i18n::markdown::SLASH_TABLE.get().to_owned(),
+        "math" => crate::i18n::markdown::SLASH_MATH.get().to_owned(),
+        "divider" => crate::i18n::markdown::SLASH_DIVIDER.get().to_owned(),
+        "image" => crate::i18n::markdown::SLASH_IMAGE.get().to_owned(),
+        "emoji" => crate::i18n::markdown::SLASH_EMOJI.get().to_owned(),
+        _ => cmd.title.to_owned(),
+    }
+}
+
 fn filter_slash_commands(query: &str) -> Vec<&'static SlashCommand> {
     let q = query.trim().to_lowercase();
     SLASH_COMMANDS
@@ -254,6 +282,7 @@ fn filter_slash_commands(query: &str) -> Vec<&'static SlashCommand> {
         .filter(|cmd| {
             q.is_empty()
                 || cmd.title.to_lowercase().contains(&q)
+                || slash_command_title(cmd).to_lowercase().contains(&q)
                 || cmd.id.contains(&q)
                 || cmd.keywords.iter().any(|k| k.contains(&q))
         })
@@ -613,7 +642,7 @@ impl MarkdownPane {
         let source_heading_highlight = source_editor.update(cx, |editor, cx| {
             editor.create_range_decorations_collection(Vec::new(), cx)
         });
-        let link_input = cx.new(|cx| InputState::new(window, cx).placeholder("输入链接 URL (回车确认)"));
+        let link_input = cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::markdown::LINK_INPUT_PLACEHOLDER.get()));
         cx.subscribe_in(
             &link_input,
             window,
@@ -630,7 +659,7 @@ impl MarkdownPane {
             },
         )
         .detach();
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("在文档中查找…"));
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::markdown::SEARCH_DOC_PLACEHOLDER.get()));
         cx.subscribe_in(
             &search_input,
             window,
@@ -650,7 +679,7 @@ impl MarkdownPane {
             },
         )
         .detach();
-        let replace_input = cx.new(|cx| InputState::new(window, cx).placeholder("替换为…"));
+        let replace_input = cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::markdown::REPLACE_WITH_PLACEHOLDER.get()));
         cx.subscribe_in(
             &replace_input,
             window,
@@ -665,7 +694,7 @@ impl MarkdownPane {
             TextareaState::new(window, cx)
                 .auto_grow(2, 8)
                 .submit_on_enter(true)
-                .placeholder("输入批注内容 (回车保存)…")
+                .placeholder(crate::i18n::markdown::ANNOTATION_PLACEHOLDER.get())
         });
         cx.subscribe_in(
             &note_input,
@@ -689,7 +718,7 @@ impl MarkdownPane {
             TextareaState::new(window, cx)
                 .auto_grow(2, 8)
                 .submit_on_enter(true)
-                .placeholder("输入批注内容 (回车保存)…")
+                .placeholder(crate::i18n::markdown::ANNOTATION_PLACEHOLDER.get())
         });
         cx.subscribe_in(
             &drawer_note_input,
@@ -1401,7 +1430,7 @@ impl MarkdownPane {
             ),
             "details" => {
                 self.visual_editor.update(cx, |editor, cx| {
-                    editor.replace_selected_markdown("<details open>\n<summary>标题</summary>\n\n正文\n\n</details>", cx);
+                    editor.replace_selected_markdown(crate::i18n::markdown::DETAILS_TEMPLATE.get(), cx);
                     editor.focus(window, cx);
                 });
             }
@@ -1454,6 +1483,24 @@ impl MarkdownPane {
             });
         }
         cx.notify();
+    }
+
+    pub fn refresh_locale(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.link_input.update(cx, |input, cx| {
+            input.set_placeholder(crate::i18n::markdown::LINK_INPUT_PLACEHOLDER.get(), window, cx);
+        });
+        self.search_input.update(cx, |input, cx| {
+            input.set_placeholder(crate::i18n::markdown::SEARCH_DOC_PLACEHOLDER.get(), window, cx);
+        });
+        self.replace_input.update(cx, |input, cx| {
+            input.set_placeholder(crate::i18n::markdown::REPLACE_WITH_PLACEHOLDER.get(), window, cx);
+        });
+        self.note_input.update(cx, |input, cx| {
+            input.set_placeholder(crate::i18n::markdown::ANNOTATION_PLACEHOLDER.get(), window, cx);
+        });
+        self.drawer_note_input.update(cx, |input, cx| {
+            input.set_placeholder(crate::i18n::markdown::ANNOTATION_PLACEHOLDER.get(), window, cx);
+        });
     }
 
     pub fn sync_annotations(&mut self, items: &[AnnotationItem], cx: &mut Context<Self>) {
@@ -1756,8 +1803,8 @@ impl MarkdownPane {
     fn insert_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let picker = rfd::AsyncFileDialog::new()
             .set_parent(window)
-            .set_title("插入本地图片")
-            .add_filter("图片", &["png", "jpg", "jpeg", "webp", "gif", "svg"]);
+            .set_title(crate::i18n::markdown::DIALOG_INSERT_IMAGE.get())
+            .add_filter(crate::i18n::markdown::IMAGE_FILTER_LABEL.get(), &["png", "jpg", "jpeg", "webp", "gif", "svg"]);
         let directory = self
             .path
             .parent()
@@ -1794,7 +1841,7 @@ impl MarkdownPane {
     }
 
     fn insert_image_reference(&mut self, filename: &str, cx: &mut Context<Self>) {
-        let insertion = format!("![图片](<{filename}>)");
+        let insertion = crate::i18n::markdown::image_markdown_insertion(filename);
         self.visual_editor.update(cx, |editor, cx| {
             if let Ok(mut range) = editor.capture_selection() {
                 let _ = editor.replace_captured(&mut range, &insertion, cx);
@@ -2126,7 +2173,7 @@ impl MarkdownPane {
             .child(tool_btn(
                 "ft-translate",
                 self.translate.is_open(),
-                div().text_xs().font_semibold().child("译").into_any_element(),
+                div().text_xs().font_semibold().child(crate::i18n::markdown::TRANSLATE_SHORT_ICON.get()).into_any_element(),
                 Box::new(cx.listener(move |pane, _, window, cx| {
                     if let Some(text) = pane.visual_editor.read(cx).selected_plain_text() {
                         let anchor = point(rel_x, rel_y + px(44.));
@@ -2167,16 +2214,16 @@ impl MarkdownPane {
 
         if self.show_turn_into {
             let turn_items: &[(&str, &str, IconName)] = &[
-                ("text", "正文", IconName::Type),
-                ("h1", "一级标题 H1", IconName::Heading1),
-                ("h2", "二级标题 H2", IconName::Heading2),
-                ("h3", "三级标题 H3", IconName::Heading3),
-                ("h4", "四级标题 H4", IconName::Heading4),
-                ("bullet", "无序列表", IconName::List),
-                ("ordered", "有序列表", IconName::ListOrdered),
-                ("todo", "任务列表", IconName::ListTodo),
-                ("quote", "引用块", IconName::TextQuote),
-                ("code", "代码块", IconName::CodeXml),
+                ("text", crate::i18n::markdown::BLOCK_TEXT.get(), IconName::Type),
+                ("h1", crate::i18n::markdown::BLOCK_H1.get(), IconName::Heading1),
+                ("h2", crate::i18n::markdown::BLOCK_H2.get(), IconName::Heading2),
+                ("h3", crate::i18n::markdown::BLOCK_H3.get(), IconName::Heading3),
+                ("h4", crate::i18n::markdown::BLOCK_H4.get(), IconName::Heading4),
+                ("bullet", crate::i18n::markdown::BLOCK_BULLET.get(), IconName::List),
+                ("ordered", crate::i18n::markdown::BLOCK_ORDERED.get(), IconName::ListOrdered),
+                ("todo", crate::i18n::markdown::BLOCK_TODO.get(), IconName::ListTodo),
+                ("quote", crate::i18n::markdown::BLOCK_QUOTE.get(), IconName::TextQuote),
+                ("code", crate::i18n::markdown::BLOCK_CODE.get(), IconName::CodeXml),
             ];
             let rows = turn_items.iter().map(|(id, label, ic)| {
                 let cmd_id = *id;
@@ -2264,7 +2311,7 @@ impl MarkdownPane {
                     .items_center()
                     .gap_2()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(div().text_xs().text_color(rgb(0x787774)).child("荧光笔"))
+                    .child(div().text_xs().text_color(rgb(0x787774)).child(crate::i18n::markdown::HIGHLIGHTER_LABEL.get()))
                     .children(swatches)
                     .child(
                         div()
@@ -2277,7 +2324,7 @@ impl MarkdownPane {
                             .hover(|s| s.bg(rgb(0xf2f3f5)))
                             .active(|s| s.bg(rgb(crate::ui::PRESSED_BG)))
                             .cursor_pointer()
-                            .child("清除")
+                            .child(crate::i18n::common::CLEAR.get())
                             .on_click(cx.listener(|pane, _, window, cx| {
                                 pane.clear_highlight(cx);
                                 pane.defer_focus_visual(window, cx);
@@ -2302,7 +2349,7 @@ impl MarkdownPane {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(Input::new(&self.link_input).flex_1().min_w_0())
                     .child(
-                        crate::ui::button_primary("apply-md-link", "确定").on_click(cx.listener(
+                        crate::ui::button_primary("apply-md-link", crate::i18n::common::CONFIRM.get()).on_click(cx.listener(
                             |pane, _, window, cx| {
                                 let url = pane.link_input.read(cx).value().trim().to_string();
                                 pane.visual_editor.update(cx, |editor, cx| {
@@ -2395,7 +2442,7 @@ impl MarkdownPane {
                             div()
                                 .text_size(px(13.5))
                                 .text_color(rgb(0x37352f))
-                                .child(cmd.title),
+                                .child(slash_command_title(cmd)),
                         ),
                 )
                 .child(
@@ -2427,14 +2474,14 @@ impl MarkdownPane {
 
         let header_label = if let Some(query) = query.strip_prefix(':') {
             if query.is_empty() {
-                "表情符号 · 输入中文或英文搜索".to_owned()
+                crate::i18n::markdown::EMOJI_HEADER_EMPTY.get().to_owned()
             } else {
-                format!("表情: {query} (↑↓选择 · Enter确认)")
+                crate::i18n::markdown::emoji_header_query(query)
             }
         } else if query.is_empty() {
-            "基础与排版块 (↑↓选择 · Enter确认)".to_owned()
+            crate::i18n::markdown::SLASH_HEADER_EMPTY.get().to_owned()
         } else {
-            format!("过滤: /{query}")
+            crate::i18n::markdown::slash_header_query(&query)
         };
 
         Some(
@@ -2558,42 +2605,42 @@ impl MarkdownPane {
         {
             let items: &[(&str, EditorCommand, IconName)] = &[
                 (
-                    "转为正文",
+                    crate::i18n::markdown::TURN_INTO_TEXT.get(),
                     EditorCommand::SetBlockKind(BlockKind::Paragraph),
                     IconName::Type,
                 ),
                 (
-                    "转为一级标题 H1",
+                    crate::i18n::markdown::TURN_INTO_H1.get(),
                     EditorCommand::SetBlockKind(BlockKind::Heading { level: 1 }),
                     IconName::Heading1,
                 ),
                 (
-                    "转为二级标题 H2",
+                    crate::i18n::markdown::TURN_INTO_H2.get(),
                     EditorCommand::SetBlockKind(BlockKind::Heading { level: 2 }),
                     IconName::Heading2,
                 ),
                 (
-                    "转为三级标题 H3",
+                    crate::i18n::markdown::TURN_INTO_H3.get(),
                     EditorCommand::SetBlockKind(BlockKind::Heading { level: 3 }),
                     IconName::Heading3,
                 ),
                 (
-                    "转为无序列表",
+                    crate::i18n::markdown::TURN_INTO_BULLET.get(),
                     EditorCommand::ToggleList { ordered: false },
                     IconName::List,
                 ),
                 (
-                    "转为任务列表",
+                    crate::i18n::markdown::TURN_INTO_TODO.get(),
                     EditorCommand::ToggleTask,
                     IconName::ListTodo,
                 ),
                 (
-                    "转为引用块",
+                    crate::i18n::markdown::TURN_INTO_QUOTE.get(),
                     EditorCommand::ToggleBlockquote,
                     IconName::TextQuote,
                 ),
                 (
-                    "转为代码块",
+                    crate::i18n::markdown::TURN_INTO_CODE.get(),
                     EditorCommand::SetCodeBlock { lang: None },
                     IconName::CodeXml,
                 ),
@@ -2681,7 +2728,7 @@ impl MarkdownPane {
                                 .justify_center()
                                 .child(crate::ui::icon(IconName::Trash).w(px(13.)).h(px(13.))),
                         )
-                        .child("删除该块")
+                        .child(crate::i18n::markdown::DELETE_BLOCK.get())
                         .on_click(cx.listener(move |pane, _, window, cx| {
                             pane.block_menu_for = None;
                             pane.visual_editor.update(cx, |editor, cx| {
@@ -2820,7 +2867,7 @@ impl MarkdownPane {
                             .flex()
                             .justify_end()
                             .child(
-                                crate::ui::button_primary("save-md-annotation", "保存批注")
+                                crate::ui::button_primary("save-md-annotation", crate::i18n::markdown::SAVE_ANNOTATION.get())
                                     .font_family(crate::ui::DEFAULT_SANS_FONT)
                                     .text_size(px(12.))
                                     .min_h(px(26.))
@@ -2929,7 +2976,7 @@ impl Render for MarkdownPane {
                             cx.notify();
                         })),
                     )
-                    .child(action("md-source", "源码").on_click(
+                    .child(action("md-source", crate::i18n::workspace::SOURCE_LABEL.get()).on_click(
                         cx.listener(|pane, _, window, cx| pane.toggle_source(window, cx)),
                     ))
                     .child({
@@ -2973,7 +3020,7 @@ impl Render for MarkdownPane {
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .child(crate::ui::label("标题导航".into()))
+                        .child(crate::ui::label(crate::i18n::markdown::HEADING_NAV.get().into()))
                         .children(headings),
                 )
                 .child(
@@ -3124,7 +3171,7 @@ impl Render for MarkdownPane {
                             .when(self.loading.is_some(), |content| {
                                 content.child(
                                     div().mt_4().text_sm().text_color(rgb(0x787774))
-                                        .child("正在加载后续内容…"),
+                                        .child(crate::i18n::markdown::LOADING_MORE_CONTENT.get()),
                                 )
                             }),
                     ))
@@ -3164,12 +3211,10 @@ impl Render for MarkdownPane {
                         )
                     })
                     .when_some(self.hovered_link.as_ref(), |area, url| {
-                        let action = if cfg!(target_os = "macos") {
-                            "Cmd+左键"
-                        } else {
-                            "Ctrl+左键"
-                        };
-                        let verb = if url.starts_with('#') { "跳转" } else { "打开" };
+                        let label = crate::i18n::markdown::link_tooltip_click(
+                            cfg!(target_os = "macos"),
+                            url.starts_with('#'),
+                        );
                         area.child(
                             div()
                                 .id("md-link-hover-pill")
@@ -3187,7 +3232,7 @@ impl Render for MarkdownPane {
                                 .text_xs()
                                 .text_color(rgb(0x5b5b58))
                                 .text_ellipsis()
-                                .child(format!("{action} {verb}：{url}")),
+                                .child(format!("{label}：{url}")),
                         )
                     })
                     .when(self.search_open && !self.source, |area| {
@@ -3262,7 +3307,7 @@ impl Render for MarkdownPane {
                                                         .rounded(px(4.))
                                                         .when(case_on, |s| s.bg(active_bg).text_color(active_text))
                                                         .tooltip(|window, cx| {
-                                                            Tooltip::new("区分大小写").build(window, cx)
+                                                            Tooltip::new(crate::i18n::markdown::FIND_CASE_SENSITIVE.get()).build(window, cx)
                                                         })
                                                         .on_click(cx.listener(|pane, _, _, cx| {
                                                             pane.search_case_sensitive = !pane.search_case_sensitive;
@@ -3277,7 +3322,7 @@ impl Render for MarkdownPane {
                                                         .rounded(px(4.))
                                                         .when(word_on, |s| s.bg(active_bg).text_color(active_text))
                                                         .tooltip(|window, cx| {
-                                                            Tooltip::new("全字匹配").build(window, cx)
+                                                            Tooltip::new(crate::i18n::markdown::FIND_WHOLE_WORD.get()).build(window, cx)
                                                         })
                                                         .on_click(cx.listener(|pane, _, _, cx| {
                                                             pane.search_whole_word = !pane.search_whole_word;
@@ -3293,7 +3338,7 @@ impl Render for MarkdownPane {
                                                     .size(px(22.))
                                                     .when(replace_on, |s| s.bg(active_bg).text_color(active_text))
                                                     .tooltip(|window, cx| {
-                                                        Tooltip::new("替换 (Ctrl+H)").build(window, cx)
+                                                        Tooltip::new(crate::i18n::markdown::FIND_TOGGLE_REPLACE.get()).build(window, cx)
                                                     })
                                                     .on_click(cx.listener(|pane, _, window, cx| {
                                                         pane.toggle_replace(window, cx);
@@ -3311,7 +3356,7 @@ impl Render for MarkdownPane {
                                             crate::ui::control("prev-md-search", IconName::ChevronLeft)
                                                 .size(px(20.))
                                                 .tooltip(|window, cx| {
-                                                    Tooltip::new("上一个 (Shift+Enter)").build(window, cx)
+                                                    Tooltip::new(crate::i18n::markdown::FIND_PREV.get()).build(window, cx)
                                                 })
                                                 .on_click(cx.listener(|pane, _, _, cx| {
                                                     let q = pane.search_input.read(cx).value().to_string();
@@ -3323,7 +3368,7 @@ impl Render for MarkdownPane {
                                             crate::ui::control("next-md-search", IconName::ChevronRight)
                                                 .size(px(20.))
                                                 .tooltip(|window, cx| {
-                                                    Tooltip::new("下一个 (Enter)").build(window, cx)
+                                                    Tooltip::new(crate::i18n::markdown::FIND_NEXT.get()).build(window, cx)
                                                 })
                                                 .on_click(cx.listener(|pane, _, _, cx| {
                                                     let q = pane.search_input.read(cx).value().to_string();
@@ -3345,7 +3390,7 @@ impl Render for MarkdownPane {
                                             crate::ui::control("close-md-search", IconName::Close)
                                                 .size(px(20.))
                                                 .tooltip(|window, cx| {
-                                                    Tooltip::new("关闭 (Esc)").build(window, cx)
+                                                    Tooltip::new(crate::i18n::markdown::FIND_CLOSE.get()).build(window, cx)
                                                 })
                                                 .on_click(cx.listener(|pane, _, window, cx| {
                                                     pane.close_search(window, cx);
@@ -3384,7 +3429,7 @@ impl Render for MarkdownPane {
                                                 crate::ui::control("replace-md-one", IconName::Replace)
                                                     .size(px(22.))
                                                     .tooltip(|window, cx| {
-                                                        Tooltip::new("替换当前 (Enter)").build(window, cx)
+                                                        Tooltip::new(crate::i18n::markdown::REPLACE_ONE.get()).build(window, cx)
                                                     })
                                                     .on_click(cx.listener(|pane, _, _, cx| {
                                                         pane.replace_current(cx);
@@ -3394,7 +3439,7 @@ impl Render for MarkdownPane {
                                                 crate::ui::control("replace-md-all", IconName::ReplaceAll)
                                                     .size(px(22.))
                                                     .tooltip(|window, cx| {
-                                                        Tooltip::new("全部替换").build(window, cx)
+                                                        Tooltip::new(crate::i18n::markdown::REPLACE_ALL.get()).build(window, cx)
                                                     })
                                                     .on_click(cx.listener(|pane, _, _, cx| {
                                                         pane.replace_all(cx);
@@ -3679,7 +3724,7 @@ impl Render for MarkdownPane {
                                             .justify_end()
                                             .gap_1p5()
                                             .child(
-                                                crate::ui::button("cancel-md-drawer-ann", "取消")
+                                                crate::ui::button("cancel-md-drawer-ann", crate::i18n::common::CANCEL.get())
                                                     .on_click(cx.listener(
                                                         |pane, _, window, cx| {
                                                             pane.editing_drawer_annotation_id =
@@ -3693,7 +3738,7 @@ impl Render for MarkdownPane {
                                             .child(
                                                 crate::ui::button_primary(
                                                     "save-md-drawer-ann",
-                                                    "保存",
+                                                    crate::i18n::common::SAVE.get(),
                                                 )
                                                 .on_click(cx.listener(move |pane, _, window, cx| {
                                                     let next_comment = pane
@@ -3816,7 +3861,7 @@ impl Render for MarkdownPane {
                                                         .text_size(px(title_font_size))
                                                         .font_semibold()
                                                         .text_color(rgb(0x37352f))
-                                                        .child("文档批注"),
+                                                        .child(crate::i18n::markdown::DOC_ANNOTATIONS.get()),
                                                 )
                                                 .child(
                                                     crate::ui::control("close-ann-drawer", IconName::Close)
@@ -4012,24 +4057,24 @@ impl Render for MarkdownPane {
                 pane.run_command(EditorCommand::InsertTable { rows: 3, cols: 3 }, cx)
             }))
             .context_menu(|menu, _, _| {
-                menu.menu("加粗", Box::new(Bold))
-                    .menu("斜体", Box::new(Italic))
-                    .menu("下划线", Box::new(Underline))
-                    .menu("删除线", Box::new(Strikethrough))
-                    .menu("荧光高亮", Box::new(Highlight))
+                menu.menu(crate::i18n::markdown::CTX_BOLD.get(), Box::new(Bold))
+                    .menu(crate::i18n::markdown::CTX_ITALIC.get(), Box::new(Italic))
+                    .menu(crate::i18n::markdown::CTX_UNDERLINE.get(), Box::new(Underline))
+                    .menu(crate::i18n::markdown::CTX_STRIKETHROUGH.get(), Box::new(Strikethrough))
+                    .menu(crate::i18n::markdown::CTX_HIGHLIGHT.get(), Box::new(Highlight))
                     .separator()
-                    .menu("标题", Box::new(HeadingAction))
-                    .menu("无序列表", Box::new(BulletList))
-                    .menu("任务列表", Box::new(TaskList))
+                    .menu(crate::i18n::markdown::CTX_HEADING.get(), Box::new(HeadingAction))
+                    .menu(crate::i18n::markdown::CTX_BULLET_LIST.get(), Box::new(BulletList))
+                    .menu(crate::i18n::markdown::CTX_TASK_LIST.get(), Box::new(TaskList))
                     .separator()
-                    .menu("插入图片…", Box::new(InsertImage))
-                    .menu("插入表格", Box::new(InsertTable))
+                    .menu(crate::i18n::markdown::CTX_INSERT_IMAGE.get(), Box::new(InsertImage))
+                    .menu(crate::i18n::markdown::CTX_INSERT_TABLE.get(), Box::new(InsertTable))
             })
             .when_some(self.formula_editor.clone(), |pane, (editor, display)| {
                 // Block the underlying editor's mouse handler while the formula input is open.
                 pane.child(crate::ui::modal_overlay(
-                    "编辑公式",
-                    "输入 LaTeX 正文，无需添加分隔符。".to_owned(),
+                    crate::i18n::markdown::EDIT_FORMULA_TITLE.get(),
+                    crate::i18n::markdown::EDIT_FORMULA_HINT.get().to_owned(),
                     div()
                         .flex()
                         .flex_col()
@@ -4049,14 +4094,14 @@ impl Render for MarkdownPane {
                                 .flex()
                                 .justify_end()
                                 .gap_2()
-                                .child(crate::ui::button_secondary("cancel-formula", "取消").on_click(
+                                .child(crate::ui::button_secondary("cancel-formula", crate::i18n::common::CANCEL.get()).on_click(
                                     cx.listener(|pane, _, window, cx| {
                                         pane.formula_editor = None;
                                         pane.defer_focus_visual(window, cx);
                                         cx.notify();
                                     }),
                                 ))
-                                .child(crate::ui::button_primary("apply-formula", "应用").on_click(
+                                .child(crate::ui::button_primary("apply-formula", crate::i18n::common::APPLY.get()).on_click(
                                     cx.listener(move |pane, _, window, cx| {
                                         let latex = editor.read(cx).value().to_string();
                                         let source = if display {
@@ -4077,14 +4122,14 @@ impl Render for MarkdownPane {
             })
             .when_some(self.pending_image.clone(), |pane, (_, destination)| {
                 pane.child(crate::ui::modal_overlay(
-                    "替换同名图片？",
+                    crate::i18n::markdown::OVERWRITE_IMAGE_TITLE.get(),
                     destination.to_string_lossy().into_owned(),
                     div()
                         .flex()
                         .justify_end()
                         .gap_2()
                         .child(
-                            crate::ui::button_secondary("cancel-image-overwrite", "取消").on_click(
+                            crate::ui::button_secondary("cancel-image-overwrite", crate::i18n::common::CANCEL.get()).on_click(
                                 cx.listener(|pane, _, _, cx| {
                                     pane.pending_image = None;
                                     cx.notify();
@@ -4092,7 +4137,7 @@ impl Render for MarkdownPane {
                             ),
                         )
                         .child(
-                            crate::ui::button_danger("confirm-image-overwrite", "替换").on_click(
+                            crate::ui::button_danger("confirm-image-overwrite", crate::i18n::common::REPLACE.get()).on_click(
                                 cx.listener(|pane, _, _, cx| pane.confirm_image_import(cx)),
                             ),
                         ),
@@ -4100,10 +4145,10 @@ impl Render for MarkdownPane {
             })
             .when_some(self.image_error.clone(), |pane, error| {
                 pane.child(crate::ui::modal_overlay(
-                    "图片导入失败",
+                    crate::i18n::markdown::IMAGE_IMPORT_FAILED.get(),
                     error,
                     div().flex().justify_end().child(
-                        crate::ui::button_primary("dismiss-image-error", "确定").on_click(cx.listener(
+                        crate::ui::button_primary("dismiss-image-error", crate::i18n::common::CONFIRM.get()).on_click(cx.listener(
                             |pane, _, _, cx| {
                                 pane.image_error = None;
                                 cx.notify();

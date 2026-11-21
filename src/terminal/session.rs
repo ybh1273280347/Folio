@@ -44,7 +44,7 @@ pub fn start_command(
             pixel_width: 0,
             pixel_height: 0,
         })
-        .map_err(|error| format!("无法创建 Windows ConPTY：{error}"))?;
+        .map_err(|error| crate::i18n::media::term_err_conpty(&error))?;
     let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let mut command = CommandBuilder::new(&shell);
@@ -72,12 +72,12 @@ pub fn start_command(
     let mut child = pair
         .slave
         .spawn_command(command)
-        .map_err(|error| format!("无法启动 {}：{error}", shell.display()))?;
+        .map_err(|error| crate::i18n::media::term_err_spawn(&shell, &error))?;
     let job = match ProcessJob::attach(child.as_ref()) {
         Ok(job) => job,
         Err(error) => {
             let _ = child.kill();
-            return Err(format!("无法管理终端进程：{error}"));
+            return Err(crate::i18n::media::term_err_job(&error));
         }
     };
     // Retaining the slave handle can prevent EOF when the child exits.

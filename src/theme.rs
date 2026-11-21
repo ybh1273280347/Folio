@@ -174,19 +174,19 @@ pub enum ColorRole {
 }
 
 impl ColorRole {
-    pub const ALL: [(Self, &'static str); 12] = [
-        (Self::Background, "背景"),
-        (Self::Surface, "画布与弹窗"),
-        (Self::Text, "正文与界面文字"),
-        (Self::Muted, "次要文字"),
-        (Self::Border, "边框与分隔线"),
-        (Self::Hover, "悬停背景"),
-        (Self::Pressed, "按下背景"),
-        (Self::Accent, "强调色"),
-        (Self::OnAccent, "强调色上的文字"),
-        (Self::Code, "代码背景"),
-        (Self::Selection, "选中背景"),
-        (Self::Danger, "错误与删除"),
+    pub const ALL: [(Self, crate::i18n::BiText); 12] = [
+        (Self::Background, crate::i18n::preferences::COLOR_BACKGROUND),
+        (Self::Surface, crate::i18n::preferences::COLOR_SURFACE),
+        (Self::Text, crate::i18n::preferences::COLOR_TEXT),
+        (Self::Muted, crate::i18n::preferences::COLOR_MUTED),
+        (Self::Border, crate::i18n::preferences::COLOR_BORDER),
+        (Self::Hover, crate::i18n::preferences::COLOR_HOVER),
+        (Self::Pressed, crate::i18n::preferences::COLOR_PRESSED),
+        (Self::Accent, crate::i18n::preferences::COLOR_ACCENT),
+        (Self::OnAccent, crate::i18n::preferences::COLOR_ON_ACCENT),
+        (Self::Code, crate::i18n::preferences::COLOR_CODE),
+        (Self::Selection, crate::i18n::preferences::COLOR_SELECTION),
+        (Self::Danger, crate::i18n::preferences::COLOR_DANGER),
     ];
 }
 
@@ -226,10 +226,10 @@ impl ThemeSettings {
     pub fn save(&mut self, name: &str) -> Result<(), &'static str> {
         let name = name.trim();
         if name.is_empty() {
-            return Err("请为主题填写名称。");
+            return Err(crate::i18n::preferences::ERR_THEME_NAME_EMPTY.get());
         }
         if name == "自定义（未保存）" {
-            return Err("请填写主题名称。");
+            return Err(crate::i18n::preferences::ERR_THEME_NAME_RESERVED.get());
         }
         self.saved.insert(name.to_owned(), self.palette);
         self.active = name.to_owned();

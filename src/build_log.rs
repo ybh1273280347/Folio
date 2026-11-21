@@ -24,13 +24,13 @@ pub fn panel(
                 .justify_between()
                 .px_3()
                 .py_2()
-                .child("编译日志")
+                .child(crate::i18n::media::BUILD_LOG_TITLE.get())
                 .child(
                     div()
                         .flex()
                         .gap_2()
                         .child(
-                            crate::ui::button_secondary("copy-build-log", "复制全部").on_click(
+                            crate::ui::button_secondary("copy-build-log", crate::i18n::media::BUILD_LOG_COPY_ALL.get()).on_click(
                                 move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(
                                         copied.clone(),

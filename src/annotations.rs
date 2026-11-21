@@ -47,43 +47,43 @@ pub fn resolve_path(root: &Path, path: &str) -> Result<std::path::PathBuf, Failu
         dunce::canonicalize(path)?
     } else { files::project_path(&root, path)? };
     if !target.starts_with(&root) {
-        return Err(Failure::new("outside_project", "批注工具只能访问当前项目内的文件。"));
+        return Err(Failure::new("outside_project", crate::i18n::tags::ERR_ANN_OUTSIDE_PROJECT.get()));
     }
     if !target.is_file() || !target.extension().is_some_and(|e|
         e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("pdf")) {
-        return Err(Failure::new("unsupported_format", "首版只支持 Markdown 和有文字层的 PDF 文件。"));
+        return Err(Failure::new("unsupported_format", crate::i18n::tags::ERR_ANN_UNSUPPORTED_FORMAT.get()));
     }
     Ok(target)
 }
 
 fn choose_match(params: &Params, candidates: Vec<Value>) -> Result<usize, Failure> {
     if candidates.is_empty() {
-        return Err(Failure::new("quote_not_found", "未找到原文。请使用单个文字块中的实际原文；不支持跨块、公式或图片定位。"));
+        return Err(Failure::new("quote_not_found", crate::i18n::tags::ERR_ANN_QUOTE_NOT_FOUND.get()));
     }
     if params.occurrence.is_none() && candidates.len() > 1 {
-        let mut error = Failure::new("ambiguous_match", "原文匹配多处，请增加原文上下文或指定 occurrence。");
+        let mut error = Failure::new("ambiguous_match", crate::i18n::tags::ERR_ANN_AMBIGUOUS_MATCH.get());
         error.0["candidates"] = json!(candidates);
         return Err(error);
     }
     let number = params.occurrence.unwrap_or(1);
     if number == 0 || number > candidates.len() {
-        return Err(Failure::new("invalid_occurrence", format!("occurrence 应在 1 到 {} 之间。", candidates.len())));
+        return Err(Failure::new("invalid_occurrence", crate::i18n::tags::err_ann_invalid_occurrence(candidates.len())));
     }
     Ok(number - 1)
 }
 
 pub fn validate_create(params: &Params) -> Result<(&str, &str), Failure> {
     let quote = params.quote.as_deref().filter(|q| !q.trim().is_empty())
-        .ok_or_else(|| Failure::new("invalid_request", "quote 必须是非空原文。"))?;
+        .ok_or_else(|| Failure::new("invalid_request", crate::i18n::tags::ERR_ANN_EMPTY_QUOTE.get()))?;
     let comment = params.comment.as_deref().filter(|q| !q.trim().is_empty())
-        .ok_or_else(|| Failure::new("invalid_request", "comment 必须是非空批注正文。"))?;
+        .ok_or_else(|| Failure::new("invalid_request", crate::i18n::tags::ERR_ANN_EMPTY_COMMENT.get()))?;
     Ok((quote, comment))
 }
 
 pub fn prepare_markdown(source: &str, params: &Params, extensions: MarkdownExtensions) -> Result<Prepared, Failure> {
     let (quote, comment) = validate_create(params)?;
     if params.page.is_some() {
-        return Err(Failure::new("invalid_request", "Markdown 不使用 page 参数。"));
+        return Err(Failure::new("invalid_request", crate::i18n::tags::ERR_ANN_MD_NO_PAGE.get()));
     }
     let mut model = BlockEditorModel::from_markdown(source, extensions)
         .map_err(|e| Failure::new("parse_error", e.to_string()))?;
@@ -100,7 +100,7 @@ pub fn prepare_markdown(source: &str, params: &Params, extensions: MarkdownExten
         .map(|(i, (_, _, _, preview))| json!({"occurrence":i+1, "preview":preview})).collect())?;
     let (block, start, kind, _) = &matches[index];
     if !matches!(kind, BlockKind::Paragraph | BlockKind::Heading { .. } | BlockKind::TableCell) || quote.contains('\u{fffc}') {
-        return Err(Failure::new("unsupported_target", "此处不是可高亮的普通文字块，请选择段落、标题或表格单元格中的原文。"));
+        return Err(Failure::new("unsupported_target", crate::i18n::tags::ERR_ANN_UNSUPPORTED_TARGET.get()));
     }
     model.set_selection(BlockSelection::Text {
         anchor: BlockPosition::new(*block, *start), head: BlockPosition::new(*block, start + quote.len()),
@@ -115,13 +115,13 @@ pub fn prepare_markdown(source: &str, params: &Params, extensions: MarkdownExten
 pub fn prepare_pdf(bytes: Vec<u8>, params: &Params) -> Result<Prepared, Failure> {
     let (quote, comment) = validate_create(params)?;
     let page = params.page.filter(|p| *p > 0)
-        .ok_or_else(|| Failure::new("invalid_page", "PDF 必须指定从 1 开始的实际文件页码。"))?;
-    let document = gpui_pdf::parse(Arc::new(bytes)).map_err(|e| Failure::new("parse_error", format!("无法解析 PDF：{e:?}")))?;
+        .ok_or_else(|| Failure::new("invalid_page", crate::i18n::tags::ERR_ANN_PDF_PAGE_REQUIRED.get()))?;
+    let document = gpui_pdf::parse(Arc::new(bytes)).map_err(|e| Failure::new("parse_error", crate::i18n::tags::err_ann_pdf_parse(&e)))?;
     if page > document.pages().len() {
-        return Err(Failure::new("invalid_page", format!("PDF 只有 {} 页。", document.pages().len())));
+        return Err(Failure::new("invalid_page", crate::i18n::tags::err_ann_pdf_page_count(document.pages().len())));
     }
     let text = gpui_pdf::extract_page_text(&document, page - 1)
-        .filter(|text| !text.is_empty()).ok_or_else(|| Failure::new("no_text_layer", "该页没有可用原生文字层，首版不支持扫描页或 OCR 坐标定位。"))?;
+        .filter(|text| !text.is_empty()).ok_or_else(|| Failure::new("no_text_layer", crate::i18n::tags::ERR_ANN_PDF_NO_TEXT_LAYER.get()))?;
     let matches = text.find_matches(quote);
     let index = choose_match(params, matches.iter().enumerate().map(|(i, rects)|
         json!({"page":page, "occurrence":i+1, "vertical_position":rects.first().map(|r| r.y)})).collect())?;
@@ -147,7 +147,7 @@ pub fn existing(items: &[AnnotationItem], prepared: &Prepared, path: &Path) -> R
         if item.comment == prepared.item.comment {
             return Ok(Some(json!({"status":"ok", "created":false, "annotation":item_json(item, path)})));
         }
-        let mut error = Failure::new("already_annotated", "此位置已有不同的评论，未覆盖原批注。");
+        let mut error = Failure::new("already_annotated", crate::i18n::tags::ERR_ANN_ALREADY_ANNOTATED.get());
         error.0["annotation"] = item_json(item, path);
         return Err(error);
     }

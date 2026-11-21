@@ -532,9 +532,9 @@ pub(super) fn render_toggle_button(
     cx: &mut Context<MarkdownPane>,
 ) -> Stateful<Div> {
     let tooltip_text = if active {
-        "收起文档大纲"
+        crate::i18n::markdown::OUTLINE_COLLAPSE.get()
     } else {
-        "展开文档大纲"
+        crate::i18n::markdown::OUTLINE_EXPAND.get()
     };
     let active_bg = crate::theme::color(0xefefed);
     let active_hover = crate::theme::color(0xe6e5e1);
@@ -632,7 +632,7 @@ fn render_panel_body(
                             cx.notify();
                         }))
                 })
-                .child("文档大纲")
+                .child(crate::i18n::markdown::OUTLINE_TITLE.get())
                 .when(has_any_parents, |el| {
                     el.child(
                         crate::ui::icon(if all_collapsed {
@@ -652,7 +652,7 @@ fn render_panel_body(
             .py_3()
             .text_size(px(12.5))
             .text_color(colors.header_text)
-            .child("暂无标题")
+            .child(crate::i18n::markdown::OUTLINE_EMPTY.get())
             .into_any_element()
     } else {
         div()

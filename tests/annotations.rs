@@ -1,6 +1,7 @@
 //! Placement and storage contracts run without a GPU window or a live model gateway.
 #![allow(dead_code)]
 #[path = "../src/annotations.rs"] mod annotations;
+#[path = "../src/i18n/mod.rs"] mod i18n;
 #[path = "../src/model.rs"] mod model;
 #[path = "../src/theme.rs"] mod theme;
 #[path = "../src/files.rs"] mod files;

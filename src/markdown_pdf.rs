@@ -71,7 +71,7 @@ fn write(
     let cancelled = || BuildResult {
         status: BuildStatus::Cancelled,
         elapsed: request.started.elapsed(),
-        log: "PDF 导出已取消。".into(),
+        log: crate::i18n::media::MD_PDF_CANCELLED.get().into(),
         preview: None,
     };
     if request.cancelled.load(Ordering::Relaxed) {
@@ -125,7 +125,7 @@ fn write(
         fonts.insert(
             id,
             PdfFont::new(bytes.into(), index)
-                .ok_or_else(|| io::Error::other("无法将当前字体嵌入 PDF"))?,
+                .ok_or_else(|| io::Error::other(crate::i18n::media::MD_PDF_FONT_EMBED.get()))?,
         );
     }
     let mut document = Document::new();
@@ -283,7 +283,7 @@ fn write(
                     let color = quad
                         .background
                         .as_solid()
-                        .ok_or_else(|| io::Error::other("PDF 不支持当前渐变背景"))?;
+                        .ok_or_else(|| io::Error::other(crate::i18n::media::MD_PDF_GRADIENT_BG.get()))?;
                     let outline = rounded_rectangle(b, quad.corner_radii);
                     surface.push_clip_path(&outline, &Default::default());
                     if color.a > 0. {
@@ -317,7 +317,7 @@ fn write(
                     let color = path
                         .color
                         .as_solid()
-                        .ok_or_else(|| io::Error::other("PDF 不支持当前渐变路径"))?;
+                        .ok_or_else(|| io::Error::other(crate::i18n::media::MD_PDF_GRADIENT_PATH.get()))?;
                     set_fill(&mut surface, color);
                     // GPUI paths are tessellated fills; quadratic triangles carry their control point.
                     for triangle in path.vertices.chunks_exact(3) {
@@ -399,20 +399,20 @@ fn write(
                 VectorPaint::Svg { bounds, svg, .. } => {
                     let options = crate::mermaid::usvg_options();
                     let tree = usvg::Tree::from_str(svg, &options).map_err(|error| {
-                        io::Error::other(format!("Mermaid SVG 解析失败：{error}"))
+                        io::Error::other(crate::i18n::media::md_pdf_mermaid_svg(&error))
                     })?;
                     let size = krilla::geom::Size::from_wh(
                         f32::from(bounds.size.width),
                         f32::from(bounds.size.height),
                     )
-                    .ok_or_else(|| io::Error::other("Mermaid 图表尺寸无效"))?;
+                    .ok_or_else(|| io::Error::other(crate::i18n::media::MD_PDF_MERMAID_SIZE.get()))?;
                     surface.push_transform(&Transform::from_translate(
                         f32::from(bounds.left()),
                         f32::from(bounds.top()),
                     ));
                     surface
                         .draw_svg(&tree, size, SvgSettings::default())
-                        .ok_or_else(|| io::Error::other("Mermaid 图表绘制失败"))?;
+                        .ok_or_else(|| io::Error::other(crate::i18n::media::MD_PDF_MERMAID_DRAW.get()))?;
                     surface.pop();
                 }
                 _ => unreachable!(),
@@ -428,7 +428,7 @@ fn write(
     }
     let pdf = document
         .finish()
-        .map_err(|error| io::Error::other(format!("PDF 写入失败：{error:?}")))?;
+        .map_err(|error| io::Error::other(crate::i18n::media::md_pdf_write_failed(&error)))?;
     if request.cancelled.load(Ordering::Relaxed) {
         return Ok(cancelled());
     }
@@ -438,10 +438,7 @@ fn write(
     Ok(BuildResult {
         status: BuildStatus::Success,
         elapsed: request.started.elapsed(),
-        log: format!(
-            "已按当前 Markdown 字体、公式、换行导出矢量 PDF（文字可选择和复制）：{}",
-            request.destination.display()
-        ),
+        log: crate::i18n::media::md_pdf_exported(&request.destination),
         preview: Some(request.preview.clone()),
     })
 }

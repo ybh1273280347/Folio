@@ -296,14 +296,14 @@ impl MathPlugin {
             Some(Formula::Failed(error)) => (
                 div()
                     .text_color(rgb(0xa16b60))
-                    .child(format!("{}  ·  公式排版失败：{error}", content.latex))
+                    .child(crate::i18n::media::math_layout_failed(&content.latex, &error))
                     .into_any_element(),
                 14.,
             ),
             None => (
                 div()
                     .text_color(rgb(0x787774))
-                    .child("公式排版中…")
+                    .child(crate::i18n::media::MATH_PENDING.get())
                     .into_any_element(),
                 14.,
             ),

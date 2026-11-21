@@ -38,7 +38,7 @@ impl Workspace {
         let project = self.directory_workspace().ok_or_else(|| {
             Failure::new(
                 "directory_workspace_required",
-                "标签工具可用于项目和默认空间。",
+                crate::i18n::tags::ERR_AGENT_TAGS_PROJECT_OR_DEFAULT.get(),
             )
         })?;
         let root = dunce::canonicalize(&project.folder)
@@ -46,7 +46,7 @@ impl Workspace {
         if request["projectKey"].as_str() != Some(crate::ai::project_key(&root).as_str()) {
             return Err(Failure::new(
                 "project_not_active",
-                "请切回发起会话所属的项目后重试。",
+                crate::i18n::tags::ERR_AGENT_SWITCH_PROJECT_RETRY.get(),
             ));
         }
         Ok(Store::project(&root))
@@ -85,7 +85,7 @@ impl Workspace {
                     .tag_proposals
                     .remove(&owner(id.proposal_id))
                     .ok_or_else(|| {
-                        Failure::new("stale_preview", "这批标签变更已失效，请重新预览。")
+                        Failure::new("stale_preview", crate::i18n::tags::ERR_AGENT_STALE_TAG_CHANGES.get())
                     })?;
                 let (snapshot, result) = store.agent_commit(&self.files, pending.edit)?;
                 self.use_tag_snapshot(snapshot, cx);
