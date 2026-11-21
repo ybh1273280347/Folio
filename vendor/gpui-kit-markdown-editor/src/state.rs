@@ -405,6 +405,7 @@ pub struct BlockEditorState {
     pub(crate) block_drag: Option<BlockDrag>,
     readonly: bool,
     image_policy: super::ImagePolicy,
+    image_source: Option<Arc<dyn Fn(&gpui::SharedUri) -> gpui::ImageSource + Send + Sync>>,
     submit_policy: SubmitPolicy,
     clipboard_policy: ClipboardPolicy,
     paste_sequence: u64,
@@ -487,6 +488,7 @@ impl BlockEditorState {
             readonly: false,
             toolbar_hidden: false,
             image_policy: super::ImagePolicy::default(),
+            image_source: None,
             submit_policy: SubmitPolicy::default(),
             clipboard_policy: ClipboardPolicy::default(),
             paste_sequence: 0,
@@ -536,6 +538,21 @@ impl BlockEditorState {
     }
     pub fn set_clipboard_policy(&mut self, policy: ClipboardPolicy) {
         self.clipboard_policy = policy;
+    }
+    /// Resolve document image URIs relative to the host's document location.
+    pub fn with_image_source<F>(mut self, resolver: F) -> Self
+    where
+        F: Fn(&gpui::SharedUri) -> gpui::ImageSource + Send + Sync + 'static,
+    {
+        self.image_source = Some(Arc::new(resolver));
+        self
+    }
+    pub fn set_image_source<F>(&mut self, resolver: F, cx: &mut Context<Self>)
+    where
+        F: Fn(&gpui::SharedUri) -> gpui::ImageSource + Send + Sync + 'static,
+    {
+        self.image_source = Some(Arc::new(resolver));
+        cx.notify();
     }
     /// The retained scroll owner; content-sized wrappers share this handle.
     pub fn scroll_handle(&self) -> Option<gpui::ScrollHandle> {
@@ -1530,7 +1547,10 @@ impl BlockEditorState {
 
     /// Editing and document export must shape the same glyphs and line breaks.
     pub(crate) fn render_context(&self, cx: &App) -> RenderContext {
-        let context = RenderContext::from_app(cx).on_link_click(|_, _, _, _| {});
+        let mut context = RenderContext::from_app(cx).on_link_click(|_, _, _, _| {});
+        if let Some(resolver) = self.image_source.clone() {
+            context = context.with_image_source(move |uri| resolver(uri));
+        }
         let style = context.style().clone()
             .with_inline_code_style({
                 let mut inline_code_style = self.inline_code_style.clone();

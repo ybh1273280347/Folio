@@ -86,6 +86,7 @@ pub enum MarkdownEvent {
     Zoom(u8),
     OpenLink(String),
     AskAi(String),
+    FilesChanged,
 }
 
 actions!(
@@ -423,6 +424,17 @@ impl MarkdownPane {
     /// Rename the document identity without replacing its editor or undo history.
     pub fn set_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.path = path;
+        let doc_dir = self
+            .path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+        self.visual_editor.update(cx, |editor, cx| {
+            editor.set_image_source(
+                move |uri| crate::image::resolve_markdown_image_source(&doc_dir, uri),
+                cx,
+            );
+        });
         let title = self.path.file_stem().unwrap().to_string_lossy().into_owned();
         self.title_input.update(cx, |input, cx| input.set_value(title, window, cx));
         for annotation in &mut self.annotations {
@@ -551,8 +563,17 @@ impl MarkdownPane {
                 color: gpui_kit::rgb(color).into(),
             })
             .collect();
+        let initial_doc_dir = path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
         let visual_editor = cx.new(|cx| {
-            let mut editor = BlockEditorState::new(window, cx).with_content_folding();
+            let mut editor = BlockEditorState::new(window, cx)
+                .with_content_folding()
+                .with_clipboard_policy(markdown_editor::ClipboardPolicy::Host)
+                .with_image_source(move |uri| {
+                    crate::image::resolve_markdown_image_source(&initial_doc_dir, uri)
+                });
             editor
                 .set_markdown_extensions(extensions.clone(), cx)
                 .expect("current Markdown parses with the configured GPUI extensions");
@@ -822,6 +843,31 @@ impl MarkdownPane {
                     if pane.hovered_link != *url {
                         pane.hovered_link = url.clone();
                         cx.notify();
+                    }
+                }
+                BlockEditorEvent::PasteRequested { request, item } => {
+                    let text_fallback = item.text().map(|s| s.to_string());
+                    match crate::image::clipboard::extract_images_from_clipboard(item) {
+                        Ok(sources) if sources.is_empty() => {
+                            editor.update(cx, |editor, cx| {
+                                editor.apply_paste(request, text_fallback.as_deref(), cx);
+                            });
+                        }
+                        Ok(_) => {
+                            let consumed = editor.update(cx, |editor, cx| {
+                                editor.apply_paste(request, None, cx)
+                            });
+                            if consumed {
+                                pane.paste_clipboard_images_visual(item, cx);
+                            }
+                        }
+                        Err(err) => {
+                            editor.update(cx, |editor, cx| {
+                                editor.apply_paste(request, None, cx);
+                            });
+                            pane.image_error = Some(err);
+                            cx.notify();
+                        }
                     }
                 }
                 BlockEditorEvent::Focus => cx.emit(MarkdownEvent::Focus),
@@ -1871,11 +1917,78 @@ impl MarkdownPane {
 
     fn insert_image_reference(&mut self, filename: &str, cx: &mut Context<Self>) {
         let insertion = crate::i18n::markdown::image_markdown_insertion(filename);
+        self.insert_visual_markdown(&insertion, cx);
+    }
+
+    fn insert_visual_markdown(&mut self, markdown: &str, cx: &mut Context<Self>) {
         self.visual_editor.update(cx, |editor, cx| {
             if let Ok(mut range) = editor.capture_selection() {
-                let _ = editor.replace_captured(&mut range, &insertion, cx);
+                let _ = editor.replace_captured(&mut range, markdown, cx);
             }
         });
+    }
+
+    fn save_clipboard_images_markdown(
+        &mut self,
+        item: &ClipboardItem,
+        cx: &mut Context<Self>,
+    ) -> Result<Option<String>, String> {
+        let dir = crate::image::markdown_paste_image_dir(&self.path);
+        let saved = crate::image::save_clipboard_images_to_dir(item, &dir)?;
+        if saved.is_empty() {
+            return Ok(None);
+        }
+        let markdown = saved
+            .iter()
+            .map(|saved_path| {
+                let rel = crate::image::markdown_relative_image_ref(&self.path, saved_path);
+                crate::i18n::markdown::image_markdown_insertion(&rel)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        cx.emit(MarkdownEvent::FilesChanged);
+        Ok(Some(markdown))
+    }
+
+    fn paste_clipboard_images_visual(&mut self, item: &ClipboardItem, cx: &mut Context<Self>) {
+        match self.save_clipboard_images_markdown(item, cx) {
+            Ok(Some(markdown)) => self.insert_visual_markdown(&markdown, cx),
+            Ok(None) => {}
+            Err(err) => {
+                self.image_error = Some(err);
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn handle_source_paste(
+        &mut self,
+        item: &ClipboardItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match crate::image::clipboard::extract_images_from_clipboard(item) {
+            Ok(sources) if sources.is_empty() => false,
+            Ok(_) => match self.save_clipboard_images_markdown(item, cx) {
+                Ok(Some(markdown)) => {
+                    self.source_editor.update(cx, |editor, cx| {
+                        editor.insert(&markdown, window, cx);
+                    });
+                    true
+                }
+                Ok(None) => false,
+                Err(err) => {
+                    self.image_error = Some(err);
+                    cx.notify();
+                    true
+                }
+            },
+            Err(err) => {
+                self.image_error = Some(err);
+                cx.notify();
+                true
+            }
+        }
     }
 
     fn confirm_image_import(&mut self, cx: &mut Context<Self>) {

@@ -424,3 +424,21 @@ pub fn drawio_err_export(err: &dyn std::fmt::Display) -> String {
         Locale::En => format!("draw.io export failed: {err}"),
     }
 }
+
+// Image viewer (src/image/viewer.rs)
+pub const IMG_FIT: BiText = BiText::new("适应", "Fit");
+pub const IMG_ACTUAL_SIZE: BiText = BiText::new("1:1", "1:1");
+pub const IMG_TOOLTIP_ZOOM_OUT: BiText = BiText::new("缩小 (Ctrl+-)", "Zoom Out (Ctrl+-)");
+pub const IMG_TOOLTIP_ZOOM_IN: BiText = BiText::new("放大 (Ctrl+=)", "Zoom In (Ctrl+=)");
+pub const IMG_TOOLTIP_FIT: BiText = BiText::new("适应窗口 (Ctrl+0)", "Fit to Window (Ctrl+0)");
+pub const IMG_TOOLTIP_ACTUAL: BiText = BiText::new("实际大小 100% (Ctrl+1)", "Actual Size 100% (Ctrl+1)");
+pub const IMG_HINT_INTERACTION: BiText = BiText::new(
+    "Ctrl+滚轮缩放 · 滚轮上下移动 · 拖拽平移 · 双击切换 100%",
+    "Ctrl+Scroll zoom · Scroll pan · Drag to move · Double-click 100%",
+);
+pub fn img_load_failed(err: &dyn std::fmt::Display) -> String {
+    match locale() {
+        Locale::ZhCn => format!("无法加载图像：{err}"),
+        Locale::En => format!("Failed to load image: {err}"),
+    }
+}
