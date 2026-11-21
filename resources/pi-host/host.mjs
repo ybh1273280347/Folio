@@ -168,8 +168,7 @@ async function createRecord(cwd, manager) {
       ...annotationTools((operation, params, signal) => annotationBridge.request(
         { projectKey: project, sessionId: id }, operation, params, signal)),
       ...tagTools((operation, params, signal) => tagBridge.request(
-        { projectKey: project, sessionId: id }, operation, params, signal),
-      (title, message, opts) => uiContext(record).confirm(title, message, opts))] });
+        { projectKey: project, sessionId: id }, operation, params, signal))] });
   record.session = session;
   record.unsubscribe = session.subscribe(event => {
     if (event.type === 'tool_execution_start' && event.toolName === 'write' && typeof event.args.path === 'string') {

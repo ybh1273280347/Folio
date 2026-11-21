@@ -1034,26 +1034,15 @@ impl Session {
         let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("");
         match method {
             "confirm" => {
-                let has_tag_preview = req.get("tagPreview").is_some();
                 let title = req
                     .get("title")
                     .and_then(|v| v.as_str())
-                    .filter(|title| !title.is_empty())
-                    .unwrap_or(if has_tag_preview {
-                        crate::i18n::ai::TAG_CHANGE_CONFIRM.get()
-                    } else {
-                        crate::i18n::ai::PROMPT_CONFIRM.get()
-                    })
+                    .unwrap_or(crate::i18n::ai::PROMPT_CONFIRM.get())
                     .to_owned();
                 let message = req
                     .get("message")
                     .and_then(|v| v.as_str())
-                    .filter(|message| !message.is_empty())
-                    .unwrap_or(if has_tag_preview {
-                        crate::i18n::ai::TAG_CHANGE_CONFIRM_BODY.get()
-                    } else {
-                        ""
-                    })
+                    .unwrap_or("")
                     .to_owned();
                 let command_approval = req["commandApproval"].as_bool() == Some(true)
                     || title.contains("bash")
