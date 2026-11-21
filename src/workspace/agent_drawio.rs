@@ -135,14 +135,18 @@ impl Workspace {
         };
         let params = serde_json::to_value(operation.params).expect("Draw.io parameters serialize");
         self.drawio_requests.insert(request.id.clone(), request.clone());
-        let dispatched = pane.update(cx, |pane, cx| {
+        let dispatch = pane.update(cx, |pane, cx| {
             pane.request_tool(&request.id, operation_name, params, cx)
         });
-        if !dispatched {
+        if let Err(code) = dispatch {
             self.drawio_requests.remove(&request.id);
             self.ai.read(cx).respond_workspace_tool(
                 request,
-                Failure::new("drawio_not_ready", "当前 Draw.io 画布尚未就绪，请稍后重试。").result(),
+                Failure::new(code, match code {
+                    "drawio_bridge_unavailable" => "Folio Draw.io 工具桥尚未就绪，请稍后重试。",
+                    "drawio_dispatch_failed" => "Folio 无法向当前 Draw.io 画布派发工具请求。",
+                    _ => "当前 Draw.io 画布尚未就绪，请稍后重试。",
+                }).result(),
             );
         }
     }
