@@ -188,23 +188,19 @@ fn terminate_process_tree(child: &mut Child, pid: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Engine;
 
     /// This acceptance check runs real TeX engines; keep it opt-in so normal
     /// file-operation checks do not repeatedly rebuild documents.
     #[test]
     #[ignore = "requires installed TeX Live"]
-    fn real_tex_and_markdown_publish_next_to_their_sources() {
+    fn real_tex_publishes_next_to_source_and_preserves_last_good_preview() {
         let temp = tempfile::tempdir().unwrap();
         let folder = temp.path().join("project with spaces");
-        fs::create_dir_all(folder.join("nested")).unwrap();
+        fs::create_dir_all(&folder).unwrap();
         fs::write(
             folder.join("main.tex"),
             "\\documentclass{article}\n\\begin{document}Folio native compilation.\\end{document}",
-        )
-        .unwrap();
-        fs::write(
-            folder.join("nested/notes.md"),
-            "# Folio\n\n中文导出与 English content.\n",
         )
         .unwrap();
         let mut project = Project {
@@ -231,21 +227,7 @@ mod tests {
                     .starts_with(b"%PDF-")
             );
         }
-        let result = compile_markdown(
-            &project,
-            "nested/notes.md",
-            &build,
-            Arc::new(AtomicBool::new(false)),
-            |_| {},
-        )
-        .unwrap();
-        assert_eq!(result.status, BuildStatus::Success, "{}", result.log);
-        assert!(
-            fs::read(folder.join("nested/notes.pdf"))
-                .unwrap()
-                .starts_with(b"%PDF-")
-        );
-        let published = fs::read(result.preview.unwrap()).unwrap();
+        let published = fs::read(build.join("smoke/preview.pdf")).unwrap();
         fs::write(
             folder.join("main.tex"),
             "\\documentclass{article}\\begin{document}\\undefinedfolio\\end{document}",

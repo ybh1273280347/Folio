@@ -2,7 +2,9 @@
 //! Disk revisions arbitrate external edits; conflicted drafts never autosave over them.
 mod annotations;
 mod agent_tags;
+mod build;
 mod tags;
+use build::{Build, BuildEvent};
 use crate::ai::{AiPane, AiPaneEvent, AttachedFile};
 use gpui_kit::component::Sizable;
 use crate::theme::color as rgb;
@@ -112,10 +114,6 @@ struct OpenDocument {
     editor: Entity<EditorState>,
     last_edit: Instant,
     _subscription: Subscription,
-}
-enum BuildEvent {
-    Log(String),
-    Finished(io::Result<compiler::BuildResult>),
 }
 #[derive(Clone)]
 enum NameAction {
@@ -281,8 +279,6 @@ pub struct Workspace {
     tags: tags::TagPanel,
     reading_panes: Vec<String>,
     markdown_panes: BTreeMap<String, Entity<MarkdownPane>>,
-    // Retain the capture pane until publication, even when its tab closes.
-    markdown_export: Option<Entity<MarkdownPane>>,
     focused_markdown: Option<String>,
     markdown_changed: BTreeSet<String>,
     collapsed_folders: BTreeSet<String>,
@@ -309,19 +305,7 @@ pub struct Workspace {
     watch_paths: BTreeSet<PathBuf>,
     watch_tree: bool,
     watched_directories: BTreeSet<PathBuf>,
-    build_events: Option<mpsc::Receiver<BuildEvent>>,
-    cancellation: Option<Arc<AtomicBool>>,
-    build_status: BuildStatus,
-    build_target: String,
-    batch_queue: std::collections::VecDeque<String>,
-    batch_next: Option<Instant>,
-    batch_target: Option<String>,
-    batch_logs: String,
-    batch_failed: bool,
-    batch_running: bool,
-    build_started: Option<Instant>,
-    build_duration: Duration,
-    logs: String,
+    build: Build,
     show_logs: bool,
     terminal: Entity<TerminalPane>,
     ai: Entity<AiPane>,
@@ -343,7 +327,6 @@ pub struct Workspace {
     name_input: Entity<InputState>,
     focus: FocusHandle,
     source_version: u64,
-    build_version: u64,
     close_requested: bool,
     dialog_response: Option<(Dialog, rfd::MessageDialogResult)>,
     dialog_prompt: Option<DialogPrompt>,
@@ -753,7 +736,6 @@ impl Workspace {
             tags,
             reading_panes: Vec::new(),
             markdown_panes: BTreeMap::new(),
-            markdown_export: None,
             focused_markdown: None,
             markdown_changed: BTreeSet::new(),
             collapsed_folders: BTreeSet::new(),
@@ -780,19 +762,7 @@ impl Workspace {
             watch_paths: BTreeSet::new(),
             watch_tree: false,
             watched_directories: BTreeSet::new(),
-            build_events: None,
-            cancellation: None,
-            build_status: BuildStatus::Idle,
-            build_target: String::new(),
-            batch_queue: Default::default(),
-            batch_next: None,
-            batch_target: None,
-            batch_logs: String::new(),
-            batch_failed: false,
-            batch_running: false,
-            build_started: None,
-            build_duration: Duration::ZERO,
-            logs: String::new(),
+            build: Build::default(),
             show_logs: false,
             terminal,
             ai,
@@ -814,7 +784,6 @@ impl Workspace {
             name_input,
             focus: cx.focus_handle(),
             source_version: 0,
-            build_version: 0,
             close_requested: false,
             dialog_response: None,
             dialog_prompt: None,
@@ -1012,9 +981,9 @@ impl Workspace {
             selected_index: self.right_panel_selected,
             preview_open: self.show_build_preview,
             logs_open: self.show_logs,
-            build_running: self.build_started.is_some(),
-            build_failed: matches!(self.build_status, BuildStatus::Failed),
-            build_target: self.build_target.clone(),
+            build_running: self.build.is_running(),
+            build_failed: matches!(self.build.status, BuildStatus::Failed),
+            build_target: self.build.target.clone(),
             ai_shortcut: AppSettings::format_key_badge(&self.settings.key_for("toggle_ai")),
             terminal_shortcut: AppSettings::format_key_badge(
                 &self.settings.key_for("toggle_terminal"),
@@ -1183,7 +1152,6 @@ impl Workspace {
         self.active.clear();
         self.reading_panes.clear();
         self.markdown_panes.clear();
-        self.markdown_export = None;
         self.focused_markdown = None;
         self.markdown_changed.clear();
         self.show_build_preview = false;
@@ -1214,8 +1182,7 @@ impl Workspace {
         self.collapsed_folders.clear();
         self.focused_folder = None;
         self.selected_files.clear();
-        self.logs.clear();
-        self.build_status = BuildStatus::Idle;
+        self.build.clear_result();
         self.clear_open_documents(window, cx);
 
         let session = self
@@ -1316,8 +1283,7 @@ impl Workspace {
         self.files = files::list_files(Path::new(&project.folder))?;
         self.folders = files::list_folders(Path::new(&project.folder)).unwrap_or_default();
         self.refresh_tags(cx);
-        self.logs.clear();
-        self.build_status = BuildStatus::Idle;
+        self.build.clear_result();
         self.notice = None;
         self.preview = None;
         self.clear_open_documents(window, cx);
@@ -1375,8 +1341,7 @@ impl Workspace {
     }
     fn switch_project(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let retry_id = id.to_owned();
-        if self.cancellation.is_some()
-            || self.batch_running
+        if self.build.is_busy()
             || !self.confirm_drafts(window, cx, move |app, window, cx| {
                 app.switch_project(&retry_id, window, cx)
             })
@@ -1391,8 +1356,7 @@ impl Workspace {
         if self.config.active_workspace == Some(WorkspaceLocation::Default) {
             return;
         }
-        if self.cancellation.is_some()
-            || self.batch_running
+        if self.build.is_busy()
             || !self.confirm_drafts(window, cx, |app, window, cx| {
                 app.switch_to_default(window, cx)
             })
@@ -1420,8 +1384,7 @@ impl Workspace {
         }
     }
     fn add_project(&mut self, _: &OpenProject, window: &mut Window, cx: &mut Context<Self>) {
-        if self.cancellation.is_some()
-            || self.batch_running
+        if self.build.is_busy()
             || !self.confirm_drafts(window, cx, |app, window, cx| {
                 app.add_project(&OpenProject, window, cx)
             })
@@ -2131,9 +2094,9 @@ impl Workspace {
         }) {
             return false;
         }
-        if self.cancellation.is_some() {
+        if self.build.is_running() {
             // Let the build worker terminate latexmk's child process tree before exit.
-            self.cancel_build();
+            self.build.cancel();
             self.close_requested = true;
             return false;
         }
@@ -2488,87 +2451,32 @@ impl Workspace {
                 }
             }
         }
-        // Reuse the workspace tick for elapsed time, including quiet compiler phases.
-        // Idle workspaces do not redraw for the build indicator.
-        if let Some(started) = self.build_started {
-            self.build_duration = started.elapsed();
+        // Keep the duration current even during quiet compiler phases.
+        if self.build.is_running() {
             cx.notify();
         }
-        let events: Vec<_> = self
-            .build_events
-            .iter()
-            .flat_map(|receiver| receiver.try_iter())
-            .collect();
-        for event in events {
-            match event {
-                BuildEvent::Log(text) => {
-                    self.logs.push_str(&text);
-                    cx.notify();
-                }
-                BuildEvent::Finished(result) => {
-                    self.markdown_export = None;
-                    self.build_duration = self
-                        .build_started
-                        .take()
-                        .expect("finished build has a start time")
-                        .elapsed();
-                    self.cancellation = None;
-                    self.build_events = None;
-                    if self.close_requested {
-                        self.release_all_html_panes(window, cx);
-                        window.remove_window();
-                        cx.quit();
-                        return;
-                    }
-                    match result {
-                        Ok(result) => {
-                            self.build_status = result.status;
-                            self.build_duration = self.build_duration.max(result.elapsed);
-                            self.logs = result.log;
-                            if let Some(path) = result.preview {
-                                self.release_build_pdf(window, cx);
-                                self.build_pdf =
-                                    Some(self.new_pdf_pane(path.clone(), window, cx));
-                                self.preview = Some(path);
-                            }
-                            self.show_logs = result.status == BuildStatus::Failed;
-                        }
-                        Err(error) => {
-                            self.build_status = BuildStatus::Failed;
-                            self.logs.push_str(&format!("\n{error}\n"));
-                            self.report(error, cx);
-                            self.show_logs = true;
-                        }
-                    }
-                    if self.batch_running {
-                        self.batch_logs.push_str(&format!(
-                            "\n===== {} =====\n{}\n",
-                            self.build_target, self.logs
-                        ));
-                        self.batch_failed |= self.build_status == BuildStatus::Failed;
-                        if self.build_status != BuildStatus::Cancelled
-                            && !self.batch_queue.is_empty()
-                        {
-                            self.prepare_batch_next(window, cx);
-                        } else {
-                            self.batch_running = false;
-                            self.logs = std::mem::take(&mut self.batch_logs);
-                            if self.batch_failed {
-                                self.build_status = BuildStatus::Failed;
-                                self.show_logs = true;
-                            }
-                        }
-                    }
-                    cx.notify();
-                }
+        if let Some(completed) = self.build.poll() {
+            if self.close_requested {
+                self.release_all_html_panes(window, cx);
+                window.remove_window();
+                cx.quit();
+                return;
+            }
+            if let Some(path) = completed.preview {
+                self.release_build_pdf(window, cx);
+                self.build_pdf = Some(self.new_pdf_pane(path.clone(), window, cx));
+                self.preview = Some(path);
+            }
+            if let Some(error) = completed.error {
+                self.report(error, cx);
+            }
+            self.show_logs = self.build.status == BuildStatus::Failed;
+            if let Some(target) = completed.next_target {
+                self.prepare_batch_target(target, window, cx);
             }
         }
-        if self
-            .batch_next
-            .is_some_and(|time| time.elapsed() >= Duration::from_millis(250))
-        {
-            self.batch_next = None;
-            self.compile(&Compile, window, cx);
+        if let Some(target) = self.build.take_ready_target() {
+            self.start_build(target, cx);
         }
         let html_panes: Vec<_> = self.html_panes.values().cloned().collect();
         for pane in html_panes {
@@ -2576,7 +2484,7 @@ impl Workspace {
         }
     }
     fn compile_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.cancellation.is_some() || self.batch_running {
+        if self.build.is_busy() {
             return;
         }
         let targets: Vec<_> = self
@@ -2607,15 +2515,11 @@ impl Workspace {
         if !self.save_all(cx) {
             return;
         }
-        self.batch_queue = targets.into();
-        self.batch_logs.clear();
-        self.batch_failed = false;
-        self.batch_running = true;
-        self.prepare_batch_next(window, cx);
+        let target = self.build.begin_batch(targets);
+        self.prepare_batch_target(target, window, cx);
     }
 
-    fn prepare_batch_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let target = self.batch_queue.pop_front().unwrap();
+    fn prepare_batch_target(&mut self, target: String, window: &mut Window, cx: &mut Context<Self>) {
         let file = self.files.iter().find(|file| file.path == target).cloned();
         let result = file
             .ok_or_else(|| {
@@ -2626,24 +2530,14 @@ impl Workspace {
             })
             .and_then(|file| self.open_file(&file, window, cx));
         if let Err(error) = result {
-            self.batch_running = false;
-            self.batch_queue.clear();
+            self.build.abort_batch();
             self.report(error, cx);
             return;
         }
-        // Markdown export captures the rendered pane, so let GPUI paint it first.
-        self.batch_target = Some(target);
-        self.batch_next = Some(Instant::now());
+        self.build.wait_for_paint(target);
         cx.notify();
     }
 
-    fn cancel_build(&mut self) {
-        self.batch_queue.clear();
-        self.batch_next = None;
-        if let Some(cancelled) = &self.cancellation {
-            cancelled.store(true, Ordering::Relaxed);
-        }
-    }
     fn compile_target(&self) -> Option<&str> {
         let focused = self.focused_markdown.as_deref().unwrap_or(&self.active);
         let lower = focused.to_lowercase();
@@ -2657,29 +2551,21 @@ impl Workspace {
     }
 
     fn compile(&mut self, _: &Compile, _: &mut Window, cx: &mut Context<Self>) {
-        if self.batch_running && self.batch_next.is_some() {
-            self.batch_next = None;
-            self.batch_target = None;
-            self.batch_queue.clear();
-            self.batch_running = false;
-            self.build_status = BuildStatus::Cancelled;
+        if self.build.is_busy() {
+            self.build.cancel();
             cx.notify();
-            return;
-        }
-        if self.cancellation.is_some() {
-            self.cancel_build();
             return;
         }
         // Match the original app: a focused Markdown split overrides the active
         // tab; other files use the project's configured TeX entry point.
-        let Some(target) = self
-            .batch_target
-            .take()
-            .or_else(|| self.compile_target().map(str::to_owned))
-        else {
+        let Some(target) = self.compile_target().map(str::to_owned) else {
             self.report(crate::i18n::workspace::ERR_SELECT_MAIN_TEX.get(), cx);
             return;
         };
+        self.start_build(target, cx);
+    }
+
+    fn start_build(&mut self, target: String, cx: &mut Context<Self>) {
         let mut project = self.directory_workspace().cloned().unwrap_or_else(|| {
             let source = PathBuf::from(&target);
             let root = source.parent().expect("standalone document has a parent");
@@ -2707,20 +2593,18 @@ impl Workspace {
             }
         });
         if !self.save_all(cx) {
-            self.batch_running = false;
-            self.batch_queue.clear();
+            self.build.abort_batch();
             return;
         }
         let mut build_root = match storage::data_directory() {
             Ok(path) => path.join("builds"),
             Err(error) => {
-                self.batch_running = false;
-                self.batch_queue.clear();
+                self.build.abort_batch();
                 self.report(error, cx);
                 return;
             }
         };
-        if self.batch_running {
+        if self.build.is_batch() {
             use sha2::{Digest, Sha256};
             // Different directories can contain TeX sources with the same stem;
             // their latexmk work files must not share an output directory.
@@ -2737,26 +2621,18 @@ impl Workspace {
         if markdown.is_none() && self.directory_workspace().is_some() {
             project.main_file = target.clone();
         }
-        let cancelled = Arc::new(AtomicBool::new(false));
-        self.build_version = self.source_version;
-        self.build_target = target;
-        self.build_status = BuildStatus::Idle;
-        self.show_build_preview = true;
-        self.cancellation = Some(cancelled.clone());
-        self.build_started = Some(Instant::now());
-        self.build_duration = Duration::ZERO;
-        self.logs.clear();
-        self.notice = None;
-        let (sender, receiver) = mpsc::channel();
-        self.build_events = Some(receiver);
-        if let Some(file) = markdown {
+        let capture = markdown.as_ref().map(|file| {
             let key = if self.markdown_panes.contains_key(&format!("reading:{file}")) {
                 format!("reading:{file}")
             } else {
-                file.clone()
+                file.to_owned()
             };
-            let pane = self.markdown_panes[&key].clone();
-            self.markdown_export = Some(pane.clone());
+            self.markdown_panes[&key].clone()
+        });
+        let (cancelled, sender) = self.build.start(target, self.source_version, capture.clone());
+        self.show_build_preview = true;
+        self.notice = None;
+        if let Some((file, pane)) = markdown.zip(capture) {
             let request = crate::markdown_pdf::ExportRequest {
                 destination: PathBuf::from(&project.folder)
                     .join(&file)
@@ -2876,7 +2752,7 @@ impl Workspace {
         if dragged.1.as_deref() != Some(project.id.as_str()) {
             return Err(io::Error::other(crate::i18n::workspace::ERR_MOVE_SAME_PROJECT_FILE_ONLY.get()));
         }
-        if self.cancellation.is_some() || self.batch_running {
+        if self.build.is_busy() {
             return Err(io::Error::other(crate::i18n::workspace::ERR_WAIT_BUILD_MOVE_FILE.get()));
         }
         let root = PathBuf::from(&project.folder);
@@ -2928,7 +2804,7 @@ impl Workspace {
         if dragged.1 != project.id {
             return Err(io::Error::other(crate::i18n::workspace::ERR_MOVE_SAME_PROJECT_FOLDER_ONLY.get()));
         }
-        if self.cancellation.is_some() || self.batch_running {
+        if self.build.is_busy() {
             return Err(io::Error::other(crate::i18n::workspace::ERR_WAIT_BUILD_MOVE_FOLDER.get()));
         }
         let root = PathBuf::from(&project.folder);
@@ -2992,7 +2868,7 @@ impl Workspace {
 
     fn new_default_markdown(&mut self, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
         if self.config.active_workspace != Some(WorkspaceLocation::Default) {
-            if self.cancellation.is_some() || self.batch_running { return Ok(()); }
+            if self.build.is_busy() { return Ok(()); }
             if !self.confirm_drafts(window, cx, |app, window, cx| {
                 if let Err(error) = app.new_default_markdown(window, cx) { app.report(error, cx); }
             }) { return Ok(()); }
@@ -3009,7 +2885,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> io::Result<()> {
         if self.directory_workspace().is_none() {
-            if self.cancellation.is_some() || self.batch_running {
+            if self.build.is_busy() {
                 return Ok(());
             }
             let target_folder = folder.map(ToOwned::to_owned);
@@ -3348,7 +3224,7 @@ impl Workspace {
     }
 
     fn delete_folder(&mut self, folder: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.cancellation.is_some() {
+        if self.build.is_running() {
             return;
         }
         let prefix = format!("{folder}/");
@@ -3362,14 +3238,14 @@ impl Workspace {
     }
 
     fn delete_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_files.is_empty() || self.cancellation.is_some() {
+        if self.selected_files.is_empty() || self.build.is_running() {
             return;
         }
         self.confirm_trash(self.selected_files.iter().cloned().collect(), window, cx);
     }
 
     fn confirm_trash(&mut self, paths: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
-        if paths.is_empty() || self.cancellation.is_some() { return; }
+        if paths.is_empty() || self.build.is_running() { return; }
         let retry = paths.clone();
         if self.ask(
             Dialog::DeleteSelected,
@@ -3511,7 +3387,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.directory_workspace().is_none() || self.cancellation.is_some() {
+        if self.directory_workspace().is_none() || self.build.is_running() {
             return;
         }
         if !self.selected_files.is_empty() {
@@ -3635,7 +3511,7 @@ impl Workspace {
     }
 
     fn set_engine(&mut self, engine: Engine, cx: &mut Context<Self>) {
-        if self.cancellation.is_some() {
+        if self.build.is_running() {
             return;
         }
         if let Some(project) = self
@@ -3805,7 +3681,7 @@ impl Workspace {
             .dialog_response
             .as_ref()
             .is_some_and(|(kind, _)| *kind == Dialog::RemoveProject);
-        if self.cancellation.is_some()
+        if self.build.is_busy()
             || (!removing
                 && !self.confirm_drafts(window, cx, move |app, window, cx| {
                     app.remove_project(&retry_id, window, cx)
@@ -4522,7 +4398,7 @@ impl Workspace {
                                 menu.item(compact_menu_item(crate::i18n::workspace::MENU_SET_MAIN_FILE.get()).on_click(
                                     move |_, _, cx| {
                                         main_app.update(cx, |app, cx| {
-                                            if app.cancellation.is_some() {
+                                            if app.build.is_running() {
                                                 return;
                                             }
                                             app.config
@@ -4618,7 +4494,7 @@ impl Workspace {
                 .on_click(cx.listener(|app, _, window, cx| {
                 app.show_trash = false;
                 if app.directory_workspace().is_none() { return; }
-                if app.cancellation.is_some() || app.batch_running || !app.confirm_drafts(window, cx, |app, window, cx| {
+                if app.build.is_busy() || !app.confirm_drafts(window, cx, |app, window, cx| {
                     if let Err(error) = app.select_loose_files(window, cx) { app.report(error, cx); }
                 }) { return; }
                 if let Err(error) = app.select_loose_files(window, cx) { app.report(error, cx); }
@@ -5405,7 +5281,7 @@ impl Workspace {
                     .justify_center()
                     .gap_4()
                     .text_color(rgb(MUTED))
-                    .child(if self.cancellation.is_some() {
+                    .child(if self.build.is_busy() {
                         crate::i18n::workspace::STATUS_COMPILING.get()
                     } else if self.preview.is_some() {
                         crate::i18n::workspace::STATUS_COMPILE_OK.get()
@@ -5446,8 +5322,9 @@ impl Render for Workspace {
             pane.set_active_file(active_file, cx);
         });
         let exports: Vec<_> = self
-            .markdown_export
-            .iter()
+            .build
+            .capture()
+            .into_iter()
             .filter_map(|pane| pane.read(cx).export_element())
             .collect();
         for (key, pane) in &self.pdf_panes {
@@ -5561,43 +5438,38 @@ impl Render for Workspace {
             work_area =
                 work_area.child(resizable_panel().child(self.render_reading_pane(path, cx)));
         }
-        let label = if self.cancellation.is_some() {
+        let label = if self.build.is_busy() {
             crate::i18n::workspace::BTN_STOP_BUILD.get()
         } else {
             crate::i18n::workspace::BTN_COMPILE_BUILD.get()
         };
-        let status = if self.build_started.is_some() {
+        let status = if self.build.is_running() {
             format!(
                 "{} · {:.1}s",
-                if self
-                    .cancellation
-                    .as_ref()
-                    .expect("running build owns cancellation")
-                    .load(Ordering::Relaxed)
-                {
+                if self.build.is_cancelling() {
                     crate::i18n::workspace::STATUS_STOPPING.get()
                 } else {
                     crate::i18n::workspace::STATUS_BUILDING.get()
                 },
-                self.build_duration.as_secs_f32()
+                self.build.duration.as_secs_f32()
             )
         } else {
-            match self.build_status {
+            match self.build.status {
                 BuildStatus::Idle => String::new(),
                 BuildStatus::Success => format!(
                     "✓ {:.1}s{}",
-                    self.build_duration.as_secs_f32(),
-                    if self.source_version != self.build_version {
+                    self.build.duration.as_secs_f32(),
+                    if self.source_version != self.build.source_version {
                         crate::i18n::workspace::STATUS_NEEDS_REBUILD.get()
                     } else {
                         ""
                     }
                 ),
                 BuildStatus::Failed => {
-                    crate::i18n::workspace::status_failed_secs(self.build_duration.as_secs_f32())
+                    crate::i18n::workspace::status_failed_secs(self.build.duration.as_secs_f32())
                 }
                 BuildStatus::Cancelled => {
-                    crate::i18n::workspace::status_cancelled_secs(self.build_duration.as_secs_f32())
+                    crate::i18n::workspace::status_cancelled_secs(self.build.duration.as_secs_f32())
                 }
             }
         };
@@ -5633,7 +5505,7 @@ impl Render for Workspace {
                     .size(px(self.settings.log_height))
                     .size_range(px(100.)..px(700.))
                     .fixed()
-                    .child(crate::build_log::panel(self.logs.clone(), cx.listener(|app, _, _, cx| {
+                    .child(crate::build_log::panel(self.build.logs.clone(), cx.listener(|app, _, _, cx| {
                         app.show_logs = false;
                         cx.notify();
                     }))),
@@ -5930,7 +5802,7 @@ impl Render for Workspace {
                                                     .checked(file == main_label)
                                                     .on_click(move |_, _, cx| {
                                                         app.update(cx, |app, cx| {
-                                                            if app.cancellation.is_some() {
+                                                            if app.build.is_running() {
                                                                 return;
                                                             }
                                                             app.config
@@ -5969,13 +5841,13 @@ impl Render for Workspace {
                             .gap_1()
                             .text_xs()
                             .text_color(rgb(MUTED))
-                            .when(self.build_started.is_some(), |status| {
+                            .when(self.build.is_running(), |status| {
                                 status
                                     .w(px(140.))
                                     .text_color(rgb(crate::ui::MAIN_TEX_COLOR))
                             })
                             .child(status)
-                            .when(self.build_started.is_some(), |status| {
+                            .when(self.build.is_running(), |status| {
                                 // latexmk has no reliable percentage; show activity without inventing one.
                                 status.child(
                                     Progress::new("build-progress")
@@ -6474,7 +6346,8 @@ fn classify_markdown_link(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{classify_markdown_link, MarkdownLinkTarget};
+    use std::path::PathBuf;
 
     #[test]
     fn classify_markdown_link_handles_http_relative_and_windows_paths() {
