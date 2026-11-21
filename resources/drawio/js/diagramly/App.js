@@ -329,7 +329,7 @@ App.startTime = new Date();
  * Defines plugin IDs for loading via p URL parameter. Update the table at
  * https://www.drawio.com/doc/faq/supported-url-parameters
  */
-App.pluginRegistry = {'ex': 'plugins/explore.js',
+App.pluginRegistry = {'folio': 'plugins/folio.js', 'ex': 'plugins/explore.js',
 	'ac': 'plugins/connect.js', 'acj': 'plugins/connectJira.js',
 	'ac148': 'plugins/cConf-1-4-8.js', 'ac148cmnt': 'plugins/cConf-comments.js', 
 	'nxtcld': 'plugins/nextcloud.js',
@@ -1238,15 +1238,19 @@ App.main = function main(callback, createUi)
 			}
 			
 			// Loads plugins
-			if (urlParams['plugins'] != '0' && urlParams['offline'] != '1')
+			// Offline embed mode only permits Folio's bundled plugin when explicitly requested.
+			if (urlParams['plugins'] != '0' && (urlParams['offline'] != '1' ||
+				urlParams['p'] == 'folio'))
 			{
 				// mxSettings is not yet initialized in configure mode, redirect parameter
 				// to p URL parameter in caller for plugins in embed mode
-				var plugins = (mxSettings.settings != null) ? mxSettings.getPlugins() : null;
+				var plugins = (mxSettings.settings != null && urlParams['offline'] != '1') ?
+					mxSettings.getPlugins() : null;
 				
 				// Configured plugins in embed mode with configure=1 URL should be loaded so we
 				// look ahead here and parse the config to fetch the list of custom plugins
-				if (mxSettings.settings == null && isLocalStorage && typeof(JSON) !== 'undefined')
+				if (urlParams['offline'] != '1' && mxSettings.settings == null &&
+					isLocalStorage && typeof(JSON) !== 'undefined')
 				{
 					try
 					{

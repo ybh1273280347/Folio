@@ -1,8 +1,9 @@
 //! Read and write native Draw.io files for the AI workspace tools.
 use super::Workspace;
+use super::documents::PaneKey;
 use crate::{ai::WorkspaceToolRequest, files};
 use gpui_kit::Context;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     fs::{self, OpenOptions},
@@ -29,19 +30,22 @@ impl Failure {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 enum Operation {
     Read,
     Create,
     Update,
+    GetSelection,
+    EditCells,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Params {
-    path: String,
+    path: Option<String>,
     xml: Option<String>,
+    operations: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,10 +62,100 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if request.kind == crate::ai::WorkspaceToolKind::DrawioCancel {
+            self.drawio_requests.remove(&request.id);
+            return;
+        }
+        let operation: Request = match serde_json::from_value(request.arguments.clone()) {
+            Ok(operation) => operation,
+            Err(error) => {
+                self.ai.read(cx).respond_workspace_tool(
+                    request,
+                    Failure::new("invalid_request", error.to_string()).result(),
+                );
+                return;
+            }
+        };
+        if matches!(operation.operation, Operation::GetSelection | Operation::EditCells) {
+            self.drawio_canvas_request(request, operation, cx);
             return;
         }
         let result = self.drawio_result(request);
         self.ai.read(cx).respond_workspace_tool(request, result);
+    }
+
+    fn drawio_canvas_request(
+        &mut self,
+        request: &WorkspaceToolRequest,
+        operation: Request,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.directory_workspace() else {
+            self.ai.read(cx).respond_workspace_tool(
+                request,
+                Failure::new("project_not_active", "Draw.io 工具需要当前项目或默认空间。").result(),
+            );
+            return;
+        };
+        let root = match dunce::canonicalize(&project.folder) {
+            Ok(root) => root,
+            Err(error) => {
+                self.ai.read(cx).respond_workspace_tool(
+                    request,
+                    Failure::new("project_unavailable", error.to_string()).result(),
+                );
+                return;
+            }
+        };
+        if request.project_key != crate::ai::project_key(&root) {
+            self.ai.read(cx).respond_workspace_tool(
+                request,
+                Failure::new("project_not_active", "AI 会话所属项目已切换，请在当前项目重试。").result(),
+            );
+            return;
+        }
+        let path = self.documents.active.clone();
+        if path.is_empty() || !files::is_drawio(Path::new(&path)) {
+            self.ai.read(cx).respond_workspace_tool(
+                request,
+                Failure::new("drawio_not_active", "请先打开要操作的 Draw.io 图表并切换到该页签。").result(),
+            );
+            return;
+        }
+        let Some(pane) = self.documents.drawio_panes.get(&PaneKey::tab(&path)).cloned() else {
+            self.ai.read(cx).respond_workspace_tool(
+                request,
+                Failure::new("drawio_not_ready", "当前 Draw.io 画布尚未就绪，请稍后重试。").result(),
+            );
+            return;
+        };
+        let operation_name = match operation.operation {
+            Operation::GetSelection => "get_selection",
+            Operation::EditCells => "edit_cells",
+            _ => unreachable!(),
+        };
+        let params = serde_json::to_value(operation.params).expect("Draw.io parameters serialize");
+        self.drawio_requests.insert(request.id.clone(), request.clone());
+        let dispatched = pane.update(cx, |pane, cx| {
+            pane.request_tool(&request.id, operation_name, params, cx)
+        });
+        if !dispatched {
+            self.drawio_requests.remove(&request.id);
+            self.ai.read(cx).respond_workspace_tool(
+                request,
+                Failure::new("drawio_not_ready", "当前 Draw.io 画布尚未就绪，请稍后重试。").result(),
+            );
+        }
+    }
+
+    pub(super) fn drawio_tool_result(
+        &mut self,
+        request_id: &str,
+        result: Value,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(request) = self.drawio_requests.remove(request_id) {
+            self.ai.read(cx).respond_workspace_tool(&request, result);
+        }
     }
 
     fn drawio_result(&self, request: &WorkspaceToolRequest) -> Value {
@@ -84,12 +178,15 @@ impl Workspace {
             )
             .result();
         }
+        if operation.params.path.is_none() {
+            return Failure::new("invalid_request", "文件操作必须提供 path。").result();
+        }
         execute(&root, operation).unwrap_or_else(Failure::result)
     }
 }
 
 fn execute(root: &Path, request: Request) -> Result<Value, Failure> {
-    let relative = validate_relative_path(&request.params.path)?;
+    let relative = validate_relative_path(request.params.path.as_deref().unwrap_or_default())?;
     let path_text = relative.to_string_lossy().replace('\\', "/");
     match request.operation {
         Operation::Read => {
@@ -132,6 +229,9 @@ fn execute(root: &Path, request: Request) -> Result<Value, Failure> {
             fs::write(path, xml.as_bytes())
                 .map_err(|error| Failure::new("write_failed", error.to_string()))?;
             Ok(json!({ "status": "ok", "path": path_text }))
+        }
+        Operation::GetSelection | Operation::EditCells => {
+            unreachable!("canvas operations are dispatched to the active Draw.io pane")
         }
     }
 }
@@ -222,15 +322,15 @@ fn validate_xml(xml: &str) -> Result<(), Failure> {
 #[cfg(test)]
 mod tests {
     use super::{Operation, Params, Request, execute};
-    use serde_json::json;
     use std::fs;
 
     fn request(operation: Operation, path: &str, xml: Option<&str>) -> Request {
         Request {
             operation,
             params: Params {
-                path: path.into(),
+                path: Some(path.into()),
                 xml: xml.map(str::to_owned),
+                operations: None,
             },
         }
     }

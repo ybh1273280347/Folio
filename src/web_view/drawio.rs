@@ -67,6 +67,7 @@ pub enum DrawioPaneEvent {
     OpenExternal(String),
     Notice(String),
     Error(String),
+    ToolResult { request_id: String, result: serde_json::Value },
 }
 
 enum DrawioInternalEvent {
@@ -78,6 +79,8 @@ enum DrawioInternalEvent {
 #[derive(Debug, Deserialize)]
 struct DrawioIncoming {
     event: Option<String>,
+    request_id: Option<String>,
+    result: Option<serde_json::Value>,
     xml: Option<String>,
     data: Option<String>,
     format: Option<String>,
@@ -194,6 +197,33 @@ impl DrawioPane {
         cx.notify();
     }
 
+    /// Invoke the bundled Folio plugin and return its result through the pane IPC channel.
+    pub fn request_tool(
+        &self,
+        request_id: &str,
+        operation: &str,
+        params: serde_json::Value,
+        cx: &App,
+    ) -> bool {
+        if !self.ready {
+            return false;
+        }
+        let payload = json!({
+            "request_id": request_id,
+            "operation": operation,
+            "params": params,
+        });
+        let Ok(encoded) = serde_json::to_string(&payload.to_string()) else {
+            return false;
+        };
+        let script = format!(
+            "if (typeof window.__folioDrawioTool !== 'function') throw new Error('Folio Draw.io 插件未加载'); window.__folioDrawioTool({encoded});"
+        );
+        self.webview
+            .as_ref()
+            .is_some_and(|webview| webview.read(cx).raw().evaluate_script(&script).is_ok())
+    }
+
     pub fn reload_if_external(&mut self, cx: &mut Context<Self>) {
         let Ok(bytes) = fs::read(&self.file_path) else {
             return;
@@ -264,6 +294,11 @@ impl DrawioPane {
             return;
         };
         match event {
+            "folio_tool_result" => {
+                if let (Some(request_id), Some(result)) = (msg.request_id, msg.result) {
+                    cx.emit(DrawioPaneEvent::ToolResult { request_id, result });
+                }
+            }
             "configure" => {
                 self.send_configure(cx);
             }
@@ -497,7 +532,7 @@ impl DrawioPane {
 
         // Always load draw.io UI in Simplified Chinese while keeping outer Folio controls synced with `locale()`.
         let entry_url = format!(
-            "https://{DRAWIO_HOST}/index.html?embed=1&proto=json&configure=1&spin=1&offline=1&libraries=1&noExitBtn=1&saveAndExit=0&lang=zh"
+            "https://{DRAWIO_HOST}/index.html?embed=1&proto=json&configure=1&spin=1&offline=1&libraries=1&noExitBtn=1&saveAndExit=0&lang=zh&p=folio"
         );
 
         let task = cx.spawn_in(window, async move |this, cx| {

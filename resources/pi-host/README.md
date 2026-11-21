@@ -22,7 +22,7 @@
 > - 新增运行时 `.mjs` 模块或子目录会自动打包，无需修改 `package.ps1`。
 > - 不要把本机调试文件、大体积临时数据放到 `resources/pi-host` 根目录下。
 
-Draw.io 工具提供 `folio_drawio_read`、`folio_drawio_create` 和 `folio_drawio_update`。工具只接受项目内 `.drawio` 相对路径。创建不会覆盖已有文件，写入内容必须是根元素为 `mxfile` 的有效 XML。
+Draw.io 工具提供文件级 `folio_drawio_read`、`folio_drawio_create`、`folio_drawio_update`，以及当前画布级 `folio_drawio_get_selection` 和 `folio_drawio_edit_cells`。画布级工具操作当前活动的 `.drawio` 页签。修改支持新增顶点/连线、按 ID 更新文本/样式/几何/端点，以及按 ID 删除。文件级工具只接受项目内 `.drawio` 相对路径，创建不会覆盖已有文件，写入内容必须是根元素为 `mxfile` 的有效 XML。
 
 ---
 
