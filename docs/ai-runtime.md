@@ -59,7 +59,9 @@ Markdown highlights use the normal serializer and save path; PDF annotations onl
 
 ## Draw.io tools
 
-`folio_drawio_read({path})` reads a project `.drawio` file. `folio_drawio_create({path, xml})` creates a new native Draw.io XML file and refuses to overwrite an existing path. `folio_drawio_update({path, xml})` replaces an existing diagram with the complete XML document. Write operations validate that the root element is `mxfile`; updates to an open Draw.io pane are picked up by the existing file watcher and Draw.io reload path.
+`folio_drawio_read({path})` reads a project `.drawio` file. `folio_drawio_create({path, xml})` creates a new native Draw.io XML file and refuses to overwrite an existing path. `folio_drawio_update({path, xml})` replaces an existing diagram with the complete XML document. `folio_drawio_get_selection({})` returns the selected cells in the active Draw.io tab. `folio_drawio_edit_cells({operations})` applies cell-ID-based additions, updates, and deletions to that canvas in one graph-model transaction. Draw.io autosave persists canvas edits through its existing IPC path.
+
+The `folio-drawio` skill guides the assistant to prefer selection-aware edits for focused changes, use file-level XML tools for new or substantially restructured diagrams, and avoid claiming a canvas edit is saved before persistence is confirmed. It ships with the Pi host and yields to a shared user-installed copy.
 
 The first version supports single Markdown text blocks and text-layer PDF pages. It excludes scans/OCR coordinates, picture/formula regions, cross-block anchors, native PDF/Word comment export, and automatic anchor repair. The small `folio-annotations` skill lives in the Magpie shared library; standalone packages carry a bundled copy, loaded when the Pi user skill is absent. Workflow guidance stays in that skill and tool descriptions, not the system prompt.
 

@@ -206,6 +206,9 @@ impl Workspace {
                 DrawioPaneEvent::OpenExternal(url) => cx.open_url(url),
                 DrawioPaneEvent::Notice(message) => app.report(message.clone(), cx),
                 DrawioPaneEvent::Error(message) => app.report(message.clone(), cx),
+                DrawioPaneEvent::ToolResult { request_id, result } => {
+                    app.drawio_tool_result(request_id, result.clone(), cx)
+                }
             },
         )
         .detach();

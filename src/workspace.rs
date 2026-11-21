@@ -274,6 +274,7 @@ struct DialogPrompt {
 pub struct Workspace {
     annotation_requests: BTreeSet<String>,
     compile_requests: agent_compile::CompileRequests,
+    drawio_requests: std::collections::HashMap<String, WorkspaceToolRequest>,
     tag_proposals: agent_tags::TagProposals,
     default_workspace: Project,
     config: ProjectConfig,
@@ -573,6 +574,7 @@ impl Workspace {
         let mut app = Self {
             annotation_requests: BTreeSet::new(),
             compile_requests: Default::default(),
+            drawio_requests: Default::default(),
             tag_proposals: Default::default(),
             default_workspace,
             config,

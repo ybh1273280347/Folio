@@ -2729,6 +2729,11 @@ fn summarize_tool_call(name: &str, args: &Value, diffs: &[FileDiff]) -> String {
         "folio_drawio_read" => crate::i18n::ai::tool_drawio("read", args["path"].as_str().unwrap_or_default()),
         "folio_drawio_create" => crate::i18n::ai::tool_drawio("create", args["path"].as_str().unwrap_or_default()),
         "folio_drawio_update" => crate::i18n::ai::tool_drawio("update", args["path"].as_str().unwrap_or_default()),
+        "folio_drawio_get_selection" => "读取 Draw.io 选区".into(),
+        "folio_drawio_edit_cells" => format!(
+            "编辑 Draw.io 元素 ({})",
+            args["operations"].as_array().map_or(0, Vec::len)
+        ),
         "run_python" => crate::i18n::ai::TOOL_RUN_PYTHON.get().into(),
         "bash" | "powershell" => args
             .get("command")

@@ -141,10 +141,12 @@ async function createRecord(cwd, manager) {
   const record = { project, id, cwd, manager, sequence: 0, running: false, failed: false,
     pending: new Map(), editorText: '', retained: true, models: await ModelRuntime.create() };
   await configureModels(record);
+  const bundledSkills = ['folio-annotations', 'folio-drawio']
+    .filter(name => !fs.existsSync(path.join(getAgentDir(), 'skills', name, 'SKILL.md')))
+    .map(name => path.join(import.meta.dirname, 'skills', name));
   const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir(),
-    // Prefer the user's shared copy; standalone release packages also carry this Folio-specific skill.
-    additionalSkillPaths: fs.existsSync(path.join(getAgentDir(), 'skills', 'folio-annotations', 'SKILL.md'))
-      ? [] : [path.join(import.meta.dirname, 'skills', 'folio-annotations')],
+    // Prefer shared user copies and use bundled copies in standalone releases.
+    additionalSkillPaths: bundledSkills,
     // Keep identity/policy fixed; changing a timestamp in the system prefix would invalidate its cache.
     appendSystemPromptOverride: base => [...base, `你是 Folio 中的 AI 助手。Folio 是用户正在使用的桌面笔记与项目工作空间，pi 是你的内部执行引擎。
 你的职责是结合当前项目、用户选区、附件与会话上下文，帮助用户阅读、写作、研究、处理文档和修改代码。默认使用用户的语言，清楚区分已验证的事实、推断和未完成的工作；工具执行成功后才能声称操作已完成。
