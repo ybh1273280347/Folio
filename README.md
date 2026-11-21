@@ -2,7 +2,9 @@
 
 基于 [GPUI](https://www.gpui.rs/) 与 Rust 编写的 Windows 原生 LaTeX / Markdown 个人工作台。
 
-写文档和论文时，希望有一款轻量、启动快、内存占用低的本地编辑工具，于是用 GPUI 做了这套原生工作台。界面、编辑器、公式排版、PDF 预览与导出均在进程内完成；AI 助手同样是原生 GPUI 面板，只把模型与工具宿主放到独立的 Node 进程；打开 `.html` 文件时才按需调用系统 WebView2。
+写文档和论文时，希望有一款轻量、启动快、内存占用低的本地编辑工具，于是用 GPUI 做了这套原生工作台。界面、编辑器、公式排版、PDF 预览与导出均在进程内完成。AI 助手采用原生 GPUI 面板，模型与工具宿主运行在独立 Node 进程。HTML 预览和离线 Draw.io 按需使用系统 WebView2。
+
+[构建与运行](#构建与运行) · [Markdown 写作提示](FOLIO_MARKDOWN.md) · [架构与开发指南](ARCHITECTURE.md)
 
 ---
 
@@ -45,7 +47,7 @@
 - **表格操作**：单元格编辑、左/中/右对齐、增删行列、`Ctrl+Alt+↑/↓` 插入行、整表复制。多行表格的控制栏提供折叠按钮，折叠后只显示仍可编辑的表头行；与 `[!NOTE]-` 的文档级折叠不同，属于视图状态，不写回 Markdown。
 - **查找与替换**：所见即所得模式（源码模式不支持）下 `Ctrl+F` 查找、`Ctrl+H` 替换；打开时自动填入当前选中文本，带 `1/3` 形式的匹配计数、上一个 / 下一个（`Shift+Enter` / `Enter`）、区分大小写、全字匹配、替换当前与全部替换。`Ctrl+H` 为 WYSIWYG 专用快捷键，不在“设置 → 快捷键”中重录制。
 - **代码块**：按围栏语言用 Syntect 高亮，顶部有可搜索语言下拉框与复制按钮（复制后短暂显示勾号），语言修改可撤销并写回 Markdown；块级代码随正文按固定比例缩放，用于预览与 PDF 导出。代码块头部另有折叠按钮，默认展开，折叠后仅保留语言与复制工具栏；状态不写入 Markdown，PDF 导出始终完整。
-- **Mermaid 图表（桌面）**：`mermaid` 围栏由 Rust 引擎 `merman` 在后台解析与布局为 SVG，`resvg` 光栅化为可缩放预览，同一 SVG 直接写入 PDF；默认图表预览，可就地切换源码，保存仍为 Markdown 围栏。支持缩放与平移，不引入 JS、WebView 或在线服务；兼容范围受 Rust 引擎限制，详见 [Markdown 写作提示](FOLIO_MARKDOWN.md#mermaid-图表桌面)。
+- **Mermaid 图表**：`mermaid` 围栏由 Rust 引擎 `merman` 在后台解析与布局为 SVG，`resvg` 光栅化为可缩放预览，同一 SVG 直接写入 PDF；默认图表预览，可就地切换源码，保存仍为 Markdown 围栏。支持缩放与平移，不引入 JS、WebView 或在线服务；兼容范围受 Rust 引擎限制，详见 [Markdown 写作提示](FOLIO_MARKDOWN.md#mermaid-图表)。
 - **数学语法**：原生支持 `$...$`、`$$...$$`、`\(...\)`、`\[...\]`，点击块级公式可在弹窗中就地编辑 LaTeX 正文（无需分隔符）。支持分式、根式、上下标、重音、字体与颜色，以及 `matrix` / `pmatrix` / `bmatrix` / `cases` / `array`、`align` / `gather` / `multline` / `equation`（含 `\tag`、`\label`、`\ref`）及星号无编号版本；完整语法与不支持项见 [LaTeX 支持边界](LATEX_SUPPORT_BOUNDARIES.md) 与 [扩展指南](LATEX_EXTENSION_GUIDE.md)。
 - **HTML 表格**：Markdown 中粘贴或手写原生 `<table>`（`thead` / `tbody` / `tfoot`、`td` / `th`、`rowspan` / `colspan`、`text-align`）在视觉模式下原生渲染为可编辑单元格；单元格内容按与正文相同的 Markdown 解析（`**加粗**`、`` `代码` ``、链接、`$...$` 公式等）并随正文导出到矢量 PDF；双击单元格编辑时原始 HTML 标签被转义，不可渲染的 `script` / `style` 文本被剔除但源文件完整保留以便往返。
 - **emoji**：输入 `:` 加关键词调出 emoji 快捷插入（约 150 条，离线数据），斜杠菜单也有“表情符号”项；插入的是普通 Unicode 文本。
@@ -65,7 +67,7 @@
 
 ### 6\. 离线 Draw.io 绘图
 
-- 内置离线 draw.io 静态资源（`resources/drawio/`，`scripts/install-drawio.ps1` 可拉取 v32.7.4），通过 WebView2 虚拟宿主 `folio-drawio.localhost` 在进程内打开；画布固定简体中文、预置 10px 浅色网格，不访问在线服务（外链交给系统浏览器）。
+- 内置 draw.io v32.7.4 离线资源，通过 WebView2 虚拟宿主 `folio-drawio.localhost` 打开；画布固定简体中文、预置 10px 浅色网格，外链交给系统浏览器。
 - 左侧栏「新建」下拉的「新建 .drawio」可创建原生 `.drawio`（也识别 `.drawio.svg`）文件并保存在项目内；编辑器支持自动保存与外部改动检测，工具栏可导出 PDF / SVG / PNG 伴生文件。
 - AI 可用 `folio_drawio_read` / `folio_drawio_create` / `folio_drawio_update` 读写整份 XML，或用 `folio_drawio_get_selection` / `folio_drawio_edit_cells` 按选区与元素 ID 在一次事务内增删 / 更新节点与连线并自动保存；由内置 `folio-drawio` 技能指导，调用无需审批。详见 [docs/ai-runtime.md](docs/ai-runtime.md#drawio-tools)。
 
@@ -143,7 +145,7 @@
 
 ---
 
-## 🛠️ 构建与运行
+## 构建与运行
 
 ### 桌面版（Windows）
 
@@ -155,7 +157,7 @@
 4. **TeX Live**（可选）：整篇 `.tex` 编译需要本机 TeX Live；纯 Markdown 编辑、预览与 PDF 导出无需安装。
 5. **AI 助手**（可选功能、打包必需）：系统 `node >= 22.19.0` 在 `PATH` 中，`uv` 可用（`uv venv --python 3.12` 准备隔离的网页抓取环境）；运行时须保留系统 Node 与创建虚拟环境用的 Python 基础解释器。先运行 `scripts/setup-ai.ps1`，否则 AI 面板会提示宿主依赖未安装，`package.ps1` 也会拒绝打包。
 6. **文档选页渲染**（可选）：Word / PPT 的选页预览需要本机 Microsoft Office；运行 `scripts/install-document-renderers.ps1` 把脚本装入 Magpie 技能库（默认 `%USERPROFILE%\.config\magpie\library\skills`）。
-7. **draw.io 资源**（已随仓库内置）：`resources/drawio/` 为离线静态资源；需要更新版本时运行 `scripts/install-drawio.ps1` 重新拉取 v32.7.4。
+7. **draw.io 资源**：直接使用仓库内置的 `resources/drawio/`。升级流程见 [架构与开发指南](ARCHITECTURE.md#修改渲染或导出)。
 
 ```powershell
 # 编译并以发布模式运行（产物 target\release\folio-gpui-prototype.exe）
@@ -164,16 +166,13 @@ cargo run --release
 # 一键：编译 + 打包 + 建桌面快捷方式 + 注册文件关联 + 启动
 .\编译并更新桌面.cmd
 
-# 仅打包到 dist\releases\（可加 -Launch 启动、-SkipBuild 跳过编译）
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package.ps1
+# 生成发行包并更新稳定目录（可加 -Launch 启动、-SkipBuild 跳过编译）
+pwsh -NoProfile -File .\scripts\package.ps1
 
 # 安装 AI 宿主依赖（AI 面板或打包前必须）；-InstallBrowser 安装动态抓取用的 Chromium
 .\scripts\setup-ai.ps1
 # 可选：安装 PDF/Word/PPT 选页渲染脚本到本机 Magpie 技能库
 .\scripts\install-document-renderers.ps1
-# 更新 draw.io 离线资源（仓库已内置，通常无需执行）
-.\scripts\install-drawio.ps1
-
 # 启动稳定目录中的 Folio（参数透传，如 --open <path>）
 .\启动 Folio.cmd
 ```
@@ -191,43 +190,10 @@ Rust 集成测试覆盖折叠标注的 Markdown 往返与输入规则、主题/�
 
 ---
 
-## 📁 目录结构
-
-```text
-├── src/                       # 桌面 Rust 主程序入口、共享模型与设置（main.rs / model.rs / theme.rs / storage.rs 等）
-├── src/workspace/             # 工作区：文件树、项目、构建生命周期、文档状态、外观同步、标签与批注
-├── src/markdown.rs            # Markdown 编辑器入口
-├── src/markdown/              # 所见即所得视图、大纲、emoji
-├── src/ai/                    # 原生 AI 会话 UI、宿主 RPC、渲染、diff、引用与审批
-├── src/terminal/              # ConPTY 原生终端会话与主题
-├── src/web_view/              # WebView2 基础设施与 HTML / draw.io 面板（mod.rs / html.rs / drawio.rs）
-├── src/image/                 # 剪贴板图片/SVG 落盘与可缩放图片查看器（clipboard.rs / viewer.rs）
-├── src/tags.rs / src/tags/    # 文件标签 SQLite 存储与 AI 工具
-├── src/i18n/                  # 中英双语文案
-├── vendor/                    # vendored 与打补丁的 crate：latex-rust、gpui-pdf、gpui-xterm、
-│                              #   gpui-kit-markdown-editor、gpui-pre(-windows)；补丁见 FOLIO-PATCHES.md
-├── resources/                 # 应用图标与编译期内嵌的数学字体
-├── resources/pi-host/         # Pi SDK Node 宿主、网页抓取 / Python / 标签 / 批注 / 编译 / draw.io 工具、内置技能与扩展指南（README.md）
-├── resources/drawio/          # draw.io v32.7.4 离线静态资源（WebView2 虚拟宿主映射）
-├── resources/pi-skills/       # PDF/Word/PPT 选页渲染脚本与 Windows 说明
-├── scripts/                   # 打包、AI 宿主与文档渲染安装、draw.io 资源拉取、文件关联
-├── dist/                      # 发布产物（releases/、稳定目录 Folio/）
-├── docs/                      # 技术调研与规范（AI 运行时、公式排版评测、主题、终端方案）
-├── tests/                     # Rust 集成测试（折叠标注、外观持久化、批注定位）
-├── fixtures/                  # 冒烟样例（.tex / .md / .pdf）
-├── FOLIO_MARKDOWN.md          # Markdown 写作提示（Alerts、Mermaid、表格等）
-├── LATEX_SUPPORT_BOUNDARIES.md / LATEX_EXTENSION_GUIDE.md  # 数学公式支持范围与扩展指南
-├── 启动 Folio.cmd              # 启动 dist\Folio\Folio.exe
-├── 编译并更新桌面.cmd          # 一键编译 + 打包 + 启动
-└── MIGRATION.md                # Electron → GPUI 迁移清单
-```
-
----
-
 ## 📌 说明
 
 - **自用分享**：按个人写作与排版习惯搭建，主要满足日常 LaTeX 编译与 Markdown 记笔记需求。
 - **数据存储**：配置保存在 `%APPDATA%\folio-gpui`（可用 `FOLIO_USER_DATA` 覆盖），含 `preferences.json`、`projects.json`、`workspace-sessions.json`、`ai-tabs.json`、`ai-session-metadata.json`、废纸篓与 WebView2 缓存；AI 对话原文由 Pi JSONL 管理，项目文件树永久忽略 `.pi/`；PDF 批注在目标目录下的 `.folio/annotations.json`；标签库为项目下的 `.folio/metadata.sqlite3`（默认空间在 `~/.Folio/.folio/`，独立文件在应用数据目录 `loose-metadata.sqlite3`）；粘贴图片保存在文档目录 `images/<文档名>/`；文档源文件与编译 PDF 均留在项目本地目录，不改动用户文件结构。
 - **隐私**：划词翻译会把选中文本发送给 Google（或其百度回退）服务；AI 助手会把输入、附件与选区发送到所配置的网关及启用的联网搜索服务，Exa/千帆凭证只经私有环境变量传给宿主。启用前请确认这符合你对相关内容的处理要求。
-- **参考文档**：Markdown 写作提示见 [FOLIO_MARKDOWN.md](FOLIO_MARKDOWN.md)，数学公式支持范围见 [LATEX_SUPPORT_BOUNDARIES.md](LATEX_SUPPORT_BOUNDARIES.md) 与 [LATEX_EXTENSION_GUIDE.md](LATEX_EXTENSION_GUIDE.md)；AI 运行时与工具见 [docs/ai-runtime.md](docs/ai-runtime.md)，宿主扩展见 [resources/pi-host/README.md](resources/pi-host/README.md)。
+- **参考文档**：Markdown 写作提示见 [FOLIO_MARKDOWN.md](FOLIO_MARKDOWN.md)，数学公式支持范围见 [LATEX_SUPPORT_BOUNDARIES.md](LATEX_SUPPORT_BOUNDARIES.md) 与 [LATEX_EXTENSION_GUIDE.md](LATEX_EXTENSION_GUIDE.md)。开发从 [ARCHITECTURE.md](ARCHITECTURE.md) 开始，仓库协作约定见 [AGENTS.md](AGENTS.md)。
 

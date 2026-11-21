@@ -37,20 +37,18 @@ Draw.io 工具提供文件级 `folio_drawio_read`、`folio_drawio_create`、`fol
 ### 方式 B：桥接到 Rust `Workspace` 的工具（推荐模式）
 适用于需要复用 Rust 原生能力（如 `latexmk` 编译、标签存储、批注持久化、静默保存未落盘缓冲）的工具。
 
-以 `compile` 通道为例，共 4 步：
+优先在已有功能的通道中增加操作。新增独立能力时，按以下步骤接入。
 
 1. **JS 工具模块**（如 `compile-tools.mjs`）：
    - 导出工厂函数 `(request) => [...]`，调用 `await request('<operation>', params, signal)`。
-   - 返回 `{ content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status !== 'ok' }`。
+   - 参照同类工具将结构化结果转换为 Pi 的工具结果，保留错误码和取消状态。
 2. **注册 JS 通道**（[host.mjs](host.mjs)）：
-   - 在 `workspaceToolChannels` 数组中新增一项 `['<channel>', <factory>]`。
-   - 注册表会自动创建 `WorkspaceToolBridge(send, '<channel>')`、注入 `customTools`、在 `dispatch` 中路由 `<channel>_response`，并在会话销毁时统一 `dispose`。
-3. **Rust RPC 协议**（[../../src/ai/rpc.rs](../../src/ai/rpc.rs) & [../../src/ai/manager.rs](../../src/ai/manager.rs)）：
-   - 在 `WorkspaceToolKind` 增加 `<Channel>Request` / `<Channel>Cancel`。
-   - 在 `Host::shared` stdout 读取循环匹配 `"<channel>_request" | "<channel>_cancel"`。
-   - 在 `AiPane::respond_workspace_tool` 增加 `<Channel>Request => "<channel>_response"`。
-4. **Rust Workspace 执行器**（`src/workspace/` & [../../src/workspace.rs](../../src/workspace.rs)）：
-   - 在 `src/workspace/` 下新增模块处理请求与取消；在 `Workspace` 结构体维护请求/取消状态并在 `AiPaneEvent::WorkspaceTool` 中分派。
+   - 在 `workspaceToolChannels` 中按已有对象格式登记 `channel`、`factory` 和适用的超时策略。
+   - 宿主创建对应的 `WorkspaceToolBridge`，注册工具并按 `channel` 路由响应。会话释放时，宿主清理该会话的等待请求。
+3. **Rust RPC 协议**（[rpc.rs](../../src/ai/rpc.rs) 与 [manager.rs](../../src/ai/manager.rs)）
+   - 各通道复用 `workspace_tool_request`、`workspace_tool_cancel` 与 `workspace_tool_response`。通道、请求 ID 和会话归属由现有 RPC 与宿主处理。
+4. **Rust Workspace 接入**（[workspace/tools/](../../src/workspace/tools/) 与 [workspace.rs](../../src/workspace.rs)）
+   - 在 `AiPaneEvent::WorkspaceTool` 按 `channel` 分派。工具接入代码取得当前项目或文档、维护当前用例的取消状态，再直接调用功能模块。
    - 如需友好工具卡片标题，在 [../../src/ai/mod.rs](../../src/ai/mod.rs) 的 `summarize_tool_call` 与 [../../src/i18n/ai.rs](../../src/i18n/ai.rs) 中补充文案。
 
 ---
@@ -61,13 +59,13 @@ Draw.io 工具提供文件级 `folio_drawio_read`、`folio_drawio_create`、`fol
    - 禁止向 `stdout` 打印调试文本；`host.mjs` 已将 `console.log` 重定向到 `console.error`，第三方模块或子进程也不得污染 `stdout`。
 2. **开发态与打包态的路径差异**
    - `cargo run` 读取仓库中的 `resources/pi-host/host.mjs`；打包版 `dist/Folio/Folio.exe` 读取可执行文件同级 `pi-host/host.mjs`。验证桌面打包版前务必重新运行打包脚本或同步 `dist/Folio/pi-host/`。
-3. **Rust `src/workspace/*.rs` 子模块禁止 `use super::*;`**
-   - `src/workspace.rs` 顶部通配引入了 `gpui_kit::*`，子模块若写 `use super::*;` 会遮蔽标准库 `#[test]` 宏并触发 `recursion limit reached while expanding #[test]` 编译错误。请显式按需导入（如 `use super::Workspace;`）。
+3. **Rust 工具模块按需导入**
+   - `src/workspace.rs` 引入了 GPUI 的宏。工具子模块显式导入需要的父模块类型，避免把 GPUI 测试宏带入普通 Rust 测试。
 4. **不要切走前台标签页或占用全局 `Workspace::build`**
    - AI 后台工具应拥有独立的取消句柄（如 `Arc<AtomicBool>`）与隔离的工作目录，不应调用 `open_file` 切换用户当前视图或锁死手动编译。
    - 读写工作区文件前，静默检查 `self.documents.open` 中的 `buffer.deleted` / `buffer.conflict` 与 `is_dirty()`，遇到冲突直接返回结构化错误而非弹出阻塞窗口。
 5. **项目路径与权限边界**
-   - 所有来自模型的文件/目录参数必须经过 `files::project_path` 校验，并核对 `request.project_key` 与当前活动项目一致。
+   - 核对 `request.project_key` 与当前活动项目一致，沿用能力已有的项目路径校验。创建新文件时校验其父目录及目标文件名。
 
 ---
 
