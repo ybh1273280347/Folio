@@ -8,13 +8,13 @@ use crate::{
     model::{BuildStatus, Engine, Project},
     storage,
 };
-use gpui_kit::{AppContext as _, Context, Window};
+use gpui_kit::{Context, Window};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},

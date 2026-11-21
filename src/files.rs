@@ -519,7 +519,7 @@ pub fn reveal_path_windows(path: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::fs;
 
     use tempfile::tempdir;
 
