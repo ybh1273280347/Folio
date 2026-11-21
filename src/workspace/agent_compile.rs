@@ -3,9 +3,9 @@
 use super::Workspace;
 use crate::{
     ai::{WorkspaceToolAction, WorkspaceToolRequest},
-    compiler::{self, BuildResult},
+    build::{BuildResult, BuildStatus, compiler},
     files,
-    model::{BuildStatus, Engine, Project},
+    model::{Engine, Project},
     storage,
 };
 use gpui_kit::{Context, Window};

@@ -22,9 +22,10 @@ use crate::pdf::{PdfPane, PdfPaneEvent};
 use crate::preferences::{Preferences, SettingsChanged};
 use crate::terminal::{TerminalPane, TerminalPaneEvent};
 use crate::{
+    build::BuildStatus,
     files,
     model::{
-        AppSettings, BuildStatus, DocumentBuffer, Engine, FileKind, InternalLinkOpenTarget,
+        AppSettings, DocumentBuffer, Engine, FileKind, InternalLinkOpenTarget,
         Project, ProjectConfig, ProjectFile, WorkspaceLocation, WorkspaceSession,
     },
     storage,

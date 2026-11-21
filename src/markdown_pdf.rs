@@ -1,5 +1,5 @@
 //! Vector PDF publication consumes GPUI's document paint operations, without a second layout engine.
-use crate::{compiler::BuildResult, model::BuildStatus};
+use crate::build::{BuildResult, BuildStatus};
 use gpui_kit::*;
 use krilla::{
     Document,
