@@ -257,6 +257,7 @@ icon_assets!(
         CodeXml,
         Code,
         ChartNetwork,
+        LayoutGrid,
         PencilLine,
         Pin,
         NotebookPen,

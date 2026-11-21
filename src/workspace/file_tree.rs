@@ -6,8 +6,7 @@ use super::*;
 struct CreatablePreset {
     ext: &'static str,
     sample_path: &'static str,
-    badge: &'static str,
-    label: crate::i18n::BiText,
+    menu_label: &'static str,
     folder_label: crate::i18n::BiText,
 }
 
@@ -15,36 +14,31 @@ const CREATABLE_PRESETS: &[CreatablePreset] = &[
     CreatablePreset {
         ext: "md",
         sample_path: "untitled.md",
-        badge: ".md",
-        label: crate::i18n::workspace::NEW_PRESET_MARKDOWN,
+        menu_label: ".md",
         folder_label: crate::i18n::workspace::MENU_NEW_MARKDOWN,
     },
     CreatablePreset {
         ext: "tex",
         sample_path: "untitled.tex",
-        badge: ".tex",
-        label: crate::i18n::workspace::NEW_PRESET_TEX,
+        menu_label: ".tex",
         folder_label: crate::i18n::workspace::MENU_NEW_TEX,
     },
     CreatablePreset {
         ext: "drawio",
         sample_path: "untitled.drawio",
-        badge: ".drawio",
-        label: crate::i18n::workspace::NEW_PRESET_DRAWIO,
+        menu_label: ".drawio",
         folder_label: crate::i18n::workspace::MENU_NEW_DRAWIO,
     },
     CreatablePreset {
         ext: "bib",
         sample_path: "untitled.bib",
-        badge: ".bib",
-        label: crate::i18n::workspace::NEW_PRESET_BIB,
+        menu_label: ".bib",
         folder_label: crate::i18n::workspace::MENU_NEW_BIB,
     },
     CreatablePreset {
         ext: "txt",
         sample_path: "untitled.txt",
-        badge: ".txt",
-        label: crate::i18n::workspace::NEW_PRESET_TXT,
+        menu_label: ".txt",
         folder_label: crate::i18n::workspace::MENU_NEW_TXT,
     },
 ];
@@ -287,9 +281,18 @@ impl Workspace {
             .items_center()
             .rounded(px(5.))
             .child(
-                button("new-markdown", "+ Markdown")
+                button("new-markdown", "")
                     .rounded_r_none()
                     .px_1p5()
+                    .gap_0p5()
+                    .child(crate::ui::icon(IconName::Plus).w(px(12.)).h(px(12.)))
+                    .child(crate::ui::icon(IconName::NotebookPen).w(px(13.)).h(px(13.)))
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(
+                            crate::i18n::workspace::MENU_NEW_MARKDOWN.get(),
+                        )
+                        .build(window, cx)
+                    })
                     .on_click(move |_, window, cx| {
                         md_app.update(cx, |app, cx| {
                             if let Err(error) = app.new_markdown(window, cx) {
@@ -312,12 +315,11 @@ impl Workspace {
                     .dropdown_menu(move |menu, _, _| {
                         let menu = CREATABLE_PRESETS
                             .iter()
-                            .fold(menu.min_w(px(184.)), |menu, preset| {
+                            .fold(menu.min_w(px(124.)), |menu, preset| {
                                 let preset_app = menu_app.clone();
                                 let ext = preset.ext;
                                 let sample_path = preset.sample_path;
-                                let badge = preset.badge;
-                                let label = preset.label.get();
+                                let menu_label = preset.menu_label;
                                 menu.item(
                                     PopupMenuItem::element(move |_, _| {
                                         div()
@@ -325,27 +327,14 @@ impl Workspace {
                                             .h(px(20.))
                                             .flex()
                                             .items_center()
-                                            .justify_between()
-                                            .gap_3()
+                                            .gap_2()
                                             .text_xs()
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_2()
-                                                    .child(crate::ui::file_icon(
-                                                        sample_path,
-                                                        ext == "drawio",
-                                                        false,
-                                                    ))
-                                                    .child(label),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(11.))
-                                                    .text_color(rgb(MUTED))
-                                                    .child(badge),
-                                            )
+                                            .child(crate::ui::file_icon(
+                                                sample_path,
+                                                ext == "drawio",
+                                                false,
+                                            ))
+                                            .child(menu_label)
                                     })
                                     .on_click(move |_, window, cx| {
                                         preset_app.update(cx, |app, cx| {
@@ -1636,49 +1625,75 @@ impl Workspace {
                         .items_center()
                         .justify_between()
                         .gap_1p5()
+                        .min_w_0()
                         .child(
-                            div().flex().items_center().gap_1().child(
+                            div().flex().items_center().gap_1().min_w_0().child(
                                 div()
                                     .text_xs()
                                     .text_color(rgb(0x787774))
+                                    .text_ellipsis()
                                     .child(crate::i18n::workspace::selected_count(sel_count)),
                             ),
                         )
                         .child(
                             div()
                                 .flex()
+                                .flex_shrink_0()
                                 .items_center()
                                 .gap_1()
                                 .child(crate::ui::control("batch-tags", IconName::Tag)
+                                    .size(px(24.))
                                     .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(crate::i18n::workspace::BATCH_EDIT_TAGS_TOOLTIP.get()).build(window, cx))
                                     .on_click(cx.listener(|app, _, window, cx| {
                                         app.edit_file_tags(app.selected_files.iter().cloned().collect(), window, cx);
                                     })))
                                 .child(
-                                    crate::ui::button_secondary("batch-compile", crate::i18n::workspace::COMPILE_BTN.get())
+                                    crate::ui::button_secondary("batch-compile", "")
+                                        .w(px(24.))
                                         .min_h(px(22.))
-                                        .py_0p5()
-                                        .text_xs()
+                                        .px_0()
+                                        .py_0()
+                                        .child(
+                                            crate::ui::icon(IconName::Play).w(px(11.)).h(px(11.)),
+                                        )
+                                        .tooltip(|window, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new(
+                                                crate::i18n::workspace::TOOLTIP_BATCH_COMPILE.get(),
+                                            )
+                                            .build(window, cx)
+                                        })
                                         .on_click(cx.listener(|app, _, window, cx| {
                                             app.compile_selected(window, cx)
                                         })),
                                 )
                                 .child(
                                     crate::ui::button_danger_soft("batch-delete", "")
+                                        .w(px(24.))
                                         .min_h(px(22.))
-                                        .py_0p5()
-                                        .gap_1()
-                                        .text_xs()
+                                        .px_0()
+                                        .py_0()
                                         .child(
-                                            crate::ui::icon(IconName::Trash).w(px(11.)).h(px(11.)),
+                                            crate::ui::icon(IconName::Trash).w(px(12.)).h(px(12.)),
                                         )
-                                        .child(crate::i18n::common::DELETE.get())
+                                        .tooltip(|window, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new(
+                                                crate::i18n::common::DELETE.get(),
+                                            )
+                                            .build(window, cx)
+                                        })
                                         .on_click(cx.listener(|app, _, window, cx| {
                                             app.delete_selected(window, cx)
                                         })),
                                 )
                                 .child(
                                     crate::ui::control("clear-selection", IconName::Close)
+                                        .size(px(24.))
+                                        .tooltip(|window, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new(
+                                                crate::i18n::workspace::TOOLTIP_CLEAR_SELECTION.get(),
+                                            )
+                                            .build(window, cx)
+                                        })
                                         .on_click(cx.listener(|app, _, _, cx| {
                                             app.selected_files.clear();
                                             cx.notify();
