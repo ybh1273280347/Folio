@@ -31,16 +31,6 @@ pub fn is_supported_image_path(path: &Path) -> bool {
     SUPPORTED_IMAGE_EXTENSIONS.contains(&lower.as_str())
 }
 
-/// Strip trailing NUL bytes that Windows clipboard providers (e.g. Chromium/draw.io)
-/// often append to `image/svg+xml` buffers.
-pub(crate) fn sanitize_svg_bytes(bytes: &[u8]) -> Vec<u8> {
-    let mut end = bytes.len();
-    while end > 0 && bytes[end - 1] == 0 {
-        end -= 1;
-    }
-    bytes[..end].to_vec()
-}
-
 /// Extract valid SVG XML bytes from clipboard plain text (e.g. draw.io "Copy as SVG").
 pub fn extract_svg_text(text: &str) -> Option<Vec<u8>> {
     let trimmed = text
@@ -83,7 +73,7 @@ fn clipboard_image_to_bytes(img: &Image) -> Result<PastedImageSource, String> {
         ImageFormat::Jpeg => ("jpg", img.bytes.clone()),
         ImageFormat::Webp => ("webp", img.bytes.clone()),
         ImageFormat::Gif => ("gif", img.bytes.clone()),
-        ImageFormat::Svg => ("svg", sanitize_svg_bytes(&img.bytes)),
+        ImageFormat::Svg => ("svg", crate::svg::sanitize_svg_bytes(&img.bytes)),
         ImageFormat::Bmp => ("png", convert_bytes_to_png(&img.bytes, image::ImageFormat::Bmp)?),
         ImageFormat::Tiff => ("png", convert_bytes_to_png(&img.bytes, image::ImageFormat::Tiff)?),
         ImageFormat::Ico => ("png", convert_bytes_to_png(&img.bytes, image::ImageFormat::Ico)?),
@@ -294,7 +284,7 @@ pub fn resolve_markdown_image_source_cached(
             return ImageSource::Image(cached_img.clone());
         }
         if let Ok(raw) = fs::read(&path) {
-            let preprocessed = super::svg_compat::preprocess_svg_bytes(&raw);
+            let preprocessed = crate::svg::preprocess_svg_bytes(&raw);
             let image = Arc::new(Image::from_bytes(ImageFormat::Svg, preprocessed.bytes));
             if let Ok(mut guard) = cache.svgs.lock() {
                 guard.insert(path, (mtime, len, image.clone()));
