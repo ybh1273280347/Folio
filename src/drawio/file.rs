@@ -1,8 +1,6 @@
-//! Read and write native Draw.io files for the AI workspace tools.
-use super::Workspace;
-use super::documents::PaneKey;
-use crate::{ai::WorkspaceToolRequest, files};
-use gpui_kit::Context;
+//! Native Draw.io file operations and their tool request format.
+
+use crate::files;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -12,27 +10,27 @@ use std::{
 };
 
 #[derive(Debug)]
-struct Failure {
+pub(crate) struct Failure {
     code: &'static str,
     message: String,
 }
 
 impl Failure {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
         }
     }
 
-    fn result(self) -> Value {
+    pub(crate) fn result(self) -> Value {
         json!({ "status": "error", "error": { "code": self.code, "message": self.message } })
     }
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
-enum Operation {
+pub(crate) enum Operation {
     Read,
     Create,
     Update,
@@ -42,7 +40,7 @@ enum Operation {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Params {
+pub(crate) struct Params {
     path: Option<String>,
     xml: Option<String>,
     operations: Option<Vec<Value>>,
@@ -50,147 +48,15 @@ struct Params {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Request {
-    operation: Operation,
-    params: Params,
+pub(crate) struct Request {
+    pub operation: Operation,
+    pub params: Params,
 }
 
-impl Workspace {
-    pub(super) fn drawio_request(
-        &mut self,
-        request: &WorkspaceToolRequest,
-        cx: &mut Context<Self>,
-    ) {
-        if request.action == crate::ai::WorkspaceToolAction::Cancel {
-            self.drawio_requests.remove(&request.id);
-            return;
-        }
-        let operation: Request = match serde_json::from_value(request.arguments.clone()) {
-            Ok(operation) => operation,
-            Err(error) => {
-                self.ai.read(cx).respond_workspace_tool(
-                    request,
-                    Failure::new("invalid_request", error.to_string()).result(),
-                );
-                return;
-            }
-        };
-        if matches!(operation.operation, Operation::GetSelection | Operation::EditCells) {
-            self.drawio_canvas_request(request, operation, cx);
-            return;
-        }
-        let result = self.drawio_result(request);
-        self.ai.read(cx).respond_workspace_tool(request, result);
-    }
-
-    fn drawio_canvas_request(
-        &mut self,
-        request: &WorkspaceToolRequest,
-        operation: Request,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(project) = self.directory_workspace() else {
-            self.ai.read(cx).respond_workspace_tool(
-                request,
-                Failure::new("project_not_active", "Draw.io 工具需要当前项目或默认空间。").result(),
-            );
-            return;
-        };
-        let root = match dunce::canonicalize(&project.folder) {
-            Ok(root) => root,
-            Err(error) => {
-                self.ai.read(cx).respond_workspace_tool(
-                    request,
-                    Failure::new("project_unavailable", error.to_string()).result(),
-                );
-                return;
-            }
-        };
-        if request.project_key != crate::ai::project_key(&root) {
-            self.ai.read(cx).respond_workspace_tool(
-                request,
-                Failure::new("project_not_active", "AI 会话所属项目已切换，请在当前项目重试。").result(),
-            );
-            return;
-        }
-        let path = self.documents.active.clone();
-        if path.is_empty() || !files::is_drawio(Path::new(&path)) {
-            self.ai.read(cx).respond_workspace_tool(
-                request,
-                Failure::new("drawio_not_active", "请先打开要操作的 Draw.io 图表并切换到该页签。").result(),
-            );
-            return;
-        }
-        let Some(pane) = self.documents.drawio_panes.get(&PaneKey::tab(&path)).cloned() else {
-            self.ai.read(cx).respond_workspace_tool(
-                request,
-                Failure::new("drawio_not_ready", "当前 Draw.io 画布尚未就绪，请稍后重试。").result(),
-            );
-            return;
-        };
-        let operation_name = match operation.operation {
-            Operation::GetSelection => "get_selection",
-            Operation::EditCells => "edit_cells",
-            _ => unreachable!(),
-        };
-        let params = serde_json::to_value(operation.params).expect("Draw.io parameters serialize");
-        self.drawio_requests.insert(request.id.clone(), request.clone());
-        let dispatch = pane.update(cx, |pane, cx| {
-            pane.request_tool(&request.id, operation_name, params, cx)
-        });
-        if let Err(code) = dispatch {
-            self.drawio_requests.remove(&request.id);
-            self.ai.read(cx).respond_workspace_tool(
-                request,
-                Failure::new(code, match code {
-                    "drawio_bridge_unavailable" => "Folio Draw.io 工具桥尚未就绪，请稍后重试。",
-                    "drawio_dispatch_failed" => "Folio 无法向当前 Draw.io 画布派发工具请求。",
-                    _ => "当前 Draw.io 画布尚未就绪，请稍后重试。",
-                }).result(),
-            );
-        }
-    }
-
-    pub(super) fn drawio_tool_result(
-        &mut self,
-        request_id: &str,
-        result: Value,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(request) = self.drawio_requests.remove(request_id) {
-            self.ai.read(cx).respond_workspace_tool(&request, result);
-        }
-    }
-
-    fn drawio_result(&self, request: &WorkspaceToolRequest) -> Value {
-        let operation: Request = match serde_json::from_value(request.arguments.clone()) {
-            Ok(operation) => operation,
-            Err(error) => return Failure::new("invalid_request", error.to_string()).result(),
-        };
-        let Some(project) = self.directory_workspace() else {
-            return Failure::new("project_not_active", "Draw.io 工具需要当前项目或默认空间。")
-                .result();
-        };
-        let root = match dunce::canonicalize(&project.folder) {
-            Ok(root) => root,
-            Err(error) => return Failure::new("project_unavailable", error.to_string()).result(),
-        };
-        if request.project_key != crate::ai::project_key(&root) {
-            return Failure::new(
-                "project_not_active",
-                "AI 会话所属项目已切换，请在当前项目重试。",
-            )
-            .result();
-        }
-        if operation.params.path.is_none() {
-            return Failure::new("invalid_request", "文件操作必须提供 path。").result();
-        }
-        execute(&root, operation).unwrap_or_else(Failure::result)
-    }
-}
-
-fn execute(root: &Path, request: Request) -> Result<Value, Failure> {
-    let relative = validate_relative_path(request.params.path.as_deref().unwrap_or_default())?;
+pub(crate) fn execute(root: &Path, request: Request) -> Result<Value, Failure> {
+    let path = request.params.path.as_deref()
+        .ok_or_else(|| Failure::new("invalid_request", "文件操作必须提供 path。"))?;
+    let relative = validate_relative_path(path)?;
     let path_text = relative.to_string_lossy().replace('\\', "/");
     match request.operation {
         Operation::Read => {

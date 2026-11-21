@@ -5,6 +5,7 @@ mod ai;
 mod annotations;
 mod build;
 mod build_log;
+mod drawio;
 mod files;
 mod image;
 mod web_view;

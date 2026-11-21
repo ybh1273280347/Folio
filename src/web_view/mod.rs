@@ -1,9 +1,7 @@
 //! Shared WebView2 infrastructure for embedded web-rendered panes (HTML, draw.io, etc.).
 
-pub mod drawio;
 pub mod html;
 
-pub use drawio::{DrawioPane, DrawioPaneEvent};
 pub use html::{HtmlPane, HtmlPaneEvent};
 
 use crate::storage;
