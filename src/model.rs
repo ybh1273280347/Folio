@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ShortcutDef {
@@ -414,6 +415,10 @@ impl Default for AiSettings {
 pub struct AppSettings {
     /// Themes store colors only; typography and layout remain independent settings.
     pub theme: crate::theme::ThemeSettings,
+    /// A local image path enables the workspace backdrop.
+    pub background_image: Option<PathBuf>,
+    /// Opacity of the image layer, as a percentage from 0 to 100.
+    pub background_image_opacity: u8,
     pub interface_font: String,
     pub editor_font: String,
     pub markdown_font: String,
@@ -489,6 +494,8 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             theme: crate::theme::ThemeSettings::default(),
+            background_image: None,
+            background_image_opacity: 35,
             interface_font: String::new(),
             editor_font: String::new(),
             markdown_font: String::new(),

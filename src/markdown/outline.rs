@@ -11,9 +11,9 @@ use gpui_kit::{
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-pub(super) const PANEL_WIDTH: f32 = 200.0;
-pub(super) const AUTO_OPEN_WIDTH: f32 = 1050.0;
-pub(super) const OVERLAY_WIDTH: f32 = 900.0;
+pub(super) const PANEL_WIDTH: f32 = 240.0;
+pub(super) const AUTO_OPEN_WIDTH: f32 = 1080.0;
+pub(super) const OVERLAY_WIDTH: f32 = 940.0;
 pub(super) const ANIMATION_MS: u64 = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -487,16 +487,16 @@ impl OutlineColors {
                 panel_border: gpui_kit::rgb(palette.border),
                 header_text: gpui_kit::rgb(0x7c7a72),
                 header_hover_text: gpui_kit::rgb(0xb5b3aa),
-                item_text_root: gpui_kit::rgb(0xa8a69e),
-                item_text_nested: gpui_kit::rgb(0x828078),
-                item_text_hover: gpui_kit::rgb(0xd6d4cc),
-                item_text_active: gpui_kit::rgb(0xd6d4cc),
+                item_text_root: gpui_kit::rgb(0xb8b6ae),
+                item_text_nested: gpui_kit::rgb(0x88867e),
+                item_text_hover: gpui_kit::rgb(0xe4e2da),
+                item_text_active: gpui_kit::rgb(0xe8e6de),
                 item_bg_active: gpui_kit::rgb(palette.hover),
-                item_bg_hover: gpui_kit::rgb(0x282724),
+                item_bg_hover: gpui_kit::rgb(0x2a2926),
                 item_bg_pressed: gpui_kit::rgb(palette.pressed),
-                chevron: gpui_kit::rgb(0x727068),
+                chevron: gpui_kit::rgb(0x6e6c64),
                 chevron_hover: gpui_kit::rgb(0xb5b3aa),
-                guide_line: gpui_kit::rgb(0x46453f),
+                guide_line: gpui_kit::rgb(0x3a3934),
                 scroll_thumb: gpui_kit::rgb(0x45474b),
                 scroll_thumb_hover: gpui_kit::rgb(0x5c5f66),
                 scroll_thumb_active: gpui_kit::rgb(0x72767f),
@@ -504,19 +504,19 @@ impl OutlineColors {
         } else {
             Self {
                 panel_bg: gpui_kit::rgb(palette.surface),
-                panel_border: gpui_kit::rgb(0xf2f1ee),
-                header_text: gpui_kit::rgb(0xa8a7a2),
-                header_hover_text: gpui_kit::rgb(0x6b6a65),
-                item_text_root: gpui_kit::rgb(0x787774),
-                item_text_nested: gpui_kit::rgb(0x9b9a97),
-                item_text_hover: gpui_kit::rgb(0x454440),
-                item_text_active: gpui_kit::rgb(0x454440),
-                item_bg_active: gpui_kit::rgb(0xf3f3f1),
-                item_bg_hover: gpui_kit::rgb(0xf7f6f4),
-                item_bg_pressed: gpui_kit::rgb(0xefefed),
-                chevron: gpui_kit::rgb(0xb0afaa),
-                chevron_hover: gpui_kit::rgb(0x6b6a65),
-                guide_line: gpui_kit::rgb(0xe3e2dd),
+                panel_border: gpui_kit::rgb(0xefeeea),
+                header_text: gpui_kit::rgb(0x9a9994),
+                header_hover_text: gpui_kit::rgb(0x4a4945),
+                item_text_root: gpui_kit::rgb(0x52514c),
+                item_text_nested: gpui_kit::rgb(0x7e7d78),
+                item_text_hover: gpui_kit::rgb(0x2c2b28),
+                item_text_active: gpui_kit::rgb(0x2c2b28),
+                item_bg_active: gpui_kit::rgb(0xf1f0ec),
+                item_bg_hover: gpui_kit::rgb(0xf6f5f2),
+                item_bg_pressed: gpui_kit::rgb(0xeae9e4),
+                chevron: gpui_kit::rgb(0xbab9b4),
+                chevron_hover: gpui_kit::rgb(0x52514c),
+                guide_line: gpui_kit::rgb(0xe8e7e2),
                 scroll_thumb: gpui_kit::rgb(0xdcdbd7),
                 scroll_thumb_hover: gpui_kit::rgb(0xc2c1bc),
                 scroll_thumb_active: gpui_kit::rgb(0xa8a7a2),
@@ -580,7 +580,17 @@ fn render_panel_body(
     overlay: bool,
     cx: &mut Context<MarkdownPane>,
 ) -> Stateful<Div> {
-    let colors = OutlineColors::current();
+    let mut colors = OutlineColors::current();
+    if pane.backdrop_visible {
+        // Docked outline shares the document backdrop transparently; only the narrow-screen
+        // overlay drawer keeps an opaque-ish surface so it stays legible over document text.
+        colors.panel_bg = colors.panel_bg.opacity(0.90);
+        colors.item_bg_active = colors.item_bg_active.opacity(0.55);
+        colors.item_bg_hover = colors.item_bg_hover.opacity(0.45);
+        colors.item_bg_pressed = colors.item_bg_pressed.opacity(0.6);
+        colors.guide_line = colors.guide_line.opacity(0.55);
+        colors.scroll_thumb = colors.scroll_thumb.opacity(0.6);
+    }
     let tree = build_tree(&pane.headings);
     let all_parents = parent_indices(&pane.headings);
     let has_any_parents = !all_parents.is_empty();
@@ -590,10 +600,11 @@ fn render_panel_body(
             .all(|ix| pane.outline_collapsed.contains(ix));
 
     let header = div()
-        .h(px(34.))
         .flex_shrink_0()
-        .pl(px(10.))
-        .pr(px(8.))
+        .pt(if overlay { px(16.) } else { px(24.) })
+        .pb(px(10.))
+        .pl(px(16.))
+        .pr(px(12.))
         .flex()
         .items_center()
         .justify_between()
@@ -602,11 +613,11 @@ fn render_panel_body(
                 .id("md-outline-header-toggle")
                 .flex()
                 .items_center()
-                .gap_1()
-                .py_1()
-                .px_1()
+                .gap(px(4.))
+                .py(px(2.))
+                .px(px(4.))
                 .rounded(px(4.))
-                .text_size(px(11.))
+                .text_size(px(12.))
                 .font_medium()
                 .text_color(colors.header_text)
                 .when(has_any_parents, |el| {
@@ -637,22 +648,29 @@ fn render_panel_body(
 
     let list_content = if tree.is_empty() {
         div()
-            .px_4()
+            .px_2()
             .py_3()
-            .text_size(px(12.))
+            .text_size(px(12.5))
             .text_color(colors.header_text)
             .child("暂无标题")
             .into_any_element()
     } else {
-        render_nodes(
-            &tree,
-            0,
-            pane.active_heading,
-            &pane.outline_collapsed,
-            colors,
-            cx,
-        )
-        .into_any_element()
+        div()
+            .w_full()
+            .min_w_0()
+            .ml(px(4.))
+            .pl(px(8.))
+            .border_l_1()
+            .border_color(colors.guide_line)
+            .child(render_nodes(
+                &tree,
+                0,
+                pane.active_heading,
+                &pane.outline_collapsed,
+                colors,
+                cx,
+            ))
+            .into_any_element()
     };
 
     let scroll_area = div()
@@ -667,9 +685,9 @@ fn render_panel_body(
                 .overflow_y_scroll()
                 .track_scroll(&pane.outline_scroll)
                 .on_scroll(|_, _, cx| cx.stop_propagation())
-                .pl(px(6.))
-                .pr(px(8.))
-                .pb_6()
+                .pl(px(16.))
+                .pr(px(12.))
+                .pb(px(28.))
                 .child(list_content),
         )
         .child(
@@ -709,14 +727,15 @@ fn render_panel_body(
         .w(px(PANEL_WIDTH))
         .h_full()
         .flex_shrink_0()
-        .bg(colors.panel_bg)
-        .border_r_1()
-        .border_color(colors.panel_border)
         .when(overlay, |panel| {
-            panel.shadow(vec![
-                BoxShadow::new(px(6.), px(0.), hsla(0., 0., 0., 0.08)).blur_radius(px(20.)),
-                BoxShadow::new(px(1.), px(0.), hsla(0., 0., 0., 0.04)).blur_radius(px(4.)),
-            ])
+            panel
+                .bg(colors.panel_bg)
+                .border_r_1()
+                .border_color(colors.panel_border)
+                .shadow(vec![
+                    BoxShadow::new(px(6.), px(0.), hsla(0., 0., 0., 0.08)).blur_radius(px(20.)),
+                    BoxShadow::new(px(1.), px(0.), hsla(0., 0., 0., 0.04)).blur_radius(px(4.)),
+                ])
         })
         .font_family(outline_font_family())
         .flex()
@@ -735,7 +754,8 @@ fn render_nodes(
     cx: &mut Context<MarkdownPane>,
 ) -> Div {
     let any_has_children = nodes.iter().any(|n| !n.children.is_empty());
-    let mut list = div().flex().flex_col().gap(px(1.)).w_full().min_w_0();
+    let list_gap = if depth == 0 { px(4.) } else { px(2.) };
+    let mut list = div().flex().flex_col().gap(list_gap).w_full().min_w_0();
 
     for node in nodes {
         let index = node.index;
@@ -746,8 +766,9 @@ fn render_nodes(
             is_collapsed && active_heading.is_some_and(|active_ix| node.contains_index(active_ix));
         let is_active = is_direct_active || is_collapsed_ancestor_active;
 
-        let font_size = if depth == 0 { px(13.5) } else { px(13.) };
-        let line_height = if depth == 0 { px(18.) } else { px(17.5) };
+        let font_size = if depth == 0 { px(13.) } else { px(12.2) };
+        let line_height = if depth == 0 { px(19.5) } else { px(18.5) };
+        let row_py = if depth == 0 { px(5.) } else { px(4.) };
         let rest_color = if is_active {
             colors.item_text_active
         } else if depth == 0 {
@@ -761,12 +782,12 @@ fn render_nodes(
             .id(("md-outline-item", index))
             .flex()
             .items_start()
-            .gap(px(2.))
+            .gap(px(4.))
             .w_full()
             .min_w_0()
-            .px(px(5.))
-            .py(px(3.5))
-            .rounded(px(5.))
+            .px(px(8.))
+            .py(row_py)
+            .rounded(px(6.))
             .cursor_pointer()
             .text_size(font_size)
             .line_height(line_height)
@@ -832,17 +853,18 @@ fn render_nodes(
 
         if has_children && !is_collapsed {
             let guide_ml = if depth == 0 {
-                px(9.)
+                px(11.)
             } else if depth < 3 {
-                px(8.)
+                px(9.)
             } else {
-                px(6.)
+                px(7.)
             };
-            let guide_pl = if depth < 3 { px(6.) } else { px(5.) };
+            let guide_pl = if depth < 3 { px(8.) } else { px(6.) };
             let child_group = div()
                 .ml(guide_ml)
                 .pl(guide_pl)
-                .my(px(2.))
+                .mt(px(2.))
+                .mb(px(4.))
                 .border_l_1()
                 .border_color(colors.guide_line)
                 .child(render_nodes(
