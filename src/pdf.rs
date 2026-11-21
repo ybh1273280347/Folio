@@ -3,8 +3,8 @@
 //! Chrome-style fluorescent highlights, and box-selection of effective content.
 use crate::theme::color as rgb;
 use crate::{
-    model::{AnnotationItem, AnnotationRect, HIGHLIGHT_COLORS},
-    storage, ui,
+    annotations::{self, AnnotationItem, AnnotationRect, HIGHLIGHT_COLORS},
+    ui,
 };
 use gpui::{MouseButton, Subscription};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
@@ -44,7 +44,7 @@ impl PdfPane {
         cx.notify();
     }
     pub fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let annotations = storage::load_annotations(&path);
+        let annotations = annotations::load_annotations(&path);
         let annotation_comment_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(2, 8)
@@ -82,7 +82,7 @@ impl PdfPane {
                         if let Some(item) = this.annotations.iter_mut().find(|a| a.id == id) {
                             item.comment = comment;
                         }
-                        let _ = storage::save_annotations(&this.path, &this.annotations);
+                        let _ = annotations::save_annotations(&this.path, &this.annotations);
                         this.editing_drawer_annotation_id = None;
                         cx.notify();
                     }
@@ -301,7 +301,7 @@ impl PdfPane {
             rects: mapped_rects,
         };
         self.annotations.push(item);
-        let _ = storage::save_annotations(&self.path, &self.annotations);
+        let _ = annotations::save_annotations(&self.path, &self.annotations);
         self.sync_highlights(cx);
         if open_comment {
             self.open_annotation_card(id, true, window, cx);
@@ -334,7 +334,7 @@ impl PdfPane {
         let comment = self.annotation_comment_input.read(cx).value().to_string();
         if let Some(item) = self.annotations.iter_mut().find(|a| a.id == id) {
             item.comment = comment;
-            let _ = storage::save_annotations(&self.path, &self.annotations);
+        let _ = annotations::save_annotations(&self.path, &self.annotations);
             cx.notify();
         }
     }
@@ -342,7 +342,7 @@ impl PdfPane {
     fn set_annotation_color(&mut self, id: u64, color: &str, cx: &mut Context<Self>) {
         if let Some(item) = self.annotations.iter_mut().find(|a| a.id == id) {
             item.color = color.to_string();
-            let _ = storage::save_annotations(&self.path, &self.annotations);
+        let _ = annotations::save_annotations(&self.path, &self.annotations);
             self.sync_highlights(cx);
             cx.notify();
         }
@@ -357,7 +357,7 @@ impl PdfPane {
         if self.editing_drawer_annotation_id == Some(id) {
             self.editing_drawer_annotation_id = None;
         }
-        storage::save_annotations(&self.path, &self.annotations).expect("failed to save annotation deletion");
+        annotations::save_annotations(&self.path, &self.annotations).expect("failed to save annotation deletion");
         self.sync_highlights(cx);
         cx.notify();
     }
@@ -368,7 +368,7 @@ impl PdfPane {
         }
         self.visible = visible;
         if visible {
-            self.annotations = storage::load_annotations(&self.path);
+            self.annotations = annotations::load_annotations(&self.path);
             self.view = Some(self.open_view(window, cx));
         } else if let Some(view) = self.view.take() {
             view.update(cx, |view, cx| view.release(window, cx));
@@ -747,7 +747,7 @@ impl PdfPane {
                                                                 {
                                                                     a.comment = next_comment;
                                                                 }
-                                                                let _ = storage::save_annotations(
+                                                                let _ = annotations::save_annotations(
                                                                     &this.path,
                                                                     &this.annotations,
                                                                 );

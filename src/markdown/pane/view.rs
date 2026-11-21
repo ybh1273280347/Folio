@@ -703,7 +703,7 @@ impl Render for MarkdownPane {
                                         {
                                             a.color = next_color.clone();
                                         }
-                                        let _ = storage::save_annotations(
+                                        let _ = annotations::save_annotations(
                                             &pane.path,
                                             &pane.annotations,
                                         );
@@ -794,7 +794,7 @@ impl Render for MarkdownPane {
                                             if pane.editing_drawer_annotation_id == Some(id) {
                                                 pane.editing_drawer_annotation_id = None;
                                             }
-                                            let _ = storage::save_annotations(
+                                            let _ = annotations::save_annotations(
                                                 &pane.path,
                                                 &pane.annotations,
                                             );
@@ -872,7 +872,7 @@ impl Render for MarkdownPane {
                                                         {
                                                             a.comment = next_comment;
                                                         }
-                                                        let _ = storage::save_annotations(
+                                                        let _ = annotations::save_annotations(
                                                             &pane.path,
                                                             &pane.annotations,
                                                         );
@@ -963,7 +963,7 @@ impl Render for MarkdownPane {
                                                             pane.editing_drawer_annotation_id =
                                                                 None;
                                                         }
-                                                        storage::save_annotations(
+                                                        annotations::save_annotations(
                                                             &pane.path,
                                                             &pane.annotations,
                                                         )

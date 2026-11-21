@@ -1113,7 +1113,7 @@ impl Workspace {
             full.strip_prefix(&workspace.folder).expect("same workspace").to_string_lossy().replace('\\', "/")
         } else { full.to_string_lossy().into_owned() };
         self.relocate_file_state(key, &renamed, window, cx);
-        let annotation_result = storage::relocate_annotations(&old, &full);
+        let annotation_result = crate::annotations::relocate_annotations(&old, &full);
         self.relocate_tags(&[(key.to_owned(), renamed.clone())], false, cx);
         if let Some(workspace) = self.directory_workspace() {
             self.files = files::list_files(Path::new(&workspace.folder))?;

@@ -1,6 +1,6 @@
 //! Placement and storage contracts run without a GPU window or a live model gateway.
 #![allow(dead_code)]
-#[path = "../src/annotations.rs"] mod annotations;
+#[path = "../src/annotations/mod.rs"] mod annotations;
 #[path = "../src/i18n/mod.rs"] mod i18n;
 #[path = "../src/model.rs"] mod model;
 #[path = "../src/theme.rs"] mod theme;
@@ -47,11 +47,11 @@ fn annotation_store_merges_files_and_preserves_existing_comments() {
     let mut manual = prepared.item.clone();
     manual.id = 7;
     manual.comment = "人工评论".into();
-    storage::save_annotations(&first, &[manual.clone()]).unwrap();
-    storage::save_annotations(&second, &[prepared.item.clone()]).unwrap();
-    let loaded = storage::try_load_annotations(&first).unwrap();
+    annotations::save_annotations(&first, &[manual.clone()]).unwrap();
+    annotations::save_annotations(&second, &[prepared.item.clone()]).unwrap();
+    let loaded = annotations::try_load_annotations(&first).unwrap();
     assert_eq!(loaded[0].comment, "人工评论");
-    assert_eq!(storage::try_load_annotations(&second).unwrap().len(), 1);
+    assert_eq!(annotations::try_load_annotations(&second).unwrap().len(), 1);
     assert_eq!(annotations::existing(&loaded, &prepared, &first).unwrap_err().0["error"]["code"], "already_annotated");
     let same = annotations::Prepared { item:manual, markdown:prepared.markdown };
     assert_eq!(annotations::existing(&loaded, &same, &first).unwrap().unwrap()["created"], false);
@@ -64,14 +64,14 @@ fn annotation_relocation_preserves_other_files_in_the_sidecar() {
     let target = dir.path().join("new.md");
     let sibling = dir.path().join("sibling.md");
     let note = prepare_markdown("target", &request("target"), MarkdownExtensions::default()).unwrap().item;
-    storage::save_annotations(&source, std::slice::from_ref(&note)).unwrap();
-    storage::save_annotations(&sibling, std::slice::from_ref(&note)).unwrap();
+    annotations::save_annotations(&source, std::slice::from_ref(&note)).unwrap();
+    annotations::save_annotations(&sibling, std::slice::from_ref(&note)).unwrap();
 
-    storage::relocate_annotations(&source, &target).unwrap();
+    annotations::relocate_annotations(&source, &target).unwrap();
 
-    assert!(storage::try_load_annotations(&source).unwrap().is_empty());
-    assert_eq!(storage::try_load_annotations(&target).unwrap()[0].comment, note.comment);
-    assert_eq!(storage::try_load_annotations(&sibling).unwrap().len(), 1);
+    assert!(annotations::try_load_annotations(&source).unwrap().is_empty());
+    assert_eq!(annotations::load_annotations(&target)[0].comment, note.comment);
+    assert_eq!(annotations::try_load_annotations(&sibling).unwrap().len(), 1);
 }
 
 #[test]
@@ -82,7 +82,7 @@ fn annotation_damaged_store_is_reported_without_overwriting_it() {
     std::fs::create_dir_all(store.parent().unwrap()).unwrap();
     std::fs::write(&store, "damaged JSON").unwrap();
     assert!(annotations::list(&file).is_err());
-    assert!(storage::save_annotations(&file, &[]).is_err());
+    assert!(annotations::save_annotations(&file, &[]).is_err());
     assert_eq!(std::fs::read_to_string(store).unwrap(), "damaged JSON");
 }
 

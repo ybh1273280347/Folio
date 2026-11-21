@@ -1,6 +1,5 @@
 //! Workspace orchestration: disk-backed drafts, project actions and asynchronous builds.
 //! Disk revisions arbitrate external edits; conflicted drafts never autosave over them.
-mod annotations;
 mod appearance;
 mod build;
 mod documents;

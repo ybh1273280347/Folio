@@ -7,8 +7,8 @@ use super::{
 use crate::theme::color as rgb;
 use crate::math::{MathDisplaySize, MathReady, MathRenderer, formula_id};
 use crate::mermaid::{MermaidReady, MermaidRenderer};
-use crate::model::{AnnotationItem, AppSettings, HIGHLIGHT_COLORS};
-use crate::storage;
+use crate::annotations::{self, AnnotationItem, HIGHLIGHT_COLORS};
+use crate::model::AppSettings;
 use comrak::{Arena, Options, nodes::NodeValue, parse_document};
 use gpui_kit::{
     assets::IconName,
@@ -695,7 +695,7 @@ impl MarkdownPane {
                         if let Some(item) = pane.annotations.iter_mut().find(|a| a.id == id) {
                             item.comment = comment;
                         }
-                        let _ = storage::save_annotations(&pane.path, &pane.annotations);
+                        let _ = annotations::save_annotations(&pane.path, &pane.annotations);
                         pane.active_annotation_id = None;
                         cx.notify();
                     }
@@ -719,7 +719,7 @@ impl MarkdownPane {
                         if let Some(item) = pane.annotations.iter_mut().find(|a| a.id == id) {
                             item.comment = comment;
                         }
-                        let _ = storage::save_annotations(&pane.path, &pane.annotations);
+                        let _ = annotations::save_annotations(&pane.path, &pane.annotations);
                         pane.editing_drawer_annotation_id = None;
                         cx.notify();
                     }
@@ -869,7 +869,7 @@ impl MarkdownPane {
             pane.visual_editor.update(cx, |_, cx| cx.notify());
             cx.notify();
         });
-        let annotations = storage::load_annotations(&path);
+        let annotations = annotations::load_annotations(&path);
         let mut pane = Self {
             export: Rc::new(RefCell::new(None)),
             export_width: px(0.),
@@ -1821,7 +1821,7 @@ impl MarkdownPane {
                 region: None,
                 rects: Vec::new(),
             });
-            let _ = storage::save_annotations(&self.path, &self.annotations);
+            let _ = annotations::save_annotations(&self.path, &self.annotations);
             next_id
         };
         let comment = self
@@ -2900,7 +2900,7 @@ impl MarkdownPane {
                     if let Some(a) = pane.annotations.iter_mut().find(|a| a.id == id) {
                         a.color = cname.clone();
                     }
-                    let _ = storage::save_annotations(&pane.path, &pane.annotations);
+                    let _ = annotations::save_annotations(&pane.path, &pane.annotations);
                     pane.apply_highlight_color(&cname, cx);
                 }))
         });
@@ -2945,7 +2945,7 @@ impl MarkdownPane {
                                             .on_click(cx.listener(move |pane, _, _, cx| {
                                                 pane.annotations.retain(|a| a.id != id);
                                                 if pane.selected_annotation_id == Some(id) { pane.selected_annotation_id = None; }
-                                                let _ = storage::save_annotations(
+                                                let _ = annotations::save_annotations(
                                                     &pane.path,
                                                     &pane.annotations,
                                                 );
@@ -2990,7 +2990,7 @@ impl MarkdownPane {
                                         {
                                             a.comment = comment;
                                         }
-                                        let _ = storage::save_annotations(
+                                        let _ = annotations::save_annotations(
                                             &pane.path,
                                             &pane.annotations,
                                         );
