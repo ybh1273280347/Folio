@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::clipboard::sanitize_svg_bytes;
+use super::sanitize_svg_bytes;
 
 #[derive(Debug, Clone)]
 pub struct PreprocessedSvg {
@@ -737,7 +737,7 @@ mod tests {
         assert!(!normalized.contains('"'));
         assert!(!normalized.contains('\''));
 
-        let opts = crate::fonts::usvg_options();
+        let opts = crate::svg::usvg_options();
         let svg = format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="40"><text x="10" y="24" font-family="{normalized}" font-size="14px">Hello 世界</text></svg>"#
         );

@@ -776,7 +776,7 @@ fn with_theme(source: &str, dark: bool) -> String {
 }
 
 fn rasterize(svg: &str, density: f32) -> Result<(Arc<RenderImage>, (f32, f32)), String> {
-    let options = crate::fonts::usvg_options();
+    let options = crate::svg::usvg_options();
     let tree = usvg::Tree::from_str(svg, &options)
         .map_err(|error| crate::i18n::media::mermaid_svg_parse_failed(&error))?;
     let size = tree.size();

@@ -966,8 +966,8 @@ fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
 }
 
 fn svg_to_pdf(svg: &str) -> Result<Vec<u8>, String> {
-    let preprocessed = crate::image::svg_compat::preprocess_svg_bytes(svg.as_bytes());
-    let options = crate::fonts::usvg_options();
+    let preprocessed = crate::svg::preprocess_svg_bytes(svg.as_bytes());
+    let options = crate::svg::usvg_options();
     let tree = usvg::Tree::from_data(&preprocessed.bytes, &options).map_err(|e| e.to_string())?;
     let raw_size = tree.size();
     let width = (raw_size.width() * 0.75).max(1.0);

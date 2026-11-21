@@ -38,8 +38,8 @@ fn clamp_pdf_dimensions(raw_w: f32, raw_h: f32) -> (f32, f32) {
 }
 
 fn svg_bytes_to_pdf(bytes: &[u8]) -> io::Result<Vec<u8>> {
-    let preprocessed = super::svg_compat::preprocess_svg_bytes(bytes);
-    let options = crate::fonts::usvg_options();
+    let preprocessed = crate::svg::preprocess_svg_bytes(bytes);
+    let options = crate::svg::usvg_options();
     let tree = usvg::Tree::from_data(&preprocessed.bytes, &options).map_err(io::Error::other)?;
     let raw = tree.size();
     let (width, height) = clamp_pdf_dimensions(raw.width(), raw.height());

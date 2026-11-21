@@ -397,7 +397,7 @@ fn write(
                     surface.pop();
                 }
                 VectorPaint::Svg { bounds, svg, .. } => {
-                    let options = crate::fonts::usvg_options();
+                    let options = crate::svg::usvg_options();
                     let tree = usvg::Tree::from_str(svg, &options).map_err(|error| {
                         io::Error::other(crate::i18n::media::md_pdf_mermaid_svg(&error))
                     })?;

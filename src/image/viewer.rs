@@ -114,9 +114,9 @@ impl ImagePane {
         };
 
         if self.is_svg {
-            let preprocessed = super::svg_compat::preprocess_svg_bytes(&bytes);
+            let preprocessed = crate::svg::preprocess_svg_bytes(&bytes);
             self.has_complex_rich_text = preprocessed.has_complex_rich_text;
-            let options = crate::fonts::usvg_options();
+            let options = crate::svg::usvg_options();
             match usvg::Tree::from_data(&preprocessed.bytes, &options) {
                 Ok(tree) => {
                     let size = tree.size();

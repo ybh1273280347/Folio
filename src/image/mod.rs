@@ -1,7 +1,6 @@
-//! Clipboard image/SVG extraction, PDF export, draw.io SVG compatibility, and image viewer pane.
+//! Clipboard image/SVG extraction, image PDF export, and the image viewer pane.
 pub mod clipboard;
 pub mod pdf;
-pub mod svg_compat;
 pub mod viewer;
 
 pub use clipboard::{
