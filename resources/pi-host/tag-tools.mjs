@@ -22,25 +22,13 @@ const resultForModel = (result, tagApproval) => ({
   isError: result.status !== 'ok',
 });
 
-export function tagTools(request, confirm) {
+export function tagTools(request) {
   const read = operation => async (_id, params, signal) => resultForModel(await request(operation, params, signal));
   const write = operation => async (_toolCallId, params, signal) => {
     const proposal_id = randomUUID();
     try {
       const preview = await request(operation, { proposal_id, edit: params }, signal);
       if (preview.status !== 'ok' || !preview.confirmation) return resultForModel(preview);
-      const approved = await confirm('', '', {
-        tagPreview: preview.confirmation,
-        toolCallId: _toolCallId,
-        signal,
-      });
-      if (!approved) {
-        const status = signal?.aborted ? 'cancelled' : 'declined';
-        return resultForModel({
-          status,
-          error: { code: status },
-        }, preview.confirmation);
-      }
       return resultForModel(await request('commit', { proposal_id }, signal), preview.confirmation);
     } finally {
       // This also clears a proposal if cancellation raced its preview reply.

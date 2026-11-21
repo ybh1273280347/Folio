@@ -123,7 +123,7 @@ test('annotation tools cross the real SDK and JSONL request/reply boundary', { t
   assert.deepEqual(JSON.parse(requests[1].messages.at(-1).content), result);
 });
 
-test('the tag tool commits the exact preview approved in the originating SDK session', {timeout:45000}, async t => {
+test('the tag tool commits its exact preview directly in the originating SDK session', {timeout:45000}, async t => {
   const args = {under_directory:'Notes', add:['已掌握'], remove:['待复习'], create_missing:true,
     tag_colors:[{tag:'已掌握', color:'green'}]};
   const {client, project, sessionId, requests, run} = await runWorkspaceTool(t, {
@@ -144,11 +144,6 @@ test('the tag tool commits the exact preview approved in the originating SDK ses
     ],
   };
   assert.equal((await client.request({...owner, type:'tag_response', id:preview.id, result:{status:'ok', confirmation}})).success, true);
-  const card = await client.event(sessionId, 'extension_ui_request');
-  assert.equal(card.method, 'confirm');
-  assert.deepEqual(card.tagPreview, confirmation);
-  assert.equal((await client.request({...owner, type:'extension_ui_response', id:card.id, confirmed:true})).success, true);
-
   const commit = await client.event(sessionId, 'tag_request', 'commit');
   assert.deepEqual(commit.params, {proposal_id});
   const result = {status:'ok', updated:2, paths:['Notes/note.md', 'Notes/sheet.pdf'], created_tags:['已掌握'],
@@ -157,12 +152,12 @@ test('the tag tool commits the exact preview approved in the originating SDK ses
   const discard = await client.event(sessionId, 'tag_request', 'discard');
   assert.equal((await client.request({...owner, type:'tag_response', id:discard.id, result:{status:'ok'}})).success, true);
   const ended = await client.event(sessionId, 'tool_execution_end');
-  assert.equal(ended.toolCallId, card.toolCallId);
+  assert.equal(ended.toolCallId, 'workspace-tool');
   assert.deepEqual(ended.result.details.tagApproval, confirmation);
   assert.equal((await run).success, true);
   assert.deepEqual(JSON.parse(requests[1].messages.at(-1).content), result);
   const history = await client.request({...owner, type:'get_messages'});
-  const receipt = history.data.messages.find(message => message.role === 'toolResult' && message.toolCallId === card.toolCallId);
+  const receipt = history.data.messages.find(message => message.role === 'toolResult' && message.toolCallId === 'workspace-tool');
   assert.deepEqual(receipt.details.tagApproval, confirmation);
 });
 
