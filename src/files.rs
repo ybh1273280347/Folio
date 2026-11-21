@@ -84,6 +84,10 @@ pub(crate) fn is_text(path: &Path) -> bool {
             || extension_in(path, TEXT_EXTENSIONS))
 }
 
+pub fn is_creatable(path: &Path) -> bool {
+    is_text(path) || is_drawio(path)
+}
+
 pub fn project_path(root: &Path, relative: &str) -> io::Result<PathBuf> {
     let relative_path = Path::new(relative);
     if relative.is_empty()
@@ -219,7 +223,7 @@ pub fn create_file(root: &Path, relative: &str) -> io::Result<()> {
         .and_then(|name| name.to_str())
         .unwrap_or_default();
     if path.is_absolute()
-        || !is_relevant(path)
+        || !is_creatable(path)
         || name.is_empty()
         || name == "."
         || name == ".."
@@ -244,17 +248,17 @@ pub fn create_file(root: &Path, relative: &str) -> io::Result<()> {
     Ok(())
 }
 
-pub fn create_markdown_in(root: &Path, folder: Option<&str>) -> io::Result<ProjectFile> {
+pub fn create_untitled_in(
+    root: &Path,
+    folder: Option<&str>,
+    make_name: impl Fn(Option<usize>) -> String,
+) -> io::Result<ProjectFile> {
     let prefix = folder
         .map(|folder| folder.trim().trim_matches(['/', '\\']))
         .filter(|folder| !folder.is_empty());
     let mut number = 1;
     loop {
-        let name = if number == 1 {
-            crate::i18n::workspace::untitled_md(None)
-        } else {
-            crate::i18n::workspace::untitled_md(Some(number))
-        };
+        let name = make_name((number > 1).then_some(number));
         let relative = match prefix {
             Some(folder) => format!("{folder}/{name}"),
             None => name,
@@ -262,8 +266,12 @@ pub fn create_markdown_in(root: &Path, folder: Option<&str>) -> io::Result<Proje
         match create_file(root, &relative) {
             Ok(()) => {
                 return Ok(ProjectFile {
+                    kind: if is_text(Path::new(&relative)) {
+                        FileKind::Text
+                    } else {
+                        FileKind::Asset
+                    },
                     path: relative,
-                    kind: FileKind::Text,
                 });
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => number += 1,
@@ -272,32 +280,12 @@ pub fn create_markdown_in(root: &Path, folder: Option<&str>) -> io::Result<Proje
     }
 }
 
+pub fn create_markdown_in(root: &Path, folder: Option<&str>) -> io::Result<ProjectFile> {
+    create_untitled_in(root, folder, crate::i18n::workspace::untitled_md)
+}
+
 pub fn create_drawio_in(root: &Path, folder: Option<&str>) -> io::Result<ProjectFile> {
-    let prefix = folder
-        .map(|folder| folder.trim().trim_matches(['/', '\\']))
-        .filter(|folder| !folder.is_empty());
-    let mut number = 1;
-    loop {
-        let name = if number == 1 {
-            crate::i18n::workspace::untitled_drawio(None)
-        } else {
-            crate::i18n::workspace::untitled_drawio(Some(number))
-        };
-        let relative = match prefix {
-            Some(folder) => format!("{folder}/{name}"),
-            None => name,
-        };
-        match create_file(root, &relative) {
-            Ok(()) => {
-                return Ok(ProjectFile {
-                    path: relative,
-                    kind: FileKind::Asset,
-                });
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => number += 1,
-            Err(error) => return Err(error),
-        }
-    }
+    create_untitled_in(root, folder, crate::i18n::workspace::untitled_drawio)
 }
 
 pub fn rename_file(root: &Path, relative: &str, name: &str) -> io::Result<String> {
@@ -688,5 +676,41 @@ mod tests {
         assert!(!is_text(Path::new("diagram.drawio")));
         assert!(!is_text(Path::new("diagram.drawio.svg")));
         assert!(is_text(Path::new("plain.svg")));
+    }
+
+    #[test]
+    fn create_file_rejects_readonly_assets_and_allows_editable_types() {
+        let temp = tempdir().unwrap();
+        assert!(create_file(temp.path(), "note.md").is_ok());
+        assert!(create_file(temp.path(), "paper.tex").is_ok());
+        assert!(create_file(temp.path(), "chart.drawio").is_ok());
+        assert!(create_file(temp.path(), "chart.drawio.svg").is_ok());
+        assert!(create_file(temp.path(), ".latexmkrc").is_ok());
+
+        for readonly in ["doc.pdf", "photo.png", "cover.jpg", "page.html", "index.htm", "bad.exe"] {
+            assert_eq!(
+                create_file(temp.path(), readonly).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+                "expected {readonly} to be rejected"
+            );
+            assert!(!temp.path().join(readonly).exists());
+        }
+    }
+
+    #[test]
+    fn untitled_preset_creation_numbers_without_overwriting() {
+        let temp = tempdir().unwrap();
+        let first = create_untitled_in(temp.path(), None, |n| {
+            crate::i18n::workspace::untitled_ext("tex", n)
+        })
+        .unwrap();
+        let second = create_untitled_in(temp.path(), None, |n| {
+            crate::i18n::workspace::untitled_ext("tex", n)
+        })
+        .unwrap();
+        assert_eq!(first.path, "未命名.tex");
+        assert_eq!(first.kind, FileKind::Text);
+        assert_eq!(second.path, "未命名2.tex");
+        assert_eq!(second.kind, FileKind::Text);
     }
 }

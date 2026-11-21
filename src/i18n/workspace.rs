@@ -12,8 +12,8 @@ pub const ERR_LOAD_SETTINGS: BiText = BiText::new("无法读取界面设置", "F
 pub const ERR_OUTSIDE_PROJECT: BiText = BiText::new("无法访问项目文件夹之外的文件。", "Cannot access files outside the project folder.");
 pub const ERR_SELECT_FOLDER: BiText = BiText::new("请选择一个文件夹。", "Please select a folder.");
 pub const ERR_INVALID_PROJECT_FILENAME: BiText = BiText::new(
-    "请输入有效的项目文件名。若需新建文本文件，请使用受支持的扩展名。",
-    "Please enter a valid project file name with a supported extension for text files.",
+    "请输入有效的文件名，并使用受支持的可新建扩展名（不支持直接新建 PDF、图片或 HTML）。",
+    "Please enter a valid file name with a supported creatable extension (PDF, images, and HTML cannot be created directly).",
 );
 pub const ERR_INVALID_FILENAME_EXT: BiText = BiText::new(
     "请输入有效的文件名和受支持的扩展名。",
@@ -25,13 +25,17 @@ pub const ERR_SELECT_PROJECT_FOLDER: BiText = BiText::new("请选择项目内的
 pub const ERR_MOVE_FOLDER_INTO_SELF: BiText = BiText::new("不能将文件夹移入自身或子文件夹。", "Cannot move a folder into itself or a subfolder.");
 pub const ERR_TARGET_EXISTS_UNMOVED: BiText = BiText::new("目标已存在同名文件或文件夹，未移动。", "Target already exists; item was not moved.");
 
-pub fn untitled_md(number: Option<usize>) -> String {
+pub fn untitled_ext(ext: &str, number: Option<usize>) -> String {
     match (locale(), number) {
-        (Locale::ZhCn, None) => "未命名.md".to_owned(),
-        (Locale::ZhCn, Some(n)) => format!("未命名{n}.md"),
-        (Locale::En, None) => "Untitled.md".to_owned(),
-        (Locale::En, Some(n)) => format!("Untitled{n}.md"),
+        (Locale::ZhCn, None) => format!("未命名.{ext}"),
+        (Locale::ZhCn, Some(n)) => format!("未命名{n}.{ext}"),
+        (Locale::En, None) => format!("Untitled.{ext}"),
+        (Locale::En, Some(n)) => format!("Untitled{n}.{ext}"),
     }
+}
+
+pub fn untitled_md(number: Option<usize>) -> String {
+    untitled_ext("md", number)
 }
 
 pub const ERR_TRASH_INVALID_ID: BiText = BiText::new("无效的废纸篓条目 ID。", "Invalid trash entry ID.");
@@ -261,9 +265,23 @@ pub const MENU_COPY_FULL_PATH: BiText = BiText::new("复制完整路径", "Copy 
 pub const MENU_EDIT_TAGS: BiText = BiText::new("编辑标签…", "Edit Tags…");
 pub const MENU_RENAME: BiText = BiText::new("重命名…", "Rename…");
 pub const MENU_NEW_MARKDOWN: BiText = BiText::new("新建 Markdown", "New Markdown");
+pub const MENU_NEW_TEX: BiText = BiText::new("新建 LaTeX (.tex)", "New LaTeX (.tex)");
 pub const MENU_NEW_DRAWIO: BiText = BiText::new("新建绘图 (.drawio)", "New Diagram (.drawio)");
-pub const MENU_NEW_FILE: BiText = BiText::new("新建文件…", "New File…");
+pub const MENU_NEW_BIB: BiText = BiText::new("新建参考文献 (.bib)", "New Bibliography (.bib)");
+pub const MENU_NEW_TXT: BiText = BiText::new("新建纯文本 (.txt)", "New Plain Text (.txt)");
+pub const MENU_NEW_OTHER: BiText = BiText::new("其他…", "Other…");
+pub const MENU_NEW_FILE: BiText = BiText::new("其他文件…", "Other File…");
 pub const MENU_NEW_FOLDER: BiText = BiText::new("新建文件夹…", "New Folder…");
+pub const NEW_PRESET_MARKDOWN: BiText = BiText::new("Markdown", "Markdown");
+pub const NEW_PRESET_TEX: BiText = BiText::new("LaTeX 文档", "LaTeX Document");
+pub const NEW_PRESET_DRAWIO: BiText = BiText::new("绘图", "Diagram");
+pub const NEW_PRESET_BIB: BiText = BiText::new("参考文献", "Bibliography");
+pub const NEW_PRESET_TXT: BiText = BiText::new("纯文本", "Plain Text");
+pub const TOOLTIP_NEW_FILE_MENU: BiText = BiText::new("新建其他类型文件", "New other file type");
+pub const CREATE_FILE_HINT: BiText = BiText::new(
+    "输入带受支持扩展名的文件名（如 styles.sty、config.yaml、data.csv）；不支持直接新建 PDF、图片或 HTML。",
+    "Enter a filename with a supported extension (e.g. styles.sty, config.yaml, data.csv). PDF, images, and HTML cannot be created directly.",
+);
 pub const MENU_BATCH_FOLDER_TAGS: BiText = BiText::new("批量编辑文件夹标签…", "Batch Edit Folder Tags…");
 pub const MENU_DELETE_FOLDER: BiText = BiText::new("删除文件夹…", "Delete Folder…");
 pub const MENU_BATCH_TAGS: BiText = BiText::new("批量编辑标签…", "Batch Edit Tags…");
