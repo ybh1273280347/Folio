@@ -1,7 +1,11 @@
 //! On-demand offline draw.io editor backed by WebView2 virtual host mapping and
 //! draw.io's native `embed=1&proto=json` postMessage protocol.
 
-use super::{apply_virtual_host_mapping, finish_child_webview, new_base_builder, parent_window_handle};
+pub(crate) mod file;
+
+use crate::web_view::{
+    apply_virtual_host_mapping, finish_child_webview, new_base_builder, parent_window_handle,
+};
 use crate::theme::color as rgb;
 use crate::ui;
 use gpui::{EventEmitter, FocusHandle, Focusable};

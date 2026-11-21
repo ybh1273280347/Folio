@@ -2,7 +2,6 @@
 //! Disk revisions arbitrate external edits; conflicted drafts never autosave over them.
 mod annotations;
 mod agent_compile;
-mod agent_drawio;
 mod agent_tags;
 mod appearance;
 mod build;
@@ -10,12 +9,14 @@ mod documents;
 mod file_tree;
 mod projects;
 mod tags;
+mod tools;
 use build::Build;
 use documents::{DocumentWatch, Documents, PaneKey, PaneRole};
 use crate::ai::{AiPane, AiPaneEvent, AttachedFile, WorkspaceToolAction, WorkspaceToolRequest};
 use gpui_kit::component::Sizable;
 use crate::theme::color as rgb;
-use crate::web_view::{DrawioPane, DrawioPaneEvent, HtmlPane, HtmlPaneEvent};
+use crate::drawio::{DrawioPane, DrawioPaneEvent};
+use crate::web_view::{HtmlPane, HtmlPaneEvent};
 use crate::markdown::{MarkdownEvent, MarkdownPane};
 use crate::math::MathRenderer;
 use crate::pdf::{PdfPane, PdfPaneEvent};
