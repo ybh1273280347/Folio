@@ -24,8 +24,9 @@ test('cancelling an annotation notifies Folio and retires its pending reply', as
   const owner = {projectKey:'project', sessionId:'session'};
   const result = bridge.request(owner, 'create', {path:'note.md'}, signal.signal);
   signal.abort();
-  assert.equal(sent[1].type, 'annotation_cancel');
-  assert.equal(sent[1].id, sent[0].id);
+  assert.deepEqual(sent[1], {
+    ...owner, type: 'workspace_tool_cancel', channel: 'annotation', id: sent[0].id,
+  });
   bridge.respond({...owner, id:sent[0].id, result:{status:'ok'}});
   assert.equal((await result).status, 'cancelled');
 });
