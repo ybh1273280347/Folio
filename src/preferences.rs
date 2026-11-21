@@ -48,7 +48,7 @@ impl SettingsChanged {
         }
         merge!(
             locale, theme, background_image, background_image_opacity,
-            interface_font, editor_font, markdown_font, ai_font, cjk_fallback_font,
+            interface_font, editor_font, markdown_font, ai_font, cjk_fallback_font, cjk_font_scale,
             inline_code_font, block_code_font, inline_code_scale, block_code_scale,
             interface_font_size, editor_font_size, markdown_font_size, ai_font_size,
             math_scale, inline_math_scale, math_font, line_width_limited,

@@ -2215,7 +2215,7 @@ mod tests {
         Ok(())
     }
 
-    #[gpui::test]
+    #[test]
     fn test_cjk_font_scale_scales_only_cjk_characters() -> Result<()> {
         let platform_text_system = Arc::new(DirectWriteTextSystem::new()?);
         let text_system = Arc::new(TextSystem::new(platform_text_system));
