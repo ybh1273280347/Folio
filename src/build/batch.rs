@@ -1,19 +1,15 @@
-//! Headless batch TeX compilation for the AI agent, isolated from the UI build slot.
+//! Target resolution and ordered results for headless TeX batch compilation.
 
-use super::Workspace;
+use super::{BuildResult, BuildStatus};
 use crate::{
-    ai::{WorkspaceToolAction, WorkspaceToolRequest},
-    build::{BuildResult, BuildStatus, compiler},
     files,
     model::{Engine, Project},
-    storage,
 };
-use gpui_kit::{Context, Window};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeSet, HashMap, VecDeque},
+    collections::{BTreeSet, VecDeque},
     path::Path,
     sync::{
         Arc, Mutex,
@@ -22,24 +18,16 @@ use std::{
     time::Instant,
 };
 
-pub(super) type CompileRequests = HashMap<String, Arc<AtomicBool>>;
-
 const MAX_PARALLEL_COMPILES: usize = 4;
 const MAX_EXCERPT_LINES: usize = 30;
 const MAX_EXCERPT_BYTES: usize = 2500;
 
 #[derive(Debug, Deserialize)]
-struct CompileOperation {
-    operation: String,
-    params: CompileParams,
-}
-
-#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CompileParams {
+pub(crate) struct CompileParams {
     paths: Option<Vec<String>>,
     under_directory: Option<String>,
-    engine: Option<Engine>,
+    pub(crate) engine: Option<Engine>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -72,20 +60,20 @@ struct CompileSummary {
 }
 
 #[derive(Debug)]
-struct Failure {
+pub(crate) struct Failure {
     code: &'static str,
     message: String,
 }
 
 impl Failure {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
         }
     }
 
-    fn result(self) -> Value {
+    pub(crate) fn result(self) -> Value {
         json!({
             "status": "error",
             "error": {
@@ -96,138 +84,6 @@ impl Failure {
     }
 }
 
-impl Workspace {
-    pub(super) fn compile_request(
-        &mut self,
-        request: &WorkspaceToolRequest,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if request.action == WorkspaceToolAction::Cancel {
-            if let Some(cancelled) = self.compile_requests.remove(&request.id) {
-                cancelled.store(true, Ordering::Relaxed);
-            }
-            return;
-        }
-        if let Err(error) = self.start_compile_request(request, window, cx) {
-            self.ai.read(cx).respond_workspace_tool(request, error.result());
-        }
-    }
-
-    fn start_compile_request(
-        &mut self,
-        request: &WorkspaceToolRequest,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Result<(), Failure> {
-        let operation: CompileOperation = serde_json::from_value(request.arguments.clone())
-            .map_err(|error| Failure::new("invalid_request", error.to_string()))?;
-        if operation.operation != "compile_tex" {
-            return Err(Failure::new(
-                "invalid_request",
-                format!("未知编译操作: {}", operation.operation),
-            ));
-        }
-
-        let mut project = self
-            .directory_workspace()
-            .cloned()
-            .ok_or_else(|| {
-                Failure::new(
-                    "directory_workspace_required",
-                    crate::i18n::tags::ERR_AGENT_TAGS_PROJECT_OR_DEFAULT.get(),
-                )
-            })?;
-        let root = dunce::canonicalize(&project.folder)
-            .map_err(|error| Failure::new("project_unavailable", error.to_string()))?;
-        if request.project_key != crate::ai::project_key(&root) {
-            return Err(Failure::new(
-                "project_not_active",
-                crate::i18n::tags::ERR_AGENT_SWITCH_PROJECT_RETRY.get(),
-            ));
-        }
-        if let Some(engine) = operation.params.engine {
-            project.engine = engine;
-        }
-
-        let targets = resolve_targets(&root, &operation.params)?;
-        self.save_open_buffers_silently(cx)?;
-
-        let build_root = storage::data_directory()
-            .map_err(|error| Failure::new("build_root_unavailable", error.to_string()))?
-            .join("builds");
-        let cancelled = Arc::new(AtomicBool::new(false));
-        self.compile_requests
-            .insert(request.id.clone(), cancelled.clone());
-
-        let worker_cancelled = cancelled.clone();
-        let task = cx.background_executor().spawn(async move {
-            run_batch_with(
-                &project,
-                &build_root,
-                targets,
-                worker_cancelled,
-                |item_project, item_build_root, cancel| {
-                    compiler::compile_tex(item_project, item_build_root, cancel, |_| {})
-                },
-            )
-        });
-
-        let request = request.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let outcome = task.await;
-            let _ = this.update_in(cx, |app, window, cx| {
-                if app.compile_requests.remove(&request.id).is_none() {
-                    return;
-                }
-                if let Some(active_root) = app
-                    .directory_workspace()
-                    .and_then(|project| dunce::canonicalize(&project.folder).ok())
-                    && request.project_key == crate::ai::project_key(&active_root)
-                {
-                    let _ = app.refresh_files(window, cx);
-                }
-                app.ai.read(cx).respond_workspace_tool(&request, outcome);
-            });
-        })
-        .detach();
-        Ok(())
-    }
-
-    fn save_open_buffers_silently(&mut self, cx: &mut Context<Self>) -> Result<(), Failure> {
-        let mut dirty_paths = Vec::new();
-        for (path, document) in &self.documents.open {
-            if document.buffer.deleted || document.buffer.conflict.is_some() {
-                return Err(Failure::new(
-                    "document_conflict",
-                    format!("文档存在未解决的冲突或已被删除，无法编译：{path}"),
-                ));
-            }
-            if document.buffer.is_dirty() {
-                dirty_paths.push(path.clone());
-            }
-        }
-        for path in dirty_paths {
-            match self.save_file(&path, false, cx) {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Err(Failure::new(
-                        "document_conflict",
-                        format!("文档在保存时检测到外部修改冲突：{path}"),
-                    ));
-                }
-                Err(error) => {
-                    return Err(Failure::new(
-                        "save_failed",
-                        format!("保存文档 {path} 失败：{error}"),
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
 fn normalize_relative(root: &Path, target: &Path) -> Result<String, Failure> {
     target
         .strip_prefix(root)
@@ -235,7 +91,7 @@ fn normalize_relative(root: &Path, target: &Path) -> Result<String, Failure> {
         .map_err(|_| Failure::new("outside_project", crate::i18n::workspace::ERR_OUTSIDE_PROJECT.get()))
 }
 
-fn resolve_targets(root: &Path, params: &CompileParams) -> Result<Vec<String>, Failure> {
+pub(crate) fn resolve_targets(root: &Path, params: &CompileParams) -> Result<Vec<String>, Failure> {
     let canonical_root = dunce::canonicalize(root)
         .map_err(|error| Failure::new("project_unavailable", error.to_string()))?;
     let targets = match (&params.paths, &params.under_directory) {
@@ -345,7 +201,7 @@ fn resolve_targets(root: &Path, params: &CompileParams) -> Result<Vec<String>, F
     Ok(targets)
 }
 
-fn run_batch_with<F>(
+pub(crate) fn run_batch_with<F>(
     project: &Project,
     build_root: &Path,
     targets: Vec<String>,

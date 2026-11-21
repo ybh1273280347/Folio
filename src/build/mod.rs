@@ -2,6 +2,7 @@
 
 use std::{path::PathBuf, time::Duration};
 
+pub(crate) mod batch;
 pub(crate) mod compiler;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
