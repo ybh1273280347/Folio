@@ -4,7 +4,11 @@ use super::*;
 
 impl Workspace {
     pub(super) fn persist_settings(&mut self, cx: &mut Context<Self>) {
-        let error = storage::save_settings(&self.settings).err().map(|error| error.to_string());
+        let mut settings = self.settings.clone();
+        if let Some(snapshot) = &self.zen_snapshot {
+            settings.sidebar_open = snapshot.sidebar_open;
+        }
+        let error = storage::save_settings(&settings).err().map(|error| error.to_string());
         if let Some(error) = &error {
             self.report(error, cx);
         }
@@ -64,7 +68,11 @@ impl Workspace {
         }
         if previous.keybindings != settings.keybindings {
             // Rebind the global panel shortcuts even when focus belongs to a child entity.
-            for (id, action) in [("toggle_ai", ToggleAi.name()), ("toggle_terminal", ToggleTerminal.name())] {
+            for (id, action) in [
+                ("toggle_ai", ToggleAi.name()),
+                ("toggle_terminal", ToggleTerminal.name()),
+                ("toggle_zen", ToggleZen.name()),
+            ] {
                 let old_key = previous.key_for(id);
                 if old_key != settings.key_for(id) {
                     cx.bind_keys([KeyBinding::new(

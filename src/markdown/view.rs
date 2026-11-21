@@ -318,30 +318,32 @@ impl Render for MarkdownPane {
                                 })),
                         )
                     })
-                    .when_some(self.hovered_link.as_ref(), |area, url| {
-                        let label = crate::i18n::markdown::link_tooltip_click(
-                            cfg!(target_os = "macos"),
-                            url.starts_with('#'),
-                        );
-                        area.child(
-                            div()
-                                .id("md-link-hover-pill")
-                                .absolute()
-                                .bottom_2()
-                                .left_3()
-                                .max_w(px(520.))
-                                .px_2()
-                                .py_1()
-                                .rounded(px(6.))
-                                .bg(rgb(0xf7f7f5))
-                                .border_1()
-                                .border_color(rgb(0xe2e4e8))
-                                .shadow_sm()
-                                .text_xs()
-                                .text_color(rgb(0x5b5b58))
-                                .text_ellipsis()
-                                .child(format!("{label}：{url}")),
-                        )
+                    .when(!self.zen_mode, |area| {
+                        area.when_some(self.hovered_link.as_ref(), |area, url| {
+                            let label = crate::i18n::markdown::link_tooltip_click(
+                                cfg!(target_os = "macos"),
+                                url.starts_with('#'),
+                            );
+                            area.child(
+                                div()
+                                    .id("md-link-hover-pill")
+                                    .absolute()
+                                    .bottom_2()
+                                    .left_3()
+                                    .max_w(px(520.))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded(px(6.))
+                                    .bg(rgb(0xf7f7f5))
+                                    .border_1()
+                                    .border_color(rgb(0xe2e4e8))
+                                    .shadow_sm()
+                                    .text_xs()
+                                    .text_color(rgb(0x5b5b58))
+                                    .text_ellipsis()
+                                    .child(format!("{label}：{url}")),
+                            )
+                        })
                     })
                     .when(self.search_open && !self.source, |area| {
                         let palette = crate::theme::palette();

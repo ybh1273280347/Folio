@@ -534,6 +534,9 @@ impl Workspace {
         if self.has_visible_background() {
             pane.update(cx, |pane, cx| pane.set_backdrop_visible(true, cx));
         }
+        if self.zen_mode {
+            pane.update(cx, |pane, cx| pane.set_zen_mode(true, cx));
+        }
         cx.subscribe_in(&pane, window, move |app, pane, event: &MarkdownEvent, window, cx| {
             // Resolve identity from the live pane; a rename keeps this subscription alive.
             let full = pane.read(cx).path().to_path_buf();

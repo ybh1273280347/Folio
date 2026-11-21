@@ -502,8 +502,11 @@ impl AiPane {
     pub fn respond_workspace_tool(&self, request: &WorkspaceToolRequest, result: Value) {
         let kind = match request.kind {
             WorkspaceToolKind::AnnotationRequest => "annotation_response",
+            WorkspaceToolKind::CompileRequest => "compile_response",
             WorkspaceToolKind::TagRequest => "tag_response",
-            WorkspaceToolKind::AnnotationCancel | WorkspaceToolKind::TagCancel => {
+            WorkspaceToolKind::AnnotationCancel
+            | WorkspaceToolKind::CompileCancel
+            | WorkspaceToolKind::TagCancel => {
                 unreachable!("cancellation does not request a response")
             }
         };

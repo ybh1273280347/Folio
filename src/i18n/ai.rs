@@ -284,6 +284,19 @@ pub fn tool_manage_tag(tag: &str) -> String {
         Locale::En => format!("Manage tag: {tag}"),
     }
 }
+pub fn tool_compile_tex_folder(folder: &str) -> String {
+    match locale() {
+        Locale::ZhCn => format!("批量编译目录「{folder}」下的 TeX 文档"),
+        Locale::En => format!("Compile TeX files under \"{folder}\""),
+    }
+}
+pub fn tool_compile_tex_files(count: usize) -> String {
+    match locale() {
+        Locale::ZhCn => format!("批量编译 {count} 个 TeX 文档"),
+        Locale::En => format!("Compile {count} TeX files"),
+    }
+}
+pub const TOOL_COMPILE_TEX: BiText = BiText::new("批量编译 TeX 文档", "Compile TeX files");
 
 // Session manager (src/ai/manager.rs)
 pub const NEW_SESSION: BiText = BiText::new("新会话", "New Session");

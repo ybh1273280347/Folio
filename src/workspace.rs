@@ -1,6 +1,7 @@
 //! Workspace orchestration: disk-backed drafts, project actions and asynchronous builds.
 //! Disk revisions arbitrate external edits; conflicted drafts never autosave over them.
 mod annotations;
+mod agent_compile;
 mod agent_tags;
 mod appearance;
 mod build;
@@ -64,6 +65,7 @@ actions!(
         ToggleSidebar,
         ToggleAi,
         ToggleTerminal,
+        ToggleZen,
         FindFile,
         CloseTab,
         CopyFilePath,
@@ -164,6 +166,7 @@ pub fn bind_shortcuts(settings: &AppSettings, cx: &mut App) {
     // Panel shortcuts remain available inside terminal TUIs, unlike document-editing shortcuts.
     push_key(&mut bindings, settings.key_for("toggle_ai"), ToggleAi, Some("FolioWorkspace"));
     push_key(&mut bindings, settings.key_for("toggle_terminal"), ToggleTerminal, Some("FolioWorkspace"));
+    push_key(&mut bindings, settings.key_for("toggle_zen"), ToggleZen, Some("FolioWorkspace"));
     push_key(
         &mut bindings,
         settings.key_for("toggle_source"),
@@ -232,6 +235,16 @@ enum RightPanelView {
     Terminal,
 }
 
+#[derive(Clone, Copy)]
+struct ZenSnapshot {
+    sidebar_open: bool,
+    right_panel_open: bool,
+    right_panel_maximized: bool,
+    show_logs: bool,
+    show_build_preview: bool,
+    was_fullscreen: bool,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Dialog {
     Drafts,
@@ -259,6 +272,7 @@ struct DialogPrompt {
 
 pub struct Workspace {
     annotation_requests: BTreeSet<String>,
+    compile_requests: agent_compile::CompileRequests,
     tag_proposals: agent_tags::TagProposals,
     default_workspace: Project,
     config: ProjectConfig,
@@ -291,6 +305,8 @@ pub struct Workspace {
     documents: Documents,
     build: Build,
     show_logs: bool,
+    zen_mode: bool,
+    zen_snapshot: Option<ZenSnapshot>,
     terminal: Entity<TerminalPane>,
     ai: Entity<AiPane>,
     right_panel_open: bool,
@@ -374,6 +390,9 @@ impl Workspace {
             AiPaneEvent::WorkspaceTool(request) => match request.kind {
                 WorkspaceToolKind::AnnotationRequest | WorkspaceToolKind::AnnotationCancel => {
                     app.annotation_request(request, window, cx)
+                }
+                WorkspaceToolKind::CompileRequest | WorkspaceToolKind::CompileCancel => {
+                    app.compile_request(request, window, cx)
                 }
                 WorkspaceToolKind::TagRequest | WorkspaceToolKind::TagCancel => app.tag_request(request, cx),
             },
@@ -549,6 +568,7 @@ impl Workspace {
         });
         let mut app = Self {
             annotation_requests: BTreeSet::new(),
+            compile_requests: Default::default(),
             tag_proposals: Default::default(),
             default_workspace,
             config,
@@ -581,6 +601,8 @@ impl Workspace {
             documents: Documents::default(),
             build: Build::default(),
             show_logs: false,
+            zen_mode: false,
+            zen_snapshot: None,
             terminal,
             ai,
             right_panel_open: false,
@@ -750,6 +772,78 @@ impl Workspace {
         cx.notify();
     }
 
+    fn sync_zen_mode(&self, cx: &mut Context<Self>) {
+        for pane in self.documents.markdown_panes.values() {
+            pane.update(cx, |pane, cx| pane.set_zen_mode(self.zen_mode, cx));
+        }
+    }
+
+    fn focus_active_or_workspace(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pane) = self.documents.markdown_panes.get(&PaneKey::tab(&self.documents.active)) {
+            pane.update(cx, |pane, cx| pane.focus(window, cx));
+        } else if let Some(document) = self.documents.open.get(&self.documents.active) {
+            document.editor.update(cx, |editor, cx| editor.focus(window, cx));
+        } else {
+            self.focus.focus(window, cx);
+        }
+    }
+
+    fn toggle_zen_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.zen_mode {
+            let snapshot = ZenSnapshot {
+                sidebar_open: self.settings.sidebar_open,
+                right_panel_open: self.right_panel_open,
+                right_panel_maximized: self.right_panel_maximized,
+                show_logs: self.show_logs,
+                show_build_preview: self.show_build_preview,
+                was_fullscreen: window.is_fullscreen(),
+            };
+            self.zen_snapshot = Some(snapshot);
+            self.zen_mode = true;
+            self.show_trash = false;
+            self.settings.sidebar_open = false;
+            if self.right_panel_open {
+                self.right_panel_open = false;
+                self.right_panel_maximized = false;
+                self.terminal.update(cx, |pane, _| pane.hide());
+            }
+            self.show_logs = false;
+            self.show_build_preview = false;
+            self.notice = None;
+            self.notice_until = None;
+            if !window.is_fullscreen() {
+                window.toggle_fullscreen();
+            }
+            self.sync_zen_mode(cx);
+            if snapshot.right_panel_open || !self.focus.contains_focused(window, cx) {
+                self.focus_active_or_workspace(window, cx);
+            }
+            cx.notify();
+            return;
+        }
+
+        self.zen_mode = false;
+        if let Some(snapshot) = self.zen_snapshot.take() {
+            self.settings.sidebar_open = snapshot.sidebar_open;
+            self.show_logs = snapshot.show_logs;
+            self.show_build_preview = snapshot.show_build_preview;
+            if snapshot.right_panel_open {
+                self.open_right_panel(self.right_panel_view, window, cx);
+                self.right_panel_maximized = snapshot.right_panel_maximized;
+            } else if self.right_panel_open {
+                self.close_right_panel(window, cx);
+            }
+            if window.is_fullscreen() != snapshot.was_fullscreen {
+                window.toggle_fullscreen();
+            }
+        }
+        self.sync_zen_mode(cx);
+        if !self.focus.contains_focused(window, cx) {
+            self.focus_active_or_workspace(window, cx);
+        }
+        cx.notify();
+    }
+
     fn toggle_right_shortcut(
         &mut self,
         view: RightPanelView,
@@ -769,6 +863,7 @@ impl Workspace {
             selected_index: self.right_panel_selected,
             preview_open: self.show_build_preview,
             logs_open: self.show_logs,
+            zen_mode: self.zen_mode,
             build_running: self.build.is_running(),
             build_failed: matches!(self.build.status, BuildStatus::Failed),
             build_target: self.build.target.clone(),
@@ -776,6 +871,7 @@ impl Workspace {
             terminal_shortcut: AppSettings::format_key_badge(
                 &self.settings.key_for("toggle_terminal"),
             ),
+            zen_shortcut: AppSettings::format_key_badge(&self.settings.key_for("toggle_zen")),
             terminal_sessions: self.terminal.read(cx).session_count(),
             ai_tasks: self.ai.read(cx).active_tasks(),
         }
@@ -802,6 +898,9 @@ impl Workspace {
             RightPanelAction::ToggleLogs => {
                 self.show_logs = !self.show_logs;
                 cx.notify();
+            }
+            RightPanelAction::ToggleZen => {
+                self.toggle_zen_mode(window, cx);
             }
             RightPanelAction::OpenFile => {
                 self.open_file_dialog(window, cx);
@@ -1290,6 +1389,7 @@ impl Workspace {
         let show_background = self.has_visible_background()
             && (self.documents.active.is_empty() || document.is_some());
         let mut area = div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
@@ -1298,7 +1398,7 @@ impl Workspace {
                 MouseButton::Left,
                 cx.listener(|app, _, _, _| app.documents.focused_markdown = None),
             );
-        if !self.documents.tabs.is_empty() {
+        if !self.zen_mode && !self.documents.tabs.is_empty() {
             area = area.child(self.render_editor_tab_bar(show_background, cx));
         }
         if let Some(document) = document {
@@ -1432,6 +1532,54 @@ impl Workspace {
                     } else {
                         crate::i18n::workspace::SHORTCUTS_BAR_PROJECT.get()
                     }),
+            );
+        }
+        if self.zen_mode
+            && let Some(md_pane) = self
+                .documents
+                .markdown_panes
+                .get(&PaneKey::tab(&self.documents.active))
+        {
+            let md_read = md_pane.read(cx);
+            let outline_open = md_read.is_outline_open();
+            let docked_w = md_read.outline_docked_width();
+            let outline_pane = md_pane.clone();
+            let palette = crate::theme::palette();
+            area = area.child(
+                div()
+                    .id("zen-outline-zone")
+                    .absolute()
+                    .top_2p5()
+                    .left(px(docked_w + 12.0))
+                    .opacity(if outline_open { 0.36 } else { 0.28 })
+                    .hover(|s| s.opacity(1.0))
+                    .child(
+                        Button::new("zen-outline-toggle")
+                            .ghost()
+                            .compact()
+                            .with_size(px(16.))
+                            .w(px(26.))
+                            .h(px(26.))
+                            .rounded(px(6.))
+                            .bg(gpui_kit::rgb(palette.surface))
+                            .border_1()
+                            .border_color(gpui_kit::rgb(palette.border))
+                            .shadow_sm()
+                            .icon(crate::ui::icon(IconName::ListTree))
+                            .tooltip(if outline_open {
+                                crate::i18n::workspace::TOOLTIP_COLLAPSE_OUTLINE.get()
+                            } else {
+                                crate::i18n::workspace::TOOLTIP_EXPAND_OUTLINE.get()
+                            })
+                            .on_click(move |_, window, cx| {
+                                outline_pane.update(cx, |pane, cx| {
+                                    pane.toggle_outline(cx);
+                                    if pane.is_outline_open() && !pane.is_focused(window, cx) {
+                                        pane.focus(window, cx);
+                                    }
+                                });
+                            }),
+                    ),
             );
         }
         area.into_any_element()
@@ -1569,7 +1717,9 @@ impl Render for Workspace {
             .filter_map(|pane| pane.read(cx).export_element())
             .collect();
         for (key, pane) in &self.documents.pdf_panes {
-            let visible = !self.show_trash && (key.role == PaneRole::Reading || key.path == self.documents.active);
+            let visible = !self.show_trash
+                && ((!self.zen_mode && key.role == PaneRole::Reading)
+                    || key.path == self.documents.active);
             pane.update(cx, |pane, cx| pane.set_visible(visible, window, cx));
         }
         let modal_open = self.show_trash || self.show_preferences
@@ -1578,12 +1728,18 @@ impl Render for Workspace {
             || self.dialog_prompt.is_some()
             || self.dialog_open;
         for (key, pane) in &self.documents.html_panes {
-            let visible = !modal_open && (key.role == PaneRole::Reading || key.path == self.documents.active);
+            let visible = !modal_open
+                && ((!self.zen_mode && key.role == PaneRole::Reading)
+                    || key.path == self.documents.active);
             pane.update(cx, |pane, cx| pane.set_visible(visible, window, cx));
         }
         if let Some(pane) = &self.build_pdf {
             pane.update(cx, |pane, cx| {
-                pane.set_visible(self.show_build_preview && !self.show_trash, window, cx)
+                pane.set_visible(
+                    self.show_build_preview && !self.zen_mode && !self.show_trash,
+                    window,
+                    cx,
+                )
             });
         }
         let engine = self.directory_workspace().map(|project| project.engine);
@@ -1673,9 +1829,11 @@ impl Render for Workspace {
                     .child(div().relative().size_full().child(self.render_preview(cx))),
             );
         }
-        for path in &self.documents.reading_panes {
-            work_area =
-                work_area.child(resizable_panel().child(self.render_reading_pane(path, cx)));
+        if !self.zen_mode {
+            for path in &self.documents.reading_panes {
+                work_area =
+                    work_area.child(resizable_panel().child(self.render_reading_pane(path, cx)));
+            }
         }
         let label = if self.build.is_busy() {
             crate::i18n::workspace::BTN_STOP_BUILD.get()
@@ -1904,6 +2062,17 @@ impl Render for Workspace {
                 }
                 app.toggle_right_shortcut(RightPanelView::Terminal, window, cx);
             }))
+            .on_action(cx.listener(|app, _: &ToggleZen, window, cx| {
+                if app.show_preferences
+                    || app.dialog_prompt.is_some()
+                    || app.dialog_open
+                    || app.name_action.is_some()
+                {
+                    cx.propagate();
+                    return;
+                }
+                app.toggle_zen_mode(window, cx);
+            }))
             .on_action(cx.listener(Self::save_active))
             .on_action(cx.listener(Self::add_project))
             .on_action(
@@ -1927,10 +2096,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|app, _: &ToggleSidebar, _, cx| {
                 app.toggle_sidebar(cx);
             }))
-            .child(
-                div()
-                    .flex()
-                    .h(px(38.))
+            .when(!self.zen_mode, |app| {
+                app.child(
+                    div()
+                        .flex()
+                        .h(px(38.))
                     .flex_shrink_0()
                     .items_center()
                     .pl_4()
@@ -2153,7 +2323,8 @@ impl Render for Workspace {
                                     .window_control_area(WindowControlArea::Close),
                             ),
                     ),
-            )
+                )
+            })
             .child(
                 // Constrain the resize group to the space below the title bar.
                 div().flex_1().min_h_0().overflow_hidden().child({
@@ -2277,7 +2448,52 @@ impl Render for Workspace {
                             |toast, t| toast.opacity(t),
                         ),
                 )
-            });
+            })
+            .when(
+                self.zen_mode
+                    && !right_panel_visible
+                    && !self
+                        .documents
+                        .markdown_panes
+                        .get(&PaneKey::tab(&self.documents.active))
+                        .is_some_and(|pane| pane.read(cx).is_search_open()),
+                |app| {
+                    let palette = crate::theme::palette();
+                    let shortcut =
+                        AppSettings::format_key_badge(&self.settings.key_for("toggle_zen"));
+                    app.child(
+                        div()
+                            .id("zen-exit-pill")
+                            .absolute()
+                            .top_2p5()
+                            .right_3()
+                            .h(px(26.))
+                            .px_2p5()
+                            .rounded_full()
+                            .bg(gpui_kit::rgb(palette.surface))
+                            .border_1()
+                            .border_color(gpui_kit::rgb(palette.border))
+                            .shadow_sm()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(gpui_kit::rgb(palette.muted))
+                            .opacity(0.28)
+                            .hover(move |s| {
+                                s.opacity(1.0)
+                                    .bg(gpui_kit::rgb(palette.hover))
+                                    .text_color(gpui_kit::rgb(palette.text))
+                            })
+                            .on_click(cx.listener(|app, _, window, cx| {
+                                app.toggle_zen_mode(window, cx);
+                            }))
+                            .child(crate::ui::icon(IconName::Close).size(px(12.)))
+                            .child(crate::i18n::workspace::exit_zen_label(&shortcut)),
+                    )
+                },
+            );
         if let Some(action) = &self.name_action {
             let title = match action {
                 NameAction::Create => crate::i18n::workspace::MODAL_CREATE_FILE.get(),

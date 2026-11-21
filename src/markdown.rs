@@ -362,6 +362,7 @@ pub struct MarkdownPane {
     last_scroll_y: Rc<std::cell::Cell<Pixels>>,
     reading: bool,
     backdrop_visible: bool,
+    zen_mode: bool,
     focus: FocusHandle,
     scroll: ScrollHandle,
     settings: AppSettings,
@@ -887,6 +888,7 @@ impl MarkdownPane {
             last_scroll_y: Rc::new(std::cell::Cell::new(px(0.))),
             reading,
             backdrop_visible: false,
+            zen_mode: false,
             focus: cx.focus_handle(),
             scroll,
             settings,
@@ -1098,6 +1100,27 @@ impl MarkdownPane {
     pub fn set_backdrop_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         self.backdrop_visible = visible;
         cx.notify();
+    }
+
+    pub fn set_zen_mode(&mut self, zen: bool, cx: &mut Context<Self>) {
+        if self.zen_mode != zen {
+            self.zen_mode = zen;
+            cx.notify();
+        }
+    }
+
+    pub fn is_search_open(&self) -> bool {
+        self.search_open && !self.source
+    }
+
+    pub fn outline_docked_width(&self) -> f32 {
+        if self.source && self.outline {
+            self.outline_width
+        } else if !self.source && self.is_outline_open() && !self.is_outline_overlay() {
+            outline::PANEL_WIDTH
+        } else {
+            0.0
+        }
     }
 
     fn is_outline_rendered(&self) -> bool {

@@ -10,6 +10,7 @@ import { createAgentSession, SessionManager, DefaultResourceLoader, ModelRuntime
   createMcpExtension, createCodemodeExtension, createToolSearchExtension } from '@earendil-works/pi-coding-agent';
 import { webTools } from './web-tools.mjs';
 import { annotationTools } from './annotation-tools.mjs';
+import { compileTools } from './compile-tools.mjs';
 import { tagTools } from './tag-tools.mjs';
 import { pythonTool } from './python-tool.mjs';
 import { WorkspaceToolBridge } from './workspace-tool-bridge.mjs';
@@ -22,6 +23,7 @@ const { theme } = await import(new URL('./modes/interactive/theme/theme.js', imp
 const { resolveToCwd } = await import(new URL('./core/tools/path-utils.js', import.meta.resolve('@earendil-works/pi-coding-agent')));
 const send = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 const annotationBridge = new WorkspaceToolBridge(send, 'annotation');
+const compileBridge = new WorkspaceToolBridge(send, 'compile');
 const tagBridge = new WorkspaceToolBridge(send, 'tag');
 const root = process.env.FOLIO_USER_DATA ?? path.join(os.homedir(), 'AppData', 'Roaming', 'folio-gpui');
 fs.mkdirSync(root, { recursive: true });
@@ -167,6 +169,8 @@ async function createRecord(cwd, manager) {
     resourceLoader: loader, customTools: [pythonTool(cwd), ...webTools(() => settings, cwd, root),
       ...annotationTools((operation, params, signal) => annotationBridge.request(
         { projectKey: project, sessionId: id }, operation, params, signal)),
+      ...compileTools((operation, params, signal) => compileBridge.request(
+        { projectKey: project, sessionId: id }, operation, params, signal)),
       ...tagTools((operation, params, signal) => tagBridge.request(
         { projectKey: project, sessionId: id }, operation, params, signal))] });
   record.session = session;
@@ -202,6 +206,7 @@ async function createRecord(cwd, manager) {
 
 function disposeRecord(record) {
   annotationBridge.dispose({ projectKey: record.project, sessionId: record.id });
+  compileBridge.dispose({ projectKey: record.project, sessionId: record.id });
   tagBridge.dispose({ projectKey: record.project, sessionId: record.id });
   record.unsubscribe();
   record.session.dispose();
@@ -294,6 +299,10 @@ async function dispatch(command) {
   if (command.projectKey !== projectKey(command.cwd)) throw new Error('项目标识不匹配');
   if (command.type === 'annotation_response') {
     annotationBridge.respond(command);
+    return response();
+  }
+  if (command.type === 'compile_response') {
+    compileBridge.respond(command);
     return response();
   }
   if (command.type === 'tag_response') {
