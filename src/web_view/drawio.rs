@@ -2,7 +2,6 @@
 //! draw.io's native `embed=1&proto=json` postMessage protocol.
 
 use super::{apply_virtual_host_mapping, finish_child_webview, new_base_builder, parent_window_handle};
-use crate::i18n::{Locale, locale};
 use crate::theme::color as rgb;
 use crate::ui;
 use gpui::{EventEmitter, FocusHandle, Focusable};
@@ -481,12 +480,9 @@ impl DrawioPane {
             }
         };
 
-        let lang = match locale() {
-            Locale::ZhCn => "zh",
-            Locale::En => "en",
-        };
+        // Always load draw.io UI in Simplified Chinese while keeping outer Folio controls synced with `locale()`.
         let entry_url = format!(
-            "https://{DRAWIO_HOST}/index.html?embed=1&proto=json&spin=1&offline=1&libraries=1&noExitBtn=1&saveAndExit=0&lang={lang}"
+            "https://{DRAWIO_HOST}/index.html?embed=1&proto=json&spin=1&offline=1&libraries=1&noExitBtn=1&saveAndExit=0&lang=zh"
         );
 
         let task = cx.spawn_in(window, async move |this, cx| {
