@@ -45,6 +45,8 @@ pub struct WorkspaceToolRequest {
     #[serde(rename = "type")]
     pub kind: WorkspaceToolKind,
     pub id: String,
+    // The SDK-side workspace bridge emits direct JSONL requests without a sequence.
+    #[serde(default)]
     pub sequence: u64,
     pub project_key: String,
     pub session_id: String,
@@ -256,7 +258,6 @@ mod tests {
         let request: WorkspaceToolRequest = serde_json::from_value(json!({
             "type": "tag_request",
             "id": "request-1",
-            "sequence": 17,
             "projectKey": "project-root",
             "sessionId": "session-1",
             "operation": "preview_files",
@@ -266,7 +267,7 @@ mod tests {
         assert_eq!(request.kind, WorkspaceToolKind::TagRequest);
         assert_eq!(request.project_key, "project-root");
         assert_eq!(request.session_id, "session-1");
-        assert_eq!(request.sequence, 17);
+        assert_eq!(request.sequence, 0);
         assert_eq!(request.arguments["operation"], "preview_files");
         assert_eq!(request.arguments["params"]["proposal_id"], "proposal-1");
     }
