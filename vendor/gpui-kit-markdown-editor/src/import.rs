@@ -755,6 +755,7 @@ pub(crate) fn preserve_source_extensions(extensions: MarkdownExtensions) -> Mark
 
     struct SourceAtom {
         block: bool,
+        inline_extensions: Arc<MarkdownExtensions>,
     }
     impl MarkdownPlugin for SourceAtom {
         fn name(&self) -> &str {
@@ -830,7 +831,7 @@ pub(crate) fn preserve_source_extensions(extensions: MarkdownExtensions) -> Mark
             };
             if self.block
                 && matches!(tag.as_str(), "table" | "div")
-                && let Some(table) = super::html_table::parse(&source)
+                && let Some(table) = super::html_table::parse(&source, self.inline_extensions.clone())
             {
                 return Some(
                     MarkdownNode::new(super::html_table::NAME, table)
@@ -862,9 +863,10 @@ pub(crate) fn preserve_source_extensions(extensions: MarkdownExtensions) -> Mark
             })
         }
     }
+    let inline_extensions = Arc::new(extensions.clone());
     extensions
-        .plugin(SourceAtom { block: true })
-        .plugin(SourceAtom { block: false })
+        .plugin(SourceAtom { block: true, inline_extensions: inline_extensions.clone() })
+        .plugin(SourceAtom { block: false, inline_extensions })
         .block_renderer(super::html_table::NAME, super::html_table::render)
         .block_renderer(super::html_table::EDITABLE_NAME, super::html_table::render)
         .block_renderer(HTML_DIV, |node, _, _| {

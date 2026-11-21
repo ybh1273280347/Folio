@@ -1,6 +1,8 @@
 //! Native HTML table layout and cell editing. The HTML block remains the
 //! document's source so its row groups, spans and attributes can round-trip.
 
+use std::sync::Arc;
+
 use gpui::AppContext as _;
 use gpui::{
     App, Div, Focusable as _, FontWeight, InteractiveElement as _, ParentElement as _,
@@ -8,7 +10,13 @@ use gpui::{
     px,
 };
 use gpui_kit::{
-    base::{Theme, text::MarkdownNode},
+    base::{
+        Theme,
+        text::{
+            MarkdownExtensions, MarkdownNode,
+            editor_host::{BlockNode, FlowPosition, RenderContext},
+        },
+    },
     component::{
         WindowExt as _,
         button::{Button, ButtonVariants as _},
@@ -36,12 +44,14 @@ pub(crate) struct EditableTable {
 pub(crate) struct HtmlTable {
     columns: u16,
     cells: Vec<Cell>,
+    extensions: Arc<MarkdownExtensions>,
 }
 
 struct Cell {
     rows: std::ops::Range<i16>,
     columns: std::ops::Range<i16>,
     text: SharedString,
+    blocks: Vec<BlockNode>,
     align: TextAlign,
     header: bool,
 }
@@ -129,7 +139,7 @@ fn row_cells(row: &Handle) -> Vec<Handle> {
         .collect()
 }
 
-pub(crate) fn parse(source: &str) -> Option<HtmlTable> {
+pub(crate) fn parse(source: &str, extensions: Arc<MarkdownExtensions>) -> Option<HtmlTable> {
     let source = source.trim();
     let closing = source.rsplit_once('<')?.1.strip_suffix('>')?.trim_end();
     // A blank line can end a CommonMark HTML block before its table closes.
@@ -211,12 +221,22 @@ pub(crate) fn parse(source: &str) -> Option<HtmlTable> {
                     });
                 let mut text = String::new();
                 append_cell_text(&node, &mut text);
+                let mut markdown = Vec::new();
+                serialize(
+                    &mut markdown,
+                    &SerializableHandle::from(node.clone()),
+                    Default::default(),
+                )
+                .ok()?;
+                let markdown = String::from_utf8(markdown).ok()?;
+                let blocks = super::math::parse_markdown(&markdown, extensions.clone()).ok()?;
                 cells.push(Cell {
                     rows: i16::try_from(row_index).ok()?..i16::try_from(row_end).ok()?,
                     columns,
                     text: text
                         .trim_matches(|ch: char| ch.is_ascii_whitespace())
                         .into(),
+                    blocks,
                     align,
                     header,
                 });
@@ -227,6 +247,7 @@ pub(crate) fn parse(source: &str) -> Option<HtmlTable> {
     (!cells.is_empty()).then_some(HtmlTable {
         columns: occupied_until.len() as u16,
         cells,
+        extensions,
     })
 }
 
@@ -255,7 +276,8 @@ fn append_cell_text(node: &Handle, text: &mut String) {
 /// Replace only the target cell's children. Serializing the fragment keeps
 /// the other cells, wrapper elements and their HTML attributes intact.
 pub(crate) fn replace_cell(node: &MarkdownNode, index: usize, value: &str) -> Option<MarkdownNode> {
-    let original = &node.data::<HtmlTable>().expect("HTML table data").cells[index];
+    let source_table = node.data::<HtmlTable>().expect("HTML table data");
+    let original = &source_table.cells[index];
     if original.text.as_ref() == value {
         return None;
     }
@@ -283,7 +305,8 @@ pub(crate) fn replace_cell(node: &MarkdownNode, index: usize, value: &str) -> Op
     )
     .expect("serialization to memory is infallible");
     let source = String::from_utf8(output).expect("HTML serialization writes UTF-8");
-    let table = parse(&source).expect("replacing cell text preserves the table structure");
+    let table = parse(&source, source_table.extensions.clone())
+        .expect("replacing cell text preserves the table structure");
     Some(
         MarkdownNode::new(NAME, table)
             .text(source.clone())
@@ -291,11 +314,14 @@ pub(crate) fn replace_cell(node: &MarkdownNode, index: usize, value: &str) -> Op
     )
 }
 
-pub(crate) fn render(node: &MarkdownNode, _: &mut Window, cx: &mut App) -> Div {
+pub(crate) fn render(node: &MarkdownNode, window: &mut Window, cx: &mut App) -> Div {
     let editable = node.data::<EditableTable>();
     let source = editable.map_or(node, |editable| &editable.node);
     let table = source.data::<HtmlTable>().expect("HTML table preview data");
     let border = Theme::global(cx).tokens.colors.border;
+    let render_context = RenderContext::from_app(cx)
+        .with_markdown_extensions(table.extensions.clone())
+        .with_body_font_size(window.text_style().font_size.to_pixels(window.rem_size()));
     div()
         .grid()
         .grid_cols(table.columns)
@@ -318,7 +344,18 @@ pub(crate) fn render(node: &MarkdownNode, _: &mut Window, cx: &mut App) -> Div {
                 .whitespace_normal()
                 .text_align(cell.align)
                 .when(cell.header, |this| this.font_weight(FontWeight::SEMIBOLD))
-                .child(cell.text.clone())
+                .children({
+                    cell.blocks.iter().enumerate().map(|(index, block)| {
+                        let nodes: Vec<_> = cell.blocks.iter().collect();
+                        block.render(
+                            index,
+                            FlowPosition::at(&nodes, index, index + 1 == nodes.len()),
+                            &render_context,
+                            window,
+                            cx,
+                        )
+                    })
+                })
                 .id(("html-cell", index))
                 .when_some(editable, |this, editable| {
                     let editor = editable.editor.clone();
