@@ -35,6 +35,8 @@ pub enum WorkspaceToolKind {
     AnnotationCancel,
     CompileRequest,
     CompileCancel,
+    DrawioRequest,
+    DrawioCancel,
     TagRequest,
     TagCancel,
 }
@@ -182,6 +184,8 @@ impl Host {
                     | "annotation_cancel"
                     | "compile_request"
                     | "compile_cancel"
+                    | "drawio_request"
+                    | "drawio_cancel"
                     | "tag_request"
                     | "tag_cancel" => {
                         match serde_json::from_value(value.clone()) {

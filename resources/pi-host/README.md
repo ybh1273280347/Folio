@@ -11,6 +11,7 @@
 - 内置自定义工具：
   - [annotation-tools.mjs](annotation-tools.mjs)（`annotation` 通道）
   - [compile-tools.mjs](compile-tools.mjs)（`compile` 通道）
+  - [drawio-tools.mjs](drawio-tools.mjs)（`drawio` 通道）
   - [tag-tools.mjs](tag-tools.mjs)（`tag` 通道）
   - [web-tools.mjs](web-tools.mjs) / [python-tool.mjs](python-tool.mjs)（本地执行，不走 Rust 桥接）
 - 开发测试：`test/`（仅测试用，不进入发行包）
@@ -20,6 +21,8 @@
 > `package.ps1` 使用 `robocopy /E` 全量同步 `resources/pi-host` 到发行包的 `pi-host/`，仅排除 `test`、`__pycache__`、`.pytest_cache` 与 `*.log`/`*.tmp`。
 > - 新增运行时 `.mjs` 模块或子目录会自动打包，无需修改 `package.ps1`。
 > - 不要把本机调试文件、大体积临时数据放到 `resources/pi-host` 根目录下。
+
+Draw.io 工具提供 `folio_drawio_read`、`folio_drawio_create` 和 `folio_drawio_update`。工具只接受项目内 `.drawio` 相对路径。创建不会覆盖已有文件，写入内容必须是根元素为 `mxfile` 的有效 XML。
 
 ---
 
