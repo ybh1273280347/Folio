@@ -429,9 +429,12 @@ impl MarkdownPane {
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
+        let image_cache = crate::image::MarkdownImageCache::default();
         self.visual_editor.update(cx, |editor, cx| {
             editor.set_image_source(
-                move |uri| crate::image::resolve_markdown_image_source(&doc_dir, uri),
+                move |uri| {
+                    crate::image::resolve_markdown_image_source_cached(&doc_dir, uri, &image_cache)
+                },
                 cx,
             );
         });
@@ -567,12 +570,17 @@ impl MarkdownPane {
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
+        let initial_image_cache = crate::image::MarkdownImageCache::default();
         let visual_editor = cx.new(|cx| {
             let mut editor = BlockEditorState::new(window, cx)
                 .with_content_folding()
                 .with_clipboard_policy(markdown_editor::ClipboardPolicy::Host)
                 .with_image_source(move |uri| {
-                    crate::image::resolve_markdown_image_source(&initial_doc_dir, uri)
+                    crate::image::resolve_markdown_image_source_cached(
+                        &initial_doc_dir,
+                        uri,
+                        &initial_image_cache,
+                    )
                 });
             editor
                 .set_markdown_extensions(extensions.clone(), cx)

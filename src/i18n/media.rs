@@ -436,6 +436,10 @@ pub const IMG_HINT_INTERACTION: BiText = BiText::new(
     "Ctrl+滚轮缩放 · 滚轮上下移动 · 拖拽平移 · 双击切换 100%",
     "Ctrl+Scroll zoom · Scroll pan · Drag to move · Double-click 100%",
 );
+pub const IMG_SVG_COMPLEX_NOTICE: BiText = BiText::new(
+    "检测到公式或表格等复杂富文本，静态预览可能不完整；建议在 draw.io 导出时取消勾选「格式化文本」或改用内置 .drawio 编辑器打开。",
+    "Complex rich text (math/table) detected; static SVG preview may be incomplete. Uncheck 'Formatted Text' in draw.io or open as .drawio.",
+);
 pub fn img_load_failed(err: &dyn std::fmt::Display) -> String {
     match locale() {
         Locale::ZhCn => format!("无法加载图像：{err}"),

@@ -1,6 +1,9 @@
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::SystemTime,
 };
 
 use chrono::Local;
@@ -260,12 +263,46 @@ pub fn resolve_markdown_image_path(doc_dir: &Path, uri: &str) -> Option<PathBuf>
     Some(resolved)
 }
 
-/// Resolve Markdown image URIs relative to the owning document's directory.
-pub fn resolve_markdown_image_source(doc_dir: &Path, uri: &SharedUri) -> ImageSource {
-    match resolve_markdown_image_path(doc_dir, uri.as_ref()) {
-        Some(path) => path.as_path().into(),
-        None => uri.clone().into(),
+#[derive(Default, Clone)]
+pub struct MarkdownImageCache {
+    svgs: Arc<Mutex<HashMap<PathBuf, (Option<SystemTime>, u64, Arc<Image>)>>>,
+}
+
+/// Resolve Markdown image URIs relative to the owning document's directory,
+/// preprocessing `.svg` files (e.g. draw.io `light-dark` and `<foreignObject>`)
+/// with modification-time caching.
+pub fn resolve_markdown_image_source_cached(
+    doc_dir: &Path,
+    uri: &SharedUri,
+    cache: &MarkdownImageCache,
+) -> ImageSource {
+    let Some(path) = resolve_markdown_image_path(doc_dir, uri.as_ref()) else {
+        return uri.clone().into();
+    };
+    let is_svg = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+    if is_svg && let Ok(meta) = fs::metadata(&path) {
+        let mtime = meta.modified().ok();
+        let len = meta.len();
+        if let Ok(guard) = cache.svgs.lock()
+            && let Some((cached_mtime, cached_len, cached_img)) = guard.get(&path)
+            && *cached_mtime == mtime
+            && *cached_len == len
+        {
+            return ImageSource::Image(cached_img.clone());
+        }
+        if let Ok(raw) = fs::read(&path) {
+            let preprocessed = super::svg_compat::preprocess_svg_bytes(&raw);
+            let image = Arc::new(Image::from_bytes(ImageFormat::Svg, preprocessed.bytes));
+            if let Ok(mut guard) = cache.svgs.lock() {
+                guard.insert(path, (mtime, len, image.clone()));
+            }
+            return ImageSource::Image(image);
+        }
     }
+    path.as_path().into()
 }
 
 #[cfg(test)]
