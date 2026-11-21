@@ -19,9 +19,10 @@ impl Workspace {
         let settings = &self.settings;
         let palette_changed = previous.theme.palette != settings.theme.palette;
         let fallback_changed = previous.cjk_fallback_font != settings.cjk_fallback_font;
+        let cjk_scale_changed = (previous.cjk_font_scale - settings.cjk_font_scale).abs() > f32::EPSILON;
         let locale_changed = previous.locale != settings.locale;
 
-        if palette_changed || fallback_changed || previous.interface_font != settings.interface_font
+        if palette_changed || fallback_changed || cjk_scale_changed || previous.interface_font != settings.interface_font
             || crate::theme::tool_typography(&previous) != crate::theme::tool_typography(settings)
         {
             crate::theme::apply_settings(settings, cx);
@@ -88,7 +89,7 @@ impl Workspace {
                 pane.update(cx, |pane, cx| pane.refresh_locale(window, cx));
             }
         }
-        if locale_changed || fallback_changed {
+        if locale_changed || fallback_changed || cjk_scale_changed {
             window.refresh();
         }
         if previous.background_image != settings.background_image {

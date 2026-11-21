@@ -282,6 +282,7 @@ pub fn apply_settings(settings: &crate::model::AppSettings, cx: &mut App) {
             gpui_kit::FontFallbacks::from_fonts(vec![settings.cjk_fallback_font.clone()])
         }),
     );
+    cx.text_system().set_cjk_font_scale(settings.cjk_font_scale);
     let document_typography = gpui_kit::base::Theme::global(cx).tokens.typography;
     apply(settings.theme.palette, cx);
 

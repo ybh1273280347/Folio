@@ -227,6 +227,23 @@ impl Drop for MissingGlyphReceiver {
     }
 }
 
+/// Returns whether a character belongs to CJK ideographs or fullwidth CJK punctuation.
+pub fn is_cjk_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x2E80..=0x2FDF
+            | 0x3000..=0x303F
+            | 0x3040..=0x30FF
+            | 0x3100..=0x312F
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0xFF01..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x20000..=0x323AF
+    )
+}
+
 /// The GPUI text rendering sub system.
 pub struct TextSystem {
     platform_text_system: Arc<dyn PlatformTextSystem>,
@@ -236,6 +253,7 @@ pub struct TextSystem {
     wrapper_pool: Mutex<FxHashMap<FontIdWithSize, Vec<CharWidthCache>>>,
     fallback_font_stack: SmallVec<[Font; 2]>,
     default_font_fallbacks: RwLock<Option<FontFallbacks>>,
+    cjk_font_scale: RwLock<f32>,
     font_generation: Arc<AtomicUsize>,
     missing_glyph_reporter: Arc<MissingGlyphReporter>,
     missing_glyph_receiver: Mutex<Option<MissingGlyphReceiver>>,
@@ -273,6 +291,7 @@ impl TextSystem {
                 font("Arial"), // macOS, Windows
             ],
             default_font_fallbacks: RwLock::default(),
+            cjk_font_scale: RwLock::new(1.0),
             font_generation: Arc::default(),
             missing_glyph_reporter: Arc::new(MissingGlyphReporter {
                 generation: missing_glyph_generation.clone(),
@@ -313,6 +332,27 @@ impl TextSystem {
 
     pub(crate) fn default_font_fallbacks(&self) -> Option<FontFallbacks> {
         self.default_font_fallbacks.read().clone()
+    }
+
+    /// Returns the scale factor applied to CJK characters relative to Latin text.
+    pub fn cjk_font_scale(&self) -> f32 {
+        *self.cjk_font_scale.read()
+    }
+
+    /// Set the scale factor applied to CJK characters relative to Latin text.
+    pub fn set_cjk_font_scale(&self, scale: f32) {
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        let mut current = self.cjk_font_scale.write();
+        if (*current - scale).abs() > f32::EPSILON {
+            *current = scale;
+            self.platform_text_system.set_cjk_font_scale(scale);
+            self.wrapper_pool.lock().clear();
+            self.font_generation.fetch_add(1, Ordering::Release);
+        }
     }
 
     /// Add a font's data to the text system.
