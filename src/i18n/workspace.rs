@@ -53,7 +53,6 @@ pub const REFRESH_FILES_TOOLTIP: BiText = BiText::new("刷新文件列表", "Ref
 pub const FILES_REFRESHED: BiText = BiText::new("已刷新文件列表。", "File list refreshed.");
 pub const SEARCH_HUB_PLACEHOLDER: BiText = BiText::new("搜索功能、命令或文件…", "Search features, commands, or files…");
 pub const BATCH_EDIT_TAGS_TOOLTIP: BiText = BiText::new("批量编辑标签（Alt+T）", "Batch edit tags (Alt+T)");
-pub const COMPILE_BTN: BiText = BiText::new("编译", "Compile");
 pub const TRASH_LABEL: BiText = BiText::new("废纸篓", "Trash");
 pub const SETTINGS_LABEL: BiText = BiText::new("设置", "Settings");
 pub const EXPORT_BTN: BiText = BiText::new("导出", "Export");
@@ -264,20 +263,17 @@ pub const MENU_REMOVE_PROJECT: BiText = BiText::new("移除项目…", "Remove P
 pub const MENU_COPY_FULL_PATH: BiText = BiText::new("复制完整路径", "Copy Full Path");
 pub const MENU_EDIT_TAGS: BiText = BiText::new("编辑标签…", "Edit Tags…");
 pub const MENU_RENAME: BiText = BiText::new("重命名…", "Rename…");
-pub const MENU_NEW_MARKDOWN: BiText = BiText::new("新建 Markdown", "New Markdown");
-pub const MENU_NEW_TEX: BiText = BiText::new("新建 LaTeX (.tex)", "New LaTeX (.tex)");
-pub const MENU_NEW_DRAWIO: BiText = BiText::new("新建绘图 (.drawio)", "New Diagram (.drawio)");
-pub const MENU_NEW_BIB: BiText = BiText::new("新建参考文献 (.bib)", "New Bibliography (.bib)");
-pub const MENU_NEW_TXT: BiText = BiText::new("新建纯文本 (.txt)", "New Plain Text (.txt)");
+pub const MENU_NEW_MARKDOWN: BiText = BiText::new("新建 .md", "New .md");
+pub const MENU_NEW_TEX: BiText = BiText::new("新建 .tex", "New .tex");
+pub const MENU_NEW_DRAWIO: BiText = BiText::new("新建 .drawio", "New .drawio");
+pub const MENU_NEW_BIB: BiText = BiText::new("新建 .bib", "New .bib");
+pub const MENU_NEW_TXT: BiText = BiText::new("新建 .txt", "New .txt");
 pub const MENU_NEW_OTHER: BiText = BiText::new("其他…", "Other…");
 pub const MENU_NEW_FILE: BiText = BiText::new("其他文件…", "Other File…");
 pub const MENU_NEW_FOLDER: BiText = BiText::new("新建文件夹…", "New Folder…");
-pub const NEW_PRESET_MARKDOWN: BiText = BiText::new("Markdown", "Markdown");
-pub const NEW_PRESET_TEX: BiText = BiText::new("LaTeX 文档", "LaTeX Document");
-pub const NEW_PRESET_DRAWIO: BiText = BiText::new("绘图", "Diagram");
-pub const NEW_PRESET_BIB: BiText = BiText::new("参考文献", "Bibliography");
-pub const NEW_PRESET_TXT: BiText = BiText::new("纯文本", "Plain Text");
 pub const TOOLTIP_NEW_FILE_MENU: BiText = BiText::new("新建其他类型文件", "New other file type");
+pub const TOOLTIP_BATCH_COMPILE: BiText = BiText::new("编译所选文件", "Compile selected");
+pub const TOOLTIP_CLEAR_SELECTION: BiText = BiText::new("取消选择", "Clear selection");
 pub const CREATE_FILE_HINT: BiText = BiText::new(
     "输入带受支持扩展名的文件名（如 styles.sty、config.yaml、data.csv）；不支持直接新建 PDF、图片或 HTML。",
     "Enter a filename with a supported extension (e.g. styles.sty, config.yaml, data.csv). PDF, images, and HTML cannot be created directly.",
@@ -304,8 +300,8 @@ pub const BANNER_DISK_MODIFIED: BiText = BiText::new("磁盘文件已被外部�
 pub const BTN_LOAD_DISK: BiText = BiText::new("使用磁盘版本", "Load Disk Version");
 pub const BTN_OVERWRITE_DISK: BiText = BiText::new("保留草稿并覆盖", "Keep Draft & Overwrite");
 
-pub const EMPTY_LOOSE_HINT: BiText = BiText::new("打开文件，或点击 + Markdown 开始写作", "Open a file, or click + Markdown to start writing");
-pub const EMPTY_PROJECT_HINT: BiText = BiText::new("选择文件，或点击 + Markdown 开始写作", "Select a file, or click + Markdown to start writing");
+pub const EMPTY_LOOSE_HINT: BiText = BiText::new("打开文件，或点击上方新建按钮开始写作", "Open a file, or click the New button above to start writing");
+pub const EMPTY_PROJECT_HINT: BiText = BiText::new("选择文件，或点击上方新建按钮开始写作", "Select a file, or click the New button above to start writing");
 pub const SHORTCUTS_BAR_LOOSE: BiText = BiText::new(
     "Ctrl+Shift+O 打开文件  ·  Ctrl+O 打开项目  ·  Ctrl+S 保存",
     "Ctrl+Shift+O Open File  ·  Ctrl+O Open Project  ·  Ctrl+S Save",
