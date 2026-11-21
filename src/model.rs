@@ -134,40 +134,6 @@ pub const SHORTCUT_DEFS: &[ShortcutDef] = &[
     },
 ];
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct AnnotationRect {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct AnnotationItem {
-    pub id: u64,
-    pub file: String,
-    pub page: usize,
-    pub quote: String,
-    pub occurrence: usize,
-    pub color: String,
-    pub comment: String,
-    #[serde(default)]
-    pub region: Option<AnnotationRect>,
-    #[serde(default)]
-    pub rects: Vec<AnnotationRect>,
-}
-
-/// 5 fluorescent highlight colors (name, hex string for Markdown `<mark>`, RGB hex for UI).
-pub const HIGHLIGHT_COLORS: &[(&str, &str, u32)] = &[
-    ("yellow", "#fef08a", 0xfacc15),
-    ("green", "#bbf7d0", 0x4ade80),
-    ("blue", "#bae6fd", 0x38bdf8),
-    ("pink", "#fbcfe8", 0xf472b6),
-    ("orange", "#fed7aa", 0xfb923c),
-];
-
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Engine {

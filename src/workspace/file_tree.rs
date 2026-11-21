@@ -109,7 +109,7 @@ impl Workspace {
             self.relocate_file_state(&relative, &renamed, window, cx);
             self.expand_ancestors(&renamed);
             relocated.push((relative, renamed));
-            result = storage::relocate_annotations(&source, &target);
+            result = crate::annotations::relocate_annotations(&source, &target);
             if result.is_err() { break; }
         }
         self.files = files::list_files(&root)?;

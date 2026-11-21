@@ -1,7 +1,13 @@
 //! Annotation requests are prepared off-thread, then committed through the active workspace.
-use super::*;
-use crate::annotations::{self, Failure, Params, Prepared};
+use super::super::Workspace;
+use crate::{
+    ai::{WorkspaceToolAction, WorkspaceToolRequest},
+    annotations::{self, Failure, Params, Prepared},
+    files,
+};
+use gpui_kit::{Context, Window};
 use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
 
 #[derive(Clone)]
 enum Snapshot {
@@ -10,7 +16,7 @@ enum Snapshot {
 }
 
 impl Workspace {
-    pub(super) fn annotation_request(&mut self, request: &WorkspaceToolRequest, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::workspace) fn annotation_request(&mut self, request: &WorkspaceToolRequest, window: &mut Window, cx: &mut Context<Self>) {
         if request.action == WorkspaceToolAction::Cancel {
             self.annotation_requests.remove(&request.id);
             return;
@@ -119,7 +125,7 @@ impl Workspace {
         };
         // This completion runs serially on GPUI. Always merge the latest per-directory store,
         // rather than a snapshot taken before another session or manual annotation committed.
-        let mut items = storage::try_load_annotations(path)?;
+        let mut items = annotations::try_load_annotations(path)?;
         if let Some(existing) = annotations::existing(&items, &prepared, path)? { return Ok(existing); }
         prepared.item.id = items.iter().map(|item| item.id).max().unwrap_or(0) + 1;
         if let Some(text) = &prepared.markdown {
@@ -138,7 +144,7 @@ impl Workspace {
             }
         }
         items.push(prepared.item.clone());
-        if let Err(error) = storage::save_annotations(path, &items) {
+        if let Err(error) = annotations::save_annotations(path, &items) {
             cx.notify();
             let prefix = if prepared.markdown.is_some() {
                 crate::i18n::tags::ERR_ANN_SAVE_HIGHLIGHT_ONLY.get()

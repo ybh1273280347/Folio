@@ -1,5 +1,6 @@
 //! Workspace-side tool handlers resolve the active context and route results back to AI.
 
+mod annotations;
 mod compile;
 mod drawio;
 mod tags;
