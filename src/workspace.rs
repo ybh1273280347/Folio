@@ -70,6 +70,7 @@ actions!(
         FindFile,
         CloseTab,
         CopyFilePath,
+        PasteToFileTree,
         EditTags,
         DeleteFileTreeItem,
         UndoFileDelete,
@@ -127,6 +128,7 @@ pub fn bind_shortcuts(settings: &AppSettings, cx: &mut App) {
     let mut bindings = vec![
         KeyBinding::new("ctrl-c", gpui_kit::component::input::Copy, Some("FolioPdf")),
         KeyBinding::new("ctrl-c", CopyFilePath, Some("FolioFileTree")),
+        KeyBinding::new("ctrl-v", PasteToFileTree, Some("FolioFileTree")),
         KeyBinding::new("alt-t", EditTags, Some("FolioFileTree")),
         KeyBinding::new("delete", DeleteFileTreeItem, Some("FolioFileTree")),
         KeyBinding::new("ctrl-z", UndoFileDelete, Some("FolioFileTree")),
@@ -291,6 +293,7 @@ pub struct Workspace {
     tags: tags::TagPanel,
     collapsed_folders: BTreeSet<String>,
     focused_folder: Option<String>,
+    focused_file: Option<String>,
     selected_files: BTreeSet<String>,
     tree_row_bounds: Arc<Mutex<BTreeMap<String, (bool, Bounds<Pixels>)>>>,
     tree_drag: Option<TreeSelectionDrag>,
@@ -599,6 +602,7 @@ impl Workspace {
             tags,
             collapsed_folders: BTreeSet::new(),
             focused_folder: None,
+            focused_file: None,
             selected_files: BTreeSet::new(),
             tree_row_bounds: Arc::new(Mutex::new(BTreeMap::new())),
             tree_drag: None,
@@ -1518,6 +1522,8 @@ impl Workspace {
             } else if let Some(pane) = self.documents.drawio_panes.get(&tab) {
                 area = area.child(div().flex_1().min_h_0().child(pane.clone()));
             } else if let Some(pane) = self.documents.pdf_panes.get(&tab) {
+                area = area.child(div().flex_1().min_h_0().child(pane.clone()));
+            } else if let Some(pane) = self.documents.image_panes.get(&tab) {
                 area = area.child(div().flex_1().min_h_0().child(pane.clone()));
             } else {
                 area = area.child(

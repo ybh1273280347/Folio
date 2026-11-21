@@ -388,3 +388,21 @@ pub fn untitled_drawio(number: Option<usize>) -> String {
         (Locale::En, Some(n)) => format!("Untitled {n}.drawio"),
     }
 }
+
+pub const MENU_PASTE_IMAGE: BiText = BiText::new("粘贴图像", "Paste Image");
+pub const REPORT_NO_CLIPBOARD_IMAGE: BiText = BiText::new(
+    "剪贴板中没有可粘贴的图像或 SVG。",
+    "No pasteable image or SVG found in clipboard.",
+);
+pub fn report_pasted_image(name: &str) -> String {
+    match locale() {
+        Locale::ZhCn => format!("已粘贴图像：{name}"),
+        Locale::En => format!("Pasted image: {name}"),
+    }
+}
+pub fn report_pasted_images(count: usize) -> String {
+    match locale() {
+        Locale::ZhCn => format!("已粘贴 {count} 个图像文件"),
+        Locale::En => format!("Pasted {count} image files"),
+    }
+}

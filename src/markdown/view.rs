@@ -166,6 +166,7 @@ impl Render for MarkdownPane {
         }
 
         if self.source {
+            let paste_pane = cx.entity();
             content = content.child(
                 div().relative().flex_1().min_w_0().p_2().child(
                     Editor::new(&self.source_editor)
@@ -177,7 +178,10 @@ impl Render for MarkdownPane {
                         } else {
                             self.settings.editor_font.clone().into()
                         })
-                        .text_size(px(self.settings.editor_font_size as f32)),
+                        .text_size(px(self.settings.editor_font_size as f32))
+                        .on_paste(move |item, window, cx| {
+                            paste_pane.update(cx, |pane, cx| pane.handle_source_paste(item, window, cx))
+                        }),
                 ),
             );
         } else {

@@ -50,6 +50,7 @@ pub(super) struct Documents {
     pub(super) pdf_panes: BTreeMap<PaneKey, Entity<PdfPane>>,
     pub(super) html_panes: BTreeMap<PaneKey, Entity<HtmlPane>>,
     pub(super) drawio_panes: BTreeMap<PaneKey, Entity<DrawioPane>>,
+    pub(super) image_panes: BTreeMap<PaneKey, Entity<crate::image::ImagePane>>,
     pub(super) markdown_changed: BTreeSet<String>,
     pub(super) source_version: u64,
     pub(super) document_watch: DocumentWatch,
@@ -112,7 +113,7 @@ impl Workspace {
             .map(str::to_ascii_lowercase)
             .as_deref()
         {
-            Some("pdf" | "png" | "jpg" | "jpeg" | "webp" | "gif" | "html" | "htm" | "drawio") => {
+            Some("pdf" | "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg" | "html" | "htm" | "drawio") => {
                 FileKind::Asset
             }
             _ => FileKind::Text,
@@ -127,6 +128,20 @@ impl Workspace {
     pub(super) fn is_html_path(path: &str) -> bool {
         let lower = path.to_lowercase();
         lower.ends_with(".html") || lower.ends_with(".htm")
+    }
+
+    pub(super) fn is_image_path(path: &str) -> bool {
+        if Self::is_drawio_path(path) {
+            return false;
+        }
+        matches!(
+            Path::new(path)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            Some("png" | "jpg" | "jpeg" | "webp" | "gif" | "svg")
+        )
     }
 
     fn html_root_dir(&self, full: &Path) -> PathBuf {
@@ -269,6 +284,7 @@ impl Workspace {
         self.release_all_pdf_panes(window, cx);
         self.release_all_html_panes(window, cx);
         self.release_all_drawio_panes(window, cx);
+        self.documents.image_panes.clear();
         self.documents.open.clear();
         self.documents.tabs.clear();
         self.documents.active.clear();
@@ -528,6 +544,12 @@ impl Workspace {
         if Self::is_drawio_path(path) && !self.documents.drawio_panes.contains_key(key) {
             self.add_drawio_pane(key.clone(), full.clone(), window, cx);
         }
+        if Self::is_image_path(path) && !self.documents.image_panes.contains_key(key) {
+            self.documents.image_panes.insert(
+                key.clone(),
+                cx.new(|cx| crate::image::ImagePane::new(full.clone(), cx)),
+            );
+        }
         if kind == FileKind::Text && !self.documents.open.contains_key(path) {
             let disk = if self.directory_workspace().is_some() {
                 files::read_document(
@@ -632,6 +654,11 @@ impl Workspace {
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| file.clone());
                     app.open_ai_with_selection(source, Some(full.clone()), text.clone(), window, cx);
+                }
+                MarkdownEvent::FilesChanged => {
+                    if let Err(error) = app.refresh_files(window, cx) {
+                        app.report(error, cx);
+                    }
                 }
             }
             cx.notify();
@@ -789,6 +816,7 @@ impl Workspace {
         self.release_pdf_pane(&tab, window, cx);
         self.release_html_pane(&tab, window, cx);
         self.release_drawio_pane(&tab, window, cx);
+        self.documents.image_panes.remove(&tab);
         self.documents.markdown_panes.remove(&tab);
         if !self.documents.reading_panes.iter().any(|pane| pane == path) {
             self.documents.open.remove(path);
@@ -957,6 +985,12 @@ impl Workspace {
                     pane.update(cx, |pane, cx| pane.reload_if_external(cx));
                 }
             }
+            for pane in self.documents.image_panes.values() {
+                let file_path = pane.read(cx).file_path().to_path_buf();
+                if changed.contains(&file_path) {
+                    pane.update(cx, |pane, cx| pane.reload(cx));
+                }
+            }
         }
         cx.notify();
         Ok(())
@@ -1019,6 +1053,9 @@ impl Workspace {
                                             pane.read(cx).file_path() == *path
                                         })
                                         || self.documents.drawio_panes.values().any(|pane| {
+                                            pane.read(cx).file_path() == *path
+                                        })
+                                        || self.documents.image_panes.values().any(|pane| {
                                             pane.read(cx).file_path() == *path
                                         }))
                             }
@@ -1128,7 +1165,13 @@ impl Workspace {
             if self.documents.drawio_panes.contains_key(&old_key) {
                 self.release_drawio_pane(&old_key, window, cx);
                 if Self::is_drawio_path(&renamed) {
-                    self.add_drawio_pane(new_key, full.clone(), window, cx);
+                    self.add_drawio_pane(new_key.clone(), full.clone(), window, cx);
+                }
+            }
+            if let Some(pane) = self.documents.image_panes.remove(&old_key) {
+                if Self::is_image_path(&renamed) {
+                    pane.update(cx, |pane, cx| pane.set_path(full.clone(), cx));
+                    self.documents.image_panes.insert(new_key, pane);
                 }
             }
         }
@@ -1137,6 +1180,7 @@ impl Workspace {
         }
         if self.documents.active == key { self.documents.active = renamed.clone(); }
         if self.documents.focused_markdown.as_deref() == Some(key) { self.documents.focused_markdown = Some(renamed.clone()); }
+        if self.focused_file.as_deref() == Some(key) { self.focused_file = Some(renamed.clone()); }
         for paths in [&mut self.selected_files, &mut self.documents.markdown_changed] {
             if paths.remove(key) { paths.insert(renamed.clone()); }
         }
@@ -1190,6 +1234,7 @@ impl Workspace {
         self.release_pdf_pane(&key, window, cx);
         self.release_html_pane(&key, window, cx);
         self.release_drawio_pane(&key, window, cx);
+        self.documents.image_panes.remove(&key);
         if self.documents.focused_markdown.as_deref() == Some(path) {
             self.documents.focused_markdown = None;
         }
@@ -1255,6 +1300,8 @@ impl Workspace {
             pane = pane.child(div().flex_1().min_h_0().child(html.clone()));
         } else if let Some(drawio) = self.documents.drawio_panes.get(&key) {
             pane = pane.child(div().flex_1().min_h_0().child(drawio.clone()));
+        } else if let Some(image) = self.documents.image_panes.get(&key) {
+            pane = pane.child(div().flex_1().min_h_0().child(image.clone()));
         } else if let Some(markdown) = markdown {
             pane = pane.child(div().flex_1().min_h_0().child(markdown.clone()));
         }

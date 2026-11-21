@@ -11,10 +11,9 @@ use crate::model::{DiskDocument, FileKind, ProjectFile};
 const TEXT_EXTENSIONS: &[&str] = &[
     "tex", "ltx", "bib", "sty", "cls", "bst", "bbx", "cbx", "cfg", "def", "clo", "ist", "glsdefs",
     "txt", "md", "csv", "tsv", "dat", "tikz", "pgf", "asy", "json", "yaml", "yml", "toml", "eps",
-    "svg",
 ];
 const ASSET_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "webp", "gif", "pdf", "html", "htm", "drawio",
+    "png", "jpg", "jpeg", "webp", "gif", "svg", "pdf", "html", "htm", "drawio",
 ];
 pub const EXCLUDED_DIRECTORIES: &[&str] = &[
     ".git",
@@ -675,7 +674,8 @@ mod tests {
         assert!(is_relevant(Path::new("diagram.drawio.svg")));
         assert!(!is_text(Path::new("diagram.drawio")));
         assert!(!is_text(Path::new("diagram.drawio.svg")));
-        assert!(is_text(Path::new("plain.svg")));
+        assert!(is_relevant(Path::new("plain.svg")));
+        assert!(!is_text(Path::new("plain.svg")));
     }
 
     #[test]

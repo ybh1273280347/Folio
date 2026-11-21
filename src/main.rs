@@ -6,6 +6,7 @@ mod annotations;
 mod compiler;
 mod build_log;
 mod files;
+mod image;
 mod web_view;
 mod i18n;
 mod markdown;

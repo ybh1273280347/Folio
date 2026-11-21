@@ -165,6 +165,7 @@ impl Workspace {
         };
         self.collapsed_folders = self.collapsed_folders.iter().map(|path| remap(path)).collect();
         self.focused_folder = self.focused_folder.as_deref().map(remap);
+        self.focused_file = self.focused_file.as_deref().map(remap);
         self.documents.document_watch.invalidate_tree();
     }
 
@@ -527,11 +528,15 @@ impl Workspace {
                 self.release_pdf_pane(&key, window, cx);
                 self.release_html_pane(&key, window, cx);
                 self.release_drawio_pane(&key, window, cx);
+                self.documents.image_panes.remove(&key);
                 self.documents.markdown_panes.remove(&key);
             }
             self.documents.reading_panes.retain(|pane| pane != &path);
             self.documents.tabs.retain(|tab| tab != &path);
             self.selected_files.remove(&path);
+            if self.focused_file.as_deref() == Some(&path) {
+                self.focused_file = None;
+            }
             if self.documents.focused_markdown.as_deref() == Some(&path) {
                 self.documents.focused_markdown = None;
             }
@@ -604,6 +609,110 @@ impl Workspace {
             ));
             self.report(crate::i18n::workspace::REPORT_COPIED_PATH.get(), cx);
         }
+    }
+
+    fn file_parent_relative(path: &str) -> String {
+        Path::new(path)
+            .parent()
+            .map(|parent| parent.to_string_lossy().replace('\\', "/"))
+            .filter(|parent| !parent.is_empty() && parent != ".")
+            .unwrap_or_default()
+    }
+
+    fn paste_target_folder(&self) -> String {
+        if let Some(folder) = self.focused_folder.as_deref().filter(|f| !f.is_empty()) {
+            return folder.to_owned();
+        }
+        if self.selected_files.len() == 1
+            && let Some(file) = self.selected_files.iter().next()
+        {
+            return Self::file_parent_relative(file);
+        }
+        if let Some(file) = self.focused_file.as_deref().filter(|f| !f.is_empty()) {
+            return Self::file_parent_relative(file);
+        }
+        String::new()
+    }
+
+    pub(super) fn paste_to_file_tree(
+        &mut self,
+        _: &PasteToFileTree,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let folder = self.paste_target_folder();
+        self.paste_images_into_folder(&folder, window, cx);
+    }
+
+    pub(super) fn paste_images_into_folder(
+        &mut self,
+        folder_rel: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.directory_workspace() else {
+            return;
+        };
+        let Some(item) = cx.read_from_clipboard() else {
+            self.report(crate::i18n::workspace::REPORT_NO_CLIPBOARD_IMAGE.get(), cx);
+            return;
+        };
+        let root = PathBuf::from(&project.folder);
+        let target_dir = if folder_rel.is_empty() {
+            root.clone()
+        } else {
+            match files::project_path(&root, folder_rel) {
+                Ok(path) => path,
+                Err(error) => {
+                    self.report(error, cx);
+                    return;
+                }
+            }
+        };
+
+        let saved = match crate::image::save_clipboard_images_to_dir(&item, &target_dir) {
+            Ok(saved) if saved.is_empty() => {
+                self.report(crate::i18n::workspace::REPORT_NO_CLIPBOARD_IMAGE.get(), cx);
+                return;
+            }
+            Ok(saved) => saved,
+            Err(error) => {
+                self.report(error, cx);
+                return;
+            }
+        };
+
+        self.show_trash = false;
+        let mut created_rel = Vec::with_capacity(saved.len());
+        for path in &saved {
+            if let Ok(rel) = path.strip_prefix(&root) {
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                self.expand_ancestors(&rel_str);
+                created_rel.push(rel_str);
+            }
+        }
+        if let Err(error) = self.refresh_files(window, cx) {
+            self.report(error, cx);
+            return;
+        }
+        if !created_rel.is_empty() {
+            self.selected_files.clear();
+            for rel in &created_rel {
+                self.selected_files.insert(rel.clone());
+            }
+            self.focused_folder = None;
+            self.focused_file = created_rel.first().cloned();
+        }
+        if saved.len() == 1 {
+            let name = saved[0]
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.report(crate::i18n::workspace::report_pasted_image(&name), cx);
+        } else {
+            self.report(crate::i18n::workspace::report_pasted_images(saved.len()), cx);
+        }
+        cx.notify();
     }
 
     pub(super) fn delete_file_tree_item(
@@ -1116,6 +1225,7 @@ impl Workspace {
                             cx.stop_propagation();
                             app.show_trash = false;
                             app.focused_folder = Some(toggled.clone());
+                            app.focused_file = None;
                             if app.tags.filter.is_none() {
                                 if !app.collapsed_folders.remove(&toggled) {
                                     app.collapsed_folders.insert(toggled.clone());
@@ -1140,6 +1250,8 @@ impl Workspace {
                             let rename_app = app.clone();
                             let create_file_app = app.clone();
                             let create_folder_app = app.clone();
+                            let paste_app = app.clone();
+                            let paste_folder = deleted.clone();
                             let tag_folder = deleted.clone();
                             let tags_app = app.clone();
                             let menu = CREATABLE_PRESETS.iter().fold(menu.min_w(px(130.)), |menu, preset| {
@@ -1183,6 +1295,13 @@ impl Workspace {
                                                 window,
                                                 cx,
                                             )
+                                        })
+                                    },
+                                ))
+                                .item(compact_menu_item(crate::i18n::workspace::MENU_PASTE_IMAGE.get()).on_click(
+                                    move |_, window, cx| {
+                                        paste_app.update(cx, |app, cx| {
+                                            app.paste_images_into_folder(&paste_folder, window, cx)
                                         })
                                     },
                                 ))
@@ -1299,6 +1418,8 @@ impl Workspace {
                                 if !app.selected_files.remove(&selected_path) {
                                     app.selected_files.insert(selected_path.clone());
                                 }
+                                app.focused_folder = None;
+                                app.focused_file = Some(selected_path.clone());
                                 app.file_tree_focus.focus(window, cx);
                                 cx.notify();
                             })),
@@ -1350,11 +1471,13 @@ impl Workspace {
                                 app.selected_files.insert(clicked_path.clone());
                             }
                             app.focused_folder = None;
+                            app.focused_file = Some(clicked_path.clone());
                             app.file_tree_focus.focus(window, cx);
                             cx.notify();
                             return;
                         }
                         app.focused_folder = None;
+                        app.focused_file = Some(open.path.clone());
                         if let Err(error) =
                             app.open_file_with_focus(&open, event.click_count() >= 2, window, cx)
                         {
@@ -1376,6 +1499,8 @@ impl Workspace {
                         let main = rename.clone();
                         let split = split.clone();
                         let split_app = app.clone();
+                        let paste_app = app.clone();
+                        let paste_folder = Self::file_parent_relative(&rename);
                         let tags_app = app.clone();
                         let batch_tags_app = app.clone();
                         let tag_path = rename.clone();
@@ -1387,6 +1512,13 @@ impl Workspace {
                             .item(
                                 compact_menu_item(crate::i18n::workspace::MENU_COPY_FULL_PATH.get()).on_click(move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))
+                                }),
+                            )
+                            .item(
+                                compact_menu_item(crate::i18n::workspace::MENU_PASTE_IMAGE.get()).on_click(move |_, window, cx| {
+                                    paste_app.update(cx, |app, cx| {
+                                        app.paste_images_into_folder(&paste_folder, window, cx)
+                                    })
                                 }),
                             )
                             .when(batch_tags, |menu| {
@@ -1711,6 +1843,7 @@ impl Workspace {
                     .key_context("FolioFileTree")
                     .track_focus(&self.file_tree_focus)
                     .on_action(cx.listener(Self::copy_file_path))
+                    .on_action(cx.listener(Self::paste_to_file_tree))
                     .on_action(cx.listener(Self::edit_tags_from_tree))
                     .on_action(cx.listener(Self::delete_file_tree_item))
                     .on_action(cx.listener(Self::undo_file_delete))
@@ -1755,7 +1888,9 @@ impl Workspace {
                         if app.tree_drag.take().is_some() { cx.notify(); }
                     }))
                     .on_click(cx.listener(|app, _, window, cx| {
-                        if app.focused_folder.take().is_some() {
+                        let changed = app.focused_folder.take().is_some()
+                            || app.focused_file.take().is_some();
+                        if changed {
                             cx.notify();
                         }
                         app.file_tree_focus.focus(window, cx);
@@ -1766,6 +1901,7 @@ impl Workspace {
                         let project_id = project.id.clone();
                         let folder_project = project.id.clone();
                         let bounds = self.tree_row_bounds.clone();
+                        let paste_root_app = cx.entity();
                         // Empty space belongs to the root; folder rows retain their own drop targets.
                         tree.child(div().id("project-root-drop").relative()
                             .flex_grow(1.).h(px(48.)).flex_shrink_0()
@@ -1781,6 +1917,7 @@ impl Workspace {
                             .on_click(cx.listener(|app, _, window, cx| {
                                 cx.stop_propagation();
                                 app.focused_folder = None;
+                                app.focused_file = None;
                                 app.file_tree_focus.focus(window, cx);
                                 cx.notify();
                             }))
@@ -1791,7 +1928,18 @@ impl Workspace {
                             .on_drop(cx.listener(|app, dragged: &crate::terminal::DraggedFolder, window, cx| {
                                 cx.stop_propagation();
                                 if let Err(error) = app.move_tree_folder(dragged, "", window, cx) { app.report(error, cx); }
-                            })))
+                            }))
+                            .context_menu(move |menu, _, _| {
+                                let app = paste_root_app.clone();
+                                menu.min_w(px(110.)).item(
+                                    compact_menu_item(crate::i18n::workspace::MENU_PASTE_IMAGE.get())
+                                        .on_click(move |_, window, cx| {
+                                            app.update(cx, |app, cx| {
+                                                app.paste_images_into_folder("", window, cx)
+                                            })
+                                        }),
+                                )
+                            }))
                     })
                     .when(self.directory_workspace().is_none(), |tree| tree.child(div().h(px(48.)).flex_shrink_0())))
                     .when_some(self.tree_drag.as_ref().filter(|drag| drag.moved).map(TreeSelectionDrag::bounds), |area, selection| {
