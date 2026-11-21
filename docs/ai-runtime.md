@@ -57,6 +57,10 @@ The SDK sends a project/session-scoped `annotation_request`; Rust prepares Markd
 
 Markdown highlights use the normal serializer and save path; PDF annotations only update the adjacent `.folio/annotations.json`. The store merges preserve other files' annotations and malformed stores fail instead of being treated as empty. Source and sidecar are separate files: if source saving succeeds but sidecar saving fails, the tool explicitly reports that the highlight was saved without its comment.
 
+## Draw.io tools
+
+`folio_drawio_read({path})` reads a project `.drawio` file. `folio_drawio_create({path, xml})` creates a new native Draw.io XML file and refuses to overwrite an existing path. `folio_drawio_update({path, xml})` replaces an existing diagram with the complete XML document. Write operations validate that the root element is `mxfile`; updates to an open Draw.io pane are picked up by the existing file watcher and Draw.io reload path.
+
 The first version supports single Markdown text blocks and text-layer PDF pages. It excludes scans/OCR coordinates, picture/formula regions, cross-block anchors, native PDF/Word comment export, and automatic anchor repair. The small `folio-annotations` skill lives in the Magpie shared library; standalone packages carry a bundled copy, loaded when the Pi user skill is absent. Workflow guidance stays in that skill and tool descriptions, not the system prompt.
 
 Focused checks: `cargo test --release --test annotations annotation_` and `node --test --test-force-exit --test-name-pattern annotation resources/pi-host/test/host.test.mjs resources/pi-host/test/annotation-tools.test.mjs`.

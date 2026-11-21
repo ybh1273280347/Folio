@@ -297,6 +297,22 @@ pub fn tool_compile_tex_files(count: usize) -> String {
     }
 }
 pub const TOOL_COMPILE_TEX: BiText = BiText::new("批量编译 TeX 文档", "Compile TeX files");
+pub fn tool_drawio(operation: &str, path: &str) -> String {
+    let action = match (locale(), operation) {
+        (Locale::ZhCn, "read") => "读取",
+        (Locale::ZhCn, "create") => "新建",
+        (Locale::ZhCn, "update") => "更新",
+        (Locale::En, "read") => "Read",
+        (Locale::En, "create") => "Create",
+        (Locale::En, "update") => "Update",
+        (Locale::ZhCn, _) => "处理",
+        (Locale::En, _) => "Handle",
+    };
+    match locale() {
+        Locale::ZhCn => format!("{action} Draw.io 图表「{path}」"),
+        Locale::En => format!("{action} Draw.io diagram \"{path}\""),
+    }
+}
 
 // Session manager (src/ai/manager.rs)
 pub const NEW_SESSION: BiText = BiText::new("新会话", "New Session");

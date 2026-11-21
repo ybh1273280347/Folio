@@ -11,6 +11,7 @@ import { createAgentSession, SessionManager, DefaultResourceLoader, ModelRuntime
 import { webTools } from './web-tools.mjs';
 import { annotationTools } from './annotation-tools.mjs';
 import { compileTools } from './compile-tools.mjs';
+import { drawioTools } from './drawio-tools.mjs';
 import { tagTools } from './tag-tools.mjs';
 import { pythonTool } from './python-tool.mjs';
 import { WorkspaceToolBridge } from './workspace-tool-bridge.mjs';
@@ -25,6 +26,7 @@ const send = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 const workspaceToolChannels = [
   ['annotation', annotationTools],
   ['compile', compileTools],
+  ['drawio', drawioTools],
   ['tag', tagTools],
 ].map(([channel, factory]) => ({
   channel,

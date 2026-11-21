@@ -2,6 +2,7 @@
 //! Disk revisions arbitrate external edits; conflicted drafts never autosave over them.
 mod annotations;
 mod agent_compile;
+mod agent_drawio;
 mod agent_tags;
 mod appearance;
 mod build;
@@ -393,6 +394,9 @@ impl Workspace {
                 }
                 WorkspaceToolKind::CompileRequest | WorkspaceToolKind::CompileCancel => {
                     app.compile_request(request, window, cx)
+                }
+                WorkspaceToolKind::DrawioRequest | WorkspaceToolKind::DrawioCancel => {
+                    app.drawio_request(request, cx)
                 }
                 WorkspaceToolKind::TagRequest | WorkspaceToolKind::TagCancel => app.tag_request(request, cx),
             },

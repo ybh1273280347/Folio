@@ -2336,6 +2336,7 @@ dependencies = [
  "raw-window-handle",
  "resvg 0.47.0",
  "rfd",
+ "roxmltree 0.20.0",
  "rusqlite",
  "serde",
  "serde_json",
