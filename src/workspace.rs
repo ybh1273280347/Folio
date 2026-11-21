@@ -5778,7 +5778,7 @@ impl Render for Workspace {
             })
             .text_color(rgb(0x37352f))
             .text_size(px(14.))
-            .font_family(crate::ui::DEFAULT_SANS_FONT)
+            .font_family(crate::ui::sans_font(&self.settings.interface_font))
             .track_focus(&self.focus)
             .key_context("FolioWorkspace")
             .on_action(cx.listener(|app, _: &ToggleAi, window, cx| {

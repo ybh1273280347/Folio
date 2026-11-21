@@ -286,8 +286,14 @@ pub fn apply_settings(settings: &crate::model::AppSettings, cx: &mut App) {
     apply(settings.theme.palette, cx);
 
     let (tool_font, tool_size) = tool_typography(settings);
+    let ui_font: SharedString = if settings.interface_font.trim().is_empty() {
+        "Segoe UI".into()
+    } else {
+        settings.interface_font.trim().to_owned().into()
+    };
     Theme::update(cx, |theme| {
         // Native Diff reads the component monospace font at row layout time.
+        theme.font_family = ui_font;
         theme.mono_font_family = tool_font;
         theme.mono_font_size = tool_size;
     });

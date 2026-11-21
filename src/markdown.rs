@@ -2868,7 +2868,7 @@ impl MarkdownPane {
                             .justify_end()
                             .child(
                                 crate::ui::button_primary("save-md-annotation", crate::i18n::markdown::SAVE_ANNOTATION.get())
-                                    .font_family(crate::ui::DEFAULT_SANS_FONT)
+                                    .font_family(crate::ui::sans_font(&self.settings.interface_font))
                                     .text_size(px(12.))
                                     .min_h(px(26.))
                                     .px(px(10.))
@@ -3905,7 +3905,7 @@ impl Render for MarkdownPane {
         div()
             .relative()
             .size_full()
-            .font_family(crate::ui::DEFAULT_SANS_FONT)
+            .font_family(crate::ui::sans_font(&self.settings.interface_font))
             .text_size(px(13.))
             .when(!self.source, |pane| {
                 pane.key_context("FolioMarkdownVisual")
