@@ -14,7 +14,7 @@ use documents::{DocumentWatch, Documents, PaneKey, PaneRole};
 use crate::ai::{AiPane, AiPaneEvent, AttachedFile, WorkspaceToolKind, WorkspaceToolRequest};
 use gpui_kit::component::Sizable;
 use crate::theme::color as rgb;
-use crate::html::{HtmlPane, HtmlPaneEvent};
+use crate::web_view::{HtmlPane, HtmlPaneEvent};
 use crate::markdown::{MarkdownEvent, MarkdownPane};
 use crate::math::MathRenderer;
 use crate::pdf::{PdfPane, PdfPaneEvent};
