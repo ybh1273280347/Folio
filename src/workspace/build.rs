@@ -412,7 +412,7 @@ impl Workspace {
         self.show_build_preview = true;
         self.notice = None;
         if let Some((file, pane)) = markdown.zip(capture) {
-            let request = crate::markdown_pdf::ExportRequest {
+            let request = crate::markdown::pdf::ExportRequest {
                 destination: PathBuf::from(&project.folder)
                     .join(&file)
                     .with_extension("pdf"),

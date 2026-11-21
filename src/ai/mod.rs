@@ -279,7 +279,9 @@ impl ChatPane {
         cx: &mut Context<Self>,
     ) -> Self {
         let mermaid = cx.new(MermaidRenderer::new);
-        let md_extensions = crate::markdown::markdown_extensions(&math, MathDisplaySize::Ai, cx)
+        let md_extensions = crate::markdown::extensions::markdown_extensions(
+            &math, MathDisplaySize::Ai, cx,
+        )
             .plugin(mermaid.read(cx).plugin(mermaid.downgrade()));
         let sub_math = cx.subscribe(&math, |_, _, event: &MathReady, cx| {
             if matches!(event, MathReady::Ready) {

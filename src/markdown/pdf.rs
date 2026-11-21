@@ -24,7 +24,7 @@ use std::{
 const PAGE_WIDTH: f32 = 595.276;
 const PAGE_HEIGHT: f32 = 841.89;
 
-pub struct ExportRequest {
+pub(crate) struct ExportRequest {
     pub destination: PathBuf,
     pub preview: PathBuf,
     pub cancelled: Arc<AtomicBool>,

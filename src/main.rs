@@ -10,7 +10,6 @@ mod image;
 mod web_view;
 mod i18n;
 mod markdown;
-mod markdown_pdf;
 mod math;
 mod math_layout;
 mod mermaid;

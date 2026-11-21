@@ -66,7 +66,7 @@ impl Workspace {
         let source = snapshot.clone();
         let target = path.clone();
         let options = params.clone();
-        let extensions = crate::markdown::markdown_extensions(
+        let extensions = crate::markdown::extensions::markdown_extensions(
             &self.math,
             crate::math::MathDisplaySize::Markdown,
             cx,

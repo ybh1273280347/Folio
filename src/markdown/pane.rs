@@ -1,5 +1,9 @@
 //! Markdown panes share one GPUI block editor for live editing and keep the
 //! source editor only for the explicit source-mode toggle.
+use super::{
+    extensions::{CALLOUTS, markdown_extensions},
+    pdf,
+};
 use crate::theme::color as rgb;
 use crate::math::{MathDisplaySize, MathReady, MathRenderer, formula_id};
 use crate::mermaid::{MermaidReady, MermaidRenderer};
@@ -25,59 +29,13 @@ use gpui_kit::{
 use markdown_editor::{
     BlockEditor, BlockEditorEvent, BlockEditorModel, BlockEditorState, BlockId, BlockKind,
     BlockPosition, BlockSelection, CalloutStyle, ColumnAlign, EditorCommand, MarkChange, MarkKind,
-    TableEdit, callout_container, callout_header,
+    TableEdit,
 };
 use std::{cell::RefCell, ops::Range, path::PathBuf, rc::Rc};
 
 mod emoji;
 mod outline;
 mod view;
-
-pub(crate) const CALLOUTS: &[(&str, &str, u32)] = &[
-    ("note", "ⓘ  Note", 0x0969da),
-    ("info", "ⓘ  Info", 0x0969da),
-    ("abstract", "≡  Abstract", 0x0969da),
-    ("summary", "≡  Summary", 0x0969da),
-    ("tldr", "≡  TL;DR", 0x0969da),
-    ("tip", "✓  Tip", 0x1a7f37),
-    ("success", "✓  Success", 0x1a7f37),
-    ("check", "✓  Check", 0x1a7f37),
-    ("done", "✓  Done", 0x1a7f37),
-    ("important", "◉  Important", 0x8250df),
-    ("warning", "⚠  Warning", 0x9a6700),
-    ("question", "?  Question", 0x9a6700),
-    ("help", "?  Help", 0x9a6700),
-    ("faq", "?  FAQ", 0x9a6700),
-    ("todo", "☐  Todo", 0x0969da),
-    ("caution", "⊗  Caution", 0xcf222e),
-    ("danger", "⊗  Danger", 0xcf222e),
-    ("error", "⊗  Error", 0xcf222e),
-    ("failure", "✕  Failure", 0xcf222e),
-    ("fail", "✕  Fail", 0xcf222e),
-    ("missing", "✕  Missing", 0xcf222e),
-    ("bug", "✦  Bug", 0xcf222e),
-    ("example", "❖  Example", 0x8250df),
-    ("quote", "❝  Quote", 0x6e7781),
-    ("cite", "❝  Cite", 0x6e7781),
-];
-
-/// Build Folio's shared Markdown extensions (math typesetting + 25 callout surfaces).
-pub(crate) fn markdown_extensions(
-    math: &Entity<MathRenderer>,
-    display_size: MathDisplaySize,
-    cx: &App,
-) -> MarkdownExtensions {
-    let mut extensions = MarkdownExtensions::default()
-        .plugin(math.read(cx).plugin(false, math.clone(), display_size))
-        .plugin(math.read(cx).plugin(true, math.clone(), display_size));
-    for &(name, title, color) in CALLOUTS {
-        let hsla: Hsla = gpui_kit::rgb(color).into();
-        extensions = extensions.block_surface(name, move |_, _| {
-            callout_container(hsla).child(callout_header(title.into(), hsla).pb(px(6.)))
-        });
-    }
-    extensions
-}
 
 pub enum MarkdownEvent {
     RenameTitle(String),
@@ -333,7 +291,7 @@ impl Render for OutlineResizeDrag {
 }
 
 pub struct MarkdownPane {
-    export: Rc<RefCell<Option<crate::markdown_pdf::ExportRequest>>>,
+    export: Rc<RefCell<Option<pdf::ExportRequest>>>,
     export_width: Pixels,
     text: String,
     path: PathBuf,
@@ -507,11 +465,11 @@ impl MarkdownPane {
                             let faces = if cancelled {
                                 Ok(Default::default())
                             } else {
-                                crate::markdown_pdf::fonts(&ops, cx)
+                                pdf::fonts(&ops, cx)
                             };
                             let request = request.borrow_mut().take().expect("one export request");
                             std::thread::spawn(move || {
-                                crate::markdown_pdf::publish(request, ops, size, background, faces)
+                                pdf::publish(request, ops, size, background, faces)
                             });
                         },
                     )
@@ -523,7 +481,7 @@ impl MarkdownPane {
 
     pub fn export_pdf(
         &mut self,
-        request: crate::markdown_pdf::ExportRequest,
+        request: pdf::ExportRequest,
         cx: &mut Context<Self>,
     ) {
         if self.source {
