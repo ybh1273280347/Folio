@@ -500,21 +500,12 @@ impl AiPane {
         self.focus(window, cx);
     }
     pub fn respond_workspace_tool(&self, request: &WorkspaceToolRequest, result: Value) {
-        let kind = match request.kind {
-            WorkspaceToolKind::AnnotationRequest => "annotation_response",
-            WorkspaceToolKind::CompileRequest => "compile_response",
-            WorkspaceToolKind::DrawioRequest => "drawio_response",
-            WorkspaceToolKind::TagRequest => "tag_response",
-            WorkspaceToolKind::AnnotationCancel
-            | WorkspaceToolKind::CompileCancel
-            | WorkspaceToolKind::DrawioCancel
-            | WorkspaceToolKind::TagCancel => {
-                unreachable!("cancellation does not request a response")
-            }
-        };
+        if request.action == WorkspaceToolAction::Cancel {
+            return;
+        }
         if let Some(client) = self.controls.get(&request.project_key) {
-            let _ = client.send(json!({ "type": kind, "id": request.id,
-                "sessionId": request.session_id, "result": result }));
+            let _ = client.send(json!({ "type": "workspace_tool_response", "channel": request.channel,
+                "id": request.id, "sessionId": request.session_id, "result": result }));
         }
     }
     pub fn dismiss_history(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {

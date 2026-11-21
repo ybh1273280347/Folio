@@ -18,7 +18,7 @@ pub(super) struct PendingTagEdit {
 
 impl Workspace {
     pub(super) fn tag_request(&mut self, request: &WorkspaceToolRequest, cx: &mut Context<Self>) {
-        if request.kind == WorkspaceToolKind::TagCancel {
+        if request.action == WorkspaceToolAction::Cancel {
             self.tag_proposals.retain(|(project, session, _), pending| {
                 request.project_key != *project
                     || request.session_id != *session

@@ -28,34 +28,62 @@ pub enum RpcInbound {
     Exited(Option<i32>),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkspaceToolKind {
-    AnnotationRequest,
-    AnnotationCancel,
-    CompileRequest,
-    CompileCancel,
-    DrawioRequest,
-    DrawioCancel,
-    TagRequest,
-    TagCancel,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceToolAction {
+    Request,
+    Cancel,
 }
 
-/// Routing fields are checked as the JSONL message crosses into Rust.
-/// The annotation/tag handlers own validation of their operation arguments.
-#[derive(Clone, Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// Normalized host-tool RPC envelope. Sequence is optional because request/reply
+/// traffic is correlated by ID and is not part of the host event sequence stream.
+#[derive(Clone, Debug)]
 pub struct WorkspaceToolRequest {
-    #[serde(rename = "type")]
-    pub kind: WorkspaceToolKind,
+    pub channel: String,
+    pub action: WorkspaceToolAction,
     pub id: String,
-    // The SDK-side workspace bridge emits direct JSONL requests without a sequence.
-    #[serde(default)]
-    pub sequence: u64,
+    pub sequence: Option<u64>,
     pub project_key: String,
     pub session_id: String,
-    #[serde(flatten)]
     pub arguments: Value,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceToolEnvelope {
+    #[serde(rename = "type")]
+    message_type: String,
+    channel: Option<String>,
+    id: String,
+    #[serde(default)]
+    sequence: Option<u64>,
+    project_key: String,
+    session_id: String,
+    #[serde(flatten)]
+    arguments: Value,
+}
+
+impl WorkspaceToolRequest {
+    fn from_host_message(value: Value) -> Result<Self, String> {
+        let envelope: WorkspaceToolEnvelope = serde_json::from_value(value)
+            .map_err(|error| error.to_string())?;
+        let action = match envelope.message_type.as_str() {
+            "workspace_tool_request" => WorkspaceToolAction::Request,
+            "workspace_tool_cancel" => WorkspaceToolAction::Cancel,
+            message_type => return Err(format!("Unsupported workspace tool message type: {message_type}")),
+        };
+        let channel = envelope.channel
+            .ok_or_else(|| "Workspace tool message is missing its channel".to_owned())?;
+
+        Ok(Self {
+            channel,
+            action,
+            id: envelope.id,
+            sequence: envelope.sequence,
+            project_key: envelope.project_key,
+            session_id: envelope.session_id,
+            arguments: envelope.arguments,
+        })
+    }
 }
 #[derive(Clone, Debug)]
 pub struct RpcImage {
@@ -180,15 +208,9 @@ impl Host {
                         error: value["error"].as_str().map(str::to_owned),
                     },
                     "extension_ui_request" => RpcInbound::ExtensionUiRequest(value.clone()),
-                    "annotation_request"
-                    | "annotation_cancel"
-                    | "compile_request"
-                    | "compile_cancel"
-                    | "drawio_request"
-                    | "drawio_cancel"
-                    | "tag_request"
-                    | "tag_cancel" => {
-                        match serde_json::from_value(value.clone()) {
+                    "workspace_tool_request"
+                    | "workspace_tool_cancel" => {
+                        match WorkspaceToolRequest::from_host_message(value.clone()) {
                             Ok(request) => RpcInbound::WorkspaceTool(request),
                             Err(error) => RpcInbound::Stderr(crate::i18n::ai::err_rpc_protocol(&error)),
                         }
@@ -261,13 +283,14 @@ impl Host {
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkspaceToolKind, WorkspaceToolRequest};
+    use super::{WorkspaceToolAction, WorkspaceToolRequest};
     use serde_json::json;
 
     #[test]
-    fn workspace_tool_request_keeps_its_conversation_and_operation_arguments() {
-        let request: WorkspaceToolRequest = serde_json::from_value(json!({
-            "type": "tag_request",
+    fn workspace_tool_request_keeps_its_channel_and_operation_arguments() {
+        let request = WorkspaceToolRequest::from_host_message(json!({
+            "type": "workspace_tool_request",
+            "channel": "tag",
             "id": "request-1",
             "projectKey": "project-root",
             "sessionId": "session-1",
@@ -275,37 +298,44 @@ mod tests {
             "params": { "proposal_id": "proposal-1", "edit": { "add": ["重点"] } }
         })).unwrap();
 
-        assert_eq!(request.kind, WorkspaceToolKind::TagRequest);
+        assert_eq!(request.channel, "tag");
+        assert_eq!(request.action, WorkspaceToolAction::Request);
         assert_eq!(request.project_key, "project-root");
         assert_eq!(request.session_id, "session-1");
-        assert_eq!(request.sequence, 0);
+        assert_eq!(request.sequence, None);
         assert_eq!(request.arguments["operation"], "preview_files");
         assert_eq!(request.arguments["params"]["proposal_id"], "proposal-1");
     }
 
     #[test]
-    fn compile_request_and_cancel_deserialize_to_workspace_tool() {
-        let request: WorkspaceToolRequest = serde_json::from_value(json!({
-            "type": "compile_request",
+    fn generic_request_and_cancel_keep_channel_and_action() {
+        let request = WorkspaceToolRequest::from_host_message(json!({
+            "type": "workspace_tool_request",
+            "channel": "compile",
             "id": "compile-1",
             "projectKey": "project-root",
             "sessionId": "session-1",
+            "sequence": 5,
             "operation": "compile_tex",
             "params": { "paths": ["main.tex"], "engine": "xelatex" }
         }))
         .unwrap();
-        assert_eq!(request.kind, WorkspaceToolKind::CompileRequest);
+        assert_eq!(request.channel, "compile");
+        assert_eq!(request.action, WorkspaceToolAction::Request);
+        assert_eq!(request.sequence, Some(5));
         assert_eq!(request.arguments["operation"], "compile_tex");
         assert_eq!(request.arguments["params"]["paths"][0], "main.tex");
 
-        let cancel: WorkspaceToolRequest = serde_json::from_value(json!({
-            "type": "compile_cancel",
+        let cancel = WorkspaceToolRequest::from_host_message(json!({
+            "type": "workspace_tool_cancel",
+            "channel": "compile",
             "id": "compile-1",
             "projectKey": "project-root",
             "sessionId": "session-1"
         }))
         .unwrap();
-        assert_eq!(cancel.kind, WorkspaceToolKind::CompileCancel);
+        assert_eq!(cancel.channel, "compile");
+        assert_eq!(cancel.action, WorkspaceToolAction::Cancel);
         assert_eq!(cancel.id, "compile-1");
     }
 }

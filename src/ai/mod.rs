@@ -9,7 +9,7 @@ mod render;
 use session::{Session, SessionChanges};
 pub use manager::AiPane;
 pub(crate) use rpc::project_key;
-pub(crate) use rpc::{WorkspaceToolKind, WorkspaceToolRequest};
+pub(crate) use rpc::{WorkspaceToolAction, WorkspaceToolRequest};
 pub use quote::SelectionQuote;
 use quote::{append_quotes, split_injected_prompt};
 

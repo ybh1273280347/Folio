@@ -2,7 +2,7 @@
 
 use super::Workspace;
 use crate::{
-    ai::{WorkspaceToolKind, WorkspaceToolRequest},
+    ai::{WorkspaceToolAction, WorkspaceToolRequest},
     compiler::{self, BuildResult},
     files,
     model::{BuildStatus, Engine, Project},
@@ -103,7 +103,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if request.kind == WorkspaceToolKind::CompileCancel {
+        if request.action == WorkspaceToolAction::Cancel {
             if let Some(cancelled) = self.compile_requests.remove(&request.id) {
                 cancelled.store(true, Ordering::Relaxed);
             }
