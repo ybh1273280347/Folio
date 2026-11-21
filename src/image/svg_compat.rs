@@ -266,12 +266,88 @@ fn parse_inline_style(style: &str) -> HashMap<String, String> {
 
 fn parse_px(raw: &str) -> Option<f32> {
     let trimmed = raw.trim();
-    let num = trimmed
-        .strip_suffix("px")
-        .or_else(|| trimmed.strip_suffix("pt"))
-        .unwrap_or(trimmed)
-        .trim();
+    if let Some(pt) = trimmed.strip_suffix("pt") {
+        return pt
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|v| v.is_finite())
+            .map(|v| v * (96.0 / 72.0));
+    }
+    let num = trimmed.strip_suffix("px").unwrap_or(trimmed).trim();
     num.parse::<f32>().ok().filter(|v| v.is_finite())
+}
+
+fn normalize_font_family(raw: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut is_mono = false;
+    let mut is_serif = false;
+
+    for part in raw.split(',') {
+        let clean = part.trim().trim_matches(|c| c == '\'' || c == '"').trim();
+        if clean.is_empty() {
+            continue;
+        }
+        let lower = clean.to_ascii_lowercase();
+        let push_unique = |list: &mut Vec<String>, name: &str| {
+            if !list.iter().any(|existing| existing.eq_ignore_ascii_case(name)) {
+                list.push(name.to_owned());
+            }
+        };
+        match lower.as_str() {
+            "-apple-system" | "blinkmacsystemfont" | "system-ui" | "ui-sans-serif" => {
+                push_unique(&mut out, "Segoe UI");
+                push_unique(&mut out, "Arial");
+            }
+            "helvetica" | "helvetica neue" => {
+                push_unique(&mut out, clean);
+                push_unique(&mut out, "Arial");
+            }
+            "ui-monospace" | "sf mono" | "menlo" | "monaco" | "courier" => {
+                is_mono = true;
+                push_unique(&mut out, clean);
+                push_unique(&mut out, "Consolas");
+                push_unique(&mut out, "Courier New");
+            }
+            "monospace" => {
+                is_mono = true;
+            }
+            "serif" | "times" | "times new roman" | "ui-serif" => {
+                is_serif = true;
+                if lower != "serif" && lower != "ui-serif" {
+                    push_unique(&mut out, clean);
+                }
+            }
+            "sans-serif" => {}
+            _ => {
+                if lower.contains("mono") || lower.contains("consolas") || lower.contains("code") {
+                    is_mono = true;
+                }
+                push_unique(&mut out, clean);
+            }
+        }
+    }
+
+    let push_tail = |list: &mut Vec<String>, name: &str| {
+        if !list.iter().any(|existing| existing.eq_ignore_ascii_case(name)) {
+            list.push(name.to_owned());
+        }
+    };
+    if is_mono {
+        push_tail(&mut out, "Consolas");
+        push_tail(&mut out, "Microsoft YaHei");
+        push_tail(&mut out, "monospace");
+    } else if is_serif {
+        push_tail(&mut out, "Times New Roman");
+        push_tail(&mut out, "SimSun");
+        push_tail(&mut out, "serif");
+    } else {
+        push_tail(&mut out, "Arial");
+        push_tail(&mut out, "Microsoft YaHei");
+        push_tail(&mut out, "PingFang SC");
+        push_tail(&mut out, "sans-serif");
+    }
+    out.join(", ")
 }
 
 fn collect_style_props(fo: roxmltree::Node<'_, '_>) -> TextStyleProps {
@@ -522,16 +598,17 @@ fn convert_foreign_object_to_svg_text(
         .as_deref()
         .or_else(|| usable_fallback.and_then(|fb| fb.attribute("fill")))
         .unwrap_or("#000000");
-    let font_family = props
+    let raw_font_family = props
         .font_family
         .as_deref()
         .or_else(|| usable_fallback.and_then(|fb| fb.attribute("font-family")))
-        .unwrap_or("Helvetica, Arial, sans-serif");
+        .unwrap_or("Helvetica");
+    let font_family = normalize_font_family(raw_font_family);
 
     let mut out = format!(
         r#"<text x="{x:.2}" y="{y_first:.2}" fill="{}" font-family="{}" font-size="{font_size:.2}px" text-anchor="{text_anchor}""#,
         escape_xml_attr(fill),
-        escape_xml_attr(font_family),
+        escape_xml_attr(&font_family),
     );
     if let Some(weight) = props.font_weight.as_deref() {
         out.push_str(&format!(r#" font-weight="{}""#, escape_xml_attr(weight)));
@@ -650,5 +727,23 @@ mod tests {
   </switch>
 </svg>"#;
         assert!(preprocess_svg_bytes(table_svg.as_bytes()).has_complex_rich_text);
+    }
+
+    #[test]
+    fn normalizes_quoted_drawio_fonts_and_resolves_non_serif_cjk_fallback() {
+        let normalized = normalize_font_family(r#""Helvetica", 'PingFang SC', system-ui"#);
+        assert!(normalized.contains("Helvetica, Arial"));
+        assert!(normalized.contains("Microsoft YaHei"));
+        assert!(!normalized.contains('"'));
+        assert!(!normalized.contains('\''));
+
+        let opts = crate::mermaid::usvg_options();
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="40"><text x="10" y="24" font-family="{normalized}" font-size="14px">Hello 世界</text></svg>"#
+        );
+        let tree = usvg::Tree::from_str(&svg, &opts).unwrap();
+        assert!(tree.size().width() > 0.0);
+        // Ensure the generic sans family resolves away from Times New Roman on Windows.
+        assert_ne!(opts.font_family, "Times New Roman");
     }
 }
