@@ -22,13 +22,13 @@ use crate::{
 };
 use gpui_kit::{
     assets::IconName,
-    base::{Scrollbar, ScrollbarMode, StyledExt},
+    base::{Easing, Scrollbar, ScrollbarMode, StyledExt, Transition, transition_with_status},
     component::{
         button::{Button, ButtonVariants},
         input::{Editor, EditorState, Input, InputEvent, InputState},
         menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
         progress::Progress,
-        resizable::{h_resizable, resizable_panel, v_resizable},
+        resizable::{HandleEdge, h_resizable, resizable_panel, resize_handle, v_resizable},
     },
     prelude::FluentBuilder,
     *,
@@ -77,6 +77,30 @@ struct TreeSelectionDrag {
     current: Point<Pixels>,
     original: BTreeSet<String>,
     moved: bool,
+}
+
+#[derive(Clone)]
+struct SidebarResizeDrag {
+    start_x: f32,
+    start_w: f32,
+}
+
+impl Render for SidebarResizeDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+#[derive(Clone)]
+struct RightPanelResizeDrag {
+    start_x: f32,
+    start_w: f32,
+}
+
+impl Render for RightPanelResizeDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
 }
 
 impl TreeSelectionDrag {
@@ -310,16 +334,8 @@ pub struct Workspace {
     right_panel_open: bool,
     right_panel_maximized: bool,
     right_panel_view: RightPanelView,
-    right_panel_closing: bool,
-    right_panel_animating: bool,
-    right_panel_anim_gen: u64,
-    right_panel_anim_task: Task<()>,
     right_panel_search: Entity<InputState>,
     right_panel_selected: usize,
-    sidebar_closing: bool,
-    sidebar_animating: bool,
-    sidebar_anim_gen: u64,
-    sidebar_anim_task: Task<()>,
     preview: Option<PathBuf>,
     build_pdf: Option<Entity<PdfPane>>,
     pdf_panes: BTreeMap<String, Entity<PdfPane>>,
@@ -583,10 +599,7 @@ impl Workspace {
                         cx.notify();
                     }
                     InputEvent::PressEnter { .. } => {
-                        if app.right_panel_open
-                            && !app.right_panel_closing
-                            && app.right_panel_view == RightPanelView::Hub
-                        {
+                        if app.right_panel_open && app.right_panel_view == RightPanelView::Hub {
                             let props = app.hub_props(cx);
                             let items = crate::right_panel::filtered_actions(&props);
                             if let Some(item) = items
@@ -636,7 +649,6 @@ impl Workspace {
                             return;
                         }
                         if app.right_panel_open
-                            && !app.right_panel_closing
                             && app.right_panel_view == RightPanelView::Hub
                             && !app.show_preferences
                         {
@@ -696,7 +708,6 @@ impl Workspace {
                         if key == "escape"
                             && !app.show_preferences
                             && app.right_panel_open
-                            && !app.right_panel_closing
                             && app.right_panel_view == RightPanelView::Ai
                             && app.ai.update(cx, |pane, cx| pane.dismiss_history(window, cx))
                         {
@@ -770,16 +781,8 @@ impl Workspace {
             right_panel_open: false,
             right_panel_maximized: false,
             right_panel_view: RightPanelView::Hub,
-            right_panel_closing: false,
-            right_panel_animating: false,
-            right_panel_anim_gen: 0,
-            right_panel_anim_task: Task::ready(()),
             right_panel_search,
             right_panel_selected: 0,
-            sidebar_closing: false,
-            sidebar_animating: false,
-            sidebar_anim_gen: 0,
-            sidebar_anim_task: Task::ready(()),
             preview: None,
             build_pdf: None,
             pdf_panes: BTreeMap::new(),
@@ -890,53 +893,17 @@ impl Workspace {
     }
 
     fn is_right_panel_open(&self) -> bool {
-        self.right_panel_open && !self.right_panel_closing
+        self.right_panel_open
     }
 
     fn is_sidebar_open(&self) -> bool {
-        self.settings.sidebar_open && !self.sidebar_closing
+        self.settings.sidebar_open
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        let opening = !self.is_sidebar_open();
-        self.sidebar_anim_gen = self.sidebar_anim_gen.wrapping_add(1);
-        let anim_gen = self.sidebar_anim_gen;
-        let duration = Duration::from_millis(crate::right_panel::ANIMATION_MS + 10);
-        if opening {
-            self.settings.sidebar_open = true;
-            self.sidebar_closing = false;
-            self.sidebar_animating = true;
-            self.sidebar_anim_task = cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(duration).await;
-                let _ = this.update(cx, |app, cx| {
-                    if app.sidebar_anim_gen == anim_gen && !app.sidebar_closing {
-                        app.sidebar_animating = false;
-                        cx.notify();
-                    }
-                });
-            });
-        } else {
-            self.sidebar_closing = true;
-            self.sidebar_animating = true;
-            self.sidebar_anim_task = cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(duration).await;
-                let _ = this.update(cx, |app, cx| {
-                    if app.sidebar_anim_gen == anim_gen && app.sidebar_closing {
-                        app.settings.sidebar_open = false;
-                        app.sidebar_closing = false;
-                        app.sidebar_animating = false;
-                        if let Err(error) = storage::save_settings(&app.settings) {
-                            app.report(error, cx);
-                        }
-                        cx.notify();
-                    }
-                });
-            });
-        }
-        if opening {
-            if let Err(error) = storage::save_settings(&self.settings) {
-                self.report(error, cx);
-            }
+        self.settings.sidebar_open = !self.settings.sidebar_open;
+        if let Err(error) = storage::save_settings(&self.settings) {
+            self.report(error, cx);
         }
         cx.notify();
     }
@@ -947,27 +914,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let was_closed = !self.is_right_panel_open();
         self.right_panel_open = true;
-        self.right_panel_closing = false;
         self.right_panel_maximized = false;
         self.right_panel_view = view;
-
-        if was_closed {
-            self.right_panel_animating = true;
-            self.right_panel_anim_gen = self.right_panel_anim_gen.wrapping_add(1);
-            let anim_gen = self.right_panel_anim_gen;
-            let duration = Duration::from_millis(crate::right_panel::ANIMATION_MS + 10);
-            self.right_panel_anim_task = cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(duration).await;
-                let _ = this.update(cx, |app, cx| {
-                    if app.right_panel_anim_gen == anim_gen && !app.right_panel_closing {
-                        app.right_panel_animating = false;
-                        cx.notify();
-                    }
-                });
-            });
-        }
 
         let directory = self.terminal_directory();
         match view {
@@ -997,28 +946,13 @@ impl Workspace {
     }
 
     fn close_right_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.is_right_panel_open() {
+        if !self.right_panel_open {
             return;
         }
-        self.right_panel_closing = true;
+        self.right_panel_open = false;
         self.right_panel_maximized = false;
-        self.right_panel_animating = true;
-        self.right_panel_anim_gen = self.right_panel_anim_gen.wrapping_add(1);
-        let anim_gen = self.right_panel_anim_gen;
-        let duration = Duration::from_millis(crate::right_panel::ANIMATION_MS + 10);
         self.terminal.update(cx, |pane, _| pane.hide());
         self.focus.focus(window, cx);
-        self.right_panel_anim_task = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(duration).await;
-            let _ = this.update(cx, |app, cx| {
-                if app.right_panel_anim_gen == anim_gen && app.right_panel_closing {
-                    app.right_panel_open = false;
-                    app.right_panel_closing = false;
-                    app.right_panel_animating = false;
-                    cx.notify();
-                }
-            });
-        });
         cx.notify();
     }
 
@@ -5488,13 +5422,53 @@ impl Render for Workspace {
         let resize_app = cx.entity();
         let right_panel_visible = self.is_right_panel_open();
         let sidebar_visible = self.is_sidebar_open();
-        let area_width = f32::from(window.viewport_size().width)
-            - if right_panel_visible && !self.right_panel_maximized { self.settings.terminal.panel_width } else { 0. }
-            - if sidebar_visible {
-                self.settings.sidebar_width + 16.
+        let sidebar_target_w = self.settings.sidebar_width.clamp(170., 520.);
+        let right_target_w = self.settings.terminal.panel_width.clamp(280., 1600.);
+        let drawer_curve = Easing::CubicBezier {
+            x1: 0.25,
+            y1: 0.9,
+            x2: 0.32,
+            y2: 1.0,
+        };
+        let sidebar_policy = Transition::new(Duration::from_millis(220)).easing(drawer_curve.clone());
+        let right_duration_ms = (200.0 + right_target_w * 0.16).clamp(240.0, 320.0) as u64;
+        let right_policy =
+            Transition::new(Duration::from_millis(right_duration_ms)).easing(drawer_curve);
+
+        let sidebar_progress = transition_with_status(
+            "workspace-left-sidebar-motion",
+            if sidebar_visible { 1.0_f32 } else { 0.0_f32 },
+            sidebar_policy,
+            window,
+            cx,
+        )
+        .value
+        .clamp(0.0, 1.0);
+        let sidebar_rendered = sidebar_visible || sidebar_progress > 0.001;
+        let sidebar_now_w = sidebar_target_w * sidebar_progress;
+
+        let right_progress = transition_with_status(
+            "workspace-right-panel-motion",
+            if right_panel_visible && !self.right_panel_maximized {
+                1.0_f32
             } else {
-                16.
-            };
+                0.0_f32
+            },
+            right_policy,
+            window,
+            cx,
+        )
+        .value
+        .clamp(0.0, 1.0);
+        let right_rendered = right_panel_visible || right_progress > 0.001;
+        let right_now_w = if right_panel_visible && self.right_panel_maximized {
+            0.0
+        } else {
+            right_target_w * right_progress
+        };
+        let area_width =
+            (f32::from(window.viewport_size().width) - right_now_w - sidebar_now_w - 16.)
+                .max(200.0);
         let mut work_area = h_resizable("work-area")
             .on_resize(move |state, _, cx| {
                 let sizes = state.read(cx).sizes();
@@ -5600,9 +5574,7 @@ impl Render for Workspace {
                     }))),
             );
         }
-        let panel_rendered = self.right_panel_open || self.right_panel_closing;
-        let panel_width = self.settings.terminal.panel_width.clamp(280., 1600.);
-        let right_panel_content = panel_rendered.then(|| match self.right_panel_view {
+        let right_panel_content = right_rendered.then(|| match self.right_panel_view {
             RightPanelView::Hub => {
                 let props = self.hub_props(cx);
                 let action_app = cx.entity();
@@ -5634,42 +5606,37 @@ impl Render for Workspace {
             RightPanelView::Terminal => self.terminal.clone().into_any_element(),
         });
 
-        let editor_with_terminal: AnyElement = if panel_rendered && self.right_panel_animating {
-            let closing = self.right_panel_closing;
-            let anim_gen = self.right_panel_anim_gen;
-            let duration = Duration::from_millis(crate::right_panel::ANIMATION_MS);
-            let sliding_inner = div()
-                .relative()
-                .w(px(panel_width))
-                .h_full()
-                .flex_shrink_0()
-                .children(right_panel_content)
-                .with_animation(
-                    ("right-panel-slide", anim_gen),
-                    Animation::new(duration).with_easing(crate::right_panel::ease_out_cubic),
-                    move |el, t| {
-                        let progress = if closing { 1.0 - t } else { t };
-                        el.left(px(panel_width * (1.0 - progress)))
-                    },
-                );
-            let animated_panel = div()
-                .h_full()
-                .flex_shrink_0()
-                .overflow_hidden()
-                .child(sliding_inner)
-                .with_animation(
-                    ("right-panel-width", anim_gen),
-                    Animation::new(duration).with_easing(crate::right_panel::ease_out_cubic),
-                    move |el, t| {
-                        let progress = if closing { 1.0 - t } else { t };
-                        el.w(px(panel_width * progress))
-                    },
-                );
+        let maximized = right_panel_visible && self.right_panel_maximized;
+        let editor_with_terminal: AnyElement = if maximized {
             div()
                 .flex()
                 .size_full()
                 .min_w_0()
                 .min_h_0()
+                .children(right_panel_content)
+                .into_any_element()
+        } else {
+            div()
+                .id("editor-with-right-panel")
+                .relative()
+                .flex()
+                .size_full()
+                .min_w_0()
+                .min_h_0()
+                .on_drag_move(cx.listener(
+                    |app, event: &DragMoveEvent<RightPanelResizeDrag>, _, cx| {
+                        let drag = event.drag(cx);
+                        let delta = f32::from(event.event.position.x) - drag.start_x;
+                        let next_w = (drag.start_w - delta).clamp(280., 1600.);
+                        if (app.settings.terminal.panel_width - next_w).abs() > 0.5 {
+                            app.settings.terminal.panel_width = next_w;
+                            if let Err(error) = storage::save_settings(&app.settings) {
+                                app.report(error, cx);
+                            }
+                            cx.notify();
+                        }
+                    },
+                ))
                 .child(
                     div()
                         .flex()
@@ -5679,59 +5646,45 @@ impl Render for Workspace {
                         .min_h_0()
                         .child(vertical_work_area),
                 )
-                .child(animated_panel)
-                .into_any_element()
-        } else {
-            let maximized = right_panel_visible && self.right_panel_maximized;
-            h_resizable(match (panel_rendered, maximized) {
-                (true, true) => "terminal-maximized",
-                (true, false) => "editor-with-terminal",
-                _ => "editor-without-terminal",
-            })
-            .on_resize({
-                let app = cx.entity();
-                move |state, _, cx| {
-                    let width = state.read(cx).sizes().last().map(|size| f32::from(*size));
-                    app.update(cx, |app, cx| {
-                        if app.is_right_panel_open()
-                            && !app.right_panel_animating
-                            && !app.right_panel_maximized
-                            && let Some(width) = width
-                        {
-                            app.settings.terminal.panel_width = width;
-                            if let Err(error) = storage::save_settings(&app.settings) {
-                                app.report(error, cx);
-                            }
-                        }
-                    });
-                }
-            })
-            .when(!maximized, |body| {
-                body.child(
-                    resizable_panel().child(
+                .when(right_rendered, |row| {
+                    row.child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .size_full()
-                            .min_w_0()
-                            .min_h_0()
-                            .child(vertical_work_area),
-                    ),
-                )
-            })
-            .when_some(right_panel_content, |body, drawer_child| {
-                body.child(
-                    resizable_panel()
-                        .when(!maximized, |panel| {
-                            panel
-                                .size(px(panel_width))
-                                .size_range(px(280.)..px(1600.))
-                                .fixed()
-                        })
-                        .child(drawer_child),
-                )
-            })
-            .into_any_element()
+                            .relative()
+                            .w(px(right_now_w))
+                            .h_full()
+                            .flex_shrink_0()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .relative()
+                                    .w(px(right_target_w))
+                                    .h_full()
+                                    .opacity(0.6 + 0.4 * right_progress)
+                                    .children(right_panel_content),
+                            )
+                            .when(right_panel_visible && right_progress >= 0.999, |panel| {
+                                panel.child(
+                                    resize_handle("right-panel-resize", Axis::Horizontal)
+                                        .inside(HandleEdge::Leading)
+                                        .on_drag(
+                                            RightPanelResizeDrag {
+                                                start_x: 0.0,
+                                                start_w: right_target_w,
+                                            },
+                                            |drag, pos, _, cx| {
+                                                let start_x = f32::from(pos.x);
+                                                let start_w = drag.start_w;
+                                                cx.new(move |_| RightPanelResizeDrag {
+                                                    start_x,
+                                                    start_w,
+                                                })
+                                            },
+                                        ),
+                                )
+                            }),
+                    )
+                })
+                .into_any_element()
         };
         let show_backdrop = self.has_visible_background();
         let mut app = div()
@@ -6027,89 +5980,76 @@ impl Render for Workspace {
                     } else {
                         editor_with_terminal
                     };
-                    let sidebar_rendered = self.settings.sidebar_open || self.sidebar_closing;
-                    let sidebar_width = self.settings.sidebar_width.clamp(170., 520.);
-                    if sidebar_rendered && self.sidebar_animating {
-                        let closing = self.sidebar_closing;
-                        let anim_gen = self.sidebar_anim_gen;
-                        let duration = Duration::from_millis(crate::right_panel::ANIMATION_MS);
-                        let sliding_sidebar = div()
-                            .relative()
-                            .w(px(sidebar_width))
-                            .h_full()
-                            .flex_shrink_0()
-                            .child(self.render_sidebar(cx))
-                            .with_animation(
-                                ("left-sidebar-slide", anim_gen),
-                                Animation::new(duration)
-                                    .with_easing(crate::right_panel::ease_out_cubic),
-                                move |el, t| {
-                                    let progress = if closing { 1.0 - t } else { t };
-                                    el.left(px(-sidebar_width * (1.0 - progress)))
-                                },
-                            );
-                        let animated_sidebar = div()
-                            .h_full()
-                            .flex_shrink_0()
-                            .overflow_hidden()
-                            .child(sliding_sidebar)
-                            .with_animation(
-                                ("left-sidebar-width", anim_gen),
-                                Animation::new(duration)
-                                    .with_easing(crate::right_panel::ease_out_cubic),
-                                move |el, t| {
-                                    let progress = if closing { 1.0 - t } else { t };
-                                    el.w(px(sidebar_width * progress))
-                                },
-                            );
-                        div()
-                            .flex()
-                            .size_full()
-                            .min_w_0()
-                            .min_h_0()
-                            .child(animated_sidebar)
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .h_full()
-                                    .min_h_0()
-                                    .child(main_content),
-                            )
-                            .into_any_element()
-                    } else {
-                        h_resizable(if sidebar_rendered {
-                            "workspace-with-sidebar"
-                        } else {
-                            "workspace-no-sidebar"
-                        })
-                        .on_resize({
-                            let app = cx.entity();
-                            move |state, _, cx| {
-                                let sidebar_width = f32::from(state.read(cx).sizes()[0]);
-                                app.update(cx, |app, cx| {
-                                    if app.is_sidebar_open() && !app.sidebar_animating {
-                                        app.settings.sidebar_width = sidebar_width;
-                                        if let Err(error) = storage::save_settings(&app.settings) {
-                                            app.report(error, cx);
-                                        }
-                                        cx.notify();
+                    div()
+                        .id("workspace-body")
+                        .relative()
+                        .flex()
+                        .size_full()
+                        .min_w_0()
+                        .min_h_0()
+                        .on_drag_move(cx.listener(
+                            |app, event: &DragMoveEvent<SidebarResizeDrag>, _, cx| {
+                                let drag = event.drag(cx);
+                                let delta = f32::from(event.event.position.x) - drag.start_x;
+                                let next_w = (drag.start_w + delta).clamp(170., 520.);
+                                if (app.settings.sidebar_width - next_w).abs() > 0.5 {
+                                    app.settings.sidebar_width = next_w;
+                                    if let Err(error) = storage::save_settings(&app.settings) {
+                                        app.report(error, cx);
                                     }
-                                });
-                            }
-                        })
-                        .when(sidebar_rendered, |body| {
-                            body.child(
-                                resizable_panel()
-                                    .size(px(sidebar_width))
-                                    .size_range(px(170.)..px(520.))
-                                    .fixed()
-                                    .child(self.render_sidebar(cx)),
+                                    cx.notify();
+                                }
+                            },
+                        ))
+                        .when(sidebar_rendered, |row| {
+                            row.child(
+                                div()
+                                    .relative()
+                                    .w(px(sidebar_now_w))
+                                    .h_full()
+                                    .flex_shrink_0()
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .relative()
+                                            .w(px(sidebar_target_w))
+                                            .h_full()
+                                            .left(px(-sidebar_target_w * (1.0 - sidebar_progress)))
+                                            .child(self.render_sidebar(cx)),
+                                    )
+                                    .when(
+                                        sidebar_visible && sidebar_progress >= 0.999,
+                                        |panel| {
+                                            panel.child(
+                                                resize_handle("sidebar-resize", Axis::Horizontal)
+                                                    .inside(HandleEdge::Trailing)
+                                                    .on_drag(
+                                                        SidebarResizeDrag {
+                                                            start_x: 0.0,
+                                                            start_w: sidebar_target_w,
+                                                        },
+                                                        |drag, pos, _, cx| {
+                                                            let start_x = f32::from(pos.x);
+                                                            let start_w = drag.start_w;
+                                                            cx.new(move |_| SidebarResizeDrag {
+                                                                start_x,
+                                                                start_w,
+                                                            })
+                                                        },
+                                                    ),
+                                            )
+                                        },
+                                    ),
                             )
                         })
-                        .child(resizable_panel().child(main_content))
-                        .into_any_element()
-                    }
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .min_h_0()
+                                .child(main_content),
+                        )
                 }),
             )
             .when(self.tags.is_editing(), |app| app.child(self.render_tag_editor(cx)))
