@@ -1,4 +1,5 @@
 /target/
+/vendor/gpui-kit-markdown-editor/target/
 /runtime/
 /dist/
 /fixtures/smoke/*.pdf
