@@ -23,7 +23,6 @@ pub(super) enum ApprovalState {
 pub(super) struct TagApproval {
     pub(super) preview: TagConfirmation,
     pub(super) state: ApprovalState,
-    pub(super) expanded: bool,
 }
 
 impl TagApproval {
@@ -43,11 +42,7 @@ impl TagApproval {
             }
             _ => ApprovalState::Failed,
         };
-        Some(Self {
-            preview,
-            state,
-            expanded: false,
-        })
+        Some(Self { preview, state })
     }
 }
 
@@ -236,12 +231,8 @@ impl ChatPane {
                     cx.stop_propagation();
                     let mut previews = Vec::new();
                     for id in undo_ids.iter().rev() {
-                        if let Some(approval) =
-                            pane.find_tool_mut(id).and_then(|b| b.approval.as_mut())
-                            && approval.state == ApprovalState::Applied
-                        {
-                            approval.state = ApprovalState::Undone;
-                            previews.push(approval.preview.clone());
+                        if let Some(preview) = pane.session.borrow_mut().undo_tag_approval(id) {
+                            previews.push(preview);
                         }
                     }
                     if !previews.is_empty() {
@@ -339,7 +330,7 @@ impl ChatPane {
             IconName::Tag
         };
         let toggle = id.to_owned();
-        let expanded = approval.expanded;
+        let expanded = self.expanded_tag_receipts.contains(id);
         let details = expanded.then(|| tag_preview(&approval.preview, palette, typo).into_any_element());
         let row_id = SharedString::from(format!("tag-review-{id}"));
         let hover_bg = gpui_kit::hsla(0., 0., if palette.is_dark() { 1. } else { 0. }, 0.04);
@@ -382,13 +373,8 @@ impl ChatPane {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |pane, _, _, cx| {
                             cx.stop_propagation();
-                            if let Some(receipt) = pane
-                                .find_tool_mut(&undo_id)
-                                .and_then(|block| block.approval.as_mut())
-                                && receipt.state == ApprovalState::Applied
-                            {
-                                receipt.state = ApprovalState::Undone;
-                                cx.emit(AiPaneEvent::UndoTags(vec![receipt.preview.clone()]));
+                            if let Some(preview) = pane.session.borrow_mut().undo_tag_approval(&undo_id) {
+                                cx.emit(AiPaneEvent::UndoTags(vec![preview]));
                                 cx.notify();
                             }
                         }))
@@ -434,13 +420,10 @@ impl ChatPane {
                     .when(state == ApprovalState::Undone, |d| d.opacity(0.65))
                     .hover(move |s| s.bg(hover_bg))
                     .on_click(cx.listener(move |pane, _, _, cx| {
-                        if let Some(receipt) = pane
-                            .find_tool_mut(&toggle)
-                            .and_then(|block| block.approval.as_mut())
-                        {
-                            receipt.expanded = !receipt.expanded;
-                            cx.notify();
+                        if !pane.expanded_tag_receipts.remove(&toggle) {
+                            pane.expanded_tag_receipts.insert(toggle.clone());
                         }
+                        cx.notify();
                     }))
                     .child(div().flex_1().min_w_0().child(review_heading(
                         icon,

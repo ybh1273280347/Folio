@@ -17,24 +17,24 @@ pub(super) struct PendingTagEdit {
 }
 
 impl Workspace {
-    pub(super) fn tag_request(&mut self, request: &Value, cx: &mut Context<Self>) {
-        if request["type"] == "tag_cancel" {
+    pub(super) fn tag_request(&mut self, request: &WorkspaceToolRequest, cx: &mut Context<Self>) {
+        if request.kind == WorkspaceToolKind::TagCancel {
             self.tag_proposals.retain(|(project, session, _), pending| {
-                request["projectKey"].as_str() != Some(project)
-                    || request["sessionId"].as_str() != Some(session)
-                    || request["id"].as_str() != Some(pending.request_id.as_str())
+                request.project_key != *project
+                    || request.session_id != *session
+                    || request.id != pending.request_id
             });
             return;
         }
         let result = self.handle_tag_request(request, cx);
         match result {
-            Ok(Some(result)) => self.ai.read(cx).respond_tag(request, result),
+            Ok(Some(result)) => self.ai.read(cx).respond_workspace_tool(request, result),
             Ok(None) => {}
-            Err(error) => self.ai.read(cx).respond_tag(request, error.result()),
+            Err(error) => self.ai.read(cx).respond_workspace_tool(request, error.result()),
         }
     }
 
-    fn tag_tool_store(&self, request: &Value) -> ToolResult<Store> {
+    fn tag_tool_store(&self, request: &WorkspaceToolRequest) -> ToolResult<Store> {
         let project = self.directory_workspace().ok_or_else(|| {
             Failure::new(
                 "directory_workspace_required",
@@ -43,7 +43,7 @@ impl Workspace {
         })?;
         let root = dunce::canonicalize(&project.folder)
             .map_err(|error| Failure::new("project_unavailable", error.to_string()))?;
-        if request["projectKey"].as_str() != Some(crate::ai::project_key(&root).as_str()) {
+        if request.project_key != crate::ai::project_key(&root) {
             return Err(Failure::new(
                 "project_not_active",
                 crate::i18n::tags::ERR_AGENT_SWITCH_PROJECT_RETRY.get(),
@@ -54,14 +54,12 @@ impl Workspace {
 
     fn handle_tag_request(
         &mut self,
-        request: &Value,
+        request: &WorkspaceToolRequest,
         cx: &mut Context<Self>,
     ) -> ToolResult<Option<Value>> {
-        let operation: Request = serde_json::from_value(request.clone())
+        let operation: Request = serde_json::from_value(request.arguments.clone())
             .map_err(|error| Failure::new("invalid_request", error.to_string()))?;
-        let project = request["projectKey"].as_str().expect("host tag project");
-        let session = request["sessionId"].as_str().expect("host tag session");
-        let owner = |proposal| (project.to_owned(), session.to_owned(), proposal);
+        let owner = |proposal| (request.project_key.clone(), request.session_id.clone(), proposal);
         // Discard must work after the user has switched spaces or stopped the run.
         if let Request::Discard(id) = operation {
             self.tag_proposals.remove(&owner(id.proposal_id));
@@ -100,7 +98,7 @@ impl Workspace {
         self.tag_proposals.insert(
             owner(id),
             PendingTagEdit {
-                request_id: request["id"].as_str().expect("host tag request id").into(),
+                request_id: request.id.clone(),
                 edit: proposal,
             },
         );
@@ -267,7 +265,7 @@ impl Workspace {
 
     fn run_tag_query(
         &mut self,
-        request: &Value,
+        request: &WorkspaceToolRequest,
         cx: &mut Context<Self>,
         query: impl FnOnce() -> ToolResult<Value> + Send + 'static,
     ) {
@@ -280,7 +278,7 @@ impl Workspace {
                     .tag_tool_store(&request)
                     .and(result)
                     .unwrap_or_else(Failure::result);
-                app.ai.read(cx).respond_tag(&request, result);
+                app.ai.read(cx).respond_workspace_tool(&request, result);
             });
         })
         .detach();

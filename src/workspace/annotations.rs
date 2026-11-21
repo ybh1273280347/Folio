@@ -10,23 +10,22 @@ enum Snapshot {
 }
 
 impl Workspace {
-    pub(super) fn annotation_request(&mut self, request: &Value, window: &mut Window, cx: &mut Context<Self>) {
-        let id = request["id"].as_str().expect("host annotation request id").to_owned();
-        if request["type"] == "annotation_cancel" {
-            self.annotation_requests.remove(&id);
+    pub(super) fn annotation_request(&mut self, request: &WorkspaceToolRequest, window: &mut Window, cx: &mut Context<Self>) {
+        if request.kind == WorkspaceToolKind::AnnotationCancel {
+            self.annotation_requests.remove(&request.id);
             return;
         }
-        let result = self.start_annotation(request, &id, window, cx);
+        let result = self.start_annotation(request, window, cx);
         if let Err(error) = result {
-            self.ai.read(cx).respond_annotation(request, error.0);
+            self.ai.read(cx).respond_workspace_tool(request, error.0);
         }
     }
 
-    fn annotation_path(&self, request: &Value, params: &Params) -> Result<PathBuf, Failure> {
+    fn annotation_path(&self, request: &WorkspaceToolRequest, params: &Params) -> Result<PathBuf, Failure> {
         let project = self.directory_workspace().ok_or_else(||
             Failure::new("project_not_active", crate::i18n::tags::ERR_AGENT_SWITCH_PROJECT_RETRY.get()))?;
         let root = dunce::canonicalize(&project.folder)?;
-        if request["projectKey"].as_str() != Some(crate::ai::project_key(&root).as_str()) {
+        if request.project_key != crate::ai::project_key(&root) {
             return Err(Failure::new("project_not_active", crate::i18n::tags::ERR_AGENT_SWITCH_PROJECT_RETRY.get()));
         }
         annotations::resolve_path(&root, &params.path)
@@ -37,15 +36,15 @@ impl Workspace {
             (dunce::canonicalize(&document.path).ok().as_deref() == Some(path)).then(|| key.clone()))
     }
 
-    fn start_annotation(&mut self, request: &Value, id: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<(), Failure> {
-        let params: Params = serde_json::from_value(request["params"].clone())
+    fn start_annotation(&mut self, request: &WorkspaceToolRequest, window: &mut Window, cx: &mut Context<Self>) -> Result<(), Failure> {
+        let params: Params = serde_json::from_value(request.arguments["params"].clone())
             .map_err(|e| Failure::new("invalid_request", e.to_string()))?;
         let path = self.annotation_path(request, &params)?;
-        if request["operation"] == "list" {
-            self.ai.read(cx).respond_annotation(request, annotations::list(&path)?);
+        if request.arguments["operation"] == "list" {
+            self.ai.read(cx).respond_workspace_tool(request, annotations::list(&path)?);
             return Ok(());
         }
-        if request["operation"] != "create" {
+        if request.arguments["operation"] != "create" {
             return Err(Failure::new("invalid_request", crate::i18n::tags::ERR_ANN_UNKNOWN_ACTION.get()));
         }
         annotations::validate_create(&params)?;
@@ -78,23 +77,22 @@ impl Workspace {
                 Snapshot::Pdf { .. } => annotations::prepare_pdf(std::fs::read(&target)?, &options),
             }
         });
-        self.annotation_requests.insert(id.to_owned());
+        self.annotation_requests.insert(request.id.clone());
         let request = request.clone();
-        let id = id.to_owned();
         cx.spawn_in(window, async move |this, cx| {
             let prepared = prepare.await;
             let _ = this.update_in(cx, |app, window, cx| {
                 // Cancellation and project changes can happen while PDF text is extracted.
-                if !app.annotation_requests.remove(&id) { return; }
+                if !app.annotation_requests.remove(&request.id) { return; }
                 let result = prepared.and_then(|prepared|
                     app.commit_annotation(&request, &params, &path, &snapshot, prepared, window, cx));
-                app.ai.read(cx).respond_annotation(&request, result.unwrap_or_else(|error| error.0));
+                app.ai.read(cx).respond_workspace_tool(&request, result.unwrap_or_else(|error| error.0));
             });
         }).detach();
         Ok(())
     }
 
-    fn commit_annotation(&mut self, request: &Value, params: &Params, path: &Path, snapshot: &Snapshot,
+    fn commit_annotation(&mut self, request: &WorkspaceToolRequest, params: &Params, path: &Path, snapshot: &Snapshot,
         mut prepared: Prepared, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, Failure>
     {
         if self.annotation_path(request, params)? != path {

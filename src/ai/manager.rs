@@ -57,8 +57,7 @@ pub struct AiPane {
     math: Entity<MathRenderer>,
     host: Option<Arc<rpc::Host>>,
     controls: HashMap<String, RpcClient>,
-    views: HashMap<(String, String), Entity<ChatPane>>,
-    subscriptions: HashMap<(String, String), Vec<Subscription>>,
+    sessions: HashMap<(String, String), SessionTab>,
     store: TabStore,
     histories: HashMap<String, Vec<HistoryEntry>>,
     search: Entity<InputState>,
@@ -79,6 +78,14 @@ pub struct AiPane {
     opened: bool,
     _poll: Task<()>,
     _inputs: Vec<Subscription>,
+}
+
+/// The manager owns each runtime by project/session identity. Closing a
+/// running tab retains its runtime and draft until the host reports settlement.
+struct SessionTab {
+    state: Rc<RefCell<Session>>,
+    view: Entity<ChatPane>,
+    _subscriptions: [Subscription; 2],
 }
 
 impl AiPane {
@@ -150,8 +157,7 @@ impl AiPane {
             math,
             host: None,
             controls: HashMap::new(),
-            views: HashMap::new(),
-            subscriptions: HashMap::new(),
+            sessions: HashMap::new(),
             store,
             histories: HashMap::new(),
             search,
@@ -245,20 +251,20 @@ impl AiPane {
             self.command(json!({"type":"create_session"}), cx);
         }
     }
-    pub fn active_tasks(&self, cx: &App) -> Vec<(String, String, bool)> {
+    pub fn active_tasks(&self) -> Vec<(String, String, bool)> {
         let project = self.project();
         let mut seen = HashSet::new();
         let mut out = Vec::new();
         if let Some(entries) = self.histories.get(&project) {
             for entry in entries {
-                let view = self
-                    .views
+                let session = self
+                    .sessions
                     .get(&(project.clone(), entry.id.clone()))
-                    .map(|v| v.read(cx));
-                let waiting = view.is_some_and(|v| v.pending_ui.is_some()) || entry.waiting;
-                let running = view.is_some_and(|v| v.is_streaming) || entry.running;
+                    .map(|tab| tab.state.borrow());
+                let waiting = session.as_ref().is_some_and(|v| v.pending_ui.is_some()) || entry.waiting;
+                let running = session.as_ref().is_some_and(|v| v.is_streaming) || entry.running;
                 if running || waiting {
-                    let title = view
+                    let title = session
                         .and_then(|v| v.session_name.clone())
                         .unwrap_or_else(|| entry.title());
                     seen.insert(entry.id.clone());
@@ -266,11 +272,11 @@ impl AiPane {
                 }
             }
         }
-        for ((proj, id), view) in &self.views {
+        for ((proj, id), tab) in &self.sessions {
             if proj != &project || seen.contains(id) {
                 continue;
             }
-            let v = view.read(cx);
+            let v = tab.state.borrow();
             let waiting = v.pending_ui.is_some();
             if v.is_streaming || waiting {
                 let title = v
@@ -285,7 +291,7 @@ impl AiPane {
 
     pub fn activate(&mut self, id: String, cx: &mut Context<Self>) {
         let project = self.project();
-        if self.views.contains_key(&(project.clone(), id.clone())) {
+        if self.sessions.contains_key(&(project.clone(), id.clone())) {
             self.command(json!({"type":"retain", "sessionId":id}), cx);
         }
         let tabs = self.store.projects.entry(project).or_default();
@@ -311,14 +317,16 @@ impl AiPane {
         }
         let identity = (project, id.to_owned());
         let running = self
-            .views
+            .sessions
             .get(&identity)
-            .is_some_and(|view| view.read(cx).is_streaming || view.read(cx).pending_ui.is_some());
-        if self.views.contains_key(&identity) {
+            .is_some_and(|tab| {
+                let session = tab.state.borrow();
+                session.is_streaming || session.pending_ui.is_some()
+            });
+        if self.sessions.contains_key(&identity) {
             self.command(json!({"type":"release", "sessionId":id}), cx);
             if !running {
-                self.views.remove(&identity);
-                self.subscriptions.remove(&identity);
+                self.sessions.remove(&identity);
             }
         }
         self.save();
@@ -326,6 +334,14 @@ impl AiPane {
     }
 
     fn poll(&mut self, cx: &mut Context<Self>) {
+        // Drain conversation routes before control-route settlement can dispose
+        // of a closed tab. Background sessions run on the same scheduler.
+        for tab in self.sessions.values() {
+            let changes = tab.state.borrow_mut().poll();
+            if let Some(changes) = changes {
+                tab.view.update(cx, |view, cx| view.apply_session_changes(changes, cx));
+            }
+        }
         let batch: Vec<_> = self
             .controls
             .iter()
@@ -376,10 +392,7 @@ impl AiPane {
                                     {
                                         tabs.active = tabs.tabs.last().cloned();
                                     }
-                                    self.views.retain(|(owner, id), _| {
-                                        owner != &project || tabs.tabs.contains(id)
-                                    });
-                                    self.subscriptions.retain(|(owner, id), _| {
+                                    self.sessions.retain(|(owner, id), _| {
                                         owner != &project || tabs.tabs.contains(id)
                                     });
                                     let empty = tabs.tabs.is_empty();
@@ -414,8 +427,7 @@ impl AiPane {
                                 if tabs.active.as_ref() == Some(&id) {
                                     tabs.active = tabs.tabs.last().cloned();
                                 }
-                                self.views.remove(&(project.clone(), id.clone()));
-                                self.subscriptions.remove(&(project.clone(), id));
+                                self.sessions.remove(&(project.clone(), id));
                                 self.save();
                             }
                             if let Some(client) = self.controls.get(&project) {
@@ -430,14 +442,12 @@ impl AiPane {
                         _ => {}
                     }
                 }
+                RpcInbound::WorkspaceTool(request) => {
+                    // Project control routes stay alive even when the originating tab is hidden.
+                    cx.emit(AiPaneEvent::WorkspaceTool(request));
+                }
                 RpcInbound::Event(event) => {
                     let kind = event["type"].as_str().unwrap_or("");
-                    // Project control routes stay alive even when the originating tab is hidden.
-                    match kind {
-                        "annotation_request" | "annotation_cancel" => cx.emit(AiPaneEvent::Annotation(event.clone())),
-                        "tag_request" | "tag_cancel" => cx.emit(AiPaneEvent::TagRequest(event.clone())),
-                        _ => {}
-                    }
                     if matches!(
                         kind,
                         "session_status" | "session_info_changed" | "agent_settled" | "title_error"
@@ -457,8 +467,7 @@ impl AiPane {
                             .get(&project)
                             .is_some_and(|tabs| tabs.tabs.contains(&id))
                         {
-                            self.views.remove(&(project.clone(), id.clone()));
-                            self.subscriptions.remove(&(project.clone(), id));
+                            self.sessions.remove(&(project.clone(), id));
                         }
                     }
                 }
@@ -490,18 +499,17 @@ impl AiPane {
         self.ensure_view(window, cx);
         self.focus(window, cx);
     }
-    pub fn respond_annotation(&self, request: &Value, result: Value) {
-        let project = request["projectKey"].as_str().expect("host annotation project");
-        if let Some(client) = self.controls.get(project) {
-            let _ = client.send(json!({ "type": "annotation_response", "id": request["id"],
-                "sessionId": request["sessionId"], "result": result }));
-        }
-    }
-    pub fn respond_tag(&self, request: &Value, result: Value) {
-        let project = request["projectKey"].as_str().expect("host tag project");
-        if let Some(client) = self.controls.get(project) {
-            let _ = client.send(json!({ "type": "tag_response", "id": request["id"],
-                "sessionId": request["sessionId"], "result": result }));
+    pub fn respond_workspace_tool(&self, request: &WorkspaceToolRequest, result: Value) {
+        let kind = match request.kind {
+            WorkspaceToolKind::AnnotationRequest => "annotation_response",
+            WorkspaceToolKind::TagRequest => "tag_response",
+            WorkspaceToolKind::AnnotationCancel | WorkspaceToolKind::TagCancel => {
+                unreachable!("cancellation does not request a response")
+            }
+        };
+        if let Some(client) = self.controls.get(&request.project_key) {
+            let _ = client.send(json!({ "type": kind, "id": request.id,
+                "sessionId": request.session_id, "result": result }));
         }
     }
     pub fn dismiss_history(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -523,8 +531,8 @@ impl AiPane {
             .get(&self.project())
             .and_then(|tabs| tabs.active.as_ref())
         {
-            if let Some(view) = self.views.get(&(self.project(), id.clone())) {
-                let focus = view.read(cx).input.read(cx).focus_handle(cx);
+            if let Some(tab) = self.sessions.get(&(self.project(), id.clone())) {
+                let focus = tab.view.read(cx).input.read(cx).focus_handle(cx);
                 window.focus(&focus, cx);
             }
         }
@@ -561,9 +569,9 @@ impl AiPane {
             return;
         }
         self.project_name = name.clone();
-        for ((project, _), view) in &self.views {
+        for ((project, _), tab) in &self.sessions {
             if project == &self.project_key {
-                view.update(cx, |view, cx| view.set_project_name(name.clone(), cx));
+                tab.view.update(cx, |view, cx| view.set_project_name(name.clone(), cx));
             }
         }
         cx.notify();
@@ -575,8 +583,8 @@ impl AiPane {
         self.rename.update(cx, |input, cx| {
             input.set_placeholder(crate::i18n::ai::SESSION_NAME_PLACEHOLDER.get(), window, cx);
         });
-        for view in self.views.values() {
-            view.update(cx, |view, cx| view.refresh_locale(window, cx));
+        for tab in self.sessions.values() {
+            tab.view.update(cx, |view, cx| view.refresh_locale(window, cx));
         }
     }
 
@@ -594,8 +602,8 @@ impl AiPane {
             self.command(json!({"type":"configure", "settings":settings.ai}), cx);
         }
         if view_changed {
-            for view in self.views.values() {
-                view.update(cx, |view, cx| view.sync_settings(settings, cx));
+            for tab in self.sessions.values() {
+                tab.view.update(cx, |view, cx| view.sync_settings(settings, cx));
             }
             cx.notify();
         }
@@ -608,8 +616,8 @@ impl AiPane {
             .get(&self.project())
             .and_then(|tabs| tabs.active.clone())
         {
-            if let Some(view) = self.views.get(&(self.project(), id)) {
-                view.update(cx, |view, cx| view.set_active_file(file, cx));
+            if let Some(tab) = self.sessions.get(&(self.project(), id)) {
+                tab.view.update(cx, |view, cx| view.set_active_file(file, cx));
             }
         }
     }
@@ -642,29 +650,25 @@ impl AiPane {
             return;
         }
         let host = self.host.clone().expect("connected host");
-        if let Some(view) = self.views.get(&identity) {
-            if !Arc::ptr_eq(&view.read(cx).host, &host) {
-                view.update(cx, |view, cx| {
-                    view.host = host;
-                    view.client = None;
-                    view.last_sequence = 0;
-                    view.open(window, cx);
-                });
+        if let Some(tab) = self.sessions.get(&identity) {
+            let restarted = tab.state.borrow_mut().reconnect(host);
+            if restarted {
+                tab.view.update(cx, |view, cx| view.open(window, cx));
             }
             if let Some((source, file, text)) = self.pending_selections.remove(&identity.0) {
-                view.update(cx, |view, cx| {
+                tab.view.update(cx, |view, cx| {
                     view.attach_selection(source, file, text, window, cx)
                 });
             }
             return;
         }
+        let state = Rc::new(RefCell::new(Session::new(host, self.cwd.clone(), id)));
+        state.borrow_mut().connect();
         let view = cx.new(|cx| {
             ChatPane::new(
-                self.cwd.clone(),
+                state.clone(),
                 self.settings.clone(),
                 self.math.clone(),
-                host,
-                id,
                 window,
                 cx,
             )
@@ -680,7 +684,7 @@ impl AiPane {
             });
         }
         let subscription = cx.subscribe(&view, |_, _, event: &AiPaneEvent, cx| match event {
-            AiPaneEvent::Annotation(_) | AiPaneEvent::TagRequest(_) =>
+            AiPaneEvent::WorkspaceTool(_) =>
                 unreachable!("workspace tool requests use the project control route"),
             AiPaneEvent::UndoTags(items) => cx.emit(AiPaneEvent::UndoTags(items.clone())),
             AiPaneEvent::OpenFile(path) => cx.emit(AiPaneEvent::OpenFile(path.clone())),
@@ -688,9 +692,7 @@ impl AiPane {
             AiPaneEvent::ToggleMaximize => cx.emit(AiPaneEvent::ToggleMaximize),
         });
         let observe = cx.observe(&view, |_, _, cx| cx.notify());
-        self.subscriptions
-            .insert(identity.clone(), vec![subscription, observe]);
-        self.views.insert(identity, view);
+        self.sessions.insert(identity, SessionTab { view, state, _subscriptions: [subscription, observe] });
     }
 
     fn delete(&mut self, id: String, confirmed: bool, cx: &mut Context<Self>) {
@@ -822,8 +824,8 @@ impl Render for AiPane {
         let displayed_view = active.as_ref().map(|id| (project.clone(), id.clone()));
         if self.displayed_view != displayed_view {
             // A background conversation keeps its draft, but must retire its transient selection UI.
-            if let Some(view) = self.displayed_view.as_ref().and_then(|key| self.views.get(key)) {
-                view.update(cx, |view, cx| view.dismiss_quote(cx));
+            if let Some(tab) = self.displayed_view.as_ref().and_then(|key| self.sessions.get(key)) {
+                tab.view.update(cx, |view, cx| view.dismiss_quote(cx));
             }
             self.displayed_view = displayed_view;
         }
@@ -899,17 +901,17 @@ impl Render for AiPane {
                                     .into_iter()
                                     .flatten()
                                     .find(|entry| entry.id == id);
-                                let view = self
-                                    .views
+                                let session = self
+                                    .sessions
                                     .get(&(project.clone(), id.clone()))
-                                    .map(|v| v.read(cx));
-                                let title = view
+                                    .map(|tab| tab.state.borrow());
+                                let title = session.as_ref()
                                     .and_then(|v| v.session_name.clone())
                                     .or_else(|| entry.map(HistoryEntry::title))
                                     .unwrap_or_else(|| crate::i18n::ai::NEW_SESSION.get().into());
-                                let waiting = view.is_some_and(|v| v.pending_ui.is_some())
+                                let waiting = session.as_ref().is_some_and(|v| v.pending_ui.is_some())
                                     || entry.is_some_and(|e| e.waiting);
-                                let running = view.is_some_and(|v| v.is_streaming)
+                                let running = session.as_ref().is_some_and(|v| v.is_streaming)
                                     || entry.is_some_and(|e| e.running);
                                 let current = active.as_ref() == Some(&id);
                                 let open = id.clone();
@@ -1043,7 +1045,7 @@ impl Render for AiPane {
                 )
             })
             .when_some(
-                active.and_then(|id| self.views.get(&(project, id)).cloned()),
+                active.and_then(|id| self.sessions.get(&(project, id)).map(|tab| tab.view.clone())),
                 |root, view| root.child(div().flex_1().min_h_0().child(view)),
             )
             .when(self.drawer, |root| {

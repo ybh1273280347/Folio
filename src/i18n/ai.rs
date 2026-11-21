@@ -14,6 +14,11 @@ pub const TOOL_INCOMPLETE: BiText = BiText::new("工具调用未完成", "Tool c
 pub const REQUEST_FAILED: BiText = BiText::new("请求失败", "Request failed");
 pub const EXT_RUNTIME_ERROR: BiText = BiText::new("扩展运行错误", "Extension runtime error");
 pub const PROMPT_CONFIRM: BiText = BiText::new("请求确认", "Confirmation required");
+pub const TAG_CHANGE_CONFIRM: BiText = BiText::new("确认标签修改", "Confirm tag changes");
+pub const TAG_CHANGE_CONFIRM_BODY: BiText = BiText::new(
+    "请检查即将应用的标签更改。",
+    "Review the tag changes before applying them.",
+);
 pub const PROMPT_SELECT: BiText = BiText::new("请选择", "Please select");
 pub const PROMPT_INPUT: BiText = BiText::new("请输入", "Please enter");
 pub const PROMPT_EDIT: BiText = BiText::new("编辑内容", "Edit content");

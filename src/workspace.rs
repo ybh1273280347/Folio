@@ -10,7 +10,7 @@ mod projects;
 mod tags;
 use build::Build;
 use documents::{DocumentWatch, Documents, PaneKey, PaneRole};
-use crate::ai::{AiPane, AiPaneEvent, AttachedFile};
+use crate::ai::{AiPane, AiPaneEvent, AttachedFile, WorkspaceToolKind, WorkspaceToolRequest};
 use gpui_kit::component::Sizable;
 use crate::theme::color as rgb;
 use crate::html::{HtmlPane, HtmlPaneEvent};
@@ -371,8 +371,12 @@ impl Workspace {
         let initial_dir = dirs::home_dir().expect("user home");
         let ai = cx.new(|cx| AiPane::new(initial_dir, settings.clone(), math.clone(), window, cx));
         cx.subscribe_in(&ai, window, |app, _, event: &AiPaneEvent, window, cx| match event {
-            AiPaneEvent::Annotation(request) => app.annotation_request(request, window, cx),
-            AiPaneEvent::TagRequest(request) => app.tag_request(request, cx),
+            AiPaneEvent::WorkspaceTool(request) => match request.kind {
+                WorkspaceToolKind::AnnotationRequest | WorkspaceToolKind::AnnotationCancel => {
+                    app.annotation_request(request, window, cx)
+                }
+                WorkspaceToolKind::TagRequest | WorkspaceToolKind::TagCancel => app.tag_request(request, cx),
+            },
             AiPaneEvent::UndoTags(items) => app.undo_tag_confirmations(items, cx),
             AiPaneEvent::OpenFile(path) => {
                 app.open_path_from_ai(path, window, cx);
@@ -773,7 +777,7 @@ impl Workspace {
                 &self.settings.key_for("toggle_terminal"),
             ),
             terminal_sessions: self.terminal.read(cx).session_count(),
-            ai_tasks: self.ai.read(cx).active_tasks(cx),
+            ai_tasks: self.ai.read(cx).active_tasks(),
         }
     }
 
