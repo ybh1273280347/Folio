@@ -57,8 +57,8 @@ pub enum AiPaneEvent {
     TagRequest(Value),
     UndoTags(Vec<crate::tags::agent::TagConfirmation>),
     OpenFile(PathBuf),
+    BackToHub,
     ToggleMaximize,
-    Hide,
 }
 impl EventEmitter<AiPaneEvent> for AiPane {}
 impl EventEmitter<AiPaneEvent> for ChatPane {}
