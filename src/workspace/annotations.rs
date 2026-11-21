@@ -33,7 +33,7 @@ impl Workspace {
     }
 
     fn annotation_document_key(&self, path: &Path) -> Option<String> {
-        self.documents.iter().find_map(|(key, document)|
+        self.documents.open.iter().find_map(|(key, document)|
             (dunce::canonicalize(&document.path).ok().as_deref() == Some(path)).then(|| key.clone()))
     }
 
@@ -51,7 +51,7 @@ impl Workspace {
         annotations::validate_create(&params)?;
         let snapshot = if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("md")) {
             if let Some(key) = self.annotation_document_key(&path) {
-                let buffer = &self.documents[&key].buffer;
+                let buffer = &self.documents.open[&key].buffer;
                 if buffer.conflict.is_some() || buffer.deleted {
                     return Err(Failure::new("document_conflict", crate::i18n::tags::ERR_ANN_DOC_CONFLICT.get()));
                 }
@@ -104,7 +104,7 @@ impl Workspace {
         let expected_revision = match snapshot {
             Snapshot::Markdown { text, revision } => {
                 if let Some(key) = &key {
-                    let buffer = &self.documents[key].buffer;
+                    let buffer = &self.documents.open[key].buffer;
                     if &buffer.text != text || buffer.conflict.is_some() || buffer.deleted {
                         return Err(Failure::new("document_changed", crate::i18n::tags::ERR_ANN_DOC_CHANGED.get()));
                     }
@@ -128,12 +128,12 @@ impl Workspace {
             let saved = files::save_document_at(path, text, &expected_revision)?
                 .map_err(|_| Failure::new("document_changed", crate::i18n::tags::ERR_ANN_DISK_CHANGED.get()))?;
             if let Some(key) = &key {
-                self.documents.get_mut(key).expect("opened document").buffer.replace_from_disk(saved);
-                self.markdown_changed.insert(key.clone());
-                self.source_version += 1;
+                self.documents.open.get_mut(key).expect("opened document").buffer.replace_from_disk(saved);
+                self.documents.markdown_changed.insert(key.clone());
+                self.documents.source_version += 1;
             }
             // Update both editing/reading panes without changing tabs or keyboard focus.
-            for pane in self.markdown_panes.values() {
+            for pane in self.documents.markdown_panes.values() {
                 if dunce::canonicalize(pane.read(cx).path()).ok().as_deref() == Some(path) {
                     pane.update(cx, |pane, cx| pane.sync(text, &self.settings, window, cx));
                 }
@@ -149,12 +149,12 @@ impl Workspace {
             };
             return Err(Failure::new("save_failed", format!("{prefix}: {error}")));
         }
-        for pane in self.markdown_panes.values() {
+        for pane in self.documents.markdown_panes.values() {
             if dunce::canonicalize(pane.read(cx).path()).ok().as_deref() == Some(path) {
                 pane.update(cx, |pane, cx| pane.sync_annotations(&items, cx));
             }
         }
-        for pane in self.pdf_panes.values() {
+        for pane in self.documents.pdf_panes.values() {
             if dunce::canonicalize(pane.read(cx).path()).ok().as_deref() == Some(path) {
                 pane.update(cx, |pane, cx| pane.sync_annotations(&items, cx));
             }

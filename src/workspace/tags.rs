@@ -96,9 +96,9 @@ impl Workspace {
                 .map(|file| file.path.clone())
                 .collect::<Vec<_>>()
         } else {
-            self.tabs
+            self.documents.tabs
                 .iter()
-                .chain(&self.reading_panes)
+                .chain(&self.documents.reading_panes)
                 .cloned()
                 .collect()
         };
@@ -319,10 +319,10 @@ impl Workspace {
             self.edit_file_tags(self.selected_files.iter().cloned().collect(), window, cx);
         } else if let Some(folder) = self.focused_folder.clone() {
             self.edit_folder_tags(&folder, window, cx);
-        } else if self.tabs.contains(&self.active)
-            || self.files.iter().any(|file| file.path == self.active)
+        } else if self.documents.tabs.contains(&self.documents.active)
+            || self.files.iter().any(|file| file.path == self.documents.active)
         {
-            self.edit_file_tags(vec![self.active.clone()], window, cx);
+            self.edit_file_tags(vec![self.documents.active.clone()], window, cx);
         }
     }
 
@@ -710,7 +710,7 @@ impl Workspace {
                 let id = id.clone();
                 let mut paths: Vec<_> = self.files.iter().map(|file| &file.path).collect();
                 if self.directory_workspace().is_none() {
-                    paths.extend(self.tabs.iter().chain(self.tags.snapshot.assigned.keys()));
+                    paths.extend(self.documents.tabs.iter().chain(self.tags.snapshot.assigned.keys()));
                     paths.sort_unstable();
                     paths.dedup();
                 }

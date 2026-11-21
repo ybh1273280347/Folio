@@ -117,6 +117,7 @@ pub const ERR_MOVE_SAME_PROJECT_FILE_ONLY: BiText = BiText::new(
     "Only files within the same project can be moved; loose files only support copying paths.",
 );
 pub const ERR_WAIT_BUILD_MOVE_FILE: BiText = BiText::new("请等待编译结束后移动文件。", "Please wait for compilation to finish before moving files.");
+pub const ERR_WAIT_BUILD_SWITCH_WORKSPACE: BiText = BiText::new("请等待编译结束后切换工作区。", "Please wait for compilation to finish before switching workspaces.");
 pub const ERR_SOURCE_NOT_IN_PROJECT: BiText = BiText::new("来源文件不属于当前项目。", "Source file does not belong to the current project.");
 pub const ERR_MOVE_SAME_PROJECT_FOLDER_ONLY: BiText = BiText::new("仅支持移动同一项目内的文件夹。", "Only folders within the same project can be moved.");
 pub const ERR_WAIT_BUILD_MOVE_FOLDER: BiText = BiText::new("请等待编译结束后移动文件夹。", "Please wait for compilation to finish before moving folders.");
