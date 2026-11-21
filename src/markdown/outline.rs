@@ -11,7 +11,7 @@ use gpui_kit::{
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-pub(super) const PANEL_WIDTH: f32 = 240.0;
+pub(super) const PANEL_WIDTH: f32 = 225.0;
 pub(super) const AUTO_OPEN_WIDTH: f32 = 1080.0;
 pub(super) const OVERLAY_WIDTH: f32 = 940.0;
 pub(super) const ANIMATION_MS: u64 = 200;
@@ -766,7 +766,7 @@ fn render_nodes(
             is_collapsed && active_heading.is_some_and(|active_ix| node.contains_index(active_ix));
         let is_active = is_direct_active || is_collapsed_ancestor_active;
 
-        let font_size = if depth == 0 { px(13.) } else { px(12.2) };
+        let font_size = if depth == 0 { px(12.) } else { px(11.5) };
         let line_height = if depth == 0 { px(19.5) } else { px(18.5) };
         let row_py = if depth == 0 { px(5.) } else { px(4.) };
         let rest_color = if is_active {

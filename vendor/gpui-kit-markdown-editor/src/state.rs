@@ -1168,38 +1168,27 @@ impl BlockEditorState {
         let mut found = None;
         for leaf in self.model.document().leaves() {
             if !legacy_raw && let Some(inline) = self.model.doc.inline(leaf.id()) {
-                let (expanded, starts, ends) = Self::expand_inline_plain(inline);
-                let mut from = 0;
-                while let Some(slice) = expanded.get(from..) {
-                    let Some(rel) = slice.find(quote) else {
-                        break;
-                    };
-                    let out_start = from + rel;
-                    let out_end = out_start + quote.len();
-                    if seen == occurrence {
-                        found = Some((leaf.id(), starts[out_start], ends[out_end]));
-                        break;
-                    }
-                    seen += 1;
-                    from = out_start + step;
-                }
-            } else if let Some(text) = self.model.doc.leaf_text(leaf.id()) {
-                let mut from = 0;
-                while let Some(slice) = text.get(from..) {
-                    let Some(rel) = slice.find(quote) else {
-                        break;
-                    };
-                    let start = from + rel;
-                    let end = start + quote.len();
-                    if seen == occurrence {
+                if !inline.text().contains(super::inline::ATOM_CHAR) {
+                    if let Some((start, end)) =
+                        nth_quote_range(inline.text(), quote, step, occurrence, &mut seen)
+                    {
                         found = Some((leaf.id(), start, end));
                         break;
                     }
-                    seen += 1;
-                    from = start + step;
+                } else {
+                    let (expanded, starts, ends) = Self::expand_inline_plain(inline);
+                    if let Some((out_start, out_end)) =
+                        nth_quote_range(&expanded, quote, step, occurrence, &mut seen)
+                    {
+                        found = Some((leaf.id(), starts[out_start], ends[out_end]));
+                        break;
+                    }
                 }
-            }
-            if found.is_some() {
+            } else if let Some(text) = self.model.doc.leaf_text(leaf.id())
+                && let Some((start, end)) =
+                    nth_quote_range(text, quote, step, occurrence, &mut seen)
+            {
+                found = Some((leaf.id(), start, end));
                 break;
             }
         }
@@ -1209,6 +1198,7 @@ impl BlockEditorState {
                 head: BlockPosition::new(block, end),
             });
             self.selection_changed(cx);
+            self.heading_jump.set(Some(block));
             self.reveal_caret(cx);
             true
         } else {
@@ -4237,4 +4227,27 @@ fn opening_pair(text: &str, open: Range<usize>, delim: &str) -> Option<Range<usi
         return None;
     }
     Some(close)
+}
+
+/// Finds the byte range of the `occurrence`-th match of `quote` in `haystack`,
+/// advancing `seen` for earlier matches.
+fn nth_quote_range(
+    haystack: &str,
+    quote: &str,
+    step: usize,
+    occurrence: usize,
+    seen: &mut usize,
+) -> Option<(usize, usize)> {
+    let mut from = 0;
+    while let Some(slice) = haystack.get(from..) {
+        let rel = slice.find(quote)?;
+        let start = from + rel;
+        let end = start + quote.len();
+        if *seen == occurrence {
+            return Some((start, end));
+        }
+        *seen += 1;
+        from = start + step;
+    }
+    None
 }
