@@ -41,6 +41,8 @@ pub struct ImagePane {
     svg_tree: Option<Arc<usvg::Tree>>,
     svg_rendered: Option<(u32, Arc<RenderImage>)>,
     svg_pending_bucket: Option<u32>,
+    has_complex_rich_text: bool,
+    svg_complex_notice_dismissed: bool,
     load_error: Option<String>,
     zoom_mode: ZoomMode,
     pan: Point<Pixels>,
@@ -59,6 +61,8 @@ impl ImagePane {
             svg_tree: None,
             svg_rendered: None,
             svg_pending_bucket: None,
+            has_complex_rich_text: false,
+            svg_complex_notice_dismissed: false,
             load_error: None,
             zoom_mode: ZoomMode::Fit,
             pan: Point::default(),
@@ -90,6 +94,7 @@ impl ImagePane {
         self.svg_tree = None;
         self.svg_rendered = None;
         self.svg_pending_bucket = None;
+        self.has_complex_rich_text = false;
         self.load_error = None;
 
         let ext = self
@@ -109,9 +114,10 @@ impl ImagePane {
         };
 
         if self.is_svg {
-            let clean_bytes = super::clipboard::sanitize_svg_bytes(&bytes);
+            let preprocessed = super::svg_compat::preprocess_svg_bytes(&bytes);
+            self.has_complex_rich_text = preprocessed.has_complex_rich_text;
             let options = crate::mermaid::usvg_options();
-            match usvg::Tree::from_data(&clean_bytes, &options) {
+            match usvg::Tree::from_data(&preprocessed.bytes, &options) {
                 Ok(tree) => {
                     let size = tree.size();
                     self.natural_size = Some((size.width().max(1.0), size.height().max(1.0)));
@@ -618,6 +624,43 @@ impl Render for ImagePane {
                 .child(crate::i18n::media::IMG_HINT_INTERACTION.get());
 
             stage = stage.child(hint).child(hud);
+
+            if self.has_complex_rich_text && !self.svg_complex_notice_dismissed {
+                let notice = div()
+                    .id("image-svg-complex-notice")
+                    .absolute()
+                    .top_3()
+                    .left_4()
+                    .right_4()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_3()
+                    .py_1p5()
+                    .rounded(px(6.))
+                    .bg(rgb(0xfffbeb).opacity(0.95))
+                    .border_1()
+                    .border_color(rgb(0xfde68a))
+                    .text_xs()
+                    .text_color(rgb(0x92400e))
+                    .cursor_default()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(crate::i18n::media::IMG_SVG_COMPLEX_NOTICE.get()),
+                    )
+                    .child(
+                        crate::ui::control("dismiss-svg-complex-notice", IconName::Close)
+                            .on_click(cx.listener(|pane, _, _, cx| {
+                                pane.svg_complex_notice_dismissed = true;
+                                cx.notify();
+                            })),
+                    );
+                stage = stage.child(notice);
+            }
         }
 
         stage.into_any_element()
