@@ -461,6 +461,7 @@ fn register_table_surfaces(extensions: &mut MarkdownExtensions, state: &Entity<B
 const LIST_CHUNK: usize = 32;
 
 const CONTAINER_EXTRA_GAP: Pixels = px(6.);
+const ADJACENT_CONTAINERS_EXTRA_GAP: Pixels = px(11.);
 
 fn is_container_node(node: &BlockNode) -> bool {
     match node {
@@ -485,7 +486,11 @@ fn container_extra_gap(
     next_is_container: bool,
     next_is_heading: bool,
 ) -> Pixels {
-    if (curr_is_container && !next_is_heading) || (!curr_is_heading && next_is_container) {
+    // Consecutive panels need separation between their surfaces, while headings
+    // keep the spacing supplied by their own renderer.
+    if curr_is_container && next_is_container {
+        ADJACENT_CONTAINERS_EXTRA_GAP
+    } else if (curr_is_container && !next_is_heading) || (!curr_is_heading && next_is_container) {
         CONTAINER_EXTRA_GAP
     } else {
         px(0.)
@@ -640,8 +645,16 @@ impl RenderOnce for BlockEditor {
                 .unwrap_or_else(|| theme.tokens.colors.surface.into());
             let mut head = style.table_head().clone();
             let head_fill = head.background.take().unwrap_or_else(|| code_fill.into());
+            // Inline code has its own pill fill and can also carry a highlight
+            // background. Fade both after the editor resolves their defaults.
+            let mut inline_box = style.inline_code_style().clone();
+            inline_box.background = inline_box.background.map(fade_fill);
+            let mut inline_mark = style.inline_code();
+            inline_mark.background_color = inline_mark.background_color.map(|color| color.opacity(opacity));
             let style = style.clone()
                 .with_code_background(code_fill.opacity(opacity))
+                .with_inline_code(inline_mark)
+                .with_inline_code_style(inline_box)
                 .with_code_block(block)
                 .with_table(table.bg(fade_fill(table_fill)))
                 .with_table_head(head.bg(fade_fill(head_fill)));

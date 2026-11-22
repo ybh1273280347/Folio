@@ -3978,8 +3978,8 @@ impl BlockNode {
                 div()
                     .w_full()
                     .min_w_0()
-                    // Items breathe a little apart, less than paragraphs do.
-                    .when(ix > 0, |this| this.pt(body * 0.25))
+                    // Separate top-level entries more than the bullets within them.
+                    .when(ix > 0, |this| this.pt(body * if options.depth == 0 { 0.45 } else { 0.30 }))
                     .when(*spread, |this| this.child(div()))
                     .children({
                         let mut items: Vec<Div> = Vec::with_capacity(children.len());
@@ -4087,6 +4087,7 @@ impl BlockNode {
                                                 .w_full()
                                                 .min_w_0()
                                                 .pl(indent)
+                                                .pt(body * 0.45)
                                                 .overflow_hidden()
                                                 .child(block),
                                         );
