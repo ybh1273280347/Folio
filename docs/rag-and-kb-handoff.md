@@ -27,7 +27,7 @@ e6bbdb8 merge: 合入阶段1 PaddleOCR-VL 扫描 PDF 精修管线       # 移除
 [AI Agent 工具]  ──(QMD searches(lex/vec) + intent + rerank)──▶ src/rag 引擎 ──▶ .folio/rag.sqlite3
                                                              ▲                  (FTS5 + sqlite-vec)
 [PDF 提取两级]
-  ├─ Fast（日常默认）：pdf-inspector 按页抽 Markdown（失败退回 gpui_pdf），每页 >2200 字则页内切分
+  ├─ Fast（日常默认）：pdf-inspector 按页抽 Markdown（失败退回 gpui_pdf），按 token 预算在页内切分
   └─ Accurate（显式触发）：PaddleOCR-VL-1.6 → .folio/pdf-cache/<sha256>/full.md + pages.json → 按标题跨页二次分块
 ```
 
@@ -48,7 +48,7 @@ e6bbdb8 merge: 合入阶段1 PaddleOCR-VL 扫描 PDF 精修管线       # 移除
 | 文件 | 关键符号 / 入口 | 职责 |
 | :--- | :--- | :--- |
 | [src/rag/mod.rs](file:///d:/projects/my_projects/Latex/gpui-prototype/src/rag/mod.rs) | `SubSearchType`, `SubSearch`, `SearchRequest`, `AccuratePdfMode`, `SearchHit`, `StatusReport`, `ReindexReport`, `collect_eligible_paths`, `record_derived_pdf`, `load_derived_pdf_hashes`, `has_folio_pdf_fingerprint` | 对外协议类型、支持扩展名筛选（`md`/`txt`/`tex`/`ltx`/`bib`/`pdf`）以及 `.folio/derived-pdfs.json` + PDF 内嵌指纹读写与校验 |
-| [src/rag/chunker.rs](file:///d:/projects/my_projects/Latex/gpui-prototype/src/rag/chunker.rs) | `ChunkDraft`, `ExtractedDocument`, `chunk_text_document`, `extract_and_chunk_pdf`, `chunk_inspected_pdf`, `extract_and_chunk_pdf_gpui`, `chunk_annotations`, `chunk_structured_lines`, `split_section_lines`, `split_text_with_overlap` | 文本与 PDF 解析分块器（`TARGET_CHUNK_CHARS = 2200`, `OVERLAP_CHARS = 320`, `HARD_MAX_CHARS = 3200`） |
+| [src/rag/chunker.rs](file:///d:/projects/my_projects/Latex/gpui-prototype/src/rag/chunker.rs) | `ChunkDraft`, `ExtractedDocument`, `chunk_text_document`, `extract_and_chunk_pdf`, `chunk_annotations`, `split_token_chunks` | 文本与 PDF 共用 Qwen3 token 预算，保留行号与页码锚点 |
 | [src/rag/ocr.rs](file:///d:/projects/my_projects/Latex/gpui-prototype/src/rag/ocr.rs) | `PageAnchor`, `resolve_ocr_token`, `load_cached_pdf`, `upgrade_pdfs`, `build_multipart_body`, `parse_paddleocr_jsonl_to_cache`, `match_chunk_page` | PaddleOCR-VL-1.6 异步任务客户端（`paddleocr.aistudio-app.com/api/v2/ocr/jobs`）、Token 自动解析（设置 → 环境变量 → `~/.pi/agent/mcp.json`）及 `.folio/pdf-cache/<sha256>/` 缓存读写 |
 | [src/rag/pipeline.rs](file:///d:/projects/my_projects/Latex/gpui-prototype/src/rag/pipeline.rs) | `SyncOptions`, `sync_project`, `SearchServices`, `search_project`, `position_aware_blend_scores`, `clean_heading_text`, `clean_markdown_snippet`, `build_snippet` | 增量同步、批注同步、衍生 PDF 跳过、RRF 融合（`RRF_K = 60.0`, `MAX_CHUNKS_PER_FILE = 4`）、重排打分及摘要清洗截断（`SNIPPET_CHARS = 120`） |
 | [src/rag/store.rs](file:///d:/projects/my_projects/Latex/gpui-prototype/src/rag/store.rs) | `RagStore`, `DocumentMeta`, `StoreStats`, `sync` 表操作 (`upsert_document`, `deactivate_missing`, `search_fts`, `search_vec`, `pdf_upgrade_candidates`, `ocr_counts`, `stats`) | SQLite WAL + FTS5 trigram + `sqlite-vec` 持久化层；统计与 OCR 候选均排除 `status = 'derived'` |
@@ -91,8 +91,15 @@ e6bbdb8 merge: 合入阶段1 PaddleOCR-VL 扫描 PDF 精修管线       # 移除
 - `.folio/pdf-cache/<sha256>/`：`PaddleOCR-VL-1.6` 解析产物（`full.md` 与 `pages.json` 锚点数组）。
 - `.folio/derived-pdfs.json`：Folio 编译/导出产物 SHA-256 清单。
 
-### 当前 PDF 解析/分块的待重构观察点
-1. **Fast 路径无跨页聚合与标题结构**：`chunk_inspected_pdf` 虽然拿到 `pdf-inspector` 返回的 Markdown，但逐页独立 `split_text_with_overlap(2200, 320)`——短页（如 PPT 每页几十字）会各自成为孤立小 chunk，页内 `#` 标题也未进入 `heading_path` 或跨页合并，且没有代码围栏/公式块保护。
+### Token 分块与索引迁移
+
+- 正常目标为 384 tokens，硬上限为 480 tokens，均含送入 embedding 的标题前缀。块间重叠至多约 56 tokens，结构化文本优先在行与完整块之间断开。单行或保护块超出上限时，从原文的 UTF-8 边界拆分。
+- 使用 [Qwen3-Embedding-0.6B 官方 tokenizer](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/blob/b22da495047858cce924d27d76261e96be6febc0/tokenizer.json)，按 Apache-2.0 随程序编译嵌入。运行时直接本地分词。
+- `chunker_version` 从 1 提升到 2。项目下次同步会重建分块、FTS、向量与重排派生缓存，OCR 分页文件继续复用。
+
+### PDF 解析与分块边界
+
+1. **Fast 路径逐页独立分块**：优先选择页内段落边界，保留每个分块的原页码。短页仍分别成块。
 2. **Accurate 路径与 Fast 路径策略分裂**：Accurate 路径先把所有页拼成 `full.md`，再走 `chunk_structured_lines` 跨页按 `#` 标题二次分块并用 `pages.json` 锚点回填 `page_num`；Fast 路径尚未使用统一的后处理策略。
 3. **摘要清洗只发生在展示/响应阶段**：`chunks` 表仍存带原始 `[heading]\n...` 与 Markdown/LaTeX 的块（便于保留上下文与命中高亮还原），展示摘要时在 `build_snippet` 中即时剥离与截断；若改为双列/结构化存储或调整分块策略，需同步核对 `clean_markdown_snippet` 与 Markdown/PDF 跳转定位逻辑。
 

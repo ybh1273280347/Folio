@@ -1,7 +1,7 @@
 //! SQLite storage layer using WAL, FTS5 trigram, and statically linked sqlite-vec.
 
 use super::chunker::ChunkDraft;
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -11,7 +11,7 @@ use std::{
 };
 
 const SCHEMA_VERSION: &str = "1";
-const CHUNKER_VERSION: &str = "1";
+const CHUNKER_VERSION: &str = "2";
 const FTS_TOKENIZER: &str = "trigram";
 
 static REGISTER_VEC: Once = Once::new();
@@ -93,8 +93,9 @@ impl RagStore {
     }
 
     pub fn reset_index(&mut self, embed_model: &str, embed_dim: usize) -> Result<(), String> {
+        self.ensure_schema(embed_model, embed_dim, true)?;
         self.embed_dim = embed_dim;
-        self.ensure_schema(embed_model, embed_dim, true)
+        Ok(())
     }
 
     fn ensure_schema(
@@ -103,7 +104,12 @@ impl RagStore {
         embed_dim: usize,
         force_reset: bool,
     ) -> Result<(), String> {
-        self.conn
+        // The background sync and search can open the same cache concurrently during a migration.
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        tx
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS meta (
                     key   TEXT PRIMARY KEY,
@@ -112,10 +118,10 @@ impl RagStore {
             )
             .map_err(|e| e.to_string())?;
 
-        let prev_schema = self.get_meta("schema_version")?;
-        let prev_dim = self.get_meta("embed_dim")?;
-        let prev_model = self.get_meta("embed_model")?;
-        let prev_chunker = self.get_meta("chunker_version")?;
+        let prev_schema = Self::get_meta(&tx, "schema_version")?;
+        let prev_dim = Self::get_meta(&tx, "embed_dim")?;
+        let prev_model = Self::get_meta(&tx, "embed_model")?;
+        let prev_chunker = Self::get_meta(&tx, "chunker_version")?;
 
         let rebuild_all = force_reset
             || prev_schema.as_deref().is_some_and(|v| v != SCHEMA_VERSION)
@@ -129,7 +135,7 @@ impl RagStore {
             || prev_model.as_deref().is_some_and(|m| m != embed_model);
 
         if rebuild_all {
-            self.conn
+            tx
                 .execute_batch(
                     "DROP TRIGGER IF EXISTS chunks_ai;
                      DROP TRIGGER IF EXISTS chunks_ad;
@@ -143,7 +149,7 @@ impl RagStore {
                 )
                 .map_err(|e| e.to_string())?;
         } else if rebuild_vectors {
-            self.conn
+            tx
                 .execute_batch("DROP TABLE IF EXISTS chunks_vec;")
                 .map_err(|e| e.to_string())?;
         }
@@ -218,27 +224,27 @@ impl RagStore {
                 updated_at   INTEGER NOT NULL
             );"
         );
-        self.conn
+        tx
             .execute_batch(&sql)
             .map_err(|e| format!("初始化 RAG 表结构失败: {e}"))?;
 
-        self.set_meta("schema_version", SCHEMA_VERSION)?;
-        self.set_meta("chunker_version", CHUNKER_VERSION)?;
-        self.set_meta("fts_tokenizer", FTS_TOKENIZER)?;
-        self.set_meta("embed_model", embed_model)?;
-        self.set_meta("embed_dim", &embed_dim.to_string())?;
-        Ok(())
+        Self::set_meta(&tx, "schema_version", SCHEMA_VERSION)?;
+        Self::set_meta(&tx, "chunker_version", CHUNKER_VERSION)?;
+        Self::set_meta(&tx, "fts_tokenizer", FTS_TOKENIZER)?;
+        Self::set_meta(&tx, "embed_model", embed_model)?;
+        Self::set_meta(&tx, "embed_dim", &embed_dim.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
     }
 
-    fn get_meta(&self, key: &str) -> Result<Option<String>, String> {
-        self.conn
+    fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>, String> {
+        conn
             .query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| row.get(0))
             .optional()
             .map_err(|e| e.to_string())
     }
 
-    fn set_meta(&self, key: &str, value: &str) -> Result<(), String> {
-        self.conn
+    fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
+        conn
             .execute(
                 "INSERT INTO meta(key, value) VALUES (?1, ?2)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1024,6 +1030,52 @@ mod tests {
             .unwrap();
         assert_eq!(vec_hits.len(), 1);
         assert_eq!(vec_hits[0].rel_path, "notes/opt.md");
+    }
+
+    #[test]
+    fn opening_character_index_discards_stale_chunks_and_vectors() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("rag.sqlite3");
+        let mut store = RagStore::open(&db, "test-embed", 4).unwrap();
+        let text = "旧版字符分块";
+        let draft = ChunkDraft {
+            seq: 0,
+            heading_path: "notes.txt".into(),
+            line_start: Some(1),
+            line_end: Some(1),
+            page_num: None,
+            chunk_text: format!("[notes.txt]\n{text}"),
+        };
+        store
+            .upsert_document(
+                "notes.txt",
+                "txt",
+                "character-index-hash",
+                1,
+                text.len() as i64,
+                "indexed",
+                Some(text),
+                Some("source"),
+                Some(&[draft]),
+            )
+            .unwrap();
+        let pending = store.pending_vector_chunks(1).unwrap();
+        store
+            .insert_chunk_vectors(&[(pending[0].chunk_id, vec![1.0, 0.0, 0.0, 0.0])])
+            .unwrap();
+        drop(store);
+        Connection::open(&db)
+            .unwrap()
+            .execute("UPDATE meta SET value = '1' WHERE key = 'chunker_version'", [])
+            .unwrap();
+
+        let store = RagStore::open(&db, "test-embed", 4).unwrap();
+        let stats = store.stats().unwrap();
+        assert_eq!(
+            (stats.indexed_files, stats.total_chunks, stats.vector_chunks),
+            (0, 0, 0)
+        );
+        assert!(!store.has_content("character-index-hash").unwrap());
     }
 
     #[test]
