@@ -22,6 +22,7 @@ struct Snapshot {
 enum SessionEvent {
     AgentStart,
     AgentSettled,
+    UserEntry { entry_id: String, timestamp: i64 },
     ThinkingLevelChanged { #[serde(rename = "level")] thinking_level: Option<String> },
     SessionInfoChanged { name: Option<String> },
     TitleError { error: Option<String> },
@@ -59,6 +60,7 @@ pub(super) struct SessionChanges {
     pub(super) toast: Option<(String, bool)>,
     pub(super) extension_prefill: Option<(String, bool)>,
     pub(super) composer_text: Option<String>,
+    pub(super) rewind_draft: Option<Value>,
 }
 
 pub(super) struct Session {
@@ -71,6 +73,7 @@ pub(super) struct Session {
     pub(super) messages: Vec<ChatMessage>,
     pub(super) is_streaming: bool,
     pub(super) is_compacting: bool,
+    pub(super) is_rewinding: bool,
     pub(super) session_name: Option<String>,
     pub(super) available_models: Vec<ModelInfo>,
     pub(super) current_model: Option<ModelInfo>,
@@ -101,6 +104,7 @@ impl Session {
             messages: Vec::new(),
             is_streaming: false,
             is_compacting: false,
+            is_rewinding: false,
             session_name: None,
             available_models: Vec::new(),
             current_model: None,
@@ -170,10 +174,26 @@ impl Session {
     }
 
     pub(super) fn compact(&mut self) {
-        if let Some(client) = &self.client && !self.is_compacting {
+        if let Some(client) = &self.client && !self.is_compacting && !self.is_rewinding {
             self.is_compacting = true;
             let _ = client.compact();
         }
+    }
+
+    pub(super) fn can_rewind(&self) -> bool {
+        self.client.is_some() && !self.is_streaming && !self.is_compacting
+            && !self.is_rewinding && self.pending_ui.is_none()
+    }
+
+    pub(super) fn rewind(&mut self, entry_id: &str, edit: bool) -> Result<(), String> {
+        if !self.can_rewind() {
+            return Ok(());
+        }
+        self.client.as_ref().expect("rewind requires a connected session").send(
+            serde_json::json!({"type":"rewind", "entryId":entry_id, "edit":edit}),
+        )?;
+        self.is_rewinding = true;
+        Ok(())
     }
 
     pub(super) fn set_thinking(&mut self, level: &str) {
@@ -253,6 +273,17 @@ impl Session {
                 data,
                 error,
             } => {
+                if command == "rewind" {
+                    self.is_rewinding = false;
+                    if !success {
+                        if let Some(err) = error {
+                            self.show_toast(crate::i18n::ai::command_failed(
+                                crate::i18n::ai::REWIND_MESSAGE.get(), &err,
+                            ), true);
+                        }
+                        return;
+                    }
+                }
                 if !success {
                     if let Some(err) = error {
                         self.messages.push(ChatMessage::Notice {
@@ -268,11 +299,20 @@ impl Session {
                     }
                     return;
                 }
-                let Some(data) = data else {
+                let Some(mut data) = data else {
                     return;
                 };
                 match command.as_str() {
                     "snapshot" | "get_state" | "get_messages" => self.apply_snapshot(&command, data),
+                    "rewind" => {
+                        self.changes.rewind_draft = data.get_mut("draft").map(Value::take);
+                        self.apply_snapshot(&command, data);
+                        self.write_snapshots.clear();
+                        self.scroll_to_bottom();
+                        if let Some(client) = &self.client {
+                            let _ = client.get_session_stats();
+                        }
+                    }
                     "get_available_models" => self.apply_models(&data),
                     "get_available_thinking_levels" => self.apply_thinking_levels(&data),
                     "get_session_stats" => self.apply_stats(&data),
@@ -318,6 +358,7 @@ impl Session {
                 self.client = None;
                 self.is_streaming = false;
                 self.is_compacting = false;
+                self.is_rewinding = false;
                 self.pending_ui = None;
                 let detail = code.map(|c| format!(" (code {c})")).unwrap_or_default();
                 self.messages.push(ChatMessage::Notice {
@@ -353,7 +394,7 @@ impl Session {
         if let Some(model) = snapshot.model.as_ref().and_then(parse_model) {
             self.current_model = Some(model);
         }
-        if command == "snapshot" {
+        if matches!(command, "snapshot" | "rewind") {
             self.last_sequence = snapshot.sequence;
         }
     }
@@ -467,12 +508,15 @@ impl Session {
                     let (attached_file, mounted_skills, quotes, display_text) =
                         split_injected_prompt(&raw);
                     self.messages.push(ChatMessage::User {
+                        entry_id: msg["entryId"].as_str().map(str::to_owned),
                         display_text,
                         timestamp_ms: msg.get("timestamp").and_then(Value::as_i64),
                         attached_file,
                         mounted_skills,
                         quotes,
-                        images: Vec::new(),
+                        images: msg.get("content").and_then(Value::as_array).into_iter().flatten()
+                            .filter_map(|block| PastedImage::from_pi(0, block).map(|image| image.image))
+                            .collect(),
                     });
                 }
                 Some("assistant") => {
@@ -569,6 +613,16 @@ impl Session {
     fn handle_session_event(&mut self, ev: &Value) {
         let kind = ev.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match kind {
+            "user_entry" => {
+                // The panel adds its outgoing prompt optimistically; Pi supplies its durable ID.
+                if let Some(ChatMessage::User { entry_id, timestamp_ms, .. }) =
+                    self.messages.iter_mut().rfind(|message| matches!(message, ChatMessage::User { .. }))
+                    && entry_id.is_none()
+                {
+                    *entry_id = ev["entryId"].as_str().map(str::to_owned);
+                    *timestamp_ms = ev["timestamp"].as_i64();
+                }
+            }
             "agent_start" => {
                 self.is_streaming = true;
                 if self.active_run_start.is_none() {

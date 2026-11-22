@@ -118,6 +118,18 @@ function state(record) {
     thinkingLevel: session.thinkingLevel, waiting: record.pending.size > 0, failed: record.failed };
 }
 
+function transcript(record) {
+  const { session, manager } = record;
+  // Only user rows need a stable JSONL entry ID. Assistant streaming keeps its existing shape.
+  const users = manager.buildSessionProjection().entries.flatMap(({ sourceEntry, messages }) =>
+    messages.filter(message => message.role === 'user').map(() => sourceEntry.id));
+  let user = 0;
+  const messages = session.messages.map(message =>
+    message.role === 'user' ? { ...message, entryId: users[user++] } : message);
+  if (record.partial && messages.at(-1)?.role !== 'assistant') messages.push(record.partial);
+  return { ...state(record), messages, partial: Boolean(record.partial), sequence: record.sequence };
+}
+
 function uiContext(record) {
   const request = (method, fields, options) => new Promise(resolve => {
     if (record.cancelling || options?.signal?.aborted) { resolve(undefined); return; }
@@ -187,11 +199,11 @@ async function configureModels(record) {
   }
 }
 
-async function createRecord(cwd, manager) {
+async function createRecord(cwd, manager, replacement) {
   const project = projectKey(cwd);
   if (projectKey(manager.getCwd()) !== project) throw new Error('会话不属于当前项目');
   const id = manager.getSessionId();
-  if (sessions.get(project, id)) return sessions.get(project, id);
+  if (!replacement && sessions.get(project, id)) return sessions.get(project, id);
   const record = { project, id, cwd, manager, sequence: 0, running: false, failed: false,
     pending: new Map(), editorText: '', retained: true, models: await ModelRuntime.create() };
   await configureModels(record);
@@ -235,7 +247,32 @@ async function createRecord(cwd, manager) {
       ...workspaceToolChannels.flatMap(({ bridge, factory }) => factory((operation, params, signal) =>
         bridge.request({ projectKey: project, sessionId: id }, operation, params, signal)))] });
   record.session = session;
+  if (replacement) {
+    const { previous, temporary, file } = replacement;
+    // Construct the new SDK context before committing the replacement JSONL.
+    // The same ID and event sequence keep existing Folio routes attached.
+    try {
+      fs.renameSync(temporary, file);
+    } catch (error) {
+      session.dispose();
+      throw error;
+    }
+    manager.setSessionFile(file);
+    record.sequence = previous.sequence;
+    record.retained = previous.retained;
+    previous.titleController?.abort();
+    disposeSession(previous);
+  }
   record.unsubscribe = session.subscribe(event => {
+    if (event.type === 'message_end' && event.message.role === 'user') {
+      // Pi emits message_end immediately before appending the entry to its session manager.
+      queueMicrotask(() => {
+        const entry = manager.getLeafEntry();
+        if (entry?.type === 'message' && entry.message === event.message) {
+          publish(record, { type: 'user_entry', entryId: entry.id, timestamp: event.message.timestamp });
+        }
+      });
+    }
     if (event.type === 'tool_execution_start' && event.toolName === 'write' && typeof event.args.path === 'string') {
       // SDK dispatch completes before execution; GPUI may receive this after the file is written.
       const target = resolveToCwd(event.args.path, cwd);
@@ -324,7 +361,7 @@ async function generateTitle(record, text) {
     const title = [...(response.choices[0].message.content ?? '').trim().replace(/^["“”'「」]+|["“”'「」]+$/g, '').replace(/\s+/g, ' ')].slice(0, 24).join('');
     if (!title) throw new Error('标题模型返回空内容');
     // A manual rename or deletion can finish while the separate model request is pending.
-    if (!sessions.get(record.project, record.id) || metadata[identity]?.titleSource === 'manual') return;
+    if (sessions.get(record.project, record.id) !== record || metadata[identity]?.titleSource === 'manual') return;
     record.session.setSessionName(title);
     metadata[identity] = { ...metadata[identity], titleSource: 'generated' };
     saveMetadata();
@@ -332,7 +369,7 @@ async function generateTitle(record, text) {
     if (!controller.signal.aborted) publish(record, { type: 'title_error', error: error.message });
   } finally {
     record.titleController = undefined;
-    if (!record.retained && !record.running && sessions.get(record.project, record.id)) {
+    if (!record.retained && !record.running && !record.rewind && sessions.get(record.project, record.id) === record) {
       disposeSession(record);
     }
   }
@@ -368,20 +405,66 @@ async function dispatch(command) {
     saveMetadata();
     return response();
   }
-  const record = await target(command);
+  let record = await target(command);
+  if (record.rewind && command.type === 'snapshot') {
+    // A tab reopened during the replacement must see the committed transcript.
+    sessions.retain(record);
+    record = await record.rewind.then(updated => updated, () => record);
+  }
+  if (record.rewind && !['release', 'retain', 'get_state', 'get_messages', 'get_session_stats',
+    'get_available_models', 'get_available_thinking_levels', 'get_commands'].includes(command.type)) {
+    throw new Error('会话正在回退');
+  }
   const session = record.session;
   switch (command.type) {
     case 'snapshot': {
       sessions.retain(record);
-      const messages = record.partial && session.messages.at(-1)?.role !== 'assistant'
-        ? [...session.messages, record.partial] : session.messages;
-      response({ ...state(record), messages, partial: Boolean(record.partial), sequence: record.sequence });
+      response(transcript(record));
       const next = record.pending.entries().next().value;
       if (next) publish(record, { type: 'extension_ui_request', id: next[0], method: next[1].method, ...next[1].fields });
       return;
     }
     case 'get_state': return response(state(record));
-    case 'get_messages': return response({ messages: session.messages });
+    case 'get_messages': return response({ messages: transcript(record).messages });
+    case 'rewind': {
+      if (record.running || record.task || session.isCompacting || record.pending.size) {
+        throw new Error('请等待当前会话操作结束');
+      }
+      const { manager } = record;
+      const branch = manager.getBranch();
+      const index = branch.findIndex(entry => entry.id === command.entryId);
+      const selected = branch[index];
+      if (selected?.type !== 'message' || selected.message.role !== 'user') {
+        throw new Error('找不到要回退的用户消息');
+      }
+      const file = manager.getSessionFile();
+      const temporary = `${file}.${randomUUID()}.tmp`;
+      const rewind = (async () => {
+        // Keep the active path strictly before the selected turn, including Pi's context state.
+        const entries = [manager.getHeader(), ...branch.slice(0, index)];
+        fs.writeFileSync(temporary, entries.map(entry => JSON.stringify(entry) + '\n').join(''), { flag: 'wx' });
+        const next = SessionManager.open(temporary, manager.getSessionDir());
+        if (session.sessionName && next.getSessionName() !== session.sessionName) next.appendSessionInfo(session.sessionName);
+        const context = next.buildSessionContext();
+        if (session.model && (context.model?.provider !== session.model.provider || context.model?.modelId !== session.model.id)) {
+          next.appendModelChange(session.model.provider, session.model.id);
+        }
+        if (context.thinkingLevel !== session.thinkingLevel) next.appendThinkingLevelChange(session.thinkingLevel);
+        return createRecord(command.cwd, next, { previous: record, temporary, file });
+      })();
+      record.rewind = rewind;
+      try {
+        const updated = await rewind;
+        response({ ...transcript(updated), draft: command.edit === true ? selected.message.content : undefined });
+        publish(updated, { type: 'session_status', ...state(updated) });
+      } finally {
+        fs.rmSync(temporary, { force: true });
+        record.rewind = undefined;
+        const current = sessions.get(record.project, record.id);
+        if (current && !current.retained && !current.running && !current.titleController) disposeSession(current);
+      }
+      return;
+    }
     case 'get_session_stats': return response({ ...session.getSessionStats(), contextUsage: session.getContextUsage() });
     case 'get_available_models': return response({ models: await record.models.getAvailable() });
     case 'get_available_thinking_levels': return response({ levels: session.getAvailableThinkingLevels() });
@@ -391,7 +474,7 @@ async function dispatch(command) {
       ...session.resourceLoader.getSkills().skills.map(c => ({ name: `skill:${c.name}`, description: c.description, source: 'skill' })),
     ] });
     case 'prompt': {
-      if (record.running) throw new Error('会话正在运行');
+      if (record.running || record.task) throw new Error('会话正在运行');
       record.running = true;
       record.failed = false;
       record.editorText = command.message;
@@ -407,7 +490,8 @@ async function dispatch(command) {
         await session.prompt(command.message, { images: command.images });
       })();
       record.task = task;
-      if (first && command.titleText?.trim() && settings.titleModelId) {
+      if (first && command.titleText?.trim() && settings.titleModelId
+        && metadata[key(record.project, record.id)]?.titleSource !== 'manual') {
         metadata[key(record.project, record.id)] = { ...metadata[key(record.project, record.id)], titleSource: 'pending' };
         saveMetadata();
         void generateTitle(record, command.titleText);
