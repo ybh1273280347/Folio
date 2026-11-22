@@ -316,44 +316,15 @@ pub fn md_pdf_exported(path: &Path) -> String {
 }
 
 // Terminal (src/terminal/)
-pub const TERM_NO_DELETE_LOOSE: BiText = BiText::new("禁止删除：独立文件不支持删除", "Cannot delete: loose files cannot be deleted");
-pub const TERM_INVALID_FOLDER_DROP: BiText = BiText::new("不能移入自身或子文件夹", "Cannot move into itself or a subfolder");
-pub const TERM_COPY_PATH: BiText = BiText::new("复制路径", "Copy path");
+pub const DRAG_LOOSE_FILE: BiText = BiText::new("独立文件不可删除", "Loose file cannot be deleted");
+pub const DRAG_INVALID_FOLDER: BiText = BiText::new("不能移入这里", "Cannot move here");
+pub const DRAG_TRASH: BiText = BiText::new("移入废纸篓", "Move to Trash");
+pub const DRAG_PROJECT_ROOT: BiText = BiText::new("项目根目录", "Project root");
 pub const TERM_PROCESS_ENDED: BiText = BiText::new("终端进程已结束", "Terminal process ended");
 pub const TERM_STARTING: BiText = BiText::new("正在启动…", "Starting…");
 pub const TERM_NEW_OR_AGENT: BiText = BiText::new("新建终端或启动 Agent", "New terminal or launch Agent");
 pub const TERM_CLICK_PLUS_HINT: BiText = BiText::new("点击“+”新建终端", "Click \"+\" to start a terminal");
 
-pub fn term_move_to_trash(count: usize) -> String {
-    match locale() {
-        Locale::ZhCn => format!("移入废纸篓 {count} 项"),
-        Locale::En => format!("Move {count} item(s) to Trash"),
-    }
-}
-pub fn term_move_to_root(count: usize) -> String {
-    match locale() {
-        Locale::ZhCn => format!("移动到项目根目录 {count} 项"),
-        Locale::En => format!("Move {count} item(s) to project root"),
-    }
-}
-pub fn term_move_to_folder(count: usize) -> String {
-    match locale() {
-        Locale::ZhCn => format!("移动到文件夹 {count} 项"),
-        Locale::En => format!("Move {count} item(s) to folder"),
-    }
-}
-pub fn term_copy_paths(count: usize) -> String {
-    match locale() {
-        Locale::ZhCn => format!("复制 {count} 个路径"),
-        Locale::En => format!("Copy {count} paths"),
-    }
-}
-pub fn term_more_items(extra: usize) -> String {
-    match locale() {
-        Locale::ZhCn => format!("还有 {extra} 项"),
-        Locale::En => format!("+{extra} more"),
-    }
-}
 pub fn term_exited_code(code: impl std::fmt::Display) -> String {
     match locale() {
         Locale::ZhCn => format!("已退出 · {code}"),

@@ -1151,7 +1151,7 @@ impl Render for Workspace {
                                             .w(px(sidebar_target_w))
                                             .h_full()
                                             .left(px(-sidebar_target_w * (1.0 - sidebar_progress)))
-                                            .child(self.render_sidebar(cx)),
+                                            .child(self.render_sidebar(window, cx)),
                                     )
                                     .when(
                                         sidebar_visible && sidebar_progress >= 0.999,
