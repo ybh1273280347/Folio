@@ -29,7 +29,7 @@ use gpui::{
 use gpui_kit::{
     assets::IconName,
     base::{
-        Scrollbar, ScrollbarMode, StyledExt, TextSelection,
+        Dialog, DialogPopup, Scrollbar, ScrollbarMode, StyledExt, TextSelection,
         text::{MarkdownExtensions, TextView, TextViewStyle},
     },
     component::{
@@ -238,6 +238,8 @@ struct ChatPane {
     quote_drag: Option<(usize, usize, Point<Pixels>)>,
     quote_bounds: Rc<Cell<Bounds<Pixels>>>,
     pasted_images: Vec<PastedImage>,
+    image_preview: Option<(Arc<gpui::Image>, Option<FocusHandle>)>,
+    image_preview_focus: FocusHandle,
     next_image_id: u64,
     pending_ext_prefill: Option<(String, bool)>,
     pending_composer_text: Option<String>,
@@ -382,6 +384,8 @@ impl ChatPane {
             quote_drag: None,
             quote_bounds: Rc::new(Cell::new(Bounds::default())),
             pasted_images: Vec::new(),
+            image_preview: None,
+            image_preview_focus: cx.focus_handle(),
             next_image_id: 1,
             pending_ext_prefill: None,
             pending_composer_text: None,
@@ -476,6 +480,17 @@ impl ChatPane {
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         let handle = self.input.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
+    }
+
+    fn close_image_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((_, previous_focus)) = self.image_preview.take() {
+            if let Some(previous_focus) = previous_focus {
+                window.focus(&previous_focus, cx);
+            } else {
+                window.blur(cx);
+            }
+        }
+        cx.notify();
     }
 
     fn dismiss_quote(&mut self, cx: &mut Context<Self>) {
@@ -1370,12 +1385,23 @@ impl Render for ChatPane {
                                                     .flex()
                                                     .flex_wrap()
                                                     .gap_1p5()
-                                                    .children(images.iter().map(|im| {
-                                                        img(im.clone())
-                                                            .w(px(72.))
-                                                            .h(px(72.))
-                                                            .rounded(px(8.))
-                                                            .object_fit(ObjectFit::Cover)
+                                                    .children(images.iter().enumerate().map(|(index, im)| {
+                                                        let preview = im.clone();
+                                                        div()
+                                                            .id(SharedString::from(format!("ai-image-{msg_idx}-{index}")))
+                                                            .cursor_pointer()
+                                                            .on_click(cx.listener(move |pane, _, window, cx| {
+                                                                pane.image_preview = Some((preview.clone(), window.focused(cx)));
+                                                                window.focus(&pane.image_preview_focus, cx);
+                                                                cx.notify();
+                                                            }))
+                                                            .child(
+                                                                img(im.clone())
+                                                                    .w(px(72.))
+                                                                    .h(px(72.))
+                                                                    .rounded(px(8.))
+                                                                    .object_fit(ObjectFit::Cover),
+                                                            )
                                                     })),
                                             )
                                         })
@@ -1723,6 +1749,39 @@ impl Render for ChatPane {
             })
                 .absolute().inset_0())
             .children(self.render_quote_popover(palette, typo, cx))
+            .when_some(self.image_preview.as_ref(), |root, (image, _)| {
+                let viewport = window.viewport_size();
+                // The dialog is viewport-wide even though its trigger lives inside the chat scroll view.
+                root.child(
+                    Dialog::new(cx)
+                        .focus_handle(self.image_preview_focus.clone())
+                        .accessibility_label(crate::i18n::ai::IMAGE_MESSAGE.get())
+                        .backdrop(div().size_full().occlude().bg(gpui::black().opacity(0.56)))
+                        .on_close(cx.listener(|pane, _, window, cx| pane.close_image_preview(window, cx)))
+                        .popup(
+                            DialogPopup::new()
+                                .relative()
+                                .rounded(px(10.))
+                                .overflow_hidden()
+                                .bg(gpui_kit::rgb(palette.surface))
+                                .shadow(popover_shadow(palette.is_dark()))
+                                .child(
+                                    img(image.clone())
+                                        .id("ai-image-preview")
+                                        .max_w(viewport.width * 0.9)
+                                        .max_h(viewport.height * 0.9)
+                                        .object_fit(ObjectFit::Contain),
+                                )
+                                .child(div().absolute().top_2().right_2().child(
+                                    Button::new("close-ai-image-preview")
+                                        .small()
+                                        .icon(crate::ui::icon(IconName::Close))
+                                        .tooltip(crate::i18n::common::CLOSE.get())
+                                        .on_click(cx.listener(|pane, _, window, cx| pane.close_image_preview(window, cx))),
+                                )),
+                        ),
+                )
+            })
     }
 }
 
