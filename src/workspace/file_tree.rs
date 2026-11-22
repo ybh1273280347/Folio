@@ -507,7 +507,7 @@ impl Workspace {
         let folder_project = project.clone();
         let hover = self.tree.drop_hover.clone();
         let path = path.to_owned();
-        let style_target = move |style: StyleRefinement, window: &mut Window, cx: &mut App| {
+        let style_target = move |style: StyleRefinement| {
             let neutral = gpui_kit::rgb(palette.text);
             if path.is_empty() {
                 return style.bg(neutral.opacity(0.06));
@@ -524,30 +524,15 @@ impl Workspace {
                     started: now,
                 });
             }
-            let started = hover.as_ref().expect("hover started").started;
-            let progress = (now.duration_since(started).as_secs_f32() / 0.10).min(1.);
-            let strength = if cx.reduce_motion() { 1. } else { 1. - (1. - progress).powi(2) };
-            if strength < 1. {
-                window.request_animation_frame();
-            }
-            // A wide, faint shadow separates the target from adjacent rows.
-            // The tighter inset edge makes the receiving surface read as recessed.
-            style.rounded(px(7.)).bg(neutral.opacity(0.08 + 0.035 * strength))
-                .shadow(vec![
-                    BoxShadow::new(px(0.), px(2.), hsla(0., 0., 0., 0.06 * strength))
-                        .blur_radius(px(9.)),
-                    BoxShadow::new(px(0.), px(1.), hsla(0., 0., 0., 0.14 * strength))
-                        .blur_radius(px(3.))
-                        .inset(),
-                ])
+            style
         };
         let folder_style = style_target.clone();
-        row.drag_over::<DraggedPaths>(move |style, dragged, window, cx| {
-            if dragged.1.as_deref() == Some(project.as_str()) { style_target(style, window, cx) } else { style }
+        row.drag_over::<DraggedPaths>(move |style, dragged, _, _| {
+            if dragged.1.as_deref() == Some(project.as_str()) { style_target(style) } else { style }
         })
-        .drag_over::<DraggedFolder>(move |style, dragged, window, cx| {
+        .drag_over::<DraggedFolder>(move |style, dragged, _, _| {
             if dragged.1 == folder_project && !Path::new(&folder_hover).starts_with(&dragged.0) {
-                folder_style(style, window, cx)
+                folder_style(style)
             } else {
                 style
             }
@@ -2308,22 +2293,44 @@ impl Workspace {
                     .when(dragging_tree_item, |tree| {
                         let hover = self.tree.drop_hover.clone();
                         let rows = self.tree.tree_row_bounds.clone();
-                        tree.child(canvas(|_, _, _| (), move |_, _, window, _| {
+                        tree.child(canvas(|_, _, _| (), move |_, _, window, cx| {
                             let hover = hover.borrow();
                             // Paint after the rows resolve the active drop target. The
                             // existing clipped bounds keep the mask inside the visible subtree.
-                            let Some(target) = hover.as_ref().filter(|target| !target.directory.is_empty()) else {
+                            let Some(target) = hover.as_ref() else {
                                 return;
                             };
                             let rows = rows.lock().expect("tree bounds");
-                            let directory = Path::new(&target.directory);
-                            let scope = rows.iter()
-                                .filter(|(path, _)| Path::new(path.as_str()).starts_with(directory))
-                                .map(|(_, (_, bounds))| *bounds)
-                                .reduce(|scope, row| scope.union(&row));
-                            if let Some(scope) = scope {
-                                let tint = gpui_kit::rgb(drag_palette.text).opacity(0.055);
-                                window.paint_quad(fill(scope, tint).corner_radii(Corners::all(px(8.))));
+                            let neutral = gpui_kit::rgb(drag_palette.text);
+                            if !target.directory.is_empty() {
+                                let directory = Path::new(&target.directory);
+                                let scope = rows.iter()
+                                    .filter(|(path, _)| Path::new(path.as_str()).starts_with(directory))
+                                    .map(|(_, (_, bounds))| *bounds)
+                                    .reduce(|scope, row| scope.union(&row));
+                                if let Some(scope) = scope {
+                                    let tint = neutral.opacity(0.055).into();
+                                    window.paint_drop_shadows(scope, Corners::all(px(9.)), &[
+                                        BoxShadow::new(px(0.), px(0.), tint).blur_radius(px(3.)),
+                                    ]);
+                                }
+                            }
+                            let inset = px(4.);
+                            if let Some((_, row)) = rows.get(&target.row)
+                                && row.size.height > inset * 2.
+                                && row.size.width > inset * 2.
+                            {
+                                let progress = (target.started.elapsed().as_secs_f32() / 0.10).min(1.);
+                                let strength = if cx.reduce_motion() { 1. } else { 1. - (1. - progress).powi(2) };
+                                if strength < 1. {
+                                    window.request_animation_frame();
+                                }
+                                // A blurred fill gives the inset highlight a soft edge
+                                // without drawing a hard border or blurring row content.
+                                let tint = neutral.opacity(0.055 + 0.03 * strength).into();
+                                window.paint_drop_shadows(row.inset(inset), Corners::all(px(6.)), &[
+                                    BoxShadow::new(px(0.), px(0.), tint).blur_radius(px(2.)),
+                                ]);
                             }
                         }).absolute().inset_0())
                     })
