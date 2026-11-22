@@ -216,7 +216,7 @@ mod tests {
     }
 }
 
-use super::{Workspace, Compile, PaneKey};
+use super::{Workspace, Compile};
 use crate::{model::{Engine, Project}, storage};
 use gpui_kit::{Context, Window};
 use sha2::Digest;
@@ -317,11 +317,11 @@ impl Workspace {
     }
 
     pub(super) fn compile_target(&self) -> Option<&str> {
-        let focused = self.documents.focused_markdown.as_deref().unwrap_or(&self.documents.active);
+        let focused = self.documents.focused_markdown().unwrap_or(self.documents.active());
         let lower = focused.to_lowercase();
         if lower.ends_with(".md")
-            || (self.documents.focused_markdown.is_none()
-                && Self::is_image_path(&self.documents.active))
+            || (self.documents.focused_markdown().is_none()
+                && Self::is_image_path(self.documents.active()))
             || (self.config.active_id.is_none() && lower.ends_with(".tex"))
         {
             Some(focused)
@@ -405,8 +405,7 @@ impl Workspace {
             project.main_file = target.clone();
         }
         let capture = markdown.as_ref().map(|file| {
-            self.documents.markdown_panes.get(&PaneKey::reading(file))
-                .unwrap_or_else(|| &self.documents.markdown_panes[&PaneKey::tab(file)]).clone()
+            self.documents.markdown_export_pane(file).clone()
         });
         let (cancelled, sender) = self.build.start(target.clone(), self.documents.source_version(), capture.clone());
         self.show_build_preview = true;

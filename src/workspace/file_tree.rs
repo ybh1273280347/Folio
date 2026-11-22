@@ -152,7 +152,7 @@ impl Workspace {
         let old_prefix = format!("{old}/");
         // Include open buffers even if their file was removed externally; never reload a moved draft.
         let keys: BTreeSet<String> = self.files.iter().map(|file| &file.path)
-            .chain(self.documents.tabs.iter()).chain(self.documents.reading_panes.iter()).chain(self.documents.open.keys())
+            .chain(self.documents.tracked_paths())
             .filter(|key| key.starts_with(&old_prefix)).cloned().collect();
         for key in keys {
             let new_key = format!("{renamed}/{}", key.strip_prefix(&old_prefix).expect("matched folder prefix"));
@@ -166,7 +166,7 @@ impl Workspace {
         self.collapsed_folders = self.collapsed_folders.iter().map(|path| remap(path)).collect();
         self.focused_folder = self.focused_folder.as_deref().map(remap);
         self.focused_file = self.focused_file.as_deref().map(remap);
-        self.documents.document_watch.invalidate_tree();
+        self.invalidate_document_tree();
     }
 
     fn focused_folder_prefix(&self) -> String {
@@ -492,9 +492,7 @@ impl Workspace {
             return;
         }
         for path in &paths {
-            if self.documents.open.get(path).is_some_and(|document| {
-                document.buffer.is_dirty() || document.buffer.conflict.is_some()
-            }) {
+            if self.documents.needs_save_before_removal(path) {
                 match self.save_file(path, false, cx) {
                     Ok(true) => {}
                     Ok(false) => return,
@@ -522,31 +520,16 @@ impl Workspace {
             };
             deleted.push(path.clone());
             self.trash_entries.push(entry);
-            self.documents.open.remove(&path);
-            for role in [PaneRole::Tab, PaneRole::Reading] {
-                let key = PaneKey::new(&path, role);
-                self.release_pdf_pane(&key, window, cx);
-                self.release_html_pane(&key, window, cx);
-                self.release_drawio_pane(&key, window, cx);
-                self.documents.image_panes.remove(&key);
-                self.documents.markdown_panes.remove(&key);
-            }
-            self.documents.reading_panes.retain(|pane| pane != &path);
-            self.documents.tabs.retain(|tab| tab != &path);
+            self.detach_removed_document(&path, window, cx);
             self.selected_files.remove(&path);
             if self.focused_file.as_deref() == Some(&path) {
                 self.focused_file = None;
-            }
-            if self.documents.focused_markdown.as_deref() == Some(&path) {
-                self.documents.focused_markdown = None;
             }
         }
         if deleted.is_empty() {
             return;
         }
-        if !self.documents.tabs.contains(&self.documents.active) {
-            self.documents.active = self.documents.tabs.last().cloned().unwrap_or_default();
-        }
+        self.documents.select_last_tab_if_closed();
         let main = project.main_file.clone();
         if deleted.iter().any(|path| path == &main) {
             if project.id == self.default_workspace.id {
@@ -602,8 +585,8 @@ impl Workspace {
             self.report(crate::i18n::workspace::REPORT_COPIED_FOLDER_PATH.get(), cx);
             return;
         }
-        if !self.documents.active.is_empty() {
-            let full = self.document_path(&self.documents.active);
+        if !self.documents.active().is_empty() {
+            let full = self.document_path(self.documents.active());
             cx.write_to_clipboard(ClipboardItem::new_string(
                 full.to_string_lossy().into_owned(),
             ));
@@ -738,8 +721,8 @@ impl Workspace {
             self.delete_folder(&folder, window, cx);
             return;
         }
-        if !self.documents.active.is_empty() && self.files.iter().any(|file| file.path == self.documents.active) {
-            let path = self.documents.active.clone();
+        if !self.documents.active().is_empty() && self.files.iter().any(|file| file.path == self.documents.active()) {
+            let path = self.documents.active().to_owned();
             self.delete_file(&path, window, cx);
         }
     }
@@ -963,7 +946,7 @@ impl Workspace {
         };
         let mut entries = BTreeMap::new();
         if self.directory_workspace().is_none() {
-            let mut paths: BTreeSet<_> = self.documents.tabs.iter().collect();
+            let mut paths: BTreeSet<_> = self.documents.tabs().iter().collect();
             if self.tags.filter.is_some() {
                 paths.extend(self.tags.snapshot.assigned.keys());
             }
@@ -1052,14 +1035,14 @@ impl Workspace {
                 };
                 if self.directory_workspace().is_none() {
                     let key = path.clone();
-                    let active = self.documents.active == key;
+                    let active = self.documents.active() == key;
                     let close = key.clone();
                     let rename_key = key.clone();
                     let rename_name = Path::new(path).file_name().unwrap().to_string_lossy().into_owned();
                     let rename_app = cx.entity();
                     let tags_app = rename_app.clone();
                     let tag_path = key.clone();
-                    let is_open = self.documents.tabs.contains(&key);
+                    let is_open = self.documents.tabs().contains(&key);
                     let full = PathBuf::from(path);
                     let reveal = full.clone();
                     let copy = full.clone();
@@ -1102,28 +1085,13 @@ impl Workspace {
                         .on_click(cx.listener(move |app, event: &ClickEvent, window, cx| {
                             cx.stop_propagation();
                             app.show_trash = false;
-                            if !app.documents.tabs.contains(&key) {
+                            if !app.documents.tabs().contains(&key) {
                                 if let Err(error) = app.open_standalone_file(Path::new(&key), window, cx) {
                                     app.report(error, cx);
                                 }
                                 return;
                             }
-                            app.documents.active = key.clone();
-                            if event.click_count() >= 2 {
-                                if let Some(pane) = app.documents.markdown_panes.get(&PaneKey::tab(&key)) {
-                                    pane.update(cx, |pane, cx| pane.focus(window, cx));
-                                } else if let Some(document) = app.documents.open.get(&key) {
-                                    document
-                                        .editor
-                                        .update(cx, |editor, cx| editor.focus(window, cx));
-                                }
-                            } else {
-                                app.file_tree_focus.focus(window, cx);
-                            }
-                            if let Err(error) = app.remember_session() {
-                                app.report(error, cx);
-                            }
-                            cx.notify();
+                            app.select_tab_from_tree(&key, event.click_count() >= 2, window, cx);
                         }))
                         .context_menu(move |menu, _, _| {
                             let app = rename_app.clone();
@@ -1384,7 +1352,7 @@ impl Workspace {
                     .gap_2()
                     .cursor_pointer()
                     .when(is_selected, |row| row.bg(rgb(0xdde9f6)))
-                    .when(!is_selected && self.documents.active == file.path, |row| row.bg(rgb(0xe8e7e4)))
+                    .when(!is_selected && self.documents.active() == file.path, |row| row.bg(rgb(0xe8e7e4)))
                     .hover(|style| style.bg(rgb(0xefefed)))
                     .active(|style| style.bg(rgb(crate::ui::PRESSED_BG)))
                     .child(
@@ -1619,7 +1587,7 @@ impl Workspace {
                     if let Err(error) = app.new_default_markdown(window, cx) { app.report(error, cx); }
                 })))
             .on_click(cx.listener(|app, _, window, cx| { app.show_trash = false; app.switch_to_default(window, cx); cx.notify(); }));
-        let loose_count = if self.directory_workspace().is_none() { self.documents.tabs.len() } else { self.workspace_sessions.get("loose").map_or(0, |session| session.tabs.len()) };
+        let loose_count = if self.directory_workspace().is_none() { self.documents.tabs().len() } else { self.workspace_sessions.get("loose").map_or(0, |session| session.tabs.len()) };
         div()
             .w_full()
             .min_w_0()
@@ -1688,10 +1656,7 @@ impl Workspace {
                                             .build(window, cx)
                                     })
                                     .on_click(cx.listener(|app, _, window, cx| {
-                                        // Manual refresh reconciles the whole directory and all open
-                                        // drafts, regardless of pending watcher event filtering.
-                                        app.documents.document_watch.refresh_now();
-                                        match app.refresh_files(window, cx) {
+                                        match app.refresh_all_files(window, cx) {
                                             Ok(()) => {
                                                 app.selected_files.retain(|path| {
                                                     app.files.iter().any(|file| &file.path == path)
