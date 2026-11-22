@@ -904,7 +904,7 @@ impl MarkdownPane {
             loading: None,
             source: false,
             outline: false,
-            outline_width: 210.,
+            outline_width: outline::PANEL_WIDTH,
             outline_drag: None,
             outline_initialized: false,
             outline_user_toggled: false,
@@ -1144,12 +1144,18 @@ impl MarkdownPane {
     }
 
     pub fn outline_docked_width(&self) -> f32 {
-        if self.source && self.outline {
-            self.outline_width
-        } else if !self.source && self.is_outline_open() && !self.is_outline_overlay() {
-            outline::PANEL_WIDTH
+        if self.is_outline_open() && !self.is_outline_overlay() {
+            self.docked_outline_panel_width()
         } else {
             0.0
+        }
+    }
+
+    fn docked_outline_panel_width(&self) -> f32 {
+        if self.source {
+            self.outline_width
+        } else {
+            outline::PANEL_WIDTH
         }
     }
 
@@ -1159,16 +1165,10 @@ impl MarkdownPane {
 
     fn is_outline_overlay(&self) -> bool {
         let w = self.pane_outer_width.get();
-        w > 0.0 && w < outline::OVERLAY_WIDTH
+        !self.source && w > 0.0 && w < outline::OVERLAY_WIDTH
     }
 
     pub fn toggle_outline(&mut self, cx: &mut Context<Self>) {
-        if self.source {
-            self.outline = !self.outline;
-            self.outline_closing = false;
-            cx.notify();
-            return;
-        }
         self.outline_user_toggled = true;
         self.outline_initialized = true;
         if self.is_outline_open() {
@@ -1277,7 +1277,7 @@ impl MarkdownPane {
         self.heading_click_lock_until =
             Some(std::time::Instant::now() + std::time::Duration::from_millis(260));
         self.navigate_heading(index, window, cx);
-        if !self.source && self.is_outline_overlay() {
+        if self.is_outline_overlay() {
             self.close_outline(cx);
         }
     }

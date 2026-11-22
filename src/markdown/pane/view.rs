@@ -27,13 +27,11 @@ impl Render for MarkdownPane {
                     .gap_2()
                     .flex_1()
                     .min_w_0()
-                    .when(!self.source, |row| {
-                        row.child(outline::render_toggle_button(
-                            "md-outline",
-                            self.is_outline_open(),
-                            cx,
-                        ))
-                    })
+                    .child(outline::render_toggle_button(
+                        "md-outline",
+                        self.is_outline_open(),
+                        cx,
+                    ))
                     .child(crate::ui::icon(IconName::FileText))
                     .child(
                         div().min_w_0().text_ellipsis().child(
@@ -51,12 +49,6 @@ impl Render for MarkdownPane {
                     .flex_shrink_0()
                     .items_center()
                     .gap_1()
-                    .when(self.source, |row| {
-                        row.child(
-                            crate::ui::control("md-outline", IconName::ListTree)
-                                .on_click(cx.listener(|pane, _, _, cx| pane.toggle_outline(cx))),
-                        )
-                    })
                     .child(
                         action(
                             "md-font-size",
@@ -97,72 +89,43 @@ impl Render for MarkdownPane {
             .min_w_0()
             .min_h_0()
             .overflow_hidden();
-        if self.source && self.outline {
-            let headings = self.headings.iter().enumerate().map(|(index, heading)| {
+        let outline_overlay = self.is_outline_overlay();
+        if self.is_outline_rendered() && !outline_overlay {
+            content = content.child(outline::render_docked(self, cx));
+        }
+        if self.source && self.is_outline_open() {
+            content = content.child(
                 div()
-                    .id(("md-heading", index))
-                    .pl(px(12. + (heading.level.saturating_sub(1) as f32) * 12.))
-                    .pr_2()
-                    .py_1()
-                    .rounded(px(4.))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(0xefefed)))
-                    .active(|style| style.bg(rgb(crate::ui::PRESSED_BG)))
-                    .child(div().text_ellipsis().child(heading.title.clone()))
-                    .on_click(cx.listener(move |pane, _, window, cx| {
-                        pane.navigate_heading(index, window, cx)
-                    }))
-            });
-            content = content
-                .child(
-                    div()
-                        .id("markdown-outline")
-                        .w(px(self.outline_width))
-                        .flex_shrink_0()
-                        .h_full()
-                        .overflow_y_scroll()
-                        .bg(rgb(0xfafaf9))
-                        .p_3()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(crate::ui::label(
-                            crate::i18n::markdown::HEADING_NAV.get().into(),
-                        ))
-                        .children(headings),
-                )
-                .child(
-                    div()
-                        .id("markdown-outline-resize")
-                        .w(px(5.))
-                        .flex_shrink_0()
-                        .h_full()
-                        .border_l_1()
-                        .border_color(rgb(0xe8e7e3))
-                        .cursor_col_resize()
-                        .hover(|s| s.bg(rgb(0xe8e7e3)))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|pane, ev: &MouseDownEvent, _, cx| {
-                                pane.outline_drag =
-                                    Some((f32::from(ev.position.x), pane.outline_width));
-                                cx.stop_propagation();
-                            }),
-                        )
-                        .on_drag(OutlineResizeDrag, |_, _, _, cx| {
+                    .id("markdown-outline-resize")
+                    .w(px(5.))
+                    .flex_shrink_0()
+                    .h_full()
+                    .border_l_1()
+                    .border_color(crate::theme::color(0xe8e7e3))
+                    .cursor_col_resize()
+                    .hover(|s| s.bg(crate::theme::color(0xe8e7e3)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|pane, ev: &MouseDownEvent, _, cx| {
+                            pane.outline_drag =
+                                Some((f32::from(ev.position.x), pane.outline_width));
                             cx.stop_propagation();
-                            cx.new(|_| OutlineResizeDrag)
-                        })
-                        .on_drag_move(cx.listener(
-                            |pane, e: &DragMoveEvent<OutlineResizeDrag>, _, cx| {
-                                if let Some((start_x, start_w)) = pane.outline_drag {
-                                    let delta = f32::from(e.event.position.x) - start_x;
-                                    pane.outline_width = (start_w + delta).clamp(140., 480.);
-                                    cx.notify();
-                                }
-                            },
-                        )),
-                );
+                        }),
+                    )
+                    .on_drag(OutlineResizeDrag, |_, _, _, cx| {
+                        cx.stop_propagation();
+                        cx.new(|_| OutlineResizeDrag)
+                    })
+                    .on_drag_move(cx.listener(
+                        |pane, e: &DragMoveEvent<OutlineResizeDrag>, _, cx| {
+                            if let Some((start_x, start_w)) = pane.outline_drag {
+                                let delta = f32::from(e.event.position.x) - start_x;
+                                pane.outline_width = (start_w + delta).clamp(140., 480.);
+                                cx.notify();
+                            }
+                        },
+                    )),
+            );
         }
 
         if self.source {
@@ -248,11 +211,6 @@ impl Render for MarkdownPane {
                     .render("md-translate", None, None, Some(pane_size), cx, |this| {
                         &mut this.translate
                     });
-
-            let outline_overlay = self.is_outline_overlay();
-            if self.is_outline_rendered() && !outline_overlay {
-                content = content.child(outline::render_docked(self, cx));
-            }
 
             content = content.child(
                 // Floating controls must be outside the scroll owner: their

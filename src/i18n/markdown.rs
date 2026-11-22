@@ -79,7 +79,6 @@ pub const TURN_INTO_CODE: BiText = BiText::new("转为代码块", "Turn into Cod
 pub const DELETE_BLOCK: BiText = BiText::new("删除该块", "Delete block");
 
 pub const SAVE_ANNOTATION: BiText = BiText::new("保存批注", "Save annotation");
-pub const HEADING_NAV: BiText = BiText::new("标题导航", "Outline");
 pub const LOADING_MORE_CONTENT: BiText = BiText::new("正在加载后续内容…", "Loading remaining content…");
 
 pub fn link_tooltip_click(is_mac: bool, is_anchor: bool) -> String {
