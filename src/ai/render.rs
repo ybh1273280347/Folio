@@ -690,14 +690,19 @@ impl ChatPane {
             )
         });
 
-        let full_answer = all_parts
-            .iter()
-            .filter_map(|(_, _, p)| match p {
-                AssistantPart::Text(t) if !t.trim().is_empty() => Some(t.as_str()),
-                _ => None,
+        // The copy/export actions are hidden during streaming, so defer joining the full answer until settlement.
+        let full_answer = (!is_task_running)
+            .then(|| {
+                all_parts
+                    .iter()
+                    .filter_map(|(_, _, p)| match p {
+                        AssistantPart::Text(t) if !t.trim().is_empty() => Some(t.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
             })
-            .collect::<Vec<_>>()
-            .join("\n\n");
+            .unwrap_or_default();
 
         div()
             .flex()

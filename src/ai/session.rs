@@ -923,10 +923,9 @@ impl Session {
                 self.scroll_to_bottom();
             }
             "toolcall_start" | "toolcall_delta" | "toolcall_end" => {
-                // Pi carries live tool arguments in partial.content, not top-level id/toolName fields.
+                // The host forwards the active tool call separately from Pi's cumulative snapshot.
                 let tool_call = if ty == "toolcall_end" { ame.get("toolCall") }
-                    else { ame.get("partial").and_then(|partial| partial.get("content"))
-                        .and_then(|content| content.get(content_index)) };
+                    else { ame.get("toolCall") };
                 if let Some(tc) = tool_call {
                     let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_owned();
                     let name = tc
