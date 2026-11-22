@@ -7,7 +7,7 @@ use super::{
     client::{EmbeddingClient, RerankClient},
     doc_kind, has_folio_pdf_fingerprint, load_derived_markdown_entries,
     load_derived_pdf_hashes, ocr, sha256_hex,
-    store::{RagStore, ScoredChunk, path_matches_filters},
+    store::{RagStore, ScoredChunk, is_near_duplicate, path_matches_filters},
 };
 use crate::{annotations::AnnotationItem, storage};
 use std::{
@@ -574,6 +574,7 @@ pub fn search_project(
     }
 
     let mut rrf_ranked = fuse_rrf(&ranked_lists);
+    let derived_markdowns = load_derived_markdown_entries(store.project_root());
     let mut rerank_used = false;
     let rerank_anchor = intent
         .or_else(|| vec_queries.first().map(|(_, q)| q.as_str()))
@@ -603,7 +604,7 @@ pub fn search_project(
         let embeddings = store
             .candidate_vectors(&chunk_ids)
             .map_err(|err| RagError::new("store_error", err))?;
-        rerank_with_mmr(&mut rrf_ranked, &embeddings, 0.75);
+        rerank_with_mmr(&mut rrf_ranked, &embeddings, limit, 0.75);
     }
     if want_vec || should_rerank {
         apply_soft_file_decay(&mut rrf_ranked);
@@ -616,7 +617,7 @@ pub fn search_project(
     if snippet_queries.is_empty() {
         snippet_queries.extend(vec_queries.iter().map(|(_, q)| q.clone()));
     }
-    let results = collapse_and_format(rrf_ranked, &snippet_queries, limit);
+    let results = collapse_and_format(rrf_ranked, &snippet_queries, limit, &derived_markdowns);
     let base_mode = match (want_lex, vec_used) {
         (true, true) => "hybrid",
         (false, true) => "semantic",
@@ -676,7 +677,7 @@ pub fn search_kb_snapshots(
             ranked_lists.push((2.0, bucket_dirty));
         }
         let rrf_ranked = fuse_rrf(&ranked_lists);
-        collapse_and_format(rrf_ranked, &queries, limit)
+        collapse_and_format(rrf_ranked, &queries, limit, &HashMap::new())
     };
 
     let all = rank_bucket(buckets.all, dirty_hits.clone());
@@ -768,8 +769,10 @@ fn apply_soft_file_decay(ranked: &mut [(f64, Candidate)]) {
 fn rerank_with_mmr(
     ranked: &mut Vec<(f64, Candidate)>,
     embeddings: &HashMap<i64, Vec<f32>>,
+    limit: usize,
     lambda: f64,
 ) {
+    ranked.truncate(limit);
     let original = std::mem::take(ranked);
     if original.is_empty() {
         return;
@@ -906,6 +909,7 @@ fn collapse_and_format(
     ranked: Vec<(f64, Candidate)>,
     queries: &[String],
     limit: usize,
+    derived_markdowns: &HashMap<String, super::DerivedMarkdownEntry>,
 ) -> Vec<SearchHit> {
     let mut snippet_terms: Vec<String> = Vec::new();
     for lq in queries {
@@ -915,18 +919,28 @@ fn collapse_and_format(
     }
 
     let mut per_file: HashMap<String, usize> = HashMap::new();
+    let mut selected_texts = Vec::<String>::new();
     let mut out = Vec::new();
     for (score, cand) in ranked {
-        let base_path = cand
-            .rel_path
-            .strip_suffix("#annotations")
-            .unwrap_or(&cand.rel_path)
-            .to_owned();
-        let count = per_file.entry(base_path).or_insert(0);
+        let base_path = cand.rel_path.strip_suffix("#annotations").unwrap_or(&cand.rel_path);
+        let source_path = derived_markdowns
+            .get(base_path)
+            .filter(|entry| entry.markdown_hash == cand.content_hash.as_deref().unwrap_or_default())
+            .map_or(base_path, |entry| entry.source_pdf_path.as_str());
+        let count = per_file.entry(source_path.to_owned()).or_insert(0);
         if *count >= MAX_CHUNKS_PER_FILE {
             continue;
         }
+        let is_derived_markdown = derived_markdowns.get(base_path).is_some_and(|entry| {
+            entry.markdown_hash == cand.content_hash.as_deref().unwrap_or_default()
+        });
+        if (source_path.to_ascii_lowercase().ends_with(".pdf") || is_derived_markdown)
+            && is_near_duplicate(&cand.chunk_text, &selected_texts)
+        {
+            continue;
+        }
         *count += 1;
+        selected_texts.push(cand.chunk_text.clone());
 
         let markdown_cache = if cand.kind == "pdf"
             && matches!(cand.parse_tier.as_str(), "accurate" | "mineru" | "hybrid")
@@ -1363,10 +1377,43 @@ mod tests {
             (1.0, vec![c4, c1]),
         ];
         let ranked = fuse_rrf(&lists);
-        let hits = collapse_and_format(ranked, &["Alpha".to_owned()], 6);
+        let hits = collapse_and_format(ranked, &["Alpha".to_owned()], 6, &HashMap::new());
         assert_eq!(hits.len(), 5);
         assert_eq!(hits[0].docid, "aaaa1111");
         assert!(hits.iter().any(|h| h.path == "b.md"));
+    }
+
+    #[test]
+    fn exported_markdown_shares_pdf_quota_and_collapses_near_duplicate_text() {
+        let make_candidate = |key: &str, path: &str, text: &str, hash: &str, kind: &str| Candidate {
+            key: key.into(),
+            docid: key.into(),
+            rel_path: path.into(),
+            kind: kind.into(),
+            parse_tier: "source".into(),
+            content_hash: Some(hash.into()),
+            heading_path: key.into(),
+            line_start: Some(1),
+            line_end: Some(2),
+            page_num: None,
+            chunk_text: text.into(),
+            dirty_buffer: false,
+        };
+        let pdf = make_candidate("pdf", "papers/book.pdf", "The quick brown fox jumps over the lazy dog.", "pdf-hash", "pdf");
+        let exported = make_candidate("export", "papers/book_folio-parse.md", "the quick brown fox jumps over the lazy dog", "md-hash", "md");
+        let distinct = make_candidate("distinct", "papers/book_folio-parse.md", "A separate theorem is explained in this chapter.", "md-hash", "md");
+        let entries = HashMap::from([(
+            "papers/book_folio-parse.md".into(),
+            super::super::DerivedMarkdownEntry {
+                source_pdf_path: "papers/book.pdf".into(),
+                source_pdf_hash: "pdf-hash".into(),
+                markdown_hash: "md-hash".into(),
+            },
+        )]);
+        let hits = collapse_and_format(vec![(1.0, pdf), (0.9, exported), (0.8, distinct)], &[], 5, &entries);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].path, "papers/book.pdf");
+        assert!(hits[1].snippet.contains("separate theorem"));
     }
 
     #[test]
@@ -1382,6 +1429,52 @@ mod tests {
         // Rank 1 keeps 0.75 weight from RRF (0.75) vs rank 12 getting 0.60*1.0 + 0.40*0.2 = 0.68.
         assert!((blended[0] - 0.75).abs() < 1e-6);
         assert!((blended[11] - 0.68).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vector_search_uses_mmr_to_choose_a_diverse_second_result() {
+        let dir = tempdir().unwrap();
+        let mut store = RagStore::open(&dir.path().join("rag.sqlite3"), "test", 2).unwrap();
+        let drafts = [
+            ("first.md", "hash-1", "first candidate"),
+            ("similar.md", "hash-2", "near duplicate candidate"),
+            ("distinct.md", "hash-3", "different relevant candidate"),
+        ];
+        for (path, hash, text) in drafts {
+            let chunk = ChunkDraft {
+                seq: 0,
+                heading_path: path.into(),
+                line_start: Some(1),
+                line_end: Some(1),
+                page_num: None,
+                chunk_text: text.into(),
+            };
+            store.upsert_document(path, "md", hash, 1, text.len() as i64, "indexed", Some(text), Some("source"), Some(std::slice::from_ref(&chunk))).unwrap();
+        }
+        let pending = store.pending_vector_chunks(0, 3).unwrap();
+        store.insert_chunk_vectors(&[
+            (pending[0].chunk_id, vec![1.0, 0.0]),
+            (pending[1].chunk_id, vec![0.99, 0.01]),
+            (pending[2].chunk_id, vec![0.0, 1.0]),
+        ]).unwrap();
+        let mut vector_hits = store.search_vec(&[1.0, 0.0], None, None, &[], 3).unwrap();
+        vector_hits.sort_by(|a, b| {
+            let priority = |hit: &ScoredChunk| match hit.rel_path.as_str() {
+                "first.md" => 3_usize,
+                "similar.md" => 2_usize,
+                _ => 1_usize,
+            };
+            priority(b).cmp(&priority(a))
+        });
+        let candidates = chunks_to_candidates(vector_hits, false, &HashSet::new());
+        let mut ranked: Vec<_> = candidates.into_iter().enumerate()
+            .map(|(rank, candidate)| ((3 - rank) as f64, candidate))
+            .collect();
+        let ids: Vec<_> = ranked.iter().filter_map(|(_, candidate)| candidate.key.strip_prefix("db:")?.parse().ok()).collect();
+        let embeddings = store.candidate_vectors(&ids).unwrap();
+        rerank_with_mmr(&mut ranked, &embeddings, 3, 0.75);
+        assert_eq!(ranked[0].1.rel_path, "first.md");
+        assert_eq!(ranked[1].1.rel_path, "similar.md");
     }
 
     #[test]
@@ -1406,7 +1499,7 @@ mod tests {
             (2, vec![0.99, 0.01]),
             (3, vec![0.0, 1.0]),
         ]);
-        rerank_with_mmr(&mut ranked, &embeddings, 0.75);
+        rerank_with_mmr(&mut ranked, &embeddings, 3, 0.75);
         assert_eq!(ranked[0].1.key, "db:1");
         assert_eq!(ranked[1].1.key, "db:3");
     }
