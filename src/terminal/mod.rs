@@ -112,6 +112,7 @@ impl Render for PathsPreview {
         };
         let invalid = (over_trash && !self.can_trash) || invalid_folder;
         let palette = self.palette;
+        let shadow_strength = if palette.is_dark() { 2.0 } else { 1.0 };
         let name = self.paths[0].file_name().expect("dragged item has a name")
             .to_string_lossy().into_owned();
         let icon = if self.source_folder.is_some() {
@@ -125,21 +126,26 @@ impl Render for PathsPreview {
             .flex().flex_col().items_start().gap(px(3.))
             .font_family(self.font.clone()).text_size(px(f32::from(self.font_size).clamp(11., 13.)))
             .child(div().flex().items_center().gap(px(5.)).h(px(24.))
-                .px_2().max_w(px(240.)).rounded(px(5.))
+                .px_2().max_w(px(240.)).rounded(px(7.))
                 .border_1().border_color(rgb(palette.border))
                 .bg(rgb(palette.surface)).text_color(rgb(palette.text))
-                .shadow(vec![BoxShadow::new(px(0.), px(2.), hsla(0., 0., 0., 0.14)).blur_radius(px(6.))])
+                .shadow(vec![
+                    BoxShadow::new(px(0.), px(3.), hsla(0., 0., 0., 0.10 * shadow_strength))
+                        .blur_radius(px(12.)),
+                    BoxShadow::new(px(0.), px(1.), hsla(0., 0., 0., 0.08 * shadow_strength))
+                        .blur_radius(px(3.)),
+                ])
                 .child(div().flex_shrink_0().child(icon))
                 .child(div().min_w_0().text_ellipsis().child(name))
                 .when(count > 1, |chip| chip.child(div()
-                    .flex_shrink_0().rounded(px(4.)).px_1()
-                    .bg(rgb(palette.selection)).text_color(rgb(palette.muted))
+                    .flex_shrink_0().rounded(px(8.)).px_1()
+                    .bg(rgb(palette.text).opacity(0.07)).text_color(rgb(palette.muted))
                     .child(count.to_string()))))
             // Keep the filename chip the same size as the destination changes.
             .when_some(hint, |preview, hint| preview.child(div()
                     .max_w(px(160.)).text_ellipsis().px_2().rounded(px(4.))
                     .bg(rgb(palette.surface))
-                    .text_color(rgb(if invalid { palette.danger } else { palette.accent }))
+                    .text_color(rgb(if invalid { palette.danger } else { palette.muted }))
                     .child(hint))))
     }
 }
