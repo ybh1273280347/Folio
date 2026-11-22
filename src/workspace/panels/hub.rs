@@ -12,6 +12,7 @@ use gpui_kit::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RightPanelAction {
     OpenAi,
+    OpenKnowledgeBase,
     OpenTerminal,
     TogglePreview,
     ToggleLogs,
@@ -45,6 +46,8 @@ pub(crate) struct RightPanelHubProps {
     pub(crate) zen_shortcut: String,
     pub(crate) terminal_sessions: usize,
     pub(crate) ai_tasks: Vec<(String, String, bool)>,
+    pub(crate) kb_badge: Option<(String, bool)>,
+    pub(crate) kb_syncing: bool,
 }
 
 fn fg_alpha(hex: u32, alpha: f32) -> Rgba {
@@ -72,6 +75,15 @@ pub(crate) fn filtered_actions(props: &RightPanelHubProps) -> Vec<HubActionItem>
             badge: (!props.ai_shortcut.is_empty()).then(|| props.ai_shortcut.clone()),
             active: false,
             danger: false,
+        },
+        HubActionItem {
+            action: RightPanelAction::OpenKnowledgeBase,
+            icon: IconName::Library,
+            label: rp::ACTION_KNOWLEDGE_BASE.get(),
+            keywords: "knowledge base kb rag search index pdf ocr 知识库 检索 索引",
+            badge: props.kb_badge.as_ref().map(|(text, _)| text.clone()),
+            active: props.kb_syncing,
+            danger: props.kb_badge.as_ref().is_some_and(|(_, warn)| *warn),
         },
         HubActionItem {
             action: RightPanelAction::OpenTerminal,
@@ -328,6 +340,15 @@ pub(crate) fn render_hub(
                 *waiting,
             )),
             RightPanelAction::ActivateAiTask(id.clone()),
+        ));
+    }
+    if props.kb_syncing {
+        task_rows.push((
+            "hub-task-kb".into(),
+            IconName::Library,
+            rp::ACTION_KNOWLEDGE_BASE.get().to_owned(),
+            Some((rp::BADGE_SYNCING.get().into(), false)),
+            RightPanelAction::OpenKnowledgeBase,
         ));
     }
     if props.terminal_sessions > 0 {

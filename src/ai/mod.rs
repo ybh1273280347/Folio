@@ -60,7 +60,6 @@ pub enum AiPaneEvent {
     WorkspaceTool(WorkspaceToolRequest),
     UndoTags(Vec<crate::tags::agent::TagConfirmation>),
     OpenFile(PathBuf),
-    SyncRag,
     BackToHub,
     ToggleMaximize,
 }

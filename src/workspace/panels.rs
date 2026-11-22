@@ -1,6 +1,7 @@
 //! Right-side panel navigation, keyboard focus and feature hub.
 
 mod hub;
+mod kb;
 
 use super::*;
 use crate::ai::AttachedFile;
@@ -8,6 +9,7 @@ use crate::ai::AttachedFile;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum RightPanelView {
     Hub,
+    KnowledgeBase,
     Ai,
     Terminal,
 }
@@ -18,10 +20,12 @@ pub(super) struct RightPanel {
     pub(super) view: RightPanelView,
     search: Entity<InputState>,
     selected: usize,
+    pub(in crate::workspace) kb: kb::KbPanelState,
 }
 
 impl RightPanel {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Self {
+        let kb = kb::KbPanelState::new(window, cx);
         let right_panel_search = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(crate::i18n::workspace::SEARCH_HUB_PLACEHOLDER.get())
@@ -52,13 +56,14 @@ impl RightPanel {
             },
         )
         .detach();
-        Self { open: false, maximized: false, view: RightPanelView::Hub, search: right_panel_search, selected: 0 }
+        Self { open: false, maximized: false, view: RightPanelView::Hub, search: right_panel_search, selected: 0, kb }
     }
 
     pub(super) fn refresh_locale(&self, window: &mut Window, cx: &mut App) {
         self.search.update(cx, |input, cx| {
             input.set_placeholder(crate::i18n::workspace::SEARCH_HUB_PLACEHOLDER.get(), window, cx);
         });
+        self.kb.refresh_locale(window, cx);
     }
 }
 
@@ -82,6 +87,16 @@ impl Workspace {
                     input.set_value("", window, cx);
                     input.focus(window, cx);
                 });
+            }
+            RightPanelView::KnowledgeBase => {
+                self.terminal.update(cx, |pane, _| pane.hide());
+                self.right_panel.kb.flush_pending_clear(window, cx);
+                self.refresh_kb_snapshot(cx);
+                if self.kb_enabled() {
+                    self.right_panel.kb.search.update(cx, |input, cx| {
+                        input.focus(window, cx);
+                    });
+                }
             }
             RightPanelView::Terminal => {
                 self.terminal
@@ -141,6 +156,8 @@ impl Workspace {
             zen_shortcut: AppSettings::format_key_badge(&self.settings.key_for("toggle_zen")),
             terminal_sessions: self.terminal.read(cx).session_count(),
             ai_tasks: self.ai.read(cx).active_tasks(),
+            kb_badge: self.kb_badge(),
+            kb_syncing: self.kb_syncing(),
         }
     }
 
@@ -154,6 +171,9 @@ impl Workspace {
         match action {
             RightPanelAction::OpenAi => {
                 self.open_right_panel(RightPanelView::Ai, window, cx);
+            }
+            RightPanelAction::OpenKnowledgeBase => {
+                self.open_right_panel(RightPanelView::KnowledgeBase, window, cx);
             }
             RightPanelAction::OpenTerminal => {
                 self.open_right_panel(RightPanelView::Terminal, window, cx);
@@ -322,6 +342,7 @@ impl Workspace {
                     },
                 )
             }
+            RightPanelView::KnowledgeBase => self.render_knowledge_base_panel(window, cx),
             RightPanelView::Ai => self.ai.clone().into_any_element(),
             RightPanelView::Terminal => self.terminal.clone().into_any_element(),
         }

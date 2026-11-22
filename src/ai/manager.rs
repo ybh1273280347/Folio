@@ -74,7 +74,6 @@ pub struct AiPane {
     pending_deletion: Option<(String, bool)>,
     deleted: HashMap<String, String>,
     attached: Option<AttachedFile>,
-    rag_status: Option<(String, String)>,
     pending_selections: HashMap<String, (String, Option<AttachedFile>, String)>,
     opened: bool,
     _poll: Task<()>,
@@ -175,7 +174,6 @@ impl AiPane {
             pending_deletion: None,
             deleted: HashMap::new(),
             attached: None,
-            rag_status: None,
             pending_selections: HashMap::new(),
             opened: false,
             _poll: poll,
@@ -586,13 +584,6 @@ impl AiPane {
         cx.notify();
     }
 
-    pub fn set_rag_status(&mut self, status: Option<(String, String)>, cx: &mut Context<Self>) {
-        if self.rag_status == status {
-            return;
-        }
-        self.rag_status = status;
-        cx.notify();
-    }
     pub fn refresh_locale(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.search.update(cx, |input, cx| {
             input.set_placeholder(crate::i18n::ai::SEARCH_SESSIONS_PLACEHOLDER.get(), window, cx);
@@ -706,7 +697,6 @@ impl AiPane {
             AiPaneEvent::UndoTags(items) => cx.emit(AiPaneEvent::UndoTags(items.clone())),
             AiPaneEvent::OpenFile(path) => cx.emit(AiPaneEvent::OpenFile(path.clone())),
             AiPaneEvent::BackToHub => cx.emit(AiPaneEvent::BackToHub),
-            AiPaneEvent::SyncRag => cx.emit(AiPaneEvent::SyncRag),
             AiPaneEvent::ToggleMaximize => cx.emit(AiPaneEvent::ToggleMaximize),
         });
         let observe = cx.observe(&view, |_, _, cx| cx.notify());
@@ -1021,19 +1011,6 @@ impl Render for AiPane {
                                     .on_click(cx.listener(|pane, _, _, cx| pane.create(cx))),
                             ),
                     )
-                    .when_some(self.rag_status.clone(), |row, (label, tip)| {
-                        row.child(
-                            Button::new("ai-rag-sync")
-                                .ghost()
-                                .compact()
-                                .h(px(22.))
-                                .px_1p5()
-                                .flex_shrink_0()
-                                .label(label)
-                                .tooltip(tip)
-                                .on_click(cx.listener(|_, _, _, cx| cx.emit(AiPaneEvent::SyncRag))),
-                        )
-                    })
                     .child(
                         Button::new("ai-maximize")
                             .ghost()

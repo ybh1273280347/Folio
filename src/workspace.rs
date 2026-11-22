@@ -268,7 +268,6 @@ impl Workspace {
             AiPaneEvent::OpenFile(path) => {
                 app.open_path_from_ai(path, window, cx);
             }
-            AiPaneEvent::SyncRag => app.trigger_rag_sync_now(cx),
             AiPaneEvent::BackToHub => {
                 app.open_right_panel(RightPanelView::Hub, window, cx);
             }
@@ -1339,7 +1338,7 @@ fn compact_menu_item(label: &'static str) -> PopupMenuItem {
     })
 }
 
-fn compact_menu_icon_item(icon: IconName, label: &'static str) -> PopupMenuItem {
+pub(in crate::workspace) fn compact_menu_icon_item(icon: IconName, label: &'static str) -> PopupMenuItem {
     PopupMenuItem::element(move |_, _| {
         div()
             .h(px(18.))
