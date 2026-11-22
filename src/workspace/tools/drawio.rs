@@ -9,7 +9,7 @@ use gpui_kit::Context;
 use serde_json::Value;
 use std::path::Path;
 
-use super::super::{PaneKey, Workspace};
+use super::super::Workspace;
 
 impl Workspace {
     pub(in crate::workspace) fn drawio_request(
@@ -72,15 +72,15 @@ impl Workspace {
         operation: Request,
         cx: &mut Context<Self>,
     ) {
-        let path = self.documents.active.clone();
-        if path.is_empty() || !files::is_drawio(Path::new(&path)) {
+        let path = self.documents.active();
+        if path.is_empty() || !files::is_drawio(Path::new(path)) {
             self.ai.read(cx).respond_workspace_tool(
                 request,
                 Failure::new("drawio_not_active", "请先打开要操作的 Draw.io 图表并切换到该页签。").result(),
             );
             return;
         }
-        let Some(pane) = self.documents.drawio_panes.get(&PaneKey::tab(&path)).cloned() else {
+        let Some(pane) = self.documents.active_drawio().cloned() else {
             self.ai.read(cx).respond_workspace_tool(
                 request,
                 Failure::new("drawio_not_ready", "当前 Draw.io 画布尚未就绪，请稍后重试。").result(),

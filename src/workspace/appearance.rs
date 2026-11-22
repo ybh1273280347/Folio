@@ -41,22 +41,7 @@ impl Workspace {
         {
             self.ai.update(cx, |pane, cx| pane.sync_settings(settings, cx));
         }
-        if previous.show_line_numbers != settings.show_line_numbers {
-            for document in self.documents.open.values() {
-                document.editor.update(cx, |editor, cx| editor.set_line_number(settings.show_line_numbers, window, cx));
-            }
-        }
-        if previous.show_line_numbers != settings.show_line_numbers || previous.line_width_limited != settings.line_width_limited
-            || previous.editor_font != settings.editor_font || previous.editor_font_size != settings.editor_font_size
-            || previous.markdown_font != settings.markdown_font || previous.markdown_font_size != settings.markdown_font_size
-            || previous.interface_font != settings.interface_font
-            || previous.inline_code_font != settings.inline_code_font || previous.block_code_font != settings.block_code_font
-            || previous.inline_code_scale != settings.inline_code_scale || previous.block_code_scale != settings.block_code_scale
-        {
-            for pane in self.documents.markdown_panes.values() {
-                pane.update(cx, |pane, cx| pane.apply_settings(settings, window, cx));
-            }
-        }
+        self.documents.apply_editor_appearance(&previous, settings, window, cx);
         if previous.math_font != settings.math_font || fallback_changed
             || previous.math_scale != settings.math_scale || previous.inline_math_scale != settings.inline_math_scale
             || previous.markdown_font_size != settings.markdown_font_size || previous.ai_font_size != settings.ai_font_size
@@ -90,10 +75,8 @@ impl Workspace {
             self.tags.refresh_locale(window, cx);
             self.preferences.update(cx, |pane, cx| pane.refresh_locale(window, cx));
             self.ai.update(cx, |pane, cx| pane.refresh_locale(window, cx));
-            for pane in self.documents.markdown_panes.values() {
-                pane.update(cx, |pane, cx| pane.refresh_locale(window, cx));
-            }
-            for pane in self.documents.pdf_panes.values().chain(self.build_pdf.iter()) {
+            self.documents.refresh_locale(window, cx);
+            if let Some(pane) = &self.build_pdf {
                 pane.update(cx, |pane, cx| pane.refresh_locale(window, cx));
             }
         }

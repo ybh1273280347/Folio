@@ -1,6 +1,7 @@
 //! Project selection, workspace restoration and navigation persistence.
 
 use super::*;
+use super::documents::DocumentWatch;
 
 impl Workspace {
     pub(super) fn directory_workspace(&self) -> Option<&Project> {
@@ -21,7 +22,7 @@ impl Workspace {
 
     pub(super) fn terminal_directory(&self) -> PathBuf {
         self.directory_workspace().map(|project| PathBuf::from(&project.folder))
-            .or_else(|| (!self.documents.active.is_empty()).then(|| self.document_path(&self.documents.active)).and_then(|path| path.parent().map(Path::to_path_buf)))
+            .or_else(|| (!self.documents.active().is_empty()).then(|| self.document_path(self.documents.active())).and_then(|path| path.parent().map(Path::to_path_buf)))
             .unwrap_or_else(|| dirs::home_dir().expect("user home"))
     }
 
@@ -33,9 +34,9 @@ impl Workspace {
         self.workspace_sessions.insert(
             key,
             WorkspaceSession {
-                tabs: self.documents.tabs.clone(),
-                active: self.documents.active.clone(),
-                reading_panes: self.documents.reading_panes.clone(),
+                tabs: self.documents.tabs().to_vec(),
+                active: self.documents.active().to_owned(),
+                reading_panes: self.documents.reading_panes().to_vec(),
                 collapsed_folders: Some(self.collapsed_folders.clone()),
             },
         );
@@ -77,10 +78,10 @@ impl Workspace {
                 self.open_standalone_file(Path::new(path), window, cx)?;
             }
         }
-        let active = if self.documents.tabs.contains(&session.active) {
+        let active = if self.documents.tabs().contains(&session.active) {
             session.active
         } else {
-            self.documents.tabs.last().cloned().unwrap_or_default()
+            self.documents.tabs().last().cloned().unwrap_or_default()
         };
         for path in &session.reading_panes {
             self.open_reading_key(path, window, cx)?;
@@ -157,7 +158,7 @@ impl Workspace {
                 self.open_file(&file, window, cx)?;
             }
         }
-        if self.documents.tabs.is_empty() {
+        if self.documents.tabs().is_empty() {
             let first = self
                 .files
                 .iter()

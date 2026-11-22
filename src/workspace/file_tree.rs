@@ -585,8 +585,8 @@ impl Workspace {
             self.report(crate::i18n::workspace::REPORT_COPIED_FOLDER_PATH.get(), cx);
             return;
         }
-        if !self.documents.active.is_empty() {
-            let full = self.document_path(&self.documents.active);
+        if !self.documents.active().is_empty() {
+            let full = self.document_path(self.documents.active());
             cx.write_to_clipboard(ClipboardItem::new_string(
                 full.to_string_lossy().into_owned(),
             ));
@@ -721,8 +721,8 @@ impl Workspace {
             self.delete_folder(&folder, window, cx);
             return;
         }
-        if !self.documents.active.is_empty() && self.files.iter().any(|file| file.path == self.documents.active) {
-            let path = self.documents.active.clone();
+        if !self.documents.active().is_empty() && self.files.iter().any(|file| file.path == self.documents.active()) {
+            let path = self.documents.active().to_owned();
             self.delete_file(&path, window, cx);
         }
     }
@@ -946,7 +946,7 @@ impl Workspace {
         };
         let mut entries = BTreeMap::new();
         if self.directory_workspace().is_none() {
-            let mut paths: BTreeSet<_> = self.documents.tabs.iter().collect();
+            let mut paths: BTreeSet<_> = self.documents.tabs().iter().collect();
             if self.tags.filter.is_some() {
                 paths.extend(self.tags.snapshot.assigned.keys());
             }
@@ -1035,14 +1035,14 @@ impl Workspace {
                 };
                 if self.directory_workspace().is_none() {
                     let key = path.clone();
-                    let active = self.documents.active == key;
+                    let active = self.documents.active() == key;
                     let close = key.clone();
                     let rename_key = key.clone();
                     let rename_name = Path::new(path).file_name().unwrap().to_string_lossy().into_owned();
                     let rename_app = cx.entity();
                     let tags_app = rename_app.clone();
                     let tag_path = key.clone();
-                    let is_open = self.documents.tabs.contains(&key);
+                    let is_open = self.documents.tabs().contains(&key);
                     let full = PathBuf::from(path);
                     let reveal = full.clone();
                     let copy = full.clone();
@@ -1085,7 +1085,7 @@ impl Workspace {
                         .on_click(cx.listener(move |app, event: &ClickEvent, window, cx| {
                             cx.stop_propagation();
                             app.show_trash = false;
-                            if !app.documents.tabs.contains(&key) {
+                            if !app.documents.tabs().contains(&key) {
                                 if let Err(error) = app.open_standalone_file(Path::new(&key), window, cx) {
                                     app.report(error, cx);
                                 }
@@ -1352,7 +1352,7 @@ impl Workspace {
                     .gap_2()
                     .cursor_pointer()
                     .when(is_selected, |row| row.bg(rgb(0xdde9f6)))
-                    .when(!is_selected && self.documents.active == file.path, |row| row.bg(rgb(0xe8e7e4)))
+                    .when(!is_selected && self.documents.active() == file.path, |row| row.bg(rgb(0xe8e7e4)))
                     .hover(|style| style.bg(rgb(0xefefed)))
                     .active(|style| style.bg(rgb(crate::ui::PRESSED_BG)))
                     .child(
@@ -1587,7 +1587,7 @@ impl Workspace {
                     if let Err(error) = app.new_default_markdown(window, cx) { app.report(error, cx); }
                 })))
             .on_click(cx.listener(|app, _, window, cx| { app.show_trash = false; app.switch_to_default(window, cx); cx.notify(); }));
-        let loose_count = if self.directory_workspace().is_none() { self.documents.tabs.len() } else { self.workspace_sessions.get("loose").map_or(0, |session| session.tabs.len()) };
+        let loose_count = if self.directory_workspace().is_none() { self.documents.tabs().len() } else { self.workspace_sessions.get("loose").map_or(0, |session| session.tabs.len()) };
         div()
             .w_full()
             .min_w_0()

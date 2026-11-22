@@ -1,63 +1,171 @@
 //! Live document buffers and their editor/reader projections.
 
+mod links;
+mod view;
+
 use super::*;
 use crate::annotations::AnnotationItem;
+use crate::drawio::{DrawioPane, DrawioPaneEvent};
+use crate::markdown::{MarkdownEvent, MarkdownPane};
+use crate::model::DocumentBuffer;
+use crate::pdf::PdfPaneEvent;
+use crate::web_view::{HtmlPane, HtmlPaneEvent};
+use gpui_kit::component::input::{Editor, EditorState};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use std::sync::mpsc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum PaneRole {
+enum PaneRole {
     Tab,
     Reading,
 }
 
 /// A pane's role is independent of the path persisted in workspace sessions.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct PaneKey {
-    pub(super) path: String,
-    pub(super) role: PaneRole,
+struct PaneKey {
+    path: String,
+    role: PaneRole,
 }
 
 impl PaneKey {
-    pub(super) fn new(path: &str, role: PaneRole) -> Self {
+    fn new(path: &str, role: PaneRole) -> Self {
         Self { path: path.to_owned(), role }
     }
 
-    pub(super) fn tab(path: &str) -> Self {
+    fn tab(path: &str) -> Self {
         Self::new(path, PaneRole::Tab)
     }
 
-    pub(super) fn reading(path: &str) -> Self {
+    fn reading(path: &str) -> Self {
         Self::new(path, PaneRole::Reading)
     }
 }
 
-pub(super) struct OpenDocument {
-    pub(super) path: PathBuf,
-    pub(super) buffer: DocumentBuffer,
-    pub(super) editor: Entity<EditorState>,
-    pub(super) last_edit: Instant,
-    pub(super) subscription: Subscription,
+struct OpenDocument {
+    path: PathBuf,
+    buffer: DocumentBuffer,
+    editor: Entity<EditorState>,
+    last_edit: Instant,
+    subscription: Subscription,
 }
 
 /// The open buffer is shared by all panes for the same document. Navigation
 /// stores paths only, so workspace-session files remain independent of GPUI.
 #[derive(Default)]
 pub(super) struct Documents {
-    pub(super) open: BTreeMap<String, OpenDocument>,
-    pub(super) tabs: Vec<String>,
-    pub(super) active: String,
-    pub(super) reading_panes: Vec<String>,
-    pub(super) focused_markdown: Option<String>,
-    pub(super) markdown_panes: BTreeMap<PaneKey, Entity<MarkdownPane>>,
-    pub(super) pdf_panes: BTreeMap<PaneKey, Entity<PdfPane>>,
-    pub(super) html_panes: BTreeMap<PaneKey, Entity<HtmlPane>>,
-    pub(super) drawio_panes: BTreeMap<PaneKey, Entity<DrawioPane>>,
-    pub(super) image_panes: BTreeMap<PaneKey, Entity<crate::image::ImagePane>>,
+    open: BTreeMap<String, OpenDocument>,
+    tabs: Vec<String>,
+    active: String,
+    reading_panes: Vec<String>,
+    focused_markdown: Option<String>,
+    markdown_panes: BTreeMap<PaneKey, Entity<MarkdownPane>>,
+    pdf_panes: BTreeMap<PaneKey, Entity<PdfPane>>,
+    html_panes: BTreeMap<PaneKey, Entity<HtmlPane>>,
+    drawio_panes: BTreeMap<PaneKey, Entity<DrawioPane>>,
+    image_panes: BTreeMap<PaneKey, Entity<crate::image::ImagePane>>,
     markdown_changed: BTreeSet<String>,
     source_version: u64,
     document_watch: DocumentWatch,
 }
 
 impl Documents {
+    pub(super) fn active(&self) -> &str {
+        &self.active
+    }
+
+    pub(super) fn tabs(&self) -> &[String] {
+        &self.tabs
+    }
+
+    pub(super) fn reading_panes(&self) -> &[String] {
+        &self.reading_panes
+    }
+
+    pub(super) fn focused_markdown(&self) -> Option<&str> {
+        self.focused_markdown.as_deref()
+    }
+
+    pub(super) fn open_buffers(&self) -> impl Iterator<Item = (&str, &DocumentBuffer)> {
+        self.open.iter().map(|(path, doc)| (path.as_str(), &doc.buffer))
+    }
+
+    pub(super) fn active_drawio(&self) -> Option<&Entity<DrawioPane>> {
+        self.drawio_panes.get(&PaneKey::tab(&self.active))
+    }
+
+    pub(super) fn active_markdown_search_open(&self, cx: &App) -> bool {
+        self.markdown_panes.get(&PaneKey::tab(&self.active))
+            .is_some_and(|pane| pane.read(cx).is_search_open())
+    }
+
+    pub(super) fn markdown_export_pane(&self, path: &str) -> &Entity<MarkdownPane> {
+        self.markdown_panes.get(&PaneKey::reading(path))
+            .unwrap_or_else(|| &self.markdown_panes[&PaneKey::tab(path)])
+    }
+
+    pub(super) fn set_backdrop_visible(&self, visible: bool, cx: &mut App) {
+        for pane in self.markdown_panes.values() {
+            pane.update(cx, |pane, cx| pane.set_backdrop_visible(visible, cx));
+        }
+    }
+
+    pub(super) fn set_zen_mode(&self, zen: bool, cx: &mut App) {
+        for pane in self.markdown_panes.values() {
+            pane.update(cx, |pane, cx| pane.set_zen_mode(zen, cx));
+        }
+    }
+
+    pub(super) fn apply_editor_appearance(&self, previous: &AppSettings, settings: &AppSettings, window: &mut Window, cx: &mut App) {
+        if previous.show_line_numbers != settings.show_line_numbers {
+            for document in self.open.values() {
+                document.editor.update(cx, |editor, cx| editor.set_line_number(settings.show_line_numbers, window, cx));
+            }
+        }
+        if previous.show_line_numbers != settings.show_line_numbers || previous.line_width_limited != settings.line_width_limited
+            || previous.editor_font != settings.editor_font || previous.editor_font_size != settings.editor_font_size
+            || previous.markdown_font != settings.markdown_font || previous.markdown_font_size != settings.markdown_font_size
+            || previous.interface_font != settings.interface_font
+            || previous.inline_code_font != settings.inline_code_font || previous.block_code_font != settings.block_code_font
+            || previous.inline_code_scale != settings.inline_code_scale || previous.block_code_scale != settings.block_code_scale
+        {
+            for pane in self.markdown_panes.values() {
+                pane.update(cx, |pane, cx| pane.apply_settings(settings, window, cx));
+            }
+        }
+    }
+
+    pub(super) fn refresh_locale(&self, window: &mut Window, cx: &mut App) {
+        for pane in self.markdown_panes.values() {
+            pane.update(cx, |pane, cx| pane.refresh_locale(window, cx));
+        }
+        for pane in self.pdf_panes.values() {
+            pane.update(cx, |pane, cx| pane.refresh_locale(window, cx));
+        }
+    }
+
+    pub(super) fn poll_web_panes(&self, window: &mut Window, cx: &mut App) {
+        for pane in self.html_panes.values() {
+            pane.update(cx, |pane, cx| pane.poll(window, cx));
+        }
+        for pane in self.drawio_panes.values() {
+            pane.update(cx, |pane, cx| pane.poll(window, cx));
+        }
+    }
+
+    /// Native web surfaces must be hidden behind in-window overlays.
+    pub(super) fn sync_pane_visibility(&self, zen: bool, trash_open: bool, modal_open: bool, window: &mut Window, cx: &mut App) {
+        let visible = |key: &PaneKey| (!zen && key.role == PaneRole::Reading) || key.path == self.active;
+        for (key, pane) in &self.pdf_panes {
+            pane.update(cx, |pane, cx| pane.set_visible(!trash_open && visible(key), window, cx));
+        }
+        for (key, pane) in &self.html_panes {
+            pane.update(cx, |pane, cx| pane.set_visible(!modal_open && visible(key), window, cx));
+        }
+        for (key, pane) in &self.drawio_panes {
+            pane.update(cx, |pane, cx| pane.set_visible(!modal_open && visible(key), window, cx));
+        }
+    }
+
     pub(super) fn replace_watch(&mut self, watch: DocumentWatch) {
         self.document_watch = watch;
     }
@@ -127,7 +235,6 @@ impl DocumentWatch {
         self.paths.clear();
         self.tree = true;
     }
-
 }
 
 impl Workspace {
@@ -416,115 +523,6 @@ impl Workspace {
             || lower.ends_with(".pdf")
             || Self::is_html_path(&lower)
             || Self::is_drawio_path(&lower)
-    }
-
-    fn open_internal_link_file(
-        &mut self,
-        file: &ProjectFile,
-        anchor: Option<&str>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> io::Result<()> {
-        if self.settings.internal_link_open_target == InternalLinkOpenTarget::SplitPane
-            && Self::supports_split_pane(&file.path)
-        {
-            self.open_reading_pane(file, window, cx);
-            let reading_key = PaneKey::reading(&file.path);
-            if let Some(pane) = self.documents.markdown_panes.get(&reading_key).cloned() {
-                pane.update(cx, |pane, cx| pane.focus(window, cx));
-            }
-            self.jump_markdown_anchor(&reading_key, anchor, window, cx);
-            return Ok(());
-        }
-        self.open_file(file, window, cx)?;
-        self.jump_markdown_anchor(&PaneKey::tab(&file.path), anchor, window, cx);
-        Ok(())
-    }
-
-    fn open_markdown_link(
-        &mut self,
-        source_file: &Path,
-        raw_url: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let workspace_root = self
-            .directory_workspace()
-            .map(|project| PathBuf::from(&project.folder));
-        let target = match classify_markdown_link(source_file, workspace_root.as_deref(), raw_url) {
-            MarkdownLinkTarget::External(url) => {
-                cx.open_url(&url);
-                return;
-            }
-            MarkdownLinkTarget::Local { path, anchor } => (path, anchor),
-            MarkdownLinkTarget::Invalid(message) => {
-                self.report(message, cx);
-                return;
-            }
-        };
-        let (candidate, anchor) = target;
-        let Ok(resolved) = dunce::canonicalize(&candidate) else {
-            self.report(
-                crate::i18n::workspace::err_link_target_not_found(&candidate),
-                cx,
-            );
-            return;
-        };
-        if resolved.is_dir() {
-            match url::Url::from_directory_path(&resolved) {
-                Ok(dir_url) => cx.open_url(dir_url.as_str()),
-                Err(()) => self.report(crate::i18n::workspace::err_open_dir(&resolved), cx),
-            }
-            return;
-        }
-        if let Some(root) = workspace_root
-            && let Ok(canonical_root) = dunce::canonicalize(&root)
-            && let Ok(relative) = resolved.strip_prefix(&canonical_root)
-            && files::is_relevant(&resolved)
-        {
-            let key = relative.to_string_lossy().replace('\\', "/");
-            let file = ProjectFile {
-                kind: Self::file_kind(&resolved),
-                path: key,
-            };
-            if let Err(error) =
-                self.open_internal_link_file(&file, anchor.as_deref(), window, cx)
-            {
-                self.report(error, cx);
-            }
-            return;
-        }
-        if self.directory_workspace().is_none() && files::is_relevant(&resolved) {
-            match self.prepare_standalone_file(&resolved).and_then(|file| {
-                self.open_internal_link_file(&file, anchor.as_deref(), window, cx)
-            }) {
-                Ok(()) => self.refresh_tags(cx),
-                Err(error) => self.report(error, cx),
-            }
-            return;
-        }
-        match url::Url::from_file_path(&resolved) {
-            Ok(file_url) => cx.open_url(file_url.as_str()),
-            Err(()) => self.report(crate::i18n::workspace::err_open_file(&resolved), cx),
-        }
-    }
-
-    fn jump_markdown_anchor(
-        &mut self,
-        key: &PaneKey,
-        anchor: Option<&str>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(anchor) = anchor.filter(|a| !a.is_empty()) else {
-            return;
-        };
-        if !key.path.to_ascii_lowercase().ends_with(".md") {
-            return;
-        }
-        if let Some(pane) = self.documents.markdown_panes.get(key).cloned() {
-            pane.update(cx, |pane, cx| pane.navigate_to_anchor(anchor, window, cx));
-        }
     }
 
     pub(super) fn open_reading_key(

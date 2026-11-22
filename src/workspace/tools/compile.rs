@@ -124,15 +124,15 @@ impl Workspace {
 
     fn save_open_buffers_silently(&mut self, cx: &mut Context<Self>) -> Result<(), Failure> {
         let mut dirty_paths = Vec::new();
-        for (path, document) in &self.documents.open {
-            if document.buffer.deleted || document.buffer.conflict.is_some() {
+        for (path, buffer) in self.documents.open_buffers() {
+            if buffer.deleted || buffer.conflict.is_some() {
                 return Err(Failure::new(
                     "document_conflict",
                     format!("文档存在未解决的冲突或已被删除，无法编译：{path}"),
                 ));
             }
-            if document.buffer.is_dirty() {
-                dirty_paths.push(path.clone());
+            if buffer.is_dirty() {
+                dirty_paths.push(path.to_owned());
             }
         }
         for path in dirty_paths {
