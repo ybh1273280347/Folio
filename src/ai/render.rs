@@ -2384,7 +2384,7 @@ impl ChatPane {
                                                 .gap_1p5()
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(move |pane, _, window, cx| {
-                                                    pane.open_overlay(ChatOverlay::Image(preview.clone()), window, cx);
+                                                    pane.open_overlay(preview.clone(), window, cx);
                                                 }))
                                                 .child(
                                                     img(p.image.clone())

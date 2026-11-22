@@ -60,7 +60,7 @@ pub(super) struct SessionChanges {
     pub(super) toast: Option<(String, bool)>,
     pub(super) extension_prefill: Option<(String, bool)>,
     pub(super) composer_text: Option<String>,
-    pub(super) rewind_draft: Option<Value>,
+    pub(super) edit_applied: bool,
 }
 
 pub(super) struct Session {
@@ -185,12 +185,12 @@ impl Session {
             && !self.is_rewinding && self.pending_ui.is_none()
     }
 
-    pub(super) fn rewind(&mut self, entry_id: &str, edit: bool) -> Result<(), String> {
+    pub(super) fn edit_message(&mut self, entry_id: &str, message: &str, title: &str) -> Result<(), String> {
         if !self.can_rewind() {
             return Ok(());
         }
         self.client.as_ref().expect("rewind requires a connected session").send(
-            serde_json::json!({"type":"rewind", "entryId":entry_id, "edit":edit}),
+            serde_json::json!({"type":"edit_prompt", "entryId":entry_id, "message":message, "titleText":title}),
         )?;
         self.is_rewinding = true;
         Ok(())
@@ -273,16 +273,16 @@ impl Session {
                 data,
                 error,
             } => {
-                if command == "rewind" {
+                if command == "edit_prompt" {
                     self.is_rewinding = false;
                     if !success {
                         if let Some(err) = error {
                             self.show_toast(crate::i18n::ai::command_failed(
-                                crate::i18n::ai::REWIND_MESSAGE.get(), &err,
+                                crate::i18n::ai::EDIT_MESSAGE.get(), &err,
                             ), true);
                         }
-                        return;
                     }
+                    return;
                 }
                 if !success {
                     if let Some(err) = error {
@@ -299,20 +299,11 @@ impl Session {
                     }
                     return;
                 }
-                let Some(mut data) = data else {
+                let Some(data) = data else {
                     return;
                 };
                 match command.as_str() {
                     "snapshot" | "get_state" | "get_messages" => self.apply_snapshot(&command, data),
-                    "rewind" => {
-                        self.changes.rewind_draft = data.get_mut("draft").map(Value::take);
-                        self.apply_snapshot(&command, data);
-                        self.write_snapshots.clear();
-                        self.scroll_to_bottom();
-                        if let Some(client) = &self.client {
-                            let _ = client.get_session_stats();
-                        }
-                    }
                     "get_available_models" => self.apply_models(&data),
                     "get_available_thinking_levels" => self.apply_thinking_levels(&data),
                     "get_session_stats" => self.apply_stats(&data),
@@ -334,6 +325,13 @@ impl Session {
                     }
                     _ => {}
                 }
+            }
+            RpcInbound::Event(ev) if ev["type"].as_str() == Some("edit_applied") => {
+                self.is_rewinding = false;
+                self.apply_snapshot("edit_applied", ev);
+                self.write_snapshots.clear();
+                self.changes.edit_applied = true;
+                self.scroll_to_bottom();
             }
             RpcInbound::Event(ev) if ev["type"].as_str() == Some("message_update") => {
                 if let Some(event) = ev.get("assistantMessageEvent") {
@@ -394,7 +392,7 @@ impl Session {
         if let Some(model) = snapshot.model.as_ref().and_then(parse_model) {
             self.current_model = Some(model);
         }
-        if matches!(command, "snapshot" | "rewind") {
+        if command == "snapshot" {
             self.last_sequence = snapshot.sequence;
         }
     }
@@ -507,9 +505,18 @@ impl Session {
                     let raw = extract_text_content(msg.get("content"));
                     let (attached_file, mounted_skills, quotes, display_text) =
                         split_injected_prompt(&raw);
+                    // The quote parser normalizes line endings and drops the final newline.
+                    let normalized = raw.replace("\r\n", "\n");
+                    let prompt_prefix = if display_text.is_empty() {
+                        normalized
+                    } else {
+                        normalized.strip_suffix('\n').unwrap_or(&normalized)
+                            .strip_suffix(&display_text).expect("parsed message body is a suffix").to_owned()
+                    };
                     self.messages.push(ChatMessage::User {
                         entry_id: msg["entryId"].as_str().map(str::to_owned),
                         display_text,
+                        prompt_prefix,
                         timestamp_ms: msg.get("timestamp").and_then(Value::as_i64),
                         attached_file,
                         mounted_skills,
