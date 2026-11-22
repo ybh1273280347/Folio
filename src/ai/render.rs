@@ -18,19 +18,16 @@ impl ChatPane {
             .id("ai-turn-navigation")
             .flex()
             .items_center()
-            .gap_2()
+            .gap_1p5()
             .child(
                 div()
                     .id("ai-turn-navigation-toggle")
-                    .w(px(26.))
-                    .h(px(64.))
-                    .max_h_full()
+                    .size(px(26.))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(8.))
-                    .bg(fg_alpha(palette.text, 0.05))
+                    .rounded(px(6.))
                     .text_color(gpui_kit::rgb(palette.muted))
                     .hover(|style| style.bg(gpui_kit::rgb(palette.hover)))
                     .when(self.turn_navigation_open, |el| {
@@ -38,7 +35,7 @@ impl ChatPane {
                             .text_color(gpui_kit::rgb(palette.accent))
                     })
                     .cursor_pointer()
-                    .child(crate::ui::icon(IconName::List))
+                    .child(crate::ui::icon(IconName::List).size(px(14.)))
                     .tooltip(|window, cx| {
                         Tooltip::new(crate::i18n::ai::TURN_NAVIGATION.get()).build(window, cx)
                     })
@@ -2364,8 +2361,9 @@ impl ChatPane {
                                             )
                                     },
                                 ))
-                                .children(self.pasted_images.iter().enumerate().map(|(idx, p)| {
+                                .children(self.pasted_images.iter().map(|p| {
                                     let rm_id = p.id;
+                                    let preview = p.image.clone();
                                     div()
                                         .flex()
                                         .items_center()
@@ -2379,22 +2377,32 @@ impl ChatPane {
                                         .border_color(subtle_border(palette.border))
                                         .text_size(typo.xs)
                                         .child(
-                                            img(p.image.clone())
-                                                .w(px(24.))
-                                                .h(px(24.))
-                                                .rounded(px(5.))
-                                                .object_fit(ObjectFit::Cover),
+                                            div()
+                                                .id(("ai-preview-draft-img", rm_id as usize))
+                                                .flex()
+                                                .items_center()
+                                                .gap_1p5()
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(move |pane, _, window, cx| {
+                                                    pane.open_overlay(ChatOverlay::Image(preview.clone()), window, cx);
+                                                }))
+                                                .child(
+                                                    img(p.image.clone())
+                                                        .size(px(24.))
+                                                        .rounded(px(5.))
+                                                        .object_fit(ObjectFit::Cover),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .max_w(px(110.))
+                                                        .text_ellipsis()
+                                                        .text_color(gpui_kit::rgb(palette.muted))
+                                                        .child(p.label.clone()),
+                                                ),
                                         )
                                         .child(
                                             div()
-                                                .max_w(px(110.))
-                                                .text_ellipsis()
-                                                .text_color(gpui_kit::rgb(palette.muted))
-                                                .child(p.label.clone()),
-                                        )
-                                        .child(
-                                            div()
-                                                .id(("ai-rm-img", idx))
+                                                .id(("ai-rm-img", rm_id as usize))
                                                 .cursor_pointer()
                                                 .text_color(gpui_kit::rgb(palette.muted))
                                                 .on_click(cx.listener(move |pane, _, _, cx| {

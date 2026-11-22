@@ -227,6 +227,11 @@ const AI_COPY_BUTTON_SIZE: Pixels = px(20.);
 const AI_COPY_ICON_SIZE: Pixels = px(12.);
 const AI_COPY_BUTTON_RADIUS: Pixels = px(5.);
 
+enum ChatOverlay {
+    Image(Arc<gpui::Image>),
+    Rewind { entry_id: String, edit: bool },
+}
+
 struct ChatPane {
     session: Rc<RefCell<Session>>,
     project_name: Option<String>,
@@ -238,8 +243,8 @@ struct ChatPane {
     quote_drag: Option<(usize, usize, Point<Pixels>)>,
     quote_bounds: Rc<Cell<Bounds<Pixels>>>,
     pasted_images: Vec<PastedImage>,
-    image_preview: Option<(Arc<gpui::Image>, Option<FocusHandle>)>,
-    image_preview_focus: FocusHandle,
+    overlay: Option<(ChatOverlay, Option<FocusHandle>)>,
+    overlay_focus: FocusHandle,
     next_image_id: u64,
     pending_ext_prefill: Option<(String, bool)>,
     pending_composer_text: Option<String>,
@@ -384,8 +389,8 @@ impl ChatPane {
             quote_drag: None,
             quote_bounds: Rc::new(Cell::new(Bounds::default())),
             pasted_images: Vec::new(),
-            image_preview: None,
-            image_preview_focus: cx.focus_handle(),
+            overlay: None,
+            overlay_focus: cx.focus_handle(),
             next_image_id: 1,
             pending_ext_prefill: None,
             pending_composer_text: None,
@@ -482,8 +487,15 @@ impl ChatPane {
         window.focus(&handle, cx);
     }
 
-    fn close_image_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some((_, previous_focus)) = self.image_preview.take() {
+    fn open_overlay(&mut self, overlay: ChatOverlay, window: &mut Window, cx: &mut Context<Self>) {
+        self.overlay = Some((overlay, window.focused(cx)));
+        window.focus(&self.overlay_focus, cx);
+        cx.notify();
+    }
+
+    fn close_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Return to the composer or document that had focus before the modal opened.
+        if let Some((_, previous_focus)) = self.overlay.take() {
             if let Some(previous_focus) = previous_focus {
                 window.focus(&previous_focus, cx);
             } else {
@@ -1098,30 +1110,6 @@ impl ChatPane {
         cx.notify();
     }
 
-    fn confirm_rewind(&mut self, entry_id: String, edit: bool, window: &mut Window, cx: &mut Context<Self>) {
-        use crate::i18n::ai;
-        let (label, detail) = if edit {
-            (ai::EDIT_MESSAGE, ai::EDIT_REWIND_DETAIL)
-        } else {
-            (ai::REWIND_MESSAGE, ai::REWIND_DETAIL)
-        };
-        let answer = window.prompt(
-            gpui::PromptLevel::Warning, label.get(), Some(detail.get()),
-            &[label.get(), crate::i18n::common::CANCEL.get()], cx,
-        );
-        cx.spawn(async move |this, cx| {
-            if answer.await == Ok(0) {
-                let _ = this.update(cx, |pane, cx| {
-                    let result = pane.session.borrow_mut().rewind(&entry_id, edit);
-                    if let Err(error) = result {
-                        pane.show_toast(ai::command_failed(ai::REWIND_MESSAGE.get(), &error), true, cx);
-                    }
-                    cx.notify();
-                });
-            }
-        }).detach();
-    }
-
     fn abort(&mut self, cx: &mut Context<Self>) {
         if let Some(client) = &self.session.borrow().client {
             let _ = client.abort();
@@ -1391,9 +1379,7 @@ impl Render for ChatPane {
                                                             .id(SharedString::from(format!("ai-image-{msg_idx}-{index}")))
                                                             .cursor_pointer()
                                                             .on_click(cx.listener(move |pane, _, window, cx| {
-                                                                pane.image_preview = Some((preview.clone(), window.focused(cx)));
-                                                                window.focus(&pane.image_preview_focus, cx);
-                                                                cx.notify();
+                                                                pane.open_overlay(ChatOverlay::Image(preview.clone()), window, cx);
                                                             }))
                                                             .child(
                                                                 img(im.clone())
@@ -1544,7 +1530,9 @@ impl Render for ChatPane {
                                                         .ghost().compact().with_size(px(16.)).w(px(22.)).h(px(22.))
                                                         .icon(crate::ui::icon(icon)).tooltip(label)
                                                         .on_click(cx.listener(move |pane, _, window, cx| {
-                                                            pane.confirm_rewind(entry_id.clone(), edit, window, cx);
+                                                            pane.open_overlay(ChatOverlay::Rewind {
+                                                                entry_id: entry_id.clone(), edit,
+                                                            }, window, cx);
                                                         }))
                                                 })
                                             })),
@@ -1749,15 +1737,15 @@ impl Render for ChatPane {
             })
                 .absolute().inset_0())
             .children(self.render_quote_popover(palette, typo, cx))
-            .when_some(self.image_preview.as_ref(), |root, (image, _)| {
+            .when_some(self.overlay.as_ref(), |root, (overlay, _)| {
                 let viewport = window.viewport_size();
-                // The dialog is viewport-wide even though its trigger lives inside the chat scroll view.
-                root.child(
-                    Dialog::new(cx)
-                        .focus_handle(self.image_preview_focus.clone())
+                let dialog = Dialog::new(cx)
+                    .focus_handle(self.overlay_focus.clone())
+                    .on_close(cx.listener(|pane, _, window, cx| pane.close_overlay(window, cx)));
+                root.child(match overlay {
+                    ChatOverlay::Image(image) => dialog
                         .accessibility_label(crate::i18n::ai::IMAGE_MESSAGE.get())
                         .backdrop(div().size_full().occlude().bg(gpui::black().opacity(0.56)))
-                        .on_close(cx.listener(|pane, _, window, cx| pane.close_image_preview(window, cx)))
                         .popup(
                             DialogPopup::new()
                                 .relative()
@@ -1777,10 +1765,39 @@ impl Render for ChatPane {
                                         .small()
                                         .icon(crate::ui::icon(IconName::Close))
                                         .tooltip(crate::i18n::common::CLOSE.get())
-                                        .on_click(cx.listener(|pane, _, window, cx| pane.close_image_preview(window, cx))),
+                                        .on_click(cx.listener(|pane, _, window, cx| pane.close_overlay(window, cx))),
                                 )),
                         ),
-                )
+                    ChatOverlay::Rewind { entry_id, edit } => {
+                        use crate::i18n::ai;
+                        let entry_id = entry_id.clone();
+                        let edit = *edit;
+                        let (label, detail) = if edit {
+                            (ai::EDIT_MESSAGE.get(), ai::EDIT_REWIND_DETAIL.get())
+                        } else {
+                            (ai::REWIND_MESSAGE.get(), ai::REWIND_DETAIL.get())
+                        };
+                        dialog.accessibility_label(label)
+                            .on_ok(|_, _, _| false)
+                            .popup(div().absolute().inset_0().child(crate::ui::modal_overlay(
+                                label,
+                                detail,
+                                div().flex().justify_end().gap_2()
+                                    .child(crate::ui::button_secondary("cancel-ai-rewind", crate::i18n::common::CANCEL.get())
+                                        .px_3().min_w(px(64.))
+                                        .on_click(cx.listener(|pane, _, window, cx| pane.close_overlay(window, cx))))
+                                    .child(crate::ui::button_danger("confirm-ai-rewind", label)
+                                        .min_w(px(64.))
+                                        .on_click(cx.listener(move |pane, _, window, cx| {
+                                            pane.close_overlay(window, cx);
+                                            let result = pane.session.borrow_mut().rewind(&entry_id, edit);
+                                            if let Err(error) = result {
+                                                pane.show_toast(ai::command_failed(ai::REWIND_MESSAGE.get(), &error), true, cx);
+                                            }
+                                        }))),
+                            )))
+                    }
+                })
             })
     }
 }
