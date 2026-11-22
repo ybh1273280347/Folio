@@ -257,11 +257,13 @@ impl Workspace {
             return;
         }
 
+        let root_bg = root.clone();
         let task = cx.background_spawn(async move {
             let snapshot = RagStore::open(&db_path, &config.embed_model, config.embed_dim)
                 .and_then(|store| {
                     let stats = store.stats()?;
-                    let items = store.pdf_library_items()?;
+                    let mut items = store.pdf_library_items()?;
+                    ocr::hydrate_pdf_library_items(&root_bg, &mut items);
                     Ok((stats, items))
                 })
                 .ok();
@@ -330,9 +332,10 @@ impl Workspace {
                 &cancelled,
             )?;
             let stats = store.stats().map_err(|e| RagError::new("store_error", e))?;
-            let items = store
+            let mut items = store
                 .pdf_library_items()
                 .map_err(|e| RagError::new("store_error", e))?;
+            ocr::hydrate_pdf_library_items(&root, &mut items);
             Ok::<_, RagError>((stats, items))
         });
 
@@ -371,6 +374,7 @@ impl Workspace {
     pub(in crate::workspace) fn run_pdf_ocr_batch(
         &mut self,
         paths: Vec<String>,
+        fill_missing_only: bool,
         cx: &mut Context<Self>,
     ) {
         if paths.is_empty() {
@@ -454,6 +458,7 @@ impl Workspace {
                     &config,
                     &rel_path,
                     &hash,
+                    fill_missing_only,
                     &item_cancel,
                     &mut |ev| {
                         let _ = tx.send(OcrRunnerEvent::Progress(ev));
@@ -463,7 +468,10 @@ impl Workspace {
                 match outcome {
                     Ok(()) => {
                         let stats = store.stats().ok();
-                        let pdf_items = store.pdf_library_items().ok();
+                        let pdf_items = store.pdf_library_items().ok().map(|mut items| {
+                            ocr::hydrate_pdf_library_items(&root, &mut items);
+                            items
+                        });
                         let _ = tx.send(OcrRunnerEvent::ItemDone {
                             rel_path,
                             stats,
@@ -475,7 +483,10 @@ impl Workspace {
                     }
                     Err(err) => {
                         let stats = store.stats().ok();
-                        let pdf_items = store.pdf_library_items().ok();
+                        let pdf_items = store.pdf_library_items().ok().map(|mut items| {
+                            ocr::hydrate_pdf_library_items(&root, &mut items);
+                            items
+                        });
                         let _ = tx.send(OcrRunnerEvent::ItemFailed {
                             rel_path,
                             message: err.message,
@@ -523,8 +534,7 @@ impl Workspace {
             .pdf_items
             .iter()
             .filter(|item| {
-                self.right_panel.kb.selected_pdfs.contains(&item.rel_path)
-                    && matches!(item.parse_tier.as_str(), "accurate" | "mineru")
+                self.right_panel.kb.selected_pdfs.contains(&item.rel_path) && item.is_complete
             })
             .map(|item| (item.rel_path.clone(), item.content_hash.clone()))
             .collect();

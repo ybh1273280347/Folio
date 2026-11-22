@@ -65,6 +65,9 @@ pub struct PdfLibraryItem {
     pub status: String,
     pub parse_tier: String,
     pub last_error: Option<String>,
+    pub total_pages: Option<usize>,
+    pub missing_pages: usize,
+    pub is_complete: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -801,6 +804,8 @@ impl RagStore {
         &mut self,
         content_hash: &str,
         raw_text: &str,
+        parse_tier: &str,
+        status: &str,
         chunks: &[ChunkDraft],
     ) -> Result<(), String> {
         let tx = self.conn.transaction().map_err(|e| e.to_string())?;
@@ -812,13 +817,13 @@ impl RagStore {
         tx.execute("DELETE FROM chunks WHERE content_hash = ?1", [content_hash])
             .map_err(|e| e.to_string())?;
         tx.execute(
-            "UPDATE contents SET raw_text = ?2, parse_tier = 'accurate', byte_len = ?3 WHERE content_hash = ?1",
-            params![content_hash, raw_text, raw_text.len() as i64],
+            "UPDATE contents SET raw_text = ?2, parse_tier = ?3, byte_len = ?4 WHERE content_hash = ?1",
+            params![content_hash, raw_text, parse_tier, raw_text.len() as i64],
         )
         .map_err(|e| e.to_string())?;
         tx.execute(
-            "UPDATE documents SET status = 'indexed' WHERE content_hash = ?1",
-            [content_hash],
+            "UPDATE documents SET status = ?2 WHERE content_hash = ?1",
+            params![content_hash, status],
         )
         .map_err(|e| e.to_string())?;
 
@@ -859,12 +864,18 @@ impl RagStore {
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| {
+                let status: String = row.get(2)?;
+                let parse_tier: String = row.get(3)?;
+                let is_complete = status != "needs_ocr";
                 Ok(PdfLibraryItem {
                     rel_path: row.get(0)?,
                     content_hash: row.get(1)?,
-                    status: row.get(2)?,
-                    parse_tier: row.get(3)?,
+                    status,
+                    parse_tier,
                     last_error: row.get(4)?,
+                    total_pages: None,
+                    missing_pages: usize::from(!is_complete),
+                    is_complete,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -879,8 +890,7 @@ impl RagStore {
                 "SELECT d.rel_path, d.content_hash, c.parse_tier
                  FROM documents d
                  JOIN contents c ON c.content_hash = d.content_hash
-                 WHERE d.active = 1 AND d.kind = 'pdf' AND d.status != 'derived'
-                   AND c.parse_tier IN ('accurate', 'mineru')
+                 WHERE d.active = 1 AND d.kind = 'pdf' AND d.status = 'indexed'
                  ORDER BY d.rel_path",
             )
             .map_err(|e| e.to_string())?;

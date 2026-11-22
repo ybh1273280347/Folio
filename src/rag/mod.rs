@@ -103,11 +103,15 @@ pub struct CachedPdfInfo {
     pub markdown_cache: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PdfPageMarkdown {
     pub page: usize,
     pub markdown: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_ocr: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

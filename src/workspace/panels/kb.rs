@@ -1369,7 +1369,7 @@ impl Workspace {
         let syncing = self.kb_syncing();
         let ocr_active = !kb.ocr_progress.is_empty();
 
-        let is_blocked = |item: &PdfLibraryItem| item.status == "needs_ocr" || item.last_error.is_some();
+        let is_blocked = |item: &PdfLibraryItem| !item.is_complete || item.last_error.is_some();
         let is_accurate = |item: &PdfLibraryItem| matches!(item.parse_tier.as_str(), "accurate" | "mineru");
 
         let total_count = kb.pdf_items.len();
@@ -1398,10 +1398,10 @@ impl Workspace {
                 .iter()
                 .all(|item| kb.selected_pdfs.contains(&item.rel_path));
         let selected_count = kb.selected_pdfs.len();
-        let selected_accurate_count = kb
+        let selected_exportable_count = kb
             .pdf_items
             .iter()
-            .filter(|i| kb.selected_pdfs.contains(&i.rel_path) && is_accurate(i))
+            .filter(|i| kb.selected_pdfs.contains(&i.rel_path) && i.is_complete)
             .count();
 
         let only_ocr_targets: Vec<String> = {
@@ -1771,7 +1771,6 @@ impl Workspace {
                     let rel_path = item.rel_path.clone();
                     let content_hash = item.content_hash.clone();
                     let checked = kb.selected_pdfs.contains(&rel_path);
-                    let blocked = is_blocked(item);
                     let accurate = is_accurate(item);
                     let stem = display_pdf_stem(&rel_path);
                     let dir_hint = middle_ellipsis_dir(&rel_path);
@@ -1859,7 +1858,7 @@ impl Workspace {
                                     .child(crate::ui::icon(IconName::Close).w(px(10.)).h(px(10.))),
                             )
                             .into_any_element()
-                    } else if accurate {
+                    } else if item.is_complete {
                         div()
                             .flex()
                             .items_center()
@@ -1896,26 +1895,36 @@ impl Workspace {
                             )
                             .child(
                                 div()
-                                    .id(SharedString::from(format!("pdf-row-acc-{idx}")))
+                                    .id(SharedString::from(format!("pdf-row-tier-{idx}")))
                                     .size(px(18.))
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .text_color(gpui_kit::rgb(palette.accent))
-                                    .tooltip(|window, cx| {
-                                        gpui_kit::component::tooltip::Tooltip::new(
-                                            rp::KB_ACCURATE_BADGE.get(),
-                                        )
+                                    .text_color(gpui_kit::rgb(if accurate {
+                                        palette.accent
+                                    } else {
+                                        palette.muted
+                                    }))
+                                    .tooltip(move |window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(if accurate {
+                                            rp::KB_ACCURATE_BADGE.get()
+                                        } else {
+                                            rp::KB_FAST_BADGE.get()
+                                        })
                                         .build(window, cx)
                                     })
                                     .child(
-                                        crate::ui::icon(IconName::Sparkles)
-                                            .w(px(12.))
-                                            .h(px(12.)),
+                                        crate::ui::icon(if accurate {
+                                            IconName::Sparkles
+                                        } else {
+                                            IconName::Zap
+                                        })
+                                        .w(px(12.))
+                                        .h(px(12.)),
                                     ),
                             )
                             .into_any_element()
-                    } else if blocked {
+                    } else {
                         div()
                             .id(SharedString::from(format!("pdf-row-red-{idx}")))
                             .size(px(18.))
@@ -1933,23 +1942,6 @@ impl Workspace {
                                     .rounded_full()
                                     .bg(gpui_kit::rgb(0xef4444)),
                             )
-                            .into_any_element()
-                    } else {
-                        div()
-                            .id(SharedString::from(format!("pdf-row-fast-{idx}")))
-                            .size(px(18.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .flex_shrink_0()
-                            .text_color(gpui_kit::rgb(palette.muted))
-                            .tooltip(|window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(
-                                    rp::KB_FAST_BADGE.get(),
-                                )
-                                .build(window, cx)
-                            })
-                            .child(crate::ui::icon(IconName::Zap).w(px(11.5)).h(px(11.5)))
                             .into_any_element()
                     };
 
@@ -2053,7 +2045,7 @@ impl Workspace {
         let btn_font_size = (self.settings.interface_font_size as f32 - 2.5).max(10.0);
         let run_disabled = selected_count == 0 || ocr_active;
         let only_ocr_disabled = only_ocr_count == 0 || ocr_active;
-        let export_disabled = selected_accurate_count == 0;
+        let export_disabled = selected_exportable_count == 0;
 
         let footer = div()
             .px_2p5()
@@ -2099,7 +2091,7 @@ impl Workspace {
                                 el.cursor_pointer()
                                     .hover(move |s| s.opacity(0.9))
                                     .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.run_pdf_ocr_batch(selected_paths_for_run.clone(), cx);
+                                        app.run_pdf_ocr_batch(selected_paths_for_run.clone(), false, cx);
                                     }))
                             })
                             .child(
@@ -2128,7 +2120,7 @@ impl Workspace {
                                 el.cursor_pointer()
                                     .hover(move |s| s.bg(hover_bg))
                                     .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.run_pdf_ocr_batch(only_ocr_targets.clone(), cx);
+                                        app.run_pdf_ocr_batch(only_ocr_targets.clone(), true, cx);
                                     }))
                             })
                             .child(if only_ocr_count > 0 {

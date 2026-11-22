@@ -3,7 +3,7 @@
 use super::{
     AccuratePdfMode, DirtyDocument, RagConfig, RagError, ReindexReport, SearchHit, SearchRequest,
     SearchResponse, SubSearchType,
-    chunker::{chunk_annotations, chunk_text_document, extract_and_chunk_pdf},
+    chunker::{chunk_annotations, chunk_text_document},
     client::{EmbeddingClient, RerankClient},
     doc_kind, has_folio_pdf_fingerprint, load_derived_pdf_hashes, ocr, sha256_hex,
     store::{RagStore, ScoredChunk, path_matches_filters},
@@ -136,6 +136,11 @@ pub fn sync_project(
 
         if kind == "pdf" {
             if let Some(cached) = ocr::load_cached_pdf(root, rel_path, &content_hash) {
+                let status = if cached.needs_ocr {
+                    "needs_ocr"
+                } else {
+                    "indexed"
+                };
                 store
                     .upsert_document(
                         rel_path,
@@ -143,7 +148,7 @@ pub fn sync_project(
                         &content_hash,
                         mtime_ns,
                         file_size,
-                        "indexed",
+                        status,
                         Some(&cached.raw_text),
                         Some(cached.parse_tier),
                         Some(&cached.chunks),
@@ -151,8 +156,10 @@ pub fn sync_project(
                     .map_err(|e| RagError::new("store_error", e))?;
                 updated_files += 1;
             } else {
-                match extract_and_chunk_pdf(rel_path, bytes) {
-                    Ok(extracted) => {
+                match super::chunker::extract_and_chunk_pdf_with_pages(rel_path, &bytes) {
+                    Ok((extracted, pages)) => {
+                        ocr::write_pages_cache(&ocr::cache_dir(root, &content_hash), &pages, None)
+                            .map_err(|e| RagError::new("io_error", e))?;
                         let status = if extracted.needs_ocr {
                             "needs_ocr"
                         } else {
@@ -719,7 +726,7 @@ fn collapse_and_format(
         *count += 1;
 
         let markdown_cache = if cand.kind == "pdf"
-            && matches!(cand.parse_tier.as_str(), "accurate" | "mineru")
+            && matches!(cand.parse_tier.as_str(), "accurate" | "mineru" | "hybrid")
         {
             cand.content_hash
                 .as_ref()
