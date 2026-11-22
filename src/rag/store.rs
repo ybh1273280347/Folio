@@ -58,6 +58,13 @@ pub struct ScoredChunk {
     pub raw_score: f64,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct FtsKbBuckets {
+    pub all: Vec<ScoredChunk>,
+    pub notes: Vec<ScoredChunk>,
+    pub pdf: Vec<ScoredChunk>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PdfLibraryItem {
     pub rel_path: String,
@@ -103,6 +110,50 @@ impl RagStore {
         let mut store = Self { conn, embed_dim };
         store.ensure_schema(embed_model, embed_dim, false)?;
         Ok(store)
+    }
+
+    pub fn open_readonly_for_search(
+        db_path: &Path,
+        embed_model: &str,
+        embed_dim: usize,
+    ) -> Result<Self, String> {
+        register_sqlite_vec();
+        let conn = Connection::open(db_path).map_err(|e| format!("打开 RAG 数据库失败: {e}"))?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|e| e.to_string())?;
+        conn.execute_batch("PRAGMA query_only = ON;")
+            .map_err(|e| format!("配置只读检索 PRAGMA 失败: {e}"))?;
+
+        let dim_str = embed_dim.to_string();
+        let schema_ok = Self::get_meta(&conn, "schema_version").ok().flatten().as_deref()
+            == Some(SCHEMA_VERSION)
+            && Self::get_meta(&conn, "chunker_version").ok().flatten().as_deref()
+                == Some(CHUNKER_VERSION)
+            && Self::get_meta(&conn, "embed_dim").ok().flatten().as_deref()
+                == Some(dim_str.as_str())
+            && Self::get_meta(&conn, "embed_model").ok().flatten().as_deref() == Some(embed_model);
+        if schema_ok {
+            return Ok(Self { conn, embed_dim });
+        }
+        drop(conn);
+        Self::open(db_path, embed_model, embed_dim)
+    }
+
+    pub fn with_read_snapshot<T>(
+        &self,
+        f: impl FnOnce(&Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        struct ReadSnapshotGuard<'a>(&'a Connection);
+        impl Drop for ReadSnapshotGuard<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.execute_batch("ROLLBACK");
+            }
+        }
+        self.conn
+            .execute_batch("BEGIN DEFERRED")
+            .map_err(|e| e.to_string())?;
+        let _guard = ReadSnapshotGuard(&self.conn);
+        f(self)
     }
 
     pub fn reset_index(&mut self, embed_model: &str, embed_dim: usize) -> Result<(), String> {
@@ -516,24 +567,95 @@ impl RagStore {
         limit: usize,
     ) -> Result<Vec<ScoredChunk>, String> {
         let terms = split_query_terms(query);
-        let long_terms: Vec<&str> = terms
-            .iter()
-            .map(String::as_str)
-            .filter(|t| t.chars().count() >= 3)
-            .collect();
-        let short_terms: Vec<&str> = terms
-            .iter()
-            .map(String::as_str)
-            .filter(|t| (1..3).contains(&t.chars().count()))
-            .collect();
-
-        const MAX_SHORT_HITS_PER_FILE: usize = 4;
-        let mut merged: HashMap<i64, ScoredChunk> = HashMap::new();
-        let fetch_limit = if allowed_paths.is_some() || under_dir.is_some() || !extensions.is_empty() {
+        let (long_terms, short_terms) = partition_query_terms(&terms);
+        let long_limit = if allowed_paths.is_some() || under_dir.is_some() || !extensions.is_empty() {
             (limit * 20).clamp(200, 2000)
         } else {
             limit
         };
+        let (merged, _) = self.collect_fts_matches(
+            &long_terms,
+            &short_terms,
+            long_limit,
+            "",
+            allowed_paths,
+            under_dir,
+            extensions,
+        )?;
+        Ok(finalize_fts_hits(merged.into_values().collect(), !short_terms.is_empty(), limit))
+    }
+
+    pub fn search_fts_kb_buckets(&self, query: &str, limit: usize) -> Result<FtsKbBuckets, String> {
+        let terms = split_query_terms(query);
+        let (long_terms, short_terms) = partition_query_terms(&terms);
+        let long_limit = (limit * 20).clamp(200, 2000);
+        let (merged, long_raw_count) =
+            self.collect_fts_matches(&long_terms, &short_terms, long_limit, "", None, None, &[])?;
+
+        let mut all_raw: Vec<ScoredChunk> = Vec::with_capacity(merged.len());
+        let mut notes_map: HashMap<i64, ScoredChunk> = HashMap::new();
+        let mut pdf_map: HashMap<i64, ScoredChunk> = HashMap::new();
+        for hit in merged.into_values() {
+            all_raw.push(hit.clone());
+            if is_pdf_path(&hit.rel_path) {
+                pdf_map.insert(hit.chunk_id, hit);
+            } else {
+                notes_map.insert(hit.chunk_id, hit);
+            }
+        }
+
+        if !long_terms.is_empty() && long_raw_count >= long_limit {
+            if notes_map.len() < limit {
+                let (extra_notes, _) = self.collect_fts_matches(
+                    &long_terms,
+                    &[],
+                    long_limit,
+                    " AND lower(replace(d.rel_path, '#annotations', '')) NOT LIKE '%.pdf'",
+                    None,
+                    None,
+                    &[],
+                )?;
+                for (id, hit) in extra_notes {
+                    notes_map.entry(id).or_insert(hit);
+                }
+            }
+            if pdf_map.len() < limit {
+                let (extra_pdf, _) = self.collect_fts_matches(
+                    &long_terms,
+                    &[],
+                    long_limit,
+                    " AND lower(replace(d.rel_path, '#annotations', '')) LIKE '%.pdf'",
+                    None,
+                    None,
+                    &[],
+                )?;
+                for (id, hit) in extra_pdf {
+                    pdf_map.entry(id).or_insert(hit);
+                }
+            }
+        }
+
+        let has_short = !short_terms.is_empty();
+        Ok(FtsKbBuckets {
+            all: finalize_fts_hits(all_raw, has_short, limit),
+            notes: finalize_fts_hits(notes_map.into_values().collect(), has_short, limit),
+            pdf: finalize_fts_hits(pdf_map.into_values().collect(), has_short, limit),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn collect_fts_matches(
+        &self,
+        long_terms: &[&str],
+        short_terms: &[&str],
+        long_limit: usize,
+        extra_long_sql: &str,
+        allowed_paths: Option<&HashSet<String>>,
+        under_dir: Option<&str>,
+        extensions: &[String],
+    ) -> Result<(HashMap<i64, ScoredChunk>, usize), String> {
+        let mut merged: HashMap<i64, ScoredChunk> = HashMap::new();
+        let mut long_raw_count = 0usize;
 
         if !long_terms.is_empty() {
             let match_expr = long_terms
@@ -541,26 +663,25 @@ impl RagStore {
                 .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
                 .collect::<Vec<_>>()
                 .join(" OR ");
-            let mut stmt = self
-                .conn
-                .prepare(
-                    "SELECT c.id, d.docid, d.rel_path, d.kind, ct.parse_tier, c.heading_path,
-                            c.line_start, c.line_end, c.page_num, c.chunk_text,
-                            -bm25(chunks_fts) AS score, d.content_hash
-                     FROM chunks_fts
-                     JOIN chunks c ON c.id = chunks_fts.rowid
-                     JOIN documents d ON d.content_hash = c.content_hash AND d.active = 1
-                     JOIN contents ct ON ct.content_hash = c.content_hash
-                     WHERE chunks_fts MATCH ?1
-                     ORDER BY bm25(chunks_fts) ASC
-                     LIMIT ?2",
-                )
-                .map_err(|e| e.to_string())?;
+            let sql = format!(
+                "SELECT c.id, d.docid, d.rel_path, d.kind, ct.parse_tier, c.heading_path,
+                        c.line_start, c.line_end, c.page_num, c.chunk_text,
+                        -bm25(chunks_fts) AS score, d.content_hash
+                 FROM chunks_fts
+                 JOIN chunks c ON c.id = chunks_fts.rowid
+                 JOIN documents d ON d.content_hash = c.content_hash AND d.active = 1
+                 JOIN contents ct ON ct.content_hash = c.content_hash
+                 WHERE chunks_fts MATCH ?1{extra_long_sql}
+                 ORDER BY bm25(chunks_fts) ASC
+                 LIMIT ?2"
+            );
+            let mut stmt = self.conn.prepare(&sql).map_err(|e| e.to_string())?;
             let rows = stmt
-                .query_map(params![match_expr, fetch_limit as i64], map_scored_row)
+                .query_map(params![match_expr, long_limit as i64], map_scored_row)
                 .map_err(|e| e.to_string())?;
             for row in rows {
                 let hit = row.map_err(|e| e.to_string())?;
+                long_raw_count += 1;
                 if path_matches_filters(&hit.rel_path, allowed_paths, under_dir, extensions) {
                     merged.insert(hit.chunk_id, hit);
                 }
@@ -585,7 +706,7 @@ impl RagStore {
                      )",
                 )
                 .map_err(|e| e.to_string())?;
-            for term in &short_terms {
+            for term in short_terms {
                 let pattern = format!("%{}%", escape_like(term));
                 let rows = stmt
                     .query_map(params![pattern], |row| {
@@ -624,42 +745,7 @@ impl RagStore {
             }
         }
 
-        let mut results: Vec<ScoredChunk> = merged.into_values().collect();
-        results.sort_by(|a, b| {
-            b.raw_score
-                .total_cmp(&a.raw_score)
-                .then_with(|| a.chunk_id.cmp(&b.chunk_id))
-        });
-        if !short_terms.is_empty() && results.len() > limit {
-            let mut per_file: HashMap<String, usize> = HashMap::new();
-            let mut diverse = Vec::with_capacity(limit);
-            let mut overflow = Vec::new();
-            for hit in results {
-                let base_path = hit.rel_path.strip_suffix("#annotations").unwrap_or(&hit.rel_path);
-                let count = per_file.get(base_path).copied().unwrap_or(0);
-                if count < MAX_SHORT_HITS_PER_FILE {
-                    if let Some(slot) = per_file.get_mut(base_path) {
-                        *slot = count + 1;
-                    } else {
-                        per_file.insert(base_path.to_owned(), 1);
-                    }
-                    diverse.push(hit);
-                    if diverse.len() >= limit {
-                        break;
-                    }
-                } else {
-                    overflow.push(hit);
-                }
-            }
-            if diverse.len() < limit {
-                let need = limit - diverse.len();
-                diverse.extend(overflow.into_iter().take(need));
-            }
-            results = diverse;
-        } else {
-            results.truncate(limit);
-        }
-        Ok(results)
+        Ok((merged, long_raw_count))
     }
 
     pub fn search_vec(
@@ -1021,6 +1107,11 @@ fn prune_orphans(tx: &Transaction<'_>) -> Result<(), String> {
     Ok(())
 }
 
+pub fn is_pdf_path(rel_path: &str) -> bool {
+    let base_path = rel_path.strip_suffix("#annotations").unwrap_or(rel_path);
+    base_path.to_ascii_lowercase().ends_with(".pdf")
+}
+
 pub fn path_matches_filters(
     rel_path: &str,
     allowed_paths: Option<&HashSet<String>>,
@@ -1070,6 +1161,63 @@ fn split_query_terms(query: &str) -> Vec<String> {
         terms.push(query.trim().to_owned());
     }
     terms
+}
+
+fn partition_query_terms(terms: &[String]) -> (Vec<&str>, Vec<&str>) {
+    let long_terms = terms
+        .iter()
+        .map(String::as_str)
+        .filter(|t| t.chars().count() >= 3)
+        .collect();
+    let short_terms = terms
+        .iter()
+        .map(String::as_str)
+        .filter(|t| (1..3).contains(&t.chars().count()))
+        .collect();
+    (long_terms, short_terms)
+}
+
+fn finalize_fts_hits(
+    mut results: Vec<ScoredChunk>,
+    has_short_terms: bool,
+    limit: usize,
+) -> Vec<ScoredChunk> {
+    const MAX_SHORT_HITS_PER_FILE: usize = 4;
+    results.sort_by(|a, b| {
+        b.raw_score
+            .total_cmp(&a.raw_score)
+            .then_with(|| a.chunk_id.cmp(&b.chunk_id))
+    });
+    if has_short_terms && results.len() > limit {
+        let mut per_file: HashMap<String, usize> = HashMap::new();
+        let mut diverse = Vec::with_capacity(limit);
+        let mut overflow = Vec::new();
+        for hit in results {
+            let base_path = hit.rel_path.strip_suffix("#annotations").unwrap_or(&hit.rel_path);
+            let count = per_file.get(base_path).copied().unwrap_or(0);
+            if count < MAX_SHORT_HITS_PER_FILE {
+                if let Some(slot) = per_file.get_mut(base_path) {
+                    *slot = count + 1;
+                } else {
+                    per_file.insert(base_path.to_owned(), 1);
+                }
+                diverse.push(hit);
+                if diverse.len() >= limit {
+                    break;
+                }
+            } else {
+                overflow.push(hit);
+            }
+        }
+        if diverse.len() < limit {
+            let need = limit - diverse.len();
+            diverse.extend(overflow.into_iter().take(need));
+        }
+        diverse
+    } else {
+        results.truncate(limit);
+        results
+    }
 }
 
 fn escape_like(input: &str) -> String {
@@ -1342,5 +1490,45 @@ mod tests {
             md_paths,
             vec!["notes/第三章栈与队列系统笔记.md", "notes/review.md"]
         );
+
+        let ann = vec![ChunkDraft {
+            seq: 0,
+            heading_path: "pdf_0.pdf#annotations".into(),
+            line_start: None,
+            line_end: None,
+            page_num: Some(1),
+            chunk_text: "[pdf_0.pdf#annotations]\n批注：栈溢出注意点".into(),
+        }];
+        store
+            .upsert_document(
+                "pdf_0.pdf#annotations",
+                "annotation",
+                "hash_pdf_ann",
+                100,
+                32,
+                "indexed",
+                Some("ann raw"),
+                Some("annotation"),
+                Some(&ann),
+            )
+            .unwrap();
+        drop(store);
+
+        let ro = RagStore::open_readonly_for_search(&db, "test-embed", 4).unwrap();
+        let buckets = ro
+            .with_read_snapshot(|s| s.search_fts_kb_buckets("栈", 20))
+            .unwrap();
+        assert_eq!(buckets.all[0].rel_path, "notes/第三章栈与队列系统笔记.md");
+        assert_eq!(
+            buckets
+                .notes
+                .iter()
+                .map(|h| h.rel_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["notes/第三章栈与队列系统笔记.md", "notes/review.md"]
+        );
+        assert!(!buckets.pdf.is_empty());
+        assert!(buckets.pdf.iter().all(|h| is_pdf_path(&h.rel_path)));
+        assert!(buckets.pdf.iter().any(|h| h.rel_path == "pdf_0.pdf#annotations"));
     }
 }

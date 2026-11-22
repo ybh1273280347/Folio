@@ -4,7 +4,10 @@
 use super::*;
 use crate::i18n::right_panel as rp;
 use crate::rag::store::{PdfLibraryItem, StoreStats};
-use crate::rag::{SearchHit, pipeline::clean_heading_text};
+use crate::rag::{
+    SearchHit,
+    pipeline::{KbSearchSnapshots, clean_heading_text},
+};
 use gpui_kit::base::Disableable;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -16,19 +19,6 @@ pub(in crate::workspace) enum KbFilter {
     All,
     Notes,
     Pdf,
-}
-
-impl KbFilter {
-    pub(in crate::workspace) fn extensions(self) -> Vec<String> {
-        match self {
-            Self::All => Vec::new(),
-            Self::Notes => ["md", "txt", "tex", "ltx", "bib"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-            Self::Pdf => vec!["pdf".to_owned()],
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -73,7 +63,7 @@ pub(in crate::workspace) struct KbPanelState {
     pub(in crate::workspace) search: Entity<InputState>,
     pub(in crate::workspace) last_query: String,
     pub(in crate::workspace) searching: bool,
-    pub(in crate::workspace) results: Vec<SearchHit>,
+    pub(in crate::workspace) snapshot: KbSearchSnapshots,
     pub(in crate::workspace) filter: KbFilter,
     pub(in crate::workspace) expanded_files: HashSet<String>,
     pub(in crate::workspace) collapsing_files: HashMap<String, u64>,
@@ -109,7 +99,7 @@ impl KbPanelState {
                 InputEvent::Change => {
                     if input.read(cx).value().trim().is_empty()
                         && (!app.right_panel.kb.last_query.is_empty()
-                            || !app.right_panel.kb.results.is_empty()
+                            || app.right_panel.kb.has_any_results()
                             || app.right_panel.kb.search_error.is_some())
                     {
                         app.right_panel.kb.clear_search_results();
@@ -124,7 +114,7 @@ impl KbPanelState {
             search,
             last_query: String::new(),
             searching: false,
-            results: Vec::new(),
+            snapshot: KbSearchSnapshots::default(),
             filter: KbFilter::All,
             expanded_files: HashSet::new(),
             collapsing_files: HashMap::new(),
@@ -146,6 +136,20 @@ impl KbPanelState {
         }
     }
 
+    pub(in crate::workspace) fn active_results(&self) -> &[SearchHit] {
+        match self.filter {
+            KbFilter::All => &self.snapshot.all,
+            KbFilter::Notes => &self.snapshot.notes,
+            KbFilter::Pdf => &self.snapshot.pdf,
+        }
+    }
+
+    pub(in crate::workspace) fn has_any_results(&self) -> bool {
+        !self.snapshot.all.is_empty()
+            || !self.snapshot.notes.is_empty()
+            || !self.snapshot.pdf.is_empty()
+    }
+
     pub(in crate::workspace) fn next_search_id(&mut self) -> u64 {
         self.in_flight_search_id = self.in_flight_search_id.wrapping_add(1);
         self.in_flight_search_id
@@ -159,7 +163,7 @@ impl KbPanelState {
         self.in_flight_search_id = self.in_flight_search_id.wrapping_add(1);
         self.last_query.clear();
         self.searching = false;
-        self.results.clear();
+        self.snapshot = KbSearchSnapshots::default();
         self.expanded_files.clear();
         self.collapsing_files.clear();
         self.card_anim_gen.clear();
@@ -251,9 +255,15 @@ impl KbPanelState {
             let b_needs = b.status == "needs_ocr";
             b_needs.cmp(&a_needs).then_with(|| a.rel_path.cmp(&b.rel_path))
         });
-        for hit in &mut self.results {
-            if let Some(next) = remap(&hit.path) {
-                hit.path = next;
+        for list in [
+            &mut self.snapshot.all,
+            &mut self.snapshot.notes,
+            &mut self.snapshot.pdf,
+        ] {
+            for hit in list {
+                if let Some(next) = remap(&hit.path) {
+                    hit.path = next;
+                }
             }
         }
         if let Some(stats) = &mut self.stats {
@@ -296,10 +306,16 @@ impl KbPanelState {
         self.pdf_items.retain(|item| live_files.contains(&item.rel_path));
         self.selected_pdfs.retain(|p| live_files.contains(p));
         self.ocr_progress.retain(|p, _| live_files.contains(p));
-        self.results.retain(|hit| {
-            let base = hit.path.strip_suffix("#annotations").unwrap_or(&hit.path);
-            live_files.contains(base)
-        });
+        for list in [
+            &mut self.snapshot.all,
+            &mut self.snapshot.notes,
+            &mut self.snapshot.pdf,
+        ] {
+            list.retain(|hit| {
+                let base = hit.path.strip_suffix("#annotations").unwrap_or(&hit.path);
+                live_files.contains(base)
+            });
+        }
         if let Some(stats) = &mut self.stats {
             stats.needs_ocr_files.retain(|p| live_files.contains(p));
         }
@@ -1004,7 +1020,7 @@ impl Workspace {
         let search_focused = kb.search.read(cx).focus_handle(cx).is_focused(window);
         let input_non_empty = !kb.search.read(cx).value().trim().is_empty();
         let has_submitted_search =
-            !kb.last_query.is_empty() || kb.searching || !kb.results.is_empty() || kb.search_error.is_some();
+            !kb.last_query.is_empty() || kb.searching || kb.has_any_results() || kb.search_error.is_some();
 
         let ring_color = if search_focused {
             fg_alpha(palette.accent, 0.72)
@@ -1084,7 +1100,8 @@ impl Workspace {
                     }),
             );
 
-        let groups = group_hits_by_file(&kb.results, kb.filter);
+        let active_hits = kb.active_results();
+        let groups = group_hits_by_file(active_hits, kb.filter);
         let filtered_hit_count: usize = groups.iter().map(|g| g.hits.len()).sum();
         let filtered_doc_count = groups.len();
         let total_doc_count = kb.stats.as_ref().map_or(0, |s| s.indexed_files);
@@ -1115,11 +1132,7 @@ impl Workspace {
                         return;
                     }
                     app.right_panel.kb.filter = filter_val;
-                    if !app.right_panel.kb.search.read(cx).value().trim().is_empty() {
-                        app.submit_kb_search(cx);
-                    } else {
-                        cx.notify();
-                    }
+                    cx.notify();
                 }))
                 .when_some(icon, |el, ic| {
                     el.child(crate::ui::icon(ic).w(px(11.)).h(px(11.)))
@@ -1130,7 +1143,7 @@ impl Workspace {
         let status_text = if kb.searching {
             rp::KB_SEARCHING.get().to_owned()
         } else if has_submitted_search {
-            rp::kb_search_summary(filtered_hit_count, filtered_doc_count, kb.results.len() >= 20)
+            rp::kb_search_summary(filtered_hit_count, filtered_doc_count, active_hits.len() >= 20)
         } else if syncing {
             rp::BADGE_SYNCING.get().to_owned()
         } else {
@@ -1146,25 +1159,23 @@ impl Workspace {
                 div()
                     .flex()
                     .items_center()
-                    .when(has_submitted_search, |row| {
-                        row.p(px(2.))
-                            .rounded(px(7.))
-                            .bg(seg_bg)
-                            .gap_0p5()
-                            .child(chip("kb-filter-all", KbFilter::All, None, rp::KB_FILTER_ALL.get()))
-                            .child(chip(
-                                "kb-filter-notes",
-                                KbFilter::Notes,
-                                Some(IconName::FileText),
-                                rp::KB_FILTER_NOTES.get(),
-                            ))
-                            .child(chip(
-                                "kb-filter-pdf",
-                                KbFilter::Pdf,
-                                Some(IconName::BookOpenText),
-                                rp::KB_FILTER_PDF.get(),
-                            ))
-                    }),
+                    .p(px(2.))
+                    .rounded(px(7.))
+                    .bg(seg_bg)
+                    .gap_0p5()
+                    .child(chip("kb-filter-all", KbFilter::All, None, rp::KB_FILTER_ALL.get()))
+                    .child(chip(
+                        "kb-filter-notes",
+                        KbFilter::Notes,
+                        Some(IconName::FileText),
+                        rp::KB_FILTER_NOTES.get(),
+                    ))
+                    .child(chip(
+                        "kb-filter-pdf",
+                        KbFilter::Pdf,
+                        Some(IconName::BookOpenText),
+                        rp::KB_FILTER_PDF.get(),
+                    )),
             )
             .child(
                 div()

@@ -8,7 +8,7 @@ use crate::{
         DirtyDocument, RagError, SearchRequest,
         client::{EmbeddingClient, RerankClient, reap_idle_servers},
         collect_eligible_paths, ocr::{self, OcrProgressEvent},
-        pipeline::{SearchServices, SyncOptions, search_project, sync_project},
+        pipeline::{SearchServices, SyncOptions, search_kb_snapshots, search_project, sync_project},
         store::{PdfLibraryItem, RagStore, StoreStats},
     },
     tags::Snapshot,
@@ -750,39 +750,18 @@ impl Workspace {
                 text: buffer.text.clone(),
             })
             .collect();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let req = SearchRequest {
-            searches: vec![crate::rag::SubSearch {
-                kind: crate::rag::SubSearchType::Lex,
-                query: query.clone(),
-            }],
-            intent: None,
-            rerank: Some(false),
-            extensions: self.right_panel.kb.filter.extensions(),
-            under_directory: None,
-            limit: 20,
-        };
-
         let task = cx.background_spawn(async move {
-            let mut store = RagStore::open(&db_path, &config.embed_model, config.embed_dim)
-                .map_err(|e| RagError::new("store_error", e))?;
-            let response = search_project(
-                &mut store,
-                &req,
-                &dirty_docs,
-                None,
-                SearchServices {
-                    embed_client: None,
-                    rerank_client: None,
-                    rerank_model: "",
-                },
-                &cancel,
-            )?;
-            let snapshot = store
-                .stats()
-                .ok()
-                .zip(store.pdf_library_items().ok());
-            Ok::<_, RagError>((response, snapshot))
+            let store =
+                RagStore::open_readonly_for_search(&db_path, &config.embed_model, config.embed_dim)
+                    .map_err(|e| RagError::new("store_error", e))?;
+            store
+                .with_read_snapshot(|store| {
+                    let buckets = search_kb_snapshots(store, &query, &dirty_docs, 20)
+                        .map_err(|e| e.message)?;
+                    let meta_snapshot = store.stats().ok().zip(store.pdf_library_items().ok());
+                    Ok((buckets, meta_snapshot))
+                })
+                .map_err(|e| RagError::new("store_error", e))
         });
 
         cx.spawn(async move |this, cx| {
@@ -797,11 +776,11 @@ impl Workspace {
                 }
                 app.right_panel.kb.searching = false;
                 match outcome {
-                    Ok((resp, snapshot)) => {
+                    Ok((buckets, meta_snapshot)) => {
                         let live = app.live_project_paths();
-                        app.right_panel.kb.results = resp.results;
+                        app.right_panel.kb.snapshot = buckets;
                         app.right_panel.kb.search_error = None;
-                        if let Some((stats, items)) = snapshot {
+                        if let Some((stats, items)) = meta_snapshot {
                             app.right_panel.kb.apply_snapshot(stats, items);
                         }
                         app.right_panel.kb.prune_missing_paths(&live);

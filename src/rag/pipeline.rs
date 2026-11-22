@@ -428,24 +428,7 @@ pub fn search_project(
 
     let dirty_paths: HashSet<String> = dirty_docs.iter().map(|d| d.rel_path.clone()).collect();
     let dirty_filter = |candidates: Vec<ScoredChunk>, dirty: bool| -> Vec<Candidate> {
-        candidates
-            .into_iter()
-            .filter(|c| dirty || !dirty_paths.contains(&c.rel_path))
-            .map(|chunk| Candidate {
-                key: format!("db:{}", chunk.chunk_id),
-                docid: chunk.docid,
-                rel_path: chunk.rel_path,
-                kind: chunk.kind,
-                parse_tier: chunk.parse_tier,
-                content_hash: Some(chunk.content_hash),
-                heading_path: chunk.heading_path,
-                line_start: chunk.line_start,
-                line_end: chunk.line_end,
-                page_num: chunk.page_num,
-                chunk_text: chunk.chunk_text,
-                dirty_buffer: dirty,
-            })
-            .collect()
+        chunks_to_candidates(candidates, dirty, &dirty_paths)
     };
 
     let want_lex = !lex_queries.is_empty();
@@ -567,6 +550,80 @@ pub fn search_project(
         pending_vectors: stats.pending_vectors,
         results,
     })
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct KbSearchSnapshots {
+    pub all: Vec<SearchHit>,
+    pub notes: Vec<SearchHit>,
+    pub pdf: Vec<SearchHit>,
+}
+
+/// Runs one lexical KB query under the caller's read snapshot and materializes
+/// `all`, `notes`, and `pdf` hit lists from that single pass.
+pub fn search_kb_snapshots(
+    store: &RagStore,
+    query: &str,
+    dirty_docs: &[DirtyDocument],
+    limit: usize,
+) -> Result<KbSearchSnapshots, RagError> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(KbSearchSnapshots::default());
+    }
+    let limit = limit.clamp(1, 20);
+    let candidate_limit = (limit * 4).clamp(24, 60);
+    let buckets = store
+        .search_fts_kb_buckets(q, candidate_limit)
+        .map_err(|e| RagError::new("store_error", e))?;
+
+    let dirty_paths: HashSet<String> = dirty_docs.iter().map(|d| d.rel_path.clone()).collect();
+    let queries = vec![q.to_owned()];
+    let dirty_hits = search_dirty_buffers(dirty_docs, &queries, None, None, &[]);
+
+    let rank_bucket = |db_hits: Vec<ScoredChunk>, bucket_dirty: Vec<Candidate>| -> Vec<SearchHit> {
+        let mut ranked_lists: Vec<(f64, Vec<Candidate>)> = Vec::new();
+        let db_candidates = chunks_to_candidates(db_hits, false, &dirty_paths);
+        if !db_candidates.is_empty() {
+            ranked_lists.push((2.0, db_candidates));
+        }
+        if !bucket_dirty.is_empty() {
+            ranked_lists.push((2.0, bucket_dirty));
+        }
+        let rrf_ranked = fuse_rrf(&ranked_lists);
+        collapse_and_format(rrf_ranked, &queries, limit)
+    };
+
+    let all = rank_bucket(buckets.all, dirty_hits.clone());
+    let notes = rank_bucket(buckets.notes, dirty_hits);
+    let pdf = rank_bucket(buckets.pdf, Vec::new());
+
+    Ok(KbSearchSnapshots { all, notes, pdf })
+}
+
+fn chunks_to_candidates(
+    candidates: Vec<ScoredChunk>,
+    dirty: bool,
+    dirty_paths: &HashSet<String>,
+) -> Vec<Candidate> {
+    candidates
+        .into_iter()
+        .filter(|c| dirty || !dirty_paths.contains(&c.rel_path))
+        .map(|chunk| Candidate {
+            key: format!("db:{}", chunk.chunk_id),
+            docid: chunk.docid,
+            rel_path: chunk.rel_path,
+            kind: chunk.kind,
+            parse_tier: chunk.parse_tier,
+            content_hash: Some(chunk.content_hash),
+            heading_path: chunk.heading_path,
+            line_start: chunk.line_start,
+            line_end: chunk.line_end,
+            page_num: chunk.page_num,
+            chunk_text: chunk.chunk_text,
+            dirty_buffer: dirty,
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]
