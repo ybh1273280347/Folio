@@ -186,9 +186,13 @@ impl Workspace {
         }
 
         let task = cx.background_spawn(async move {
-            let embed_ready = EmbeddingClient::from_config(&config)
+            let live = EmbeddingClient::from_config(&config)
                 .ok()
                 .is_some_and(|client| client.health_check());
+            let auto_ready = config.auto_manage_server
+                && !config.embed_model_path.trim().is_empty()
+                && std::path::Path::new(config.embed_model_path.trim()).is_file();
+            let embed_ready = live || auto_ready;
             let stats = RagStore::open(&db_path, &config.embed_model, config.embed_dim)
                 .and_then(|store| store.stats())
                 .ok();
@@ -392,6 +396,10 @@ impl Workspace {
                 app.right_panel.kb.searching = false;
                 match outcome {
                     Ok((resp, stats)) => {
+                        let used_vec = resp.degraded_reason.is_none()
+                            && (resp.mode_used.starts_with("hybrid")
+                                || resp.mode_used.starts_with("semantic"));
+                        app.right_panel.kb.embed_ready = Some(used_vec);
                         app.right_panel.kb.results = resp.results;
                         app.right_panel.kb.degraded_reason = resp.degraded_reason;
                         app.right_panel.kb.search_error = None;
@@ -431,6 +439,9 @@ impl Workspace {
         let Some((_, root)) = self.active_rag_root() else {
             return;
         };
+        if self.right_panel.maximized {
+            self.right_panel.maximized = false;
+        }
         let clean = rel_path.strip_suffix("#annotations").unwrap_or(rel_path);
         let abs = root.join(clean.replace('/', "\\"));
         self.open_path_from_ai(&abs, window, cx);

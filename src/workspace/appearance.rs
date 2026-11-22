@@ -145,6 +145,9 @@ impl Workspace {
         } else if previous.background_image_opacity != settings.background_image_opacity {
             self.sync_backdrop_visible(cx);
         }
+        if previous.rag != self.settings.rag {
+            self.refresh_kb_snapshot(cx);
+        }
         self.persist_settings(cx);
         cx.notify();
     }
