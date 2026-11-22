@@ -7,6 +7,7 @@ use crate::rag::store::{PdfLibraryItem, StoreStats};
 use crate::rag::{SearchHit, pipeline::clean_heading_text};
 use gpui_kit::base::Disableable;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -72,6 +73,8 @@ pub(in crate::workspace) struct KbPanelState {
     pub(in crate::workspace) selected_pdfs: BTreeSet<String>,
     pub(in crate::workspace) ocr_progress: HashMap<String, PdfOcrPhase>,
     pub(in crate::workspace) ocr_error: Option<String>,
+    pub(in crate::workspace) pdf_covers: HashMap<String, Option<Arc<RenderImage>>>,
+    pub(in crate::workspace) cover_loading: HashSet<String>,
     pending_search_clear: bool,
     in_flight_search_id: u64,
 }
@@ -119,6 +122,8 @@ impl KbPanelState {
             selected_pdfs: BTreeSet::new(),
             ocr_progress: HashMap::new(),
             ocr_error: None,
+            pdf_covers: HashMap::new(),
+            cover_loading: HashSet::new(),
             pending_search_clear: false,
             in_flight_search_id: 0,
         }
@@ -154,6 +159,8 @@ impl KbPanelState {
         self.selected_pdfs.clear();
         self.ocr_progress.clear();
         self.ocr_error = None;
+        self.pdf_covers.clear();
+        self.cover_loading.clear();
     }
 
     pub(in crate::workspace) fn flush_pending_clear(&mut self, window: &mut Window, cx: &mut App) {
@@ -169,7 +176,9 @@ impl KbPanelState {
         pdf_items: Vec<PdfLibraryItem>,
     ) {
         let live_pdfs: HashSet<&str> = pdf_items.iter().map(|i| i.rel_path.as_str()).collect();
+        let live_hashes: HashSet<&str> = pdf_items.iter().map(|i| i.content_hash.as_str()).collect();
         self.selected_pdfs.retain(|p| live_pdfs.contains(p.as_str()));
+        self.pdf_covers.retain(|h, _| live_hashes.contains(h.as_str()));
         self.pdf_items = pdf_items;
         self.stats = Some(stats);
     }
@@ -376,14 +385,149 @@ fn mix_color(base: u32, tint: u32, weight: f32) -> Rgba {
     }
 }
 
+fn kb_desk_bg(palette: crate::theme::Palette) -> Rgba {
+    if palette.is_dark() {
+        gpui_kit::rgb(palette.background)
+    } else {
+        mix_color(palette.background, palette.border, 0.62)
+    }
+}
+
+fn kb_paper_shadow(is_dark: bool) -> Vec<BoxShadow> {
+    vec![
+        BoxShadow::new(
+            px(0.),
+            px(2.),
+            hsla(0., 0., 0., if is_dark { 0.34 } else { 0.065 }),
+        )
+        .blur_radius(px(8.)),
+        BoxShadow::new(
+            px(0.),
+            px(1.),
+            hsla(0., 0., 0., if is_dark { 0.22 } else { 0.03 }),
+        )
+        .blur_radius(px(2.)),
+    ]
+}
+
+fn render_grid_rows(cards: Vec<AnyElement>, cols: usize, gap_px: f32) -> AnyElement {
+    if cols <= 1 {
+        return div()
+            .flex()
+            .flex_col()
+            .gap(px(gap_px))
+            .children(cards)
+            .into_any_element();
+    }
+    let mut row_els = Vec::new();
+    let mut iter = cards.into_iter().peekable();
+    while iter.peek().is_some() {
+        let mut row = div().flex().items_stretch().gap(px(gap_px));
+        for _ in 0..cols {
+            let cell = iter
+                .next()
+                .unwrap_or_else(|| div().flex_1().min_w_0().into_any_element());
+            row = row.child(cell);
+        }
+        row_els.push(row.into_any_element());
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(gap_px))
+        .children(row_els)
+        .into_any_element()
+}
+
+fn render_pdf_cover_thumb(
+    cover: Option<&Arc<RenderImage>>,
+    w: f32,
+    h: f32,
+    palette: crate::theme::Palette,
+) -> AnyElement {
+    let paper_border = fg_alpha(palette.text, if palette.is_dark() { 0.18 } else { 0.14 });
+    let frame = div()
+        .w(px(w))
+        .h(px(h))
+        .rounded(px(3.5))
+        .border_1()
+        .border_color(paper_border)
+        .bg(gpui_kit::rgb(0xffffff))
+        .overflow_hidden()
+        .flex_shrink_0()
+        .shadow(vec![
+            BoxShadow::new(
+                px(0.),
+                px(1.5),
+                hsla(0., 0., 0., if palette.is_dark() { 0.42 } else { 0.11 }),
+            )
+            .blur_radius(px(4.)),
+        ]);
+
+    if let Some(image) = cover {
+        frame
+            .child(img(image.clone()).size_full().object_fit(ObjectFit::Cover))
+            .into_any_element()
+    } else {
+        let line_color = fg_alpha(0x64748b, 0.22);
+        frame
+            .bg(if palette.is_dark() {
+                gpui_kit::rgb(0x282825)
+            } else {
+                gpui_kit::rgb(0xfaf9f7)
+            })
+            .p(px((w * 0.16).clamp(4., 10.)))
+            .flex()
+            .flex_col()
+            .justify_between()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px((h * 0.06).clamp(2.5, 5.)))
+                    .child(
+                        div()
+                            .h(px(2.5))
+                            .w(relative(0.68))
+                            .rounded_full()
+                            .bg(fg_alpha(palette.accent, 0.42)),
+                    )
+                    .child(div().h(px(2.)).w_full().rounded_full().bg(line_color))
+                    .child(div().h(px(2.)).w(relative(0.84)).rounded_full().bg(line_color))
+                    .child(div().h(px(2.)).w(relative(0.55)).rounded_full().bg(line_color)),
+            )
+            .child(
+                div()
+                    .text_size(px((w * 0.15).clamp(7.5, 10.)))
+                    .font_medium()
+                    .text_color(fg_alpha(palette.muted, 0.65))
+                    .child("PDF"),
+            )
+            .into_any_element()
+    }
+}
+
 impl Workspace {
+    fn kb_panel_width(&self, window: &Window) -> f32 {
+        if self.right_panel.maximized {
+            let sidebar = if self.settings.sidebar_open {
+                self.settings.sidebar_width.clamp(170., 520.)
+            } else {
+                0.0
+            };
+            (f32::from(window.viewport_size().width) - sidebar).max(360.0)
+        } else {
+            self.settings.terminal.panel_width.clamp(280., 1600.)
+        }
+    }
+
     pub(super) fn render_knowledge_base_panel(
         &self,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if self.right_panel.kb.pdf_manager_open && self.projects.directory().is_some() && self.kb_enabled() {
-            return self.render_pdf_manager_panel(cx);
+            return self.render_pdf_manager_panel(window, cx);
         }
         let palette = self.settings.theme.palette;
         let t = KbType::from_ui_font(self.settings.interface_font_size);
@@ -528,6 +672,7 @@ impl Workspace {
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.right_panel.kb.pdf_manager_open = true;
                                     app.refresh_kb_snapshot(cx);
+                                    app.ensure_pdf_covers_loaded(cx);
                                     cx.notify();
                                 }))
                                 .child(pdf_mgr_icon)
@@ -655,11 +800,7 @@ impl Workspace {
     ) -> AnyElement {
         let palette = self.settings.theme.palette;
         let t = KbType::from_ui_font(self.settings.interface_font_size);
-        let canvas_bg = if palette.is_dark() {
-            gpui_kit::rgb(palette.background)
-        } else {
-            mix_color(palette.surface, palette.hover, 0.35)
-        };
+        let canvas_bg = kb_desk_bg(palette);
         let icon_el = if spin {
             crate::ui::icon(icon)
                 .w(px(18.))
@@ -828,15 +969,13 @@ impl Workspace {
                 .text_size(px(t.meta))
                 .cursor_pointer()
                 .when(active, |el| {
-                    el.bg(gpui_kit::rgb(palette.surface))
-                        .border_1()
-                        .border_color(gpui_kit::rgb(palette.border))
+                    el.bg(fg_alpha(palette.accent, 0.13))
                         .text_color(gpui_kit::rgb(palette.accent))
                         .font_medium()
                 })
                 .when(!active, |el| {
                     el.text_color(gpui_kit::rgb(palette.muted))
-                        .hover(move |s| s.text_color(gpui_kit::rgb(palette.text)))
+                        .hover(move |s| s.bg(hover_bg).text_color(gpui_kit::rgb(palette.text)))
                 })
                 .on_click(cx.listener(move |app, _, _, cx| {
                     app.right_panel.kb.filter = filter_val;
@@ -1047,18 +1186,23 @@ impl Workspace {
             );
         }
 
-        let two_col = self.right_panel.maximized || self.settings.terminal.panel_width >= 700.0;
-        let palette = self.settings.theme.palette;
-        let canvas_bg = if palette.is_dark() {
-            gpui_kit::rgb(palette.background)
+        let panel_w = self.kb_panel_width(window);
+        let cols = if panel_w >= 860.0 {
+            3
+        } else if panel_w >= 560.0 {
+            2
         } else {
-            mix_color(palette.surface, palette.hover, 0.35)
+            1
         };
-        let card_hover = mix_color(palette.surface, palette.hover, 0.65);
-        let divider_color = fg_alpha(palette.border, 0.72);
-        let badge_bg = fg_alpha(palette.text, 0.06);
-        let hi_bg = fg_alpha(palette.accent, 0.18).into();
+        let palette = self.settings.theme.palette;
+        let canvas_bg = kb_desk_bg(palette);
+        let card_hover = mix_color(palette.surface, palette.hover, 0.55);
+        let head_bg = mix_color(palette.surface, palette.background, 0.48);
+        let divider_color = fg_alpha(palette.border, 0.65);
+        let badge_bg = fg_alpha(palette.text, 0.05);
+        let hi_bg = fg_alpha(palette.accent, 0.16).into();
         let hi_fg = gpui_kit::rgb(palette.text).into();
+        let card_shadow = kb_paper_shadow(palette.is_dark());
 
         let snippet_max_h = (t.body * 1.5 * 3.0).ceil();
 
@@ -1077,12 +1221,20 @@ impl Workspace {
                 let visible_limit = if expanded { total_hits } else { 2 };
                 let extra_count = total_hits.saturating_sub(visible_limit);
                 let first_hit = group.hits[0];
+                let is_tex = group.clean_path.to_ascii_lowercase().ends_with(".tex");
                 let file_icon = if group.is_pdf {
                     IconName::BookOpenText
                 } else if first_hit.kind == "annotation" {
                     IconName::NotebookPen
                 } else {
                     IconName::FileText
+                };
+                let spine_hex = if group.is_pdf {
+                    if palette.is_dark() { palette.accent } else { 0xb86443 }
+                } else if is_tex {
+                    if palette.is_dark() { 0x7e93b8 } else { 0x566b8f }
+                } else {
+                    palette.accent
                 };
 
                 let header_open_path = first_hit.path.clone();
@@ -1091,21 +1243,18 @@ impl Workspace {
                 let header_heading = first_hit.heading.clone();
                 let header_snippet = first_hit.snippet.clone();
 
-                let mut card = div()
-                    .id(SharedString::from(format!("kb-book-{group_idx}")))
+                let mut body_col = div()
                     .flex_1()
                     .min_w_0()
-                    .rounded(px(9.))
-                    .border_1()
-                    .border_color(gpui_kit::rgb(palette.border))
-                    .bg(gpui_kit::rgb(palette.surface))
-                    .overflow_hidden()
                     .flex()
                     .flex_col()
                     .child(
                         div()
                             .id(SharedString::from(format!("kb-book-head-{group_idx}")))
                             .cursor_pointer()
+                            .bg(head_bg)
+                            .border_b_1()
+                            .border_color(divider_color)
                             .px_3()
                             .py_2()
                             .hover(move |s| s.bg(card_hover))
@@ -1132,24 +1281,11 @@ impl Workspace {
                                     .min_w_0()
                                     .flex_1()
                                     .child(
-                                        div()
-                                            .size(px(26.))
-                                            .rounded(px(6.))
+                                        crate::ui::icon(file_icon)
+                                            .w(px(14.))
+                                            .h(px(14.))
                                             .flex_shrink_0()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .bg(if group.is_pdf {
-                                                fg_alpha(palette.accent, 0.11)
-                                            } else {
-                                                fg_alpha(palette.text, 0.05)
-                                            })
-                                            .text_color(if group.is_pdf {
-                                                gpui_kit::rgb(palette.accent)
-                                            } else {
-                                                gpui_kit::rgb(palette.muted)
-                                            })
-                                            .child(crate::ui::icon(file_icon).w(px(13.)).h(px(13.))),
+                                            .text_color(gpui_kit::rgb(spine_hex)),
                                     )
                                     .child(
                                         div()
@@ -1180,20 +1316,12 @@ impl Workspace {
                                 div()
                                     .flex()
                                     .items_center()
-                                    .gap_1()
+                                    .gap_1p5()
                                     .flex_shrink_0()
                                     .when(group.is_accurate, |row| {
                                         row.child(
                                             div()
                                                 .id(SharedString::from(format!("kb-acc-{group_idx}")))
-                                                .h(px(18.))
-                                                .px_1p5()
-                                                .rounded(px(4.))
-                                                .bg(fg_alpha(palette.accent, 0.12))
-                                                .flex()
-                                                .items_center()
-                                                .gap_0p5()
-                                                .text_size(px(t.micro))
                                                 .text_color(gpui_kit::rgb(palette.accent))
                                                 .tooltip(|window, cx| {
                                                     gpui_kit::component::tooltip::Tooltip::new(
@@ -1203,27 +1331,22 @@ impl Workspace {
                                                 })
                                                 .child(
                                                     crate::ui::icon(IconName::Sparkles)
-                                                        .w(px(10.))
-                                                        .h(px(10.)),
+                                                        .w(px(11.))
+                                                        .h(px(11.)),
                                                 ),
                                         )
                                     })
                                     .child(
                                         div()
-                                            .h(px(18.))
-                                            .px_1p5()
-                                            .rounded(px(4.))
-                                            .bg(badge_bg)
-                                            .flex()
-                                            .items_center()
                                             .text_size(px(t.micro))
-                                            .text_color(gpui_kit::rgb(palette.muted))
+                                            .text_color(fg_alpha(palette.muted, 0.85))
                                             .child(rp::kb_hits_pill(total_hits)),
                                     ),
                             ),
                     )
                     .child(
                         div()
+                            .flex_1()
                             .flex()
                             .flex_col()
                             .children(group.hits.iter().take(visible_limit).enumerate().map(
@@ -1260,8 +1383,9 @@ impl Workspace {
                                         )))
                                         .px_3()
                                         .py_2()
-                                        .border_t_1()
-                                        .border_color(divider_color)
+                                        .when(hit_idx > 0, |row| {
+                                            row.border_t_1().border_color(divider_color)
+                                        })
                                         .cursor_pointer()
                                         .hover(move |s| s.bg(card_hover))
                                         .on_click(cx.listener(move |app, _, window, cx| {
@@ -1295,7 +1419,10 @@ impl Workspace {
                                                                 .min_w_0()
                                                                 .text_size(px(t.meta))
                                                                 .font_medium()
-                                                                .text_color(gpui_kit::rgb(palette.muted))
+                                                                .text_color(fg_alpha(
+                                                                    palette.text,
+                                                                    0.72,
+                                                                ))
                                                                 .text_ellipsis()
                                                                 .children(subtitle),
                                                         )
@@ -1303,14 +1430,13 @@ impl Workspace {
                                                             div()
                                                                 .flex()
                                                                 .items_center()
-                                                                .gap_1()
+                                                                .gap_1p5()
                                                                 .flex_shrink_0()
                                                                 .when_some(extra_tag, |r, tag| {
                                                                     r.child(
                                                                         div()
-                                                                            .px_1p5()
-                                                                            .py(px(1.))
-                                                                            .rounded(px(4.))
+                                                                            .px_1()
+                                                                            .rounded(px(3.))
                                                                             .bg(badge_bg)
                                                                             .text_size(px(t.micro))
                                                                             .text_color(gpui_kit::rgb(palette.muted))
@@ -1320,14 +1446,10 @@ impl Workspace {
                                                                 .when_some(loc, |r, loc| {
                                                                     r.child(
                                                                         div()
-                                                                            .px_1p5()
-                                                                            .py(px(1.))
-                                                                            .rounded(px(4.))
-                                                                            .bg(badge_bg)
                                                                             .text_size(px(t.micro))
                                                                             .text_color(fg_alpha(
-                                                                                palette.text,
-                                                                                0.72,
+                                                                                palette.muted,
+                                                                                0.82,
                                                                             ))
                                                                             .child(loc),
                                                                     )
@@ -1355,14 +1477,15 @@ impl Workspace {
                     } else {
                         rp::kb_more_hits(extra_count)
                     };
-                    card = card.child(
+                    body_col = body_col.child(
                         div()
                             .id(SharedString::from(format!("kb-book-more-{group_idx}")))
+                            .mt_auto()
                             .px_3()
                             .py_1p5()
                             .border_t_1()
                             .border_color(divider_color)
-                            .bg(fg_alpha(palette.text, 0.02))
+                            .bg(head_bg)
                             .flex()
                             .items_center()
                             .justify_center()
@@ -1394,31 +1517,25 @@ impl Workspace {
                     );
                 }
 
-                card.into_any_element()
+                div()
+                    .id(SharedString::from(format!("kb-book-{group_idx}")))
+                    .flex_1()
+                    .min_w_0()
+                    .when(cols > 1 && !expanded, |el| el.h(px(236.)))
+                    .rounded(px(9.))
+                    .border_1()
+                    .border_color(gpui_kit::rgb(palette.border))
+                    .bg(gpui_kit::rgb(palette.surface))
+                    .shadow(card_shadow.clone())
+                    .overflow_hidden()
+                    .flex()
+                    .child(div().w(px(3.5)).flex_shrink_0().bg(gpui_kit::rgb(spine_hex)))
+                    .child(body_col)
+                    .into_any_element()
             })
             .collect();
 
-        let rows: AnyElement = if two_col {
-            let mut row_els: Vec<AnyElement> = Vec::new();
-            let mut iter = cards.into_iter();
-            while let Some(first) = iter.next() {
-                let second = iter
-                    .next()
-                    .unwrap_or_else(|| div().flex_1().min_w_0().into_any_element());
-                row_els.push(
-                    div()
-                        .flex()
-                        .items_stretch()
-                        .gap_2p5()
-                        .child(first)
-                        .child(second)
-                        .into_any_element(),
-                );
-            }
-            div().flex().flex_col().gap_2p5().children(row_els).into_any_element()
-        } else {
-            div().flex().flex_col().gap_2p5().children(cards).into_any_element()
-        };
+        let rows = render_grid_rows(cards, cols, 10.0);
 
         div()
             .id("kb-results-scroll")
@@ -1432,21 +1549,33 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_pdf_manager_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_pdf_manager_panel(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let palette = self.settings.theme.palette;
         let t = KbType::from_ui_font(self.settings.interface_font_size);
+        let panel_w = self.kb_panel_width(window);
+        let pdf_cols = if panel_w >= 1080.0 {
+            4
+        } else if panel_w >= 780.0 {
+            3
+        } else if panel_w >= 520.0 {
+            2
+        } else {
+            1
+        };
         let chrome_bg = if palette.is_dark() {
             mix_color(palette.background, palette.surface, 0.35)
         } else {
             mix_color(palette.surface, palette.hover, 0.55)
         };
-        let canvas_bg = if palette.is_dark() {
-            gpui_kit::rgb(palette.background)
-        } else {
-            mix_color(palette.surface, palette.hover, 0.35)
-        };
+        let canvas_bg = kb_desk_bg(palette);
         let hover_bg = gpui_kit::rgb(palette.hover);
-        let row_hover = mix_color(palette.surface, palette.hover, 0.65);
+        let row_hover = mix_color(palette.surface, palette.hover, 0.55);
+        let cover_stage_bg = if palette.is_dark() {
+            mix_color(palette.background, palette.surface, 0.45)
+        } else {
+            mix_color(palette.background, palette.border, 0.38)
+        };
+        let card_shadow = kb_paper_shadow(palette.is_dark());
         let seg_bg = fg_alpha(palette.text, 0.045);
         let kb = &self.right_panel.kb;
         let syncing = self.kb_syncing();
@@ -1627,15 +1756,13 @@ impl Workspace {
                 .text_size(px(t.meta))
                 .cursor_pointer()
                 .when(active, |el| {
-                    el.bg(gpui_kit::rgb(palette.surface))
-                        .border_1()
-                        .border_color(gpui_kit::rgb(palette.border))
+                    el.bg(fg_alpha(palette.accent, 0.13))
                         .text_color(gpui_kit::rgb(palette.accent))
                         .font_medium()
                 })
                 .when(!active, |el| {
                     el.text_color(gpui_kit::rgb(palette.muted))
-                        .hover(move |s| s.text_color(gpui_kit::rgb(palette.text)))
+                        .hover(move |s| s.bg(hover_bg).text_color(gpui_kit::rgb(palette.text)))
                 })
                 .on_click(cx.listener(move |app, _, _, cx| {
                     app.right_panel.kb.pdf_filter = val;
@@ -1861,20 +1988,13 @@ impl Workspace {
                 false,
             )
         } else {
-            div()
-                .id("kb-pdf-mgr-scroll")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .bg(canvas_bg)
-                .p_3()
-                .pb_4()
-                .flex()
-                .flex_col()
-                .gap_1p5()
-                .children(filtered.into_iter().enumerate().map(|(idx, item)| {
+            let cards: Vec<AnyElement> = filtered
+                .into_iter()
+                .enumerate()
+                .map(|(idx, item)| {
                     let rel_path = item.rel_path.clone();
                     let content_hash = item.content_hash.clone();
+                    let cover_img = kb.pdf_covers.get(&content_hash).and_then(|opt| opt.as_ref());
                     let checked = kb.selected_pdfs.contains(&rel_path);
                     let accurate = is_accurate(item);
                     let hybrid = item.parse_tier == "hybrid";
@@ -1925,395 +2045,453 @@ impl Workspace {
                         meta_parts.join(" · ")
                     };
 
-                    let (badge_bg_color, badge_fg_color, badge_icon): (Rgba, Rgba, AnyElement) =
-                        if phase.is_some() {
-                        (
-                            fg_alpha(palette.accent, 0.14),
-                            gpui_kit::rgb(palette.accent).into(),
-                            crate::ui::icon(IconName::LoaderCircle)
-                                .w(px(14.))
-                                .h(px(14.))
-                                .with_animation(
-                                    SharedString::from(format!("pdf-badge-spin-{idx}")),
-                                    Animation::new(Duration::from_millis(850)).repeat(),
-                                    |el, t| el.rotate(gpui::radians(t * std::f32::consts::TAU)),
-                                )
-                                .into_any_element(),
-                        )
-                    } else if has_error {
-                        (
-                            fg_alpha(palette.danger, 0.12),
-                            gpui_kit::rgb(palette.danger).into(),
-                            crate::ui::icon(IconName::ShieldAlert)
-                                .w(px(14.))
-                                .h(px(14.))
-                                .into_any_element(),
-                        )
-                    } else if !item.is_complete {
-                        (
-                            fg_alpha(0xd97706, 0.12),
-                            gpui_kit::rgb(0xd97706).into(),
-                            crate::ui::icon(IconName::BookOpenText)
-                                .w(px(14.))
-                                .h(px(14.))
-                                .into_any_element(),
-                        )
-                    } else if accurate || hybrid {
-                        (
-                            fg_alpha(palette.accent, 0.12),
-                            gpui_kit::rgb(palette.accent).into(),
-                            crate::ui::icon(IconName::Sparkles)
-                                .w(px(14.))
-                                .h(px(14.))
-                                .into_any_element(),
-                        )
-                    } else {
-                        (
-                            fg_alpha(palette.text, 0.06),
-                            gpui_kit::rgb(palette.muted).into(),
-                            crate::ui::icon(IconName::Zap)
-                                .w(px(14.))
-                                .h(px(14.))
-                                .into_any_element(),
-                        )
-                    };
-
-                    let status_slot: AnyElement = if phase.is_some() {
-                        div()
-                            .id(SharedString::from(format!("pdf-row-cancel-{idx}")))
-                            .size(px(22.))
-                            .rounded(px(5.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .flex_shrink_0()
-                            .cursor_pointer()
-                            .text_color(gpui_kit::rgb(palette.muted))
-                            .hover(move |s| {
-                                s.bg(mix_color(palette.surface, palette.danger, 0.12))
-                                    .text_color(gpui_kit::rgb(palette.danger))
-                            })
-                            .tooltip(|window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(rp::KB_CANCEL_BTN.get())
-                                    .build(window, cx)
-                            })
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                cx.stop_propagation();
-                                app.cancel_pdf_ocr_item(&cancel_path, cx);
-                            }))
-                            .child(crate::ui::icon(IconName::Close).w(px(12.)).h(px(12.)))
-                            .into_any_element()
-                    } else if has_error {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .flex_shrink_0()
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("pdf-row-err-{idx}")))
-                                    .h(px(20.))
-                                    .px_1p5()
-                                    .rounded(px(4.))
-                                    .bg(fg_alpha(palette.danger, 0.10))
-                                    .flex()
-                                    .items_center()
-                                    .text_size(px(t.micro))
-                                    .font_medium()
-                                    .text_color(gpui_kit::rgb(palette.danger))
-                                    .tooltip(move |window, cx| {
-                                        gpui_kit::component::tooltip::Tooltip::new(err_tip.clone())
-                                            .build(window, cx)
-                                    })
-                                    .child(rp::KB_FAILED_BADGE.get()),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("pdf-row-retry-{idx}")))
-                                    .size(px(22.))
-                                    .rounded(px(5.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor_pointer()
-                                    .text_color(gpui_kit::rgb(palette.muted))
-                                    .hover(move |s| {
-                                        s.bg(hover_bg).text_color(gpui_kit::rgb(palette.accent))
-                                    })
-                                    .tooltip(|window, cx| {
-                                        gpui_kit::component::tooltip::Tooltip::new(rp::KB_RETRY_BTN.get())
-                                            .build(window, cx)
-                                    })
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        cx.stop_propagation();
-                                        app.run_pdf_ocr_batch(vec![retry_path.clone()], true, cx);
-                                    }))
-                                    .child(crate::ui::icon(IconName::RotateCcw).w(px(12.)).h(px(12.))),
-                            )
-                            .into_any_element()
-                    } else if !item.is_complete {
-                        let missing_label = if item.missing_pages > 0 {
-                            rp::kb_missing_pages_badge(item.missing_pages)
-                        } else {
-                            rp::KB_NEEDS_OCR_BADGE.get().to_owned()
-                        };
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .flex_shrink_0()
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("pdf-row-missing-{idx}")))
-                                    .h(px(20.))
-                                    .px_1p5()
-                                    .rounded(px(4.))
-                                    .bg(fg_alpha(0xd97706, 0.12))
-                                    .flex()
-                                    .items_center()
-                                    .text_size(px(t.micro))
-                                    .font_medium()
-                                    .text_color(gpui_kit::rgb(0xd97706))
-                                    .child(missing_label),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("pdf-row-fill-{idx}")))
-                                    .size(px(22.))
-                                    .rounded(px(5.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor_pointer()
-                                    .text_color(gpui_kit::rgb(palette.muted))
-                                    .hover(move |s| {
-                                        s.bg(hover_bg).text_color(gpui_kit::rgb(palette.accent))
-                                    })
-                                    .tooltip(|window, cx| {
-                                        gpui_kit::component::tooltip::Tooltip::new(rp::KB_ONLY_OCR_BTN.get())
-                                            .build(window, cx)
-                                    })
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        cx.stop_propagation();
-                                        app.run_pdf_ocr_batch(vec![retry_path.clone()], true, cx);
-                                    }))
-                                    .child(crate::ui::icon(IconName::Sparkles).w(px(12.)).h(px(12.))),
-                            )
-                            .into_any_element()
-                    } else {
-                        let (tier_label, tier_bg, tier_fg): (&str, Rgba, Rgba) = if accurate {
-                            (
-                                rp::KB_ACCURATE_BADGE.get(),
-                                fg_alpha(palette.accent, 0.12),
-                                gpui_kit::rgb(palette.accent).into(),
-                            )
-                        } else if hybrid {
-                            (
-                                rp::KB_HYBRID_BADGE.get(),
-                                fg_alpha(palette.accent, 0.10),
-                                gpui_kit::rgb(palette.accent).into(),
-                            )
-                        } else {
-                            (
-                                rp::KB_FAST_BADGE.get(),
-                                fg_alpha(palette.text, 0.06),
-                                gpui_kit::rgb(palette.muted).into(),
-                            )
-                        };
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .flex_shrink_0()
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("pdf-row-export-{idx}")))
-                                    .size(px(22.))
-                                    .rounded(px(5.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor_pointer()
-                                    .text_color(gpui_kit::rgb(palette.muted))
-                                    .hover(move |s| {
-                                        s.bg(hover_bg).text_color(gpui_kit::rgb(palette.text))
-                                    })
-                                    .tooltip(move |window, cx| {
-                                        gpui_kit::component::tooltip::Tooltip::new(
-                                            rp::KB_EXPORT_MD_BTN.get(),
-                                        )
-                                        .build(window, cx)
-                                    })
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        cx.stop_propagation();
-                                        app.export_pdf_markdown_item(&export_path, &export_hash, cx);
-                                    }))
-                                    .child(
-                                        crate::ui::icon(IconName::FileDown)
-                                            .w(px(12.))
-                                            .h(px(12.)),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .h(px(20.))
-                                    .px_1p5()
-                                    .rounded(px(4.))
-                                    .bg(tier_bg)
-                                    .flex()
-                                    .items_center()
-                                    .text_size(px(t.micro))
-                                    .font_medium()
-                                    .text_color(tier_fg)
-                                    .child(tier_label.to_owned()),
-                            )
-                            .into_any_element()
-                    };
-
                     let row_bg = if checked {
                         mix_color(palette.surface, palette.accent, 0.08)
                     } else {
                         gpui_kit::rgb(palette.surface).into()
                     };
                     let row_border = if checked {
-                        fg_alpha(palette.accent, 0.45)
+                        fg_alpha(palette.accent, 0.48)
                     } else {
                         gpui_kit::rgb(palette.border).into()
                     };
 
-                    div()
-                        .id(SharedString::from(format!("pdf-mgr-row-{idx}")))
-                        .rounded(px(8.))
+                    let checkbox_el = div()
+                        .id(SharedString::from(format!("pdf-row-check-{idx}")))
+                        .size(px(14.))
+                        .rounded(px(3.5))
                         .border_1()
-                        .border_color(row_border)
-                        .bg(row_bg)
-                        .overflow_hidden()
+                        .border_color(gpui_kit::rgb(if checked {
+                            palette.accent
+                        } else {
+                            palette.border
+                        }))
+                        .bg(gpui_kit::rgb(if checked {
+                            palette.accent
+                        } else {
+                            palette.surface
+                        }))
                         .flex()
-                        .flex_col()
-                        .hover(move |s| {
-                            if checked {
-                                s.bg(mix_color(palette.surface, palette.accent, 0.13))
-                            } else {
-                                s.bg(row_hover)
+                        .items_center()
+                        .justify_center()
+                        .flex_shrink_0()
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            cx.stop_propagation();
+                            if !app.right_panel.kb.selected_pdfs.remove(&toggle_path) {
+                                app.right_panel.kb.selected_pdfs.insert(toggle_path.clone());
                             }
-                        })
-                        .child(
+                            cx.notify();
+                        }))
+                        .when(checked, |b| {
+                            b.child(
+                                crate::ui::icon(IconName::Check)
+                                    .w(px(9.))
+                                    .h(px(9.))
+                                    .text_color(gpui_kit::rgb(palette.surface)),
+                            )
+                        });
+
+                    let (tier_label, tier_color): (String, Rgba) = if phase.is_some() {
+                        ("OCR…".to_owned(), gpui_kit::rgb(palette.accent).into())
+                    } else if has_error {
+                        (
+                            rp::KB_FAILED_BADGE.get().to_owned(),
+                            gpui_kit::rgb(palette.danger).into(),
+                        )
+                    } else if !item.is_complete {
+                        let lbl = if item.missing_pages > 0 {
+                            rp::kb_missing_pages_badge(item.missing_pages)
+                        } else {
+                            rp::KB_NEEDS_OCR_BADGE.get().to_owned()
+                        };
+                        (lbl, gpui_kit::rgb(0xc26d18).into())
+                    } else if accurate {
+                        (
+                            rp::KB_ACCURATE_BADGE.get().to_owned(),
+                            gpui_kit::rgb(palette.accent).into(),
+                        )
+                    } else if hybrid {
+                        (
+                            rp::KB_HYBRID_BADGE.get().to_owned(),
+                            gpui_kit::rgb(palette.accent).into(),
+                        )
+                    } else {
+                        (
+                            rp::KB_FAST_BADGE.get().to_owned(),
+                            gpui_kit::rgb(palette.muted).into(),
+                        )
+                    };
+
+                    let action_btn: Option<AnyElement> = if phase.is_some() {
+                        Some(
                             div()
-                                .px_2p5()
-                                .py_2()
+                                .id(SharedString::from(format!("pdf-row-cancel-{idx}")))
+                                .size(px(22.))
+                                .rounded(px(5.))
                                 .flex()
                                 .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!("pdf-row-check-{idx}")))
-                                        .size(px(14.))
-                                        .rounded(px(3.5))
-                                        .border_1()
-                                        .border_color(gpui_kit::rgb(if checked {
-                                            palette.accent
-                                        } else {
-                                            palette.border
-                                        }))
-                                        .when(checked, |b| b.bg(gpui_kit::rgb(palette.accent)))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .flex_shrink_0()
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(move |app, _, _, cx| {
-                                            cx.stop_propagation();
-                                            if !app.right_panel.kb.selected_pdfs.remove(&toggle_path) {
-                                                app.right_panel.kb.selected_pdfs.insert(toggle_path.clone());
-                                            }
-                                            cx.notify();
-                                        }))
-                                        .when(checked, |b| {
-                                            b.child(
-                                                crate::ui::icon(IconName::Check)
-                                                    .w(px(9.))
-                                                    .h(px(9.))
-                                                    .text_color(gpui_kit::rgb(palette.surface)),
-                                            )
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .size(px(28.))
-                                        .rounded(px(6.))
-                                        .flex_shrink_0()
-                                        .bg(badge_bg_color)
-                                        .text_color(badge_fg_color)
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .child(badge_icon),
-                                )
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!("pdf-row-open-{idx}")))
-                                        .flex_1()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(1.))
-                                        .cursor_pointer()
-                                        .tooltip(move |window, cx| {
-                                            gpui_kit::component::tooltip::Tooltip::new(tooltip_path.clone())
-                                                .build(window, cx)
-                                        })
-                                        .on_click(cx.listener(move |app, _, window, cx| {
-                                            app.open_kb_result(
-                                                &open_path,
-                                                None,
-                                                Some(1),
-                                                None,
-                                                None,
-                                                window,
-                                                cx,
-                                            );
-                                        }))
-                                        .child(
-                                            div()
-                                                .text_size(px(t.body))
-                                                .font_medium()
-                                                .text_color(gpui_kit::rgb(palette.text))
-                                                .text_ellipsis()
-                                                .child(stem),
-                                        )
-                                        .when(!subtitle_text.is_empty(), |col| {
-                                            col.child(
-                                                div()
-                                                    .text_size(px(t.micro))
-                                                    .text_color(if has_error {
-                                                        gpui_kit::rgb(palette.danger)
-                                                    } else if phase.is_some() {
-                                                        gpui_kit::rgb(palette.accent)
-                                                    } else {
-                                                        gpui_kit::rgb(palette.muted)
-                                                    })
-                                                    .text_ellipsis()
-                                                    .child(subtitle_text),
-                                            )
-                                        }),
-                                )
-                                .child(status_slot),
+                                .justify_center()
+                                .flex_shrink_0()
+                                .cursor_pointer()
+                                .text_color(gpui_kit::rgb(palette.muted))
+                                .hover(move |s| {
+                                    s.bg(mix_color(palette.surface, palette.danger, 0.12))
+                                        .text_color(gpui_kit::rgb(palette.danger))
+                                })
+                                .tooltip(|window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(rp::KB_CANCEL_BTN.get())
+                                        .build(window, cx)
+                                })
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    cx.stop_propagation();
+                                    app.cancel_pdf_ocr_item(&cancel_path, cx);
+                                }))
+                                .child(crate::ui::icon(IconName::Close).w(px(12.)).h(px(12.)))
+                                .into_any_element(),
                         )
-                        .when(phase.is_some(), |card| {
-                            card.child(
+                    } else if has_error || !item.is_complete {
+                        let icon_name = if has_error {
+                            IconName::RotateCcw
+                        } else {
+                            IconName::Sparkles
+                        };
+                        let tip = if has_error {
+                            rp::KB_RETRY_BTN.get()
+                        } else {
+                            rp::KB_ONLY_OCR_BTN.get()
+                        };
+                        Some(
+                            div()
+                                .id(SharedString::from(format!("pdf-row-act-{idx}")))
+                                .size(px(22.))
+                                .rounded(px(5.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .flex_shrink_0()
+                                .cursor_pointer()
+                                .text_color(gpui_kit::rgb(palette.muted))
+                                .hover(move |s| {
+                                    s.bg(hover_bg).text_color(gpui_kit::rgb(palette.accent))
+                                })
+                                .tooltip(move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
+                                })
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    cx.stop_propagation();
+                                    app.run_pdf_ocr_batch(vec![retry_path.clone()], true, cx);
+                                }))
+                                .child(crate::ui::icon(icon_name).w(px(12.)).h(px(12.)))
+                                .into_any_element(),
+                        )
+                    } else if item.is_complete {
+                        Some(
+                            div()
+                                .id(SharedString::from(format!("pdf-row-export-{idx}")))
+                                .size(px(22.))
+                                .rounded(px(5.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .flex_shrink_0()
+                                .cursor_pointer()
+                                .text_color(gpui_kit::rgb(palette.muted))
+                                .hover(move |s| {
+                                    s.bg(hover_bg).text_color(gpui_kit::rgb(palette.text))
+                                })
+                                .tooltip(move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(
+                                        rp::KB_EXPORT_MD_BTN.get(),
+                                    )
+                                    .build(window, cx)
+                                })
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    cx.stop_propagation();
+                                    app.export_pdf_markdown_item(&export_path, &export_hash, cx);
+                                }))
+                                .child(crate::ui::icon(IconName::FileDown).w(px(12.)).h(px(12.)))
+                                .into_any_element(),
+                        )
+                    } else {
+                        None
+                    };
+
+                    if pdf_cols == 1 {
+                        div()
+                            .id(SharedString::from(format!("pdf-mgr-row-{idx}")))
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(row_border)
+                            .bg(row_bg)
+                            .shadow(card_shadow.clone())
+                            .overflow_hidden()
+                            .flex()
+                            .flex_col()
+                            .hover(move |s| {
+                                if checked {
+                                    s.bg(mix_color(palette.surface, palette.accent, 0.13))
+                                } else {
+                                    s.bg(row_hover)
+                                }
+                            })
+                            .child(
                                 div()
-                                    .w_full()
-                                    .h(px(2.5))
-                                    .bg(fg_alpha(palette.text, 0.08))
+                                    .px_2p5()
+                                    .py_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2p5()
+                                    .child(checkbox_el)
+                                    .child(render_pdf_cover_thumb(cover_img, 36.0, 48.0, palette))
                                     .child(
                                         div()
-                                            .h_full()
-                                            .w(relative(progress_ratio))
-                                            .bg(gpui_kit::rgb(palette.accent)),
+                                            .id(SharedString::from(format!("pdf-row-open-{idx}")))
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.))
+                                            .cursor_pointer()
+                                            .tooltip(move |window, cx| {
+                                                gpui_kit::component::tooltip::Tooltip::new(
+                                                    tooltip_path.clone(),
+                                                )
+                                                .build(window, cx)
+                                            })
+                                            .on_click(cx.listener(move |app, _, window, cx| {
+                                                app.open_kb_result(
+                                                    &open_path,
+                                                    None,
+                                                    Some(1),
+                                                    None,
+                                                    None,
+                                                    window,
+                                                    cx,
+                                                );
+                                            }))
+                                            .child(
+                                                div()
+                                                    .text_size(px(t.body))
+                                                    .font_medium()
+                                                    .text_color(gpui_kit::rgb(palette.text))
+                                                    .text_ellipsis()
+                                                    .child(stem),
+                                            )
+                                            .when(!subtitle_text.is_empty(), |col| {
+                                                col.child(
+                                                    div()
+                                                        .text_size(px(t.micro))
+                                                        .text_color(if has_error {
+                                                            gpui_kit::rgb(palette.danger)
+                                                        } else if phase.is_some() {
+                                                            gpui_kit::rgb(palette.accent)
+                                                        } else {
+                                                            gpui_kit::rgb(palette.muted)
+                                                        })
+                                                        .text_ellipsis()
+                                                        .child(subtitle_text),
+                                                )
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .flex_shrink_0()
+                                            .children(action_btn)
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!(
+                                                        "pdf-row-tier-{idx}"
+                                                    )))
+                                                    .text_size(px(t.micro))
+                                                    .font_medium()
+                                                    .text_color(tier_color)
+                                                    .when(has_error, |el| {
+                                                        let tip = err_tip.clone();
+                                                        el.tooltip(move |window, cx| {
+                                                            gpui_kit::component::tooltip::Tooltip::new(
+                                                                tip.clone(),
+                                                            )
+                                                            .build(window, cx)
+                                                        })
+                                                    })
+                                                    .child(tier_label),
+                                            ),
                                     ),
                             )
-                        })
-                }))
+                            .when(phase.is_some(), |card| {
+                                card.child(
+                                    div()
+                                        .w_full()
+                                        .h(px(2.5))
+                                        .bg(fg_alpha(palette.text, 0.08))
+                                        .child(
+                                            div()
+                                                .h_full()
+                                                .w(relative(progress_ratio))
+                                                .bg(gpui_kit::rgb(palette.accent)),
+                                        ),
+                                )
+                            })
+                            .into_any_element()
+                    } else {
+                        div()
+                            .id(SharedString::from(format!("pdf-mgr-row-{idx}")))
+                            .flex_1()
+                            .min_w_0()
+                            .rounded(px(9.))
+                            .border_1()
+                            .border_color(row_border)
+                            .bg(row_bg)
+                            .shadow(card_shadow.clone())
+                            .overflow_hidden()
+                            .flex()
+                            .flex_col()
+                            .hover(move |s| {
+                                if checked {
+                                    s.bg(mix_color(palette.surface, palette.accent, 0.13))
+                                } else {
+                                    s.bg(row_hover)
+                                }
+                            })
+                            .child(
+                                div()
+                                    .relative()
+                                    .h(px(144.))
+                                    .w_full()
+                                    .bg(cover_stage_bg)
+                                    .border_b_1()
+                                    .border_color(gpui_kit::rgb(palette.border))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("pdf-row-open-{idx}")))
+                                            .cursor_pointer()
+                                            .tooltip(move |window, cx| {
+                                                gpui_kit::component::tooltip::Tooltip::new(
+                                                    tooltip_path.clone(),
+                                                )
+                                                .build(window, cx)
+                                            })
+                                            .on_click(cx.listener(move |app, _, window, cx| {
+                                                app.open_kb_result(
+                                                    &open_path,
+                                                    None,
+                                                    Some(1),
+                                                    None,
+                                                    None,
+                                                    window,
+                                                    cx,
+                                                );
+                                            }))
+                                            .child(render_pdf_cover_thumb(
+                                                cover_img,
+                                                84.0,
+                                                114.0,
+                                                palette,
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .top_2()
+                                            .left_2()
+                                            .child(checkbox_el),
+                                    )
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .top_2()
+                                            .right_2()
+                                            .px_1p5()
+                                            .py(px(1.5))
+                                            .rounded(px(4.))
+                                            .bg(fg_alpha(palette.surface, 0.90))
+                                            .border_1()
+                                            .border_color(gpui_kit::rgb(palette.border))
+                                            .text_size(px(t.micro))
+                                            .font_medium()
+                                            .text_color(tier_color)
+                                            .child(tier_label),
+                                    )
+                                    .when_some(action_btn, |stage, btn| {
+                                        stage.child(
+                                            div()
+                                                .absolute()
+                                                .bottom_1p5()
+                                                .right_1p5()
+                                                .rounded(px(5.))
+                                                .bg(fg_alpha(palette.surface, 0.92))
+                                                .border_1()
+                                                .border_color(gpui_kit::rgb(palette.border))
+                                                .child(btn),
+                                        )
+                                    }),
+                            )
+                            .when(phase.is_some(), |card| {
+                                card.child(
+                                    div()
+                                        .w_full()
+                                        .h(px(2.5))
+                                        .bg(fg_alpha(palette.text, 0.08))
+                                        .child(
+                                            div()
+                                                .h_full()
+                                                .w(relative(progress_ratio))
+                                                .bg(gpui_kit::rgb(palette.accent)),
+                                        ),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .px_2p5()
+                                    .py_2()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.))
+                                    .child(
+                                        div()
+                                            .text_size(px(t.body))
+                                            .font_medium()
+                                            .text_color(gpui_kit::rgb(palette.text))
+                                            .text_ellipsis()
+                                            .child(stem),
+                                    )
+                                    .when(!subtitle_text.is_empty(), |col| {
+                                        col.child(
+                                            div()
+                                                .text_size(px(t.micro))
+                                                .text_color(if has_error {
+                                                    gpui_kit::rgb(palette.danger)
+                                                } else if phase.is_some() {
+                                                    gpui_kit::rgb(palette.accent)
+                                                } else {
+                                                    gpui_kit::rgb(palette.muted)
+                                                })
+                                                .text_ellipsis()
+                                                .child(subtitle_text),
+                                        )
+                                    }),
+                            )
+                            .into_any_element()
+                    }
+                })
+                .collect();
+
+            div()
+                .id("kb-pdf-mgr-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .bg(canvas_bg)
+                .p_3()
+                .pb_4()
+                .child(render_grid_rows(cards, pdf_cols, 10.0))
                 .into_any_element()
         };
 

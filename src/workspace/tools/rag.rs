@@ -13,7 +13,7 @@ use crate::{
     },
     tags::Snapshot,
 };
-use gpui_kit::{AppContext, Context, Window};
+use gpui_kit::{AppContext, Context, RenderImage, Window};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -278,11 +278,75 @@ impl Workspace {
                     .is_some_and(|(active_key, _)| active_key == project_key)
                 {
                     app.right_panel.kb.accurate_configured = accurate_configured;
-                    if let Some((stats, items)) = snapshot {
-                        app.right_panel.kb.apply_snapshot(stats, items);
+                    if let (Some((stats, items)), _) = (&snapshot, ()) {
+                        app.right_panel.kb.apply_snapshot(stats.clone(), items.clone());
+                        if app.right_panel.kb.pdf_manager_open {
+                            app.ensure_pdf_covers_loaded(cx);
+                        }
                     }
                     cx.notify();
                 }
+            });
+        })
+        .detach();
+    }
+
+    /// Lazily rasterize first-page cover thumbnails in memory for visible PDFs.
+    pub(in crate::workspace) fn ensure_pdf_covers_loaded(&mut self, cx: &mut Context<Self>) {
+        let Some((project_key, root)) = self.active_rag_root() else {
+            return;
+        };
+        let pending: Vec<(String, String)> = self
+            .right_panel
+            .kb
+            .pdf_items
+            .iter()
+            .filter(|item| {
+                !self.right_panel.kb.pdf_covers.contains_key(&item.content_hash)
+                    && !self.right_panel.kb.cover_loading.contains(&item.content_hash)
+            })
+            .take(16)
+            .map(|item| (item.rel_path.clone(), item.content_hash.clone()))
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        for (_, hash) in &pending {
+            self.right_panel.kb.cover_loading.insert(hash.clone());
+        }
+
+        let task = cx.background_spawn(async move {
+            let mut rendered = Vec::with_capacity(pending.len());
+            for (rel_path, hash) in pending {
+                let abs = root.join(rel_path.replace('/', "\\"));
+                let thumb = std::fs::read(&abs).ok().and_then(|bytes| {
+                    let doc = gpui_pdf::parse(Arc::new(bytes)).ok()?;
+                    let (page_w, _) = gpui_pdf::page_dims(&doc).into_iter().next()?;
+                    let scale = (150.0 / page_w.max(1.0)).clamp(0.14, 0.45);
+                    gpui_pdf::render_page(&doc, 0, scale).ok()
+                });
+                rendered.push((hash, thumb));
+            }
+            rendered
+        });
+
+        cx.spawn(async move |this, cx| {
+            let rendered: Vec<(String, Option<Arc<RenderImage>>)> = task.await;
+            let _ = this.update(cx, |app, cx| {
+                if !app
+                    .active_rag_root()
+                    .is_some_and(|(active_key, _)| active_key == project_key)
+                {
+                    return;
+                }
+                for (hash, image) in rendered {
+                    app.right_panel.kb.cover_loading.remove(&hash);
+                    app.right_panel.kb.pdf_covers.insert(hash, image);
+                }
+                if app.right_panel.kb.pdf_manager_open {
+                    app.ensure_pdf_covers_loaded(cx);
+                }
+                cx.notify();
             });
         })
         .detach();
@@ -358,6 +422,9 @@ impl Workspace {
                         Ok((stats, items)) => {
                             app.right_panel.kb.apply_snapshot(stats, items);
                             app.right_panel.kb.sync_error = None;
+                            if app.right_panel.kb.pdf_manager_open {
+                                app.ensure_pdf_covers_loaded(cx);
+                            }
                         }
                         Err(err) if err.code == "cancelled" => {}
                         Err(err) => {
