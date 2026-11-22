@@ -388,6 +388,17 @@ pub fn untitled_drawio(number: Option<usize>) -> String {
 }
 
 pub const MENU_PASTE_IMAGE: BiText = BiText::new("粘贴图像", "Paste Image");
+pub const ERR_IMPORT_FILES_ONLY: BiText = BiText::new(
+    "请选择要复制到项目的文件。",
+    "Select files to copy into the project.",
+);
+pub fn report_imported_files(count: usize) -> String {
+    match (locale(), count) {
+        (Locale::ZhCn, _) => format!("已复制 {count} 个文件到项目"),
+        (Locale::En, 1) => "Copied 1 file into the project".to_owned(),
+        (Locale::En, _) => format!("Copied {count} files into the project"),
+    }
+}
 pub const REPORT_NO_CLIPBOARD_IMAGE: BiText = BiText::new(
     "剪贴板中没有可粘贴的图像或 SVG。",
     "No pasteable image or SVG found in clipboard.",

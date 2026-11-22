@@ -483,6 +483,78 @@ impl Workspace {
         Ok(())
     }
 
+    /// Copy native file drops and clipboard files through the same project destination rules.
+    fn import_external_files(
+        &mut self,
+        paths: &[PathBuf],
+        folder: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> io::Result<()> {
+        let Some(project) = self.projects.directory() else {
+            return Ok(());
+        };
+        let root = Path::new(&project.folder);
+        let destination = files::project_path(root, if folder.is_empty() { "." } else { folder })?;
+        let mut names = BTreeSet::new();
+        let mut copies = Vec::with_capacity(paths.len());
+        // Check the whole selection before copying so a name conflict rejects the batch.
+        for source in paths {
+            if !source.is_absolute() || !source.metadata()?.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    crate::i18n::workspace::ERR_IMPORT_FILES_ONLY.get(),
+                ));
+            }
+            let name = source.file_name().expect("absolute file has a name");
+            let target = destination.join(name);
+            let exists = match target.symlink_metadata() {
+                Ok(_) => true,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+                Err(error) => return Err(error),
+            };
+            if exists || !names.insert(name.to_string_lossy().to_lowercase()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    crate::i18n::workspace::ERR_NAME_ALREADY_EXISTS.get(),
+                ));
+            }
+            copies.push((source, target));
+        }
+
+        let mut count = 0;
+        let mut visible = BTreeSet::new();
+        let copied = copies.into_iter().try_for_each(|(source, target)| -> io::Result<()> {
+            // Publish only a complete file, even if another process creates the target meanwhile.
+            let mut staged = tempfile::NamedTempFile::new_in(&destination)?;
+            io::copy(&mut std::fs::File::open(source)?, staged.as_file_mut())?;
+            staged.persist_noclobber(&target).map_err(|error| error.error)?;
+            count += 1;
+            if files::is_relevant(&target) {
+                let relative = Path::new(folder).join(target.file_name().expect("import target has name"));
+                let relative = relative.to_string_lossy().replace('\\', "/");
+                self.expand_ancestors(&relative);
+                visible.insert(relative);
+            }
+            Ok(())
+        });
+        if count == 0 {
+            return copied;
+        }
+        // Earlier files are already published if a later copy fails. Show them in the tree.
+        self.tree.show_trash = false;
+        let refreshed = self.refresh_files(window, cx);
+        self.tree.focused_file = visible.first().cloned();
+        self.tree.focused_folder = None;
+        self.tree.selected_files = visible;
+        self.tree.file_tree_focus.focus(window, cx);
+        cx.notify();
+        copied?;
+        refreshed?;
+        self.report(crate::i18n::workspace::report_imported_files(count), cx);
+        Ok(())
+    }
+
     /// A row's drop destination is the folder it represents or the parent of its file.
     fn tree_drop_target(
         &self,
@@ -493,6 +565,7 @@ impl Workspace {
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         use crate::terminal::{DraggedFolder, DraggedPaths};
+        use gpui_kit::ExternalPaths;
 
         let destination = if is_file {
             path.rsplit_once('/').map_or("", |(parent, _)| parent)
@@ -501,6 +574,7 @@ impl Workspace {
         };
         let drop_files = destination.to_owned();
         let drop_folder = drop_files.clone();
+        let import_folder = drop_files.clone();
         let folder_hover = drop_files.clone();
         let scope = drop_files.clone();
         let project = self.projects.directory().expect("drop row has project").id.clone();
@@ -537,11 +611,19 @@ impl Workspace {
                 style
             }
         })
+        .drag_over::<ExternalPaths>(move |style, _, _, _| {
+            style.bg(gpui_kit::rgb(palette.text).opacity(0.06))
+        })
         .on_drop(cx.listener(move |app, dragged: &DraggedPaths, window, cx| {
             if let Err(error) = app.move_tree_files(dragged, &drop_files, window, cx) { app.report(error, cx); }
         }))
         .on_drop(cx.listener(move |app, dragged: &DraggedFolder, window, cx| {
             if let Err(error) = app.move_tree_folder(dragged, &drop_folder, window, cx) { app.report(error, cx); }
+        }))
+        .on_drop(cx.listener(move |app, dragged: &ExternalPaths, window, cx| {
+            if let Err(error) = app.import_external_files(dragged.paths(), &import_folder, window, cx) {
+                app.report(error, cx);
+            }
         }))
     }
 
@@ -1003,12 +1085,13 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let folder = self.paste_target_folder();
-        self.paste_images_into_folder(&folder, window, cx);
+        self.paste_into_folder(&folder, true, window, cx);
     }
 
-    pub(super) fn paste_images_into_folder(
+    fn paste_into_folder(
         &mut self,
         folder_rel: &str,
+        accept_files: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1019,6 +1102,19 @@ impl Workspace {
             self.report(crate::i18n::workspace::REPORT_NO_CLIPBOARD_IMAGE.get(), cx);
             return;
         };
+        if accept_files {
+            // Explorer supplies native file entries. Folio's Copy Path writes a text entry.
+            let paths = item.entries().iter().find_map(|entry| match entry {
+                gpui_kit::ClipboardEntry::ExternalPaths(paths) if !paths.paths().is_empty() => Some(paths.paths()),
+                _ => None,
+            });
+            if let Some(paths) = paths {
+                if let Err(error) = self.import_external_files(paths, folder_rel, window, cx) {
+                    self.report(error, cx);
+                }
+                return;
+            }
+        }
         let root = PathBuf::from(&project.folder);
         let target_dir = if folder_rel.is_empty() {
             root.clone()
@@ -1683,7 +1779,7 @@ impl Workspace {
                                 .item(compact_menu_item(crate::i18n::workspace::MENU_PASTE_IMAGE.get()).on_click(
                                     move |_, window, cx| {
                                         paste_app.update(cx, |app, cx| {
-                                            app.paste_images_into_folder(&paste_folder, window, cx)
+                                            app.paste_into_folder(&paste_folder, false, window, cx)
                                         })
                                     },
                                 ))
@@ -1899,7 +1995,7 @@ impl Workspace {
                             .item(
                                 compact_menu_item(crate::i18n::workspace::MENU_PASTE_IMAGE.get()).on_click(move |_, window, cx| {
                                     paste_app.update(cx, |app, cx| {
-                                        app.paste_images_into_folder(&paste_folder, window, cx)
+                                        app.paste_into_folder(&paste_folder, false, window, cx)
                                     })
                                 }),
                             )
@@ -2346,6 +2442,7 @@ impl Workspace {
                             }, |_, _, _, _| {}).absolute().top_0().left_0().size_full())
                             .on_click(cx.listener(|app, _, window, cx| {
                                 cx.stop_propagation();
+                                app.tree.selected_files.clear();
                                 app.tree.focused_folder = None;
                                 app.tree.focused_file = None;
                                 app.tree.file_tree_focus.focus(window, cx);
@@ -2357,7 +2454,7 @@ impl Workspace {
                                     compact_menu_item(crate::i18n::workspace::MENU_PASTE_IMAGE.get())
                                         .on_click(move |_, window, cx| {
                                             app.update(cx, |app, cx| {
-                                                app.paste_images_into_folder("", window, cx)
+                                                app.paste_into_folder("", false, window, cx)
                                             })
                                         }),
                                 )

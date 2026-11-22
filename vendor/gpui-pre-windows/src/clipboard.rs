@@ -265,8 +265,8 @@ fn read_image(format: u32) -> Option<ClipboardEntry> {
 }
 
 fn read_files() -> Option<ClipboardEntry> {
-    let locked = get_clipboard_data(CF_HDROP.0 as u32)?;
-    let hdrop = HDROP(locked.ptr as *mut _);
+    // CF_HDROP already supplies the handle that DragQueryFile expects.
+    let hdrop = HDROP(unsafe { GetClipboardData(CF_HDROP.0 as u32).ok() }?.0);
     let mut filenames = Vec::new();
     with_file_names(hdrop, |name| filenames.push(std::path::PathBuf::from(name)));
     Some(ClipboardEntry::ExternalPaths(ExternalPaths(
