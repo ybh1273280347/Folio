@@ -1,4 +1,4 @@
-//! Visual-mode document outline panel: heading sanitization, collapsible tree,
+//! Shared Markdown outline panel: heading sanitization, collapsible tree,
 //! active-section tracking, and smooth left-side docked / narrow-overlay layout.
 use super::{MarkdownPane, OutlineHeading};
 use gpui_kit::{
@@ -885,11 +885,12 @@ fn render_nodes(
 /// Render the docked left-side outline with smooth 200ms ease-out width + slide animation.
 pub(super) fn render_docked(pane: &MarkdownPane, cx: &mut Context<MarkdownPane>) -> AnyElement {
     let panel = render_panel_body(pane, false, cx);
+    let width = pane.docked_outline_panel_width();
 
     // Initial wide-screen auto-open renders statically without sliding in on document load.
     if !pane.outline_closing && pane.outline_anim_gen == 0 {
         return div()
-            .w(px(PANEL_WIDTH))
+            .w(px(width))
             .h_full()
             .flex_shrink_0()
             .overflow_hidden()
@@ -904,7 +905,7 @@ pub(super) fn render_docked(pane: &MarkdownPane, cx: &mut Context<MarkdownPane>)
 
     let sliding_inner = div()
         .relative()
-        .w(px(PANEL_WIDTH))
+        .w(px(width))
         .h_full()
         .flex_shrink_0()
         .child(panel)
@@ -913,7 +914,7 @@ pub(super) fn render_docked(pane: &MarkdownPane, cx: &mut Context<MarkdownPane>)
             Animation::new(duration).with_easing(ease_out_cubic),
             move |el, t| {
                 let progress = if closing { 1.0 - t } else { t };
-                el.left(px(-PANEL_WIDTH * (1.0 - progress)))
+                el.left(px(-width * (1.0 - progress)))
             },
         );
 
@@ -927,7 +928,7 @@ pub(super) fn render_docked(pane: &MarkdownPane, cx: &mut Context<MarkdownPane>)
             Animation::new(duration).with_easing(ease_out_cubic),
             move |el, t| {
                 let progress = if closing { 1.0 - t } else { t };
-                el.w(px(PANEL_WIDTH * progress))
+                el.w(px(width * progress))
             },
         )
         .into_any_element()

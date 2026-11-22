@@ -2,7 +2,7 @@
 
 use super::input_rule::RuleKind;
 use std::sync::Arc;
-use std::{cell::RefCell, ops::Range, rc::Rc};
+use std::{borrow::Cow, cell::RefCell, ops::Range, rc::Rc};
 
 use gpui::{
     AnyElement, App, AppContext, Bounds, ClipboardItem, Context, Entity, EntityInputHandler, EventEmitter,
@@ -21,7 +21,7 @@ use super::{
     marks::MarkKind,
     position::BlockPosition,
     projection::{ProjectionCache, Snapshot},
-    selection::BlockSelection,
+    selection::{BlockSelection, ResolvedSelection},
     style::BlockEditorStyle,
     transaction::EditOrigin,
 };
@@ -1187,38 +1187,28 @@ impl BlockEditorState {
             };
             // Rank the actual selected range with the same overlapping matches as jump.
             return self
-                .find_quote_match(&quote, |index, id, candidate| {
-                    (id == block && candidate == range).then_some(index)
+                .find_quote_match(&quote, |index, candidate| {
+                    (candidate.start == BlockPosition::new(block, range.start)
+                        && candidate.end == BlockPosition::new(block, range.end))
+                        .then_some(index)
                 })
                 .map(|index| (quote, index));
         }
-        let target_block = anchor.block;
-        let lo = anchor.offset;
+        let doc = &self.model.doc;
+        let selected = doc.resolve_selection(&self.model.selection).ok()?;
         let quote = self.selected_plain_text()?;
-        let mut count = 0usize;
-        for leaf in self.model.document().leaves() {
-            if let Some(inline) = self.model.doc.inline(leaf.id()) {
-                if leaf.id() == target_block {
-                    let prefix_end = lo.min(inline.text().len());
-                    let (expanded, _, _) = Self::expand_inline_plain(&inline.slice(0..prefix_end));
-                    count += expanded.matches(&quote).count();
-                    break;
-                } else {
-                    let (expanded, _, _) = Self::expand_inline_plain(inline);
-                    count += expanded.matches(&quote).count();
-                }
-            } else if let Some(text) = self.model.doc.leaf_text(leaf.id()) {
-                if leaf.id() == target_block {
-                    if let Some(prefix) = text.get(..lo.min(text.len())) {
-                        count += prefix.matches(&quote).count();
-                    }
-                    break;
-                } else {
-                    count += text.matches(&quote).count();
-                }
-            }
-        }
-        Some((quote, count))
+        // The serialized excerpt can omit empty boundary slices and trim whitespace.
+        let within_selection = |index, candidate: ResolvedSelection| {
+            (doc.cmp_positions(selected.start, candidate.start).ok()?.is_le()
+                && doc.cmp_positions(candidate.end, selected.end).ok()?.is_le())
+                .then_some(index)
+        };
+        let occurrence = self.find_block_quote_match(&quote, within_selection)
+            .or_else(|| self.find_quote_match(&quote, within_selection))
+            // Some clipboard excerpts include unselected cells because Markdown tables
+            // serialize whole. Keep the existing default ordinal for those excerpts.
+            .unwrap_or(0);
+        Some((quote, occurrence))
     }
 
     /// Reveal a saved quote in the current document. A uniquely highlighted
@@ -1232,34 +1222,54 @@ impl BlockEditorState {
         let mut ordinal = None;
         let mut marked = None;
         let mut ambiguous_marks = false;
-        let found = self.find_quote_match(quote, |index, block, range| {
-            let start = BlockPosition::new(block, range.start);
-            let end = BlockPosition::new(block, range.end);
+        let mut consider = |index, range: ResolvedSelection| {
             // A substring can split a grapheme even when it is valid UTF-8.
             // Preserve its ordinal without trying to reveal an invalid range.
-            self.model.doc.validate(start).ok()?;
-            self.model.doc.validate(end).ok()?;
-            let positions = (start, end);
-            let highlighted = self.model.doc.inline(block).is_some_and(|inline| {
-                inline.pieces()
-                    .filter(|(piece, _, _)| piece.start < range.end && range.start < piece.end)
-                    .all(|(_, marks, _)| marks.highlight.is_some())
-            });
+            self.model.doc.validate(range.start).ok()?;
+            self.model.doc.validate(range.end).ok()?;
+            let highlighted = self
+                .model
+                .text_ranges(range)
+                .into_iter()
+                .all(|(block, lo, hi)| {
+                    lo == hi || self.model.doc.inline(block).is_some_and(|inline| {
+                        inline.pieces()
+                            .filter(|(piece, _, _)| piece.start < hi && lo < piece.end)
+                            .all(|(_, marks, _)| marks.highlight.is_some())
+                    })
+                });
             if index == occurrence {
-                ordinal = Some(positions);
+                ordinal = Some(range);
                 if highlighted || ambiguous_marks {
                     return ordinal;
                 }
             }
-            if highlighted && marked != Some(positions) {
-                ambiguous_marks = marked.replace(positions).is_some();
+            if highlighted && marked != Some(range) {
+                ambiguous_marks = marked.replace(range).is_some();
                 if ambiguous_marks && ordinal.is_some() {
                     return ordinal;
                 }
             }
             None
-        });
-        let Some((anchor, head)) = found.or(marked.filter(|_| !ambiguous_marks)).or(ordinal)
+        };
+        // Multiline saved excerpts use Markdown block boundaries. A literal
+        // multiline quote (for example inside code) can still match one leaf.
+        let mut saw_block_match = false;
+        let found = if quote.contains('\n') {
+            self.find_block_quote_match(quote, |index, range| {
+                saw_block_match = true;
+                consider(index, range)
+            })
+        } else {
+            None
+        };
+        let found = if !saw_block_match {
+            self.find_quote_match(quote, consider)
+        } else {
+            found
+        };
+        let Some(ResolvedSelection { start: anchor, end: head }) =
+            found.or(marked.filter(|_| !ambiguous_marks)).or(ordinal)
         else {
             return false;
         };
@@ -1275,7 +1285,7 @@ impl BlockEditorState {
     fn find_quote_match<T>(
         &self,
         quote: &str,
-        mut find: impl FnMut(usize, BlockId, Range<usize>) -> Option<T>,
+        mut find: impl FnMut(usize, ResolvedSelection) -> Option<T>,
     ) -> Option<T> {
         let step = quote.chars().next()?.len_utf8();
         let legacy_raw = quote.contains(super::inline::ATOM_CHAR);
@@ -1302,11 +1312,88 @@ impl BlockEditorState {
                     Some((_, starts, ends)) => starts[start]..ends[end],
                     None => start..end,
                 };
-                if let Some(result) = find(index, block, range) {
+                if let Some(result) = find(
+                    index,
+                    ResolvedSelection {
+                        start: BlockPosition::new(block, range.start),
+                        end: BlockPosition::new(block, range.end),
+                    },
+                ) {
                     return Some(result);
                 }
                 index += 1;
                 from = start + step;
+            }
+        }
+        None
+    }
+
+    /// Match the Markdown excerpt stored by cross-block annotations. The first
+    /// and last leaves may be partial; every intervening leaf must match whole.
+    fn find_block_quote_match<T>(
+        &self,
+        quote: &str,
+        mut find: impl FnMut(usize, ResolvedSelection) -> Option<T>,
+    ) -> Option<T> {
+        let doc = &self.model.doc;
+        let excerpt = super::import::parse_document(quote, doc.extensions.clone()).ok()?;
+        if excerpt.leaves().len() < 2 {
+            return None;
+        }
+        let parts = excerpt
+            .leaves()
+            .iter()
+            .map(|&block| {
+                let text = excerpt.leaf_text(block).unwrap_or_default();
+                if text.contains(super::inline::ATOM_CHAR)
+                    && let Some(inline) = excerpt.inline(block)
+                {
+                    Cow::Owned(Self::expand_inline_plain(inline).0)
+                } else {
+                    Cow::Borrowed(text)
+                }
+            })
+            .collect::<Vec<_>>();
+        let last = parts.len() - 1;
+        let mut index = 0;
+        for blocks in doc.leaves().windows(parts.len()) {
+            let mut start = BlockPosition::new(blocks[0], 0);
+            let mut end = BlockPosition::new(blocks[last], 0);
+            let matches = blocks.iter().zip(&parts).enumerate().all(
+                |(i, (&block, part))| {
+                    let raw = doc.leaf_text(block).unwrap_or_default();
+                    let expanded = doc
+                        .inline(block)
+                        .filter(|_| raw.contains(super::inline::ATOM_CHAR))
+                        .map(Self::expand_inline_plain);
+                    let text = expanded.as_ref().map_or(raw, |(text, _, _)| text.as_str());
+                    let part = part.as_ref();
+                    if i == 0 {
+                        let Some(prefix) = text.strip_suffix(part) else {
+                            return false;
+                        };
+                        start.offset = expanded
+                            .as_ref()
+                            .map_or(prefix.len(), |(_, starts, _)| starts[prefix.len()]);
+                        true
+                    } else if i == last {
+                        if !text.starts_with(part) {
+                            return false;
+                        }
+                        end.offset = expanded
+                            .as_ref()
+                            .map_or(part.len(), |(_, _, ends)| ends[part.len()]);
+                        true
+                    } else {
+                        text == part
+                    }
+                },
+            );
+            if matches {
+                if let Some(result) = find(index, ResolvedSelection { start, end }) {
+                    return Some(result);
+                }
+                index += 1;
             }
         }
         None

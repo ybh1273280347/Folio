@@ -37,6 +37,8 @@ mod emoji;
 mod outline;
 mod view;
 
+const PREVIEW_BYTES: usize = 8 * 1024;
+
 pub enum MarkdownEvent {
     RenameTitle(String),
     Change(String),
@@ -307,6 +309,7 @@ pub struct MarkdownPane {
     // Each view keeps its editing state until the other view changes the buffer.
     source_needs_sync: bool,
     visual_needs_sync: bool,
+    pending_source_heading: Option<usize>,
     source_heading_highlight: RangeDecorationCollection,
     source_heading_highlight_timer: Task<()>,
     visual_editor: Entity<BlockEditorState>,
@@ -636,6 +639,7 @@ impl MarkdownPane {
                 .language("markdown")
                 .line_number(settings.show_line_numbers)
                 .soft_wrap(true)
+                .background_wrap_for_large_values(PREVIEW_BYTES)
                 .searchable(true)
         });
         let source_heading_highlight = source_editor.update(cx, |editor, cx| {
@@ -892,6 +896,7 @@ impl MarkdownPane {
             source_editor,
             source_needs_sync: true,
             visual_needs_sync: false,
+            pending_source_heading: None,
             source_heading_highlight,
             source_heading_highlight_timer: Task::ready(()),
             visual_editor,
@@ -899,7 +904,7 @@ impl MarkdownPane {
             loading: None,
             source: false,
             outline: false,
-            outline_width: 210.,
+            outline_width: outline::PANEL_WIDTH,
             outline_drag: None,
             outline_initialized: false,
             outline_user_toggled: false,
@@ -970,7 +975,6 @@ impl MarkdownPane {
         self.visual_needs_sync = false;
         // Bound first-paint work in bytes, even for OCR paragraphs with no blank lines.
         // The full parse still sees the original document, preserving fences and references.
-        const PREVIEW_BYTES: usize = 8 * 1024;
         let long = self.text.len() > PREVIEW_BYTES;
         let preview_end = if long {
             let end = self.text.floor_char_boundary(PREVIEW_BYTES);
@@ -1140,12 +1144,18 @@ impl MarkdownPane {
     }
 
     pub fn outline_docked_width(&self) -> f32 {
-        if self.source && self.outline {
-            self.outline_width
-        } else if !self.source && self.is_outline_open() && !self.is_outline_overlay() {
-            outline::PANEL_WIDTH
+        if self.is_outline_open() && !self.is_outline_overlay() {
+            self.docked_outline_panel_width()
         } else {
             0.0
+        }
+    }
+
+    fn docked_outline_panel_width(&self) -> f32 {
+        if self.source {
+            self.outline_width
+        } else {
+            outline::PANEL_WIDTH
         }
     }
 
@@ -1155,16 +1165,10 @@ impl MarkdownPane {
 
     fn is_outline_overlay(&self) -> bool {
         let w = self.pane_outer_width.get();
-        w > 0.0 && w < outline::OVERLAY_WIDTH
+        !self.source && w > 0.0 && w < outline::OVERLAY_WIDTH
     }
 
     pub fn toggle_outline(&mut self, cx: &mut Context<Self>) {
-        if self.source {
-            self.outline = !self.outline;
-            self.outline_closing = false;
-            cx.notify();
-            return;
-        }
         self.outline_user_toggled = true;
         self.outline_initialized = true;
         if self.is_outline_open() {
@@ -1273,7 +1277,7 @@ impl MarkdownPane {
         self.heading_click_lock_until =
             Some(std::time::Instant::now() + std::time::Duration::from_millis(260));
         self.navigate_heading(index, window, cx);
-        if !self.source && self.is_outline_overlay() {
+        if self.is_outline_overlay() {
             self.close_outline(cx);
         }
     }
@@ -1335,6 +1339,10 @@ impl MarkdownPane {
 
     fn navigate_heading(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.source {
+            if self.source_editor.read(cx).is_loading_wrapped_value() {
+                self.pending_source_heading = Some(index);
+                return;
+            }
             let Some(heading) = self.headings.get(index) else {
                 return;
             };
@@ -1539,12 +1547,10 @@ impl MarkdownPane {
         }
         self.text = text.to_owned();
         self.source_needs_sync = true;
+        self.pending_source_heading = None;
         self.load_visual(cx);
         if self.source {
-            self.source_editor.update(cx, |editor, cx| {
-                editor.set_value(text.to_owned(), window, cx)
-            });
-            self.source_needs_sync = false;
+            self.load_source(window, cx);
         }
         cx.notify();
     }
@@ -1744,18 +1750,29 @@ impl MarkdownPane {
         cx.notify();
     }
 
+    fn load_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.source_editor.update(cx, |editor, cx| {
+            if self.text.len() > PREVIEW_BYTES {
+                editor.set_value_wrapped_in_background(self.text.clone(), window, cx);
+            } else {
+                editor.set_value(self.text.clone(), window, cx);
+            }
+        });
+        self.source_needs_sync = false;
+        cx.notify();
+    }
+
     pub fn toggle_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.source = !self.source;
         if self.source {
             self.hovered_link = None;
-            self.source_editor.update(cx, |editor, cx| {
-                if self.source_needs_sync {
-                    editor.set_value(self.text.clone(), window, cx);
-                }
-                editor.focus(window, cx);
-            });
-            self.source_needs_sync = false;
+            if self.source_needs_sync {
+                self.load_source(window, cx);
+            }
+            self.source_editor.update(cx, |editor, cx| editor.focus(window, cx));
         } else {
+            self.source_editor.update(cx, |editor, _| editor.cancel_background_wrap());
+            self.pending_source_heading = None;
             if self.visual_needs_sync {
                 self.load_visual(cx);
             }

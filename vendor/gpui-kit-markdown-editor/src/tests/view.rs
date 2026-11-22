@@ -2761,6 +2761,37 @@ fn annotation_quote_round_trips_an_overlapping_selection(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+fn annotation_quote_round_trips_the_second_cross_paragraph_selection(cx: &mut TestAppContext) {
+    let (editor, cx) = open(cx, "First **tail**\n\nhead ends\n\nSecond **tail**\n\nhead ends");
+    select_in(&editor, cx, (3, 4), (2, 7));
+    let (quote, occurrence) = editor.read_with(cx, |e, _| e.selected_quote_and_occurrence().unwrap());
+    assert_eq!((&*quote, occurrence), ("**tail**\n\nhead", 1));
+
+    caret_at(&editor, cx, 0, 0);
+    editor.update(cx, |e, cx| {
+        assert!(e.select_quote_occurrence(&quote, occurrence, cx));
+        let leaves = e.model().doc.leaves();
+        assert_eq!(e.selection(), &BlockSelection::Text {
+            anchor: BlockPosition::new(leaves[2], 7),
+            head: BlockPosition::new(leaves[3], 4),
+        });
+    });
+}
+
+#[gpui::test]
+fn annotation_quote_reveals_a_saved_cross_paragraph_highlight(cx: &mut TestAppContext) {
+    let (editor, cx) = open(cx, "First tail\n\nhead ends\n\nSecond <mark>tail</mark>\n\n<mark>head</mark> ends");
+    editor.update(cx, |e, cx| {
+        assert!(e.select_quote_occurrence("tail\n\nhead", 0, cx));
+        let leaves = e.model().doc.leaves();
+        assert_eq!(e.selection(), &BlockSelection::Text {
+            anchor: BlockPosition::new(leaves[2], 7),
+            head: BlockPosition::new(leaves[3], 4),
+        });
+    });
+}
+
+#[gpui::test]
 fn annotation_quote_reveals_the_highlight_after_atom_expansion_shifts_its_ordinal(cx: &mut TestAppContext) {
     let (editor, cx) = open(cx, "![target](image.png) <mark>target</mark>");
     editor.update(cx, |e, cx| {
