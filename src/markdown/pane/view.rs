@@ -668,7 +668,6 @@ impl Render for MarkdownPane {
                 let cards = self.annotations.iter().map(|item| {
                     let id = item.id;
                     let quote = item.quote.clone();
-                    let occ = item.occurrence;
                     let comment = item.comment.clone();
                     let color = item.color.clone();
                     let is_editing = self.editing_drawer_annotation_id == Some(id);
@@ -897,9 +896,8 @@ impl Render for MarkdownPane {
                             )
                         })
                         .on_click(cx.listener(move |pane, event: &ClickEvent, window, cx| {
-                            let visual_editor = pane.visual_editor.clone();
+                            let pane_view = cx.entity().downgrade();
                             let drawer_note_input = pane.drawer_note_input.clone();
-                            let quote_cl = quote.clone();
                             let comment_cl = comment.clone();
                             let double_click = event.click_count() >= 2;
                             pane.active_annotation_id = None;
@@ -910,8 +908,8 @@ impl Render for MarkdownPane {
                                 pane.annotation_list_focus.focus(window, cx);
                             }
                             window.defer(cx, move |window, cx| {
-                                visual_editor.update(cx, |editor, cx| {
-                                    editor.select_quote_occurrence(&quote_cl, occ, cx);
+                                let _ = pane_view.update(cx, |pane, cx| {
+                                    pane.reveal_annotation(id, cx);
                                 });
                                 if double_click {
                                     drawer_note_input.update(cx, |input, cx| {

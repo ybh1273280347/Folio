@@ -47,6 +47,11 @@ pub enum MarkdownEvent {
     FilesChanged,
 }
 
+enum PendingVisualJump {
+    Heading(String),
+    Annotation(u64),
+}
+
 actions!(
     folio_markdown,
     [
@@ -342,7 +347,7 @@ pub struct MarkdownPane {
     link_editing: bool,
     link_input: Entity<InputState>,
     hovered_link: Option<SharedString>,
-    pending_anchor: Option<String>,
+    pending_visual_jump: Option<PendingVisualJump>,
     // Inline search state
     search_open: bool,
     search_replace_open: bool,
@@ -919,7 +924,7 @@ impl MarkdownPane {
             link_editing: false,
             link_input,
             hovered_link: None,
-            pending_anchor: None,
+            pending_visual_jump: None,
             search_open: false,
             search_replace_open: false,
             search_case_sensitive: false,
@@ -974,6 +979,7 @@ impl MarkdownPane {
         self.retain_mermaid_blocks(cx);
         if !long {
             self.parse_outline();
+            self.apply_pending_visual_jump(cx);
             return;
         }
         self.headings.clear();
@@ -995,9 +1001,7 @@ impl MarkdownPane {
                 pane.headings = headings;
                 pane.reconcile_outline_state(cx);
                 pane.loading = None;
-                if let Some(anchor) = pane.pending_anchor.take() {
-                    pane.reveal_anchor(&anchor, None, cx);
-                }
+                pane.apply_pending_visual_jump(cx);
                 cx.notify();
             });
         }));
@@ -1280,7 +1284,7 @@ impl MarkdownPane {
 
     pub fn navigate_to_anchor(&mut self, anchor: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.loading.is_some() {
-            self.pending_anchor = Some(anchor.to_owned());
+            self.pending_visual_jump = Some(PendingVisualJump::Heading(anchor.to_owned()));
             return;
         }
         self.reveal_anchor(anchor, Some(window), cx);
@@ -1295,6 +1299,25 @@ impl MarkdownPane {
         } else {
             self.select_visual_heading(index, None, cx);
             cx.notify();
+        }
+    }
+
+    fn reveal_annotation(&mut self, id: u64, cx: &mut Context<Self>) {
+        // The preview is replaced by the full model, including its selection.
+        if self.loading.is_some() {
+            self.pending_visual_jump = Some(PendingVisualJump::Annotation(id));
+        } else if let Some(item) = self.annotations.iter().find(|item| item.id == id) {
+            self.visual_editor.update(cx, |editor, cx| {
+                editor.select_quote_occurrence(&item.quote, item.occurrence, cx);
+            });
+        }
+    }
+
+    fn apply_pending_visual_jump(&mut self, cx: &mut Context<Self>) {
+        match self.pending_visual_jump.take() {
+            Some(PendingVisualJump::Heading(anchor)) => self.reveal_anchor(&anchor, None, cx),
+            Some(PendingVisualJump::Annotation(id)) => self.reveal_annotation(id, cx),
+            None => {}
         }
     }
 

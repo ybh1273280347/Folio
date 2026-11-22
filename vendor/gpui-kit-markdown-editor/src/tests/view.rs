@@ -2742,6 +2742,38 @@ fn select_in(
     });
 }
 
+#[gpui::test]
+fn annotation_quote_round_trips_an_overlapping_selection(cx: &mut TestAppContext) {
+    let (editor, cx) = open(cx, "aaaa");
+    select_in(&editor, cx, (0, 3), (0, 1));
+    let (quote, occurrence) = editor.read_with(cx, |e, _| e.selected_quote_and_occurrence().unwrap());
+    assert_eq!((&*quote, occurrence), ("aa", 1));
+
+    caret_at(&editor, cx, 0, 0);
+    editor.update(cx, |e, cx| {
+        assert!(e.select_quote_occurrence(&quote, occurrence, cx));
+        let block = e.model().document().leaves().next().unwrap().id();
+        assert_eq!(e.selection(), &BlockSelection::Text {
+            anchor: BlockPosition::new(block, 1),
+            head: BlockPosition::new(block, 3),
+        });
+    });
+}
+
+#[gpui::test]
+fn annotation_quote_reveals_the_highlight_after_atom_expansion_shifts_its_ordinal(cx: &mut TestAppContext) {
+    let (editor, cx) = open(cx, "![target](image.png) <mark>target</mark>");
+    editor.update(cx, |e, cx| {
+        // The raw text used when placing the annotation has one occurrence.
+        assert!(e.select_quote_occurrence("target", 0, cx));
+        let block = e.model().document().leaves().next().unwrap().id();
+        assert_eq!(e.selection(), &BlockSelection::Text {
+            anchor: BlockPosition::new(block, 4),
+            head: BlockPosition::new(block, 10),
+        });
+    });
+}
+
 fn clipboard_text(cx: &mut VisualTestContext) -> String {
     cx.read_from_clipboard().and_then(|c| c.text()).unwrap()
 }
