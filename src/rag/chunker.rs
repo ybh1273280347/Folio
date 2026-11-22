@@ -1,11 +1,34 @@
 //! Structure-aware chunking for Markdown, LaTeX, BibTeX, plain text, and digital PDFs.
 
 use crate::annotations::AnnotationItem;
-use std::sync::Arc;
+use flate2::read::GzDecoder;
+use std::{
+    io::Read,
+    ops::Range,
+    sync::{Arc, LazyLock},
+};
+use tokenizers::{Encoding, Tokenizer};
 
-const TARGET_CHUNK_CHARS: usize = 2200;
-const OVERLAP_CHARS: usize = 320;
-const HARD_MAX_CHARS: usize = 3200;
+const TARGET_CHUNK_TOKENS: usize = 384;
+const OVERLAP_TOKENS: usize = 56;
+// The managed embedding server uses a 512-token microbatch. Leave room for its special tokens.
+const HARD_MAX_TOKENS: usize = 480;
+const MAX_HEADING_TOKENS: usize = 96;
+
+static TOKENIZER: LazyLock<Tokenizer> = LazyLock::new(|| {
+    let compressed = include_bytes!("../../resources/rag/qwen3-embedding-tokenizer.json.gz");
+    let mut json = Vec::new();
+    GzDecoder::new(compressed.as_slice())
+        .read_to_end(&mut json)
+        .expect("the bundled tokenizer gzip is valid");
+    Tokenizer::from_bytes(json).expect("the bundled Qwen3-Embedding tokenizer is valid")
+});
+
+fn encode(text: &str) -> Encoding {
+    TOKENIZER
+        .encode(text, false)
+        .expect("Qwen3 BPE encodes UTF-8 text")
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChunkDraft {
@@ -67,18 +90,7 @@ fn chunk_inspected_pdf(
         }
         full_raw.push_str(&format!("<!-- page {page_num} -->\n{trimmed}"));
 
-        let heading = format!("{rel_path} > p.{page_num}");
-        for piece in split_text_with_overlap(trimmed, TARGET_CHUNK_CHARS, OVERLAP_CHARS) {
-            let seq = chunks.len();
-            chunks.push(ChunkDraft {
-                seq,
-                heading_path: heading.clone(),
-                line_start: None,
-                line_end: None,
-                page_num: Some(page_num),
-                chunk_text: format!("[{heading}]\n{piece}"),
-            });
-        }
+        append_page_chunks(rel_path, page_num, trimmed, &mut chunks);
     }
 
     let has_content_ocr_reason = inspected.ocr_reasons_by_page.iter().any(|entry| {
@@ -125,18 +137,7 @@ fn extract_and_chunk_pdf_gpui(rel_path: &str, bytes: Vec<u8>) -> Result<Extracte
         if page_text.trim().is_empty() {
             continue;
         }
-        let heading = format!("{rel_path} > p.{page_num}");
-        for piece in split_text_with_overlap(&page_text, TARGET_CHUNK_CHARS, OVERLAP_CHARS) {
-            let seq = chunks.len();
-            chunks.push(ChunkDraft {
-                seq,
-                heading_path: heading.clone(),
-                line_start: None,
-                line_end: None,
-                page_num: Some(page_num),
-                chunk_text: format!("[{heading}]\n{piece}"),
-            });
-        }
+        append_page_chunks(rel_path, page_num, page_text.trim(), &mut chunks);
     }
 
     Ok(ExtractedDocument {
@@ -147,10 +148,28 @@ fn extract_and_chunk_pdf_gpui(rel_path: &str, bytes: Vec<u8>) -> Result<Extracte
     })
 }
 
+fn append_page_chunks(rel_path: &str, page: usize, body: &str, out: &mut Vec<ChunkDraft>) {
+    let heading_path = format!("{rel_path} > p.{page}");
+    let paragraphs: Vec<_> = body
+        .match_indices("\n\n")
+        .map(|(offset, _)| offset + 2)
+        .collect();
+    for (_, chunk_text) in split_token_chunks(&heading_path, body, &paragraphs, false) {
+        out.push(ChunkDraft {
+            seq: out.len(),
+            heading_path: heading_path.clone(),
+            line_start: None,
+            line_end: None,
+            page_num: Some(page),
+            chunk_text,
+        });
+    }
+}
+
 pub fn chunk_annotations(target_rel_path: &str, items: &[AnnotationItem]) -> ExtractedDocument {
     let mut raw_text = String::new();
     let mut chunks = Vec::new();
-    for (seq, item) in items.iter().enumerate() {
+    for item in items {
         let is_pdf = target_rel_path.to_ascii_lowercase().ends_with(".pdf");
         let page_num = is_pdf.then_some(item.page + 1);
         let heading = match page_num {
@@ -176,14 +195,16 @@ pub fn chunk_annotations(target_rel_path: &str, items: &[AnnotationItem]) -> Ext
             raw_text.push_str("\n\n");
         }
         raw_text.push_str(&body);
-        chunks.push(ChunkDraft {
-            seq,
-            heading_path: heading.clone(),
-            line_start: None,
-            line_end: None,
-            page_num,
-            chunk_text: format!("[{heading}]\n{body}"),
-        });
+        for (_, chunk_text) in split_token_chunks(&heading, &body, &[], false) {
+            chunks.push(ChunkDraft {
+                seq: chunks.len(),
+                heading_path: heading.clone(),
+                line_start: None,
+                line_end: None,
+                page_num,
+                chunk_text,
+            });
+        }
     }
     ExtractedDocument {
         raw_text,
@@ -257,84 +278,52 @@ fn split_section_lines(
     is_tex: bool,
     out: &mut Vec<ChunkDraft>,
 ) {
-    if lines.iter().all(|l| l.trim().is_empty()) {
-        return;
+    let mut line_starts = Vec::with_capacity(lines.len());
+    let mut boundaries = Vec::new();
+    let mut byte = 0;
+    let mut in_fence = false;
+    let mut in_display_math = false;
+    let mut tex_env_depth = 0usize;
+    // Track protection across the section once so overlapped chunks cannot reinterpret delimiters.
+    for line in lines {
+        line_starts.push(byte);
+        byte += line.len() + 1;
+        let trimmed = line.trim();
+        if !is_tex && trimmed.starts_with("```") {
+            in_fence = !in_fence;
+        } else if !in_fence && trimmed == "$$" {
+            in_display_math = !in_display_math;
+        }
+        if is_tex {
+            if starts_protected_tex_env(trimmed) {
+                tex_env_depth += 1;
+            }
+            if ends_protected_tex_env(trimmed) {
+                tex_env_depth = tex_env_depth.saturating_sub(1);
+            }
+        }
+
+        if !in_fence && !in_display_math && tex_env_depth == 0 {
+            boundaries.push(byte);
+        }
     }
 
-    let mut i = 0usize;
-    while i < lines.len() {
-        let chunk_start = i;
-        let mut chars = 0usize;
-        let mut in_fence = false;
-        let mut in_display_math = false;
-        let mut tex_env_depth = 0usize;
-        let mut last_safe_end = i;
-
-        while i < lines.len() {
-            let line = lines[i];
-            let trimmed = line.trim();
-            chars += line.chars().count() + 1;
-
-            if !is_tex && trimmed.starts_with("```") {
-                in_fence = !in_fence;
-            }
-            if trimmed == "$$" || (trimmed.starts_with("$$") && trimmed.ends_with("$$") && trimmed.len() == 2) {
-                in_display_math = !in_display_math;
-            }
-            if is_tex {
-                if starts_protected_tex_env(trimmed) {
-                    tex_env_depth += 1;
-                }
-                if ends_protected_tex_env(trimmed) && tex_env_depth > 0 {
-                    tex_env_depth -= 1;
-                }
-            }
-
-            let protected = in_fence || in_display_math || tex_env_depth > 0;
-            if !protected && (trimmed.is_empty() || chars >= TARGET_CHUNK_CHARS) {
-                last_safe_end = i + 1;
-            }
-
-            i += 1;
-            if (!protected && chars >= TARGET_CHUNK_CHARS) || chars >= HARD_MAX_CHARS {
-                if last_safe_end <= chunk_start {
-                    last_safe_end = i;
-                }
-                break;
-            }
-        }
-
-        let end = if i >= lines.len() && chars <= HARD_MAX_CHARS {
+    let body = lines.join("\n");
+    for (range, chunk_text) in split_token_chunks(heading_path, &body, &boundaries, true) {
+        let first_line = line_starts.partition_point(|&offset| offset <= range.start);
+        let last_line = if range.end == body.len() {
             lines.len()
         } else {
-            last_safe_end.max(chunk_start + 1)
+            line_starts.partition_point(|&offset| offset < range.end)
         };
-
-        let body = lines[chunk_start..end].join("\n");
-        if !body.trim().is_empty() {
-            let seq = out.len();
-            out.push(ChunkDraft {
-                seq,
-                heading_path: heading_path.to_owned(),
-                line_start: Some(base_line + chunk_start),
-                line_end: Some(base_line + end - 1),
-                page_num: None,
-                chunk_text: format!("[{heading_path}]\n{}", body.trim()),
-            });
-        }
-
-        if end >= lines.len() {
-            break;
-        }
-
-        // Step backward by ~OVERLAP_CHARS on whole-line boundaries for context continuity.
-        let mut overlap = 0usize;
-        let mut next_start = end;
-        while next_start > chunk_start + 1 && overlap < OVERLAP_CHARS {
-            next_start -= 1;
-            overlap += lines[next_start].chars().count() + 1;
-        }
-        i = next_start.max(chunk_start + 1);
+        out.push(ChunkDraft {
+            seq: out.len(),
+            heading_path: heading_path.to_owned(),
+            line_start: Some(base_line + first_line - 1),
+            line_end: Some(base_line + last_line - 1),
+            page_num: None,
+            chunk_text,
+        });
     }
 }
 
@@ -373,73 +362,126 @@ fn chunk_bibtex(rel_path: &str, text: &str) -> Vec<ChunkDraft> {
 
     let mut out = Vec::new();
     for (key, start, end) in entries {
-        let body = lines[start - 1..end].join("\n");
-        if body.trim().is_empty() {
-            continue;
-        }
         let heading_path = format!("{rel_path} > @{key}");
-        let seq = out.len();
-        out.push(ChunkDraft {
-            seq,
-            heading_path: heading_path.clone(),
-            line_start: Some(start),
-            line_end: Some(end),
-            page_num: None,
-            chunk_text: format!("[{heading_path}]\n{}", body.trim()),
-        });
+        split_section_lines(
+            &lines[start - 1..end],
+            start,
+            &heading_path,
+            false,
+            &mut out,
+        );
     }
     out
 }
 
-fn split_text_with_overlap(text: &str, target_chars: usize, overlap_chars: usize) -> Vec<String> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
+/// Returns ranges in the original UTF-8 body and the corresponding embedding inputs.
+fn split_token_chunks(
+    heading: &str,
+    body: &str,
+    boundaries: &[usize],
+    structured: bool,
+) -> Vec<(Range<usize>, String)> {
+    if body.trim().is_empty() {
         return Vec::new();
     }
-    if trimmed.chars().count() <= target_chars {
-        return vec![trimmed.to_owned()];
-    }
 
-    let mut out = Vec::new();
-    let mut start_byte = 0usize;
-    while start_byte < trimmed.len() {
-        let mut end_byte = advance_chars(trimmed, start_byte, target_chars);
-        if end_byte < trimmed.len()
-            && let Some(break_rel) = trimmed[start_byte..end_byte].rfind("\n\n")
-            && break_rel > target_chars / 3
-        {
-            end_byte = start_byte + break_rel;
+    let heading_encoding = encode(heading);
+    let heading = if heading_encoding.len() > MAX_HEADING_TOKENS {
+        // Keep the full breadcrumb in metadata even if it would crowd out the embedding text.
+        format!(
+            "{}…",
+            &heading[..heading_encoding.get_offsets()[MAX_HEADING_TOKENS - 1].1]
+        )
+    } else {
+        heading.to_owned()
+    };
+    let prefix = format!("[{heading}]\n");
+    let prefix_tokens = encode(&prefix).len();
+    let target = TARGET_CHUNK_TOKENS - prefix_tokens;
+    let hard_max = HARD_MAX_TOKENS - prefix_tokens;
+    let encoding = encode(body);
+    // NFC and byte-level tokens can share source spans. Track the rightmost byte covered.
+    let token_ends: Vec<_> = encoding
+        .get_offsets()
+        .iter()
+        .scan(0, |covered, &(_, end)| {
+            *covered = (*covered).max(end);
+            Some(*covered)
+        })
+        .collect();
+
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut previous_end = 0;
+    while start < body.len() {
+        let first_token = token_ends.partition_point(|&end| end <= start);
+        let target_end = token_ends
+            .get(first_token + target - 1)
+            .copied()
+            .unwrap_or(body.len());
+        let hard_end = token_ends
+            .get(first_token + hard_max - 1)
+            .copied()
+            .unwrap_or(body.len());
+        let mut end = body.len();
+        if target_end < body.len() {
+            let after_target = boundaries.partition_point(|&byte| byte <= target_end);
+            let before = boundaries[..after_target]
+                .last()
+                .copied()
+                .filter(|&byte| byte > previous_end);
+            let after = boundaries
+                .get(after_target)
+                .copied()
+                .filter(|&byte| byte <= hard_end);
+            let midpoint = token_ends[first_token + target / 2];
+            let boundary = before
+                .filter(|&byte| byte >= midpoint)
+                .or(after)
+                .or(before.filter(|_| structured));
+            if boundary.is_none()
+                && structured
+                && start < previous_end
+                && boundaries.binary_search(&previous_end).is_ok()
+            {
+                // Drop optional overlap before splitting a block that may fit on its own.
+                start = previous_end;
+                continue;
+            }
+            end = boundary.unwrap_or(target_end);
         }
-        let piece = trimmed[start_byte..end_byte].trim();
-        if !piece.is_empty() {
-            out.push(piece.to_owned());
+
+        // Re-encode the actual input because BPE can merge differently at a cut or after a prefix.
+        let mut chunk_text = format!("{prefix}{}", body[start..end].trim());
+        while encode(&chunk_text).len() > HARD_MAX_TOKENS {
+            end = start
+                + body[start..end]
+                    .char_indices()
+                    .next_back()
+                    .expect("chunk has a body")
+                    .0;
+            chunk_text = format!("{prefix}{}", body[start..end].trim());
         }
-        if end_byte >= trimmed.len() {
+        if !body[start..end].trim().is_empty() {
+            chunks.push((start..end, chunk_text));
+        }
+        if end == body.len() {
             break;
         }
-        let next_start = rewind_chars(trimmed, end_byte, overlap_chars);
-        start_byte = if next_start <= start_byte {
-            end_byte
+
+        let end_token = token_ends.partition_point(|&token_end| token_end <= end);
+        let overlap_start = end_token.checked_sub(OVERLAP_TOKENS + 1)
+            .map_or(0, |index| token_ends[index]);
+        let next = if structured && boundaries.binary_search(&end).is_ok() {
+            // A structured overlap starts between blocks, even if that leaves less overlap.
+            boundaries[boundaries.partition_point(|&byte| byte < overlap_start)]
         } else {
-            next_start
+            overlap_start
         };
+        previous_end = end;
+        start = if next > start { next } else { end };
     }
-    out
-}
-
-fn advance_chars(s: &str, start: usize, count: usize) -> usize {
-    s[start..]
-        .char_indices()
-        .nth(count)
-        .map_or(s.len(), |(offset, _)| start + offset)
-}
-
-fn rewind_chars(s: &str, end: usize, count: usize) -> usize {
-    s[..end]
-        .char_indices()
-        .rev()
-        .nth(count.saturating_sub(1))
-        .map_or(0, |(offset, _)| offset)
+    chunks
 }
 
 fn parse_markdown_heading(line: &str) -> Option<(usize, String)> {
@@ -537,8 +579,35 @@ mod tests {
             body
         );
         let extracted = chunk_text_document("paper.tex", "tex", &tex);
+        assert!(extracted.chunks.len() > 1);
         assert!(extracted.chunks.iter().any(|c| {
             c.chunk_text.contains("\\begin{theorem}") && c.chunk_text.contains("\\end{theorem}")
+        }));
+    }
+
+    #[test]
+    fn token_chunks_keep_long_mixed_utf8_lines_within_budget() {
+        let text = format!(
+            "开头 {} 结束",
+            "混合检索 keeps source offsets 🧬 e\u{301}\u{327}; ".repeat(180)
+        );
+        let extracted = chunk_text_document("notes.txt", "txt", &text);
+        let chunks = &extracted.chunks;
+        assert!(chunks.len() > 1);
+        assert!(
+            chunks
+                .first()
+                .unwrap()
+                .chunk_text
+                .starts_with("[notes.txt]\n开头")
+        );
+        assert!(chunks.last().unwrap().chunk_text.ends_with("结束"));
+        assert!(chunks.iter().all(|chunk| {
+            let (_, body) = chunk.chunk_text.split_once('\n').unwrap();
+            text.contains(body)
+                && encode(&chunk.chunk_text).len() <= HARD_MAX_TOKENS
+                && chunk.line_start == Some(1)
+                && chunk.line_end == Some(1)
         }));
     }
 

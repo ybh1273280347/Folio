@@ -36,6 +36,7 @@ Copy-Item -LiteralPath (Join-Path $projectDirectory 'vendor\latex-rust\NOTICE') 
 Copy-Item -LiteralPath (Join-Path $projectDirectory 'vendor\gpui-kit-markdown-editor\LICENSE-APACHE') -Destination (Join-Path $destination 'Markdown-Editor-LICENSE-APACHE.txt')
 Copy-Item -LiteralPath (Join-Path $projectDirectory 'vendor\gpui-xterm\LICENSE') -Destination (Join-Path $destination 'GPUI-Xterm-LICENSE-MIT.txt')
 Copy-Item -LiteralPath (Join-Path $projectDirectory 'vendor\gpui-pdf\LICENSE') -Destination (Join-Path $destination 'GPUI-PDF-LICENSE.txt')
+Copy-Item -LiteralPath (Join-Path $projectDirectory 'resources\rag\Qwen3-Embedding-LICENSE') -Destination (Join-Path $destination 'Qwen3-Embedding-LICENSE.txt')
 Copy-Item -LiteralPath (Join-Path $projectDirectory 'README.md') -Destination $destination
 Copy-Item -LiteralPath (Join-Path $projectDirectory 'resources\fonts\OFL.txt') -Destination (Join-Path $destination 'STIX-Fonts-OFL.txt')
 Copy-Item -LiteralPath (Join-Path $projectDirectory 'resources\fonts\GUST-FONT-LICENSE.txt') -Destination $destination
@@ -59,6 +60,7 @@ $null = New-Item -ItemType Directory -Path $stableDirectory -Force
 Copy-Item -LiteralPath $executable -Destination $stableExecutable -Force
 Copy-Item -LiteralPath $webview2Loader.FullName -Destination (Join-Path $stableDirectory 'WebView2Loader.dll') -Force
 Copy-Item -LiteralPath (Join-Path $projectDirectory 'resources\icon.ico') -Destination $stableDirectory -Force
+Copy-Item -LiteralPath (Join-Path $destination 'Qwen3-Embedding-LICENSE.txt') -Destination $stableDirectory -Force
 $null = & (Join-Path $PSScriptRoot 'register-file-associations.ps1') -ExecutablePath $stableExecutable
 $desktop = [Environment]::GetFolderPath('Desktop')
 $shortcutPath = Join-Path $desktop 'Folio GPUI.lnk'
