@@ -276,6 +276,7 @@ fn hsla_for_color_name(name: &str) -> Hsla {
 
 struct OutlineHeading {
     range: Range<usize>,
+    line: usize,
     level: u8,
     title: String,
     display_title: String,
@@ -1076,6 +1077,7 @@ impl MarkdownPane {
                 let display_title = outline::clean_outline_title(&title);
                 Some(OutlineHeading {
                     range: start..end,
+                    line: position.start.line.saturating_sub(1),
                     level: heading.level,
                     title,
                     display_title,
@@ -1305,12 +1307,8 @@ impl MarkdownPane {
             let Some(heading) = self.headings.get(index) else {
                 return;
             };
-            let offset = heading.range.start.min(self.text.len());
             let range = heading.range.clone();
-            let line = self.text.as_bytes()[..offset]
-                .iter()
-                .filter(|&&byte| byte == b'\n')
-                .count();
+            let line = heading.line;
             self.source_editor.update(cx, |editor, cx| {
                 editor.set_cursor_position(Position::new(line as u32, 0), window, cx);
                 if let Some(line_height) = editor.line_height() {
@@ -3077,12 +3075,14 @@ mod tests {
         let headings = vec![
             OutlineHeading {
                 range: 0..10,
+                line: 0,
                 level: 1,
                 title: "1. 背景介绍".to_owned(),
                 display_title: "1. 背景介绍".to_owned(),
             },
             OutlineHeading {
                 range: 12..30,
+                line: 2,
                 level: 2,
                 title: "Quick Start Guide".to_owned(),
                 display_title: "Quick Start Guide".to_owned(),

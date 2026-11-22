@@ -1023,36 +1023,42 @@ mod tests {
         let headings = vec![
             OutlineHeading {
                 range: 0..1,
+                line: 0,
                 level: 2,
                 title: "1. Intro".into(),
                 display_title: "1. Intro".into(),
             },
             OutlineHeading {
                 range: 2..3,
+                line: 1,
                 level: 2,
                 title: "2. Core".into(),
                 display_title: "2. Core".into(),
             },
             OutlineHeading {
                 range: 4..5,
+                line: 2,
                 level: 3,
                 title: "2.1 Sub A".into(),
                 display_title: "2.1 Sub A".into(),
             },
             OutlineHeading {
                 range: 6..7,
+                line: 3,
                 level: 4,
                 title: "2.1.1 Deep".into(),
                 display_title: "2.1.1 Deep".into(),
             },
             OutlineHeading {
                 range: 8..9,
+                line: 4,
                 level: 3,
                 title: "2.2 Sub B".into(),
                 display_title: "2.2 Sub B".into(),
             },
             OutlineHeading {
                 range: 10..11,
+                line: 5,
                 level: 2,
                 title: "3. End".into(),
                 display_title: "3. End".into(),
