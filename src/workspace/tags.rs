@@ -222,7 +222,7 @@ impl Workspace {
             input.set_value(value.to_owned(), window, cx)
         });
         if !self.tags.is_editing() {
-            self.tree.scroll_to_tags(self.projects.registered().len());
+            self.tree.scroll_to_tags();
         }
         if focus {
             let input = self.tags.input.clone();
