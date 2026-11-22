@@ -1294,9 +1294,9 @@ impl Workspace {
             .into_iter()
             .filter(|(path, _)| {
                 !query.is_empty() || self.tags.filter.is_some()
-                    || !self.tree.collapsed_folders
-                        .iter()
-                        .any(|folder| path.starts_with(&format!("{folder}/")))
+                    || !path
+                        .match_indices('/')
+                        .any(|(index, _)| self.tree.collapsed_folders.contains(&path[..index]))
             })
             .map(|(path, folder)| {
                 let row_path = path.clone();
