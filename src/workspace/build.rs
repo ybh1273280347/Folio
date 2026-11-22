@@ -1,8 +1,10 @@
-//! Owns build progress, cancellation and batch sequencing. The window opens
-//! batch targets and publishes the resulting preview.
+//! Foreground build jobs, batch sequencing, logs and the published PDF preview.
 
-use crate::{build::{BuildResult, BuildStatus, compiler}, markdown::MarkdownPane};
-use gpui_kit::Entity;
+use crate::{build::{BuildResult, BuildStatus, compiler}, markdown::MarkdownPane, pdf::PdfPane};
+use gpui_kit::{
+    AnyElement, App, Context, Entity, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, Window, assets::IconName, div, px,
+};
 use std::{
     collections::VecDeque,
     io,
@@ -11,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(super) enum BuildEvent {
+enum BuildEvent {
     Log(String),
     Finished(io::Result<BuildResult>),
 }
@@ -31,20 +33,29 @@ struct Batch {
     failed: bool,
 }
 
-pub(super) struct BuildCompletion {
-    pub(super) preview: Option<PathBuf>,
-    pub(super) error: Option<io::Error>,
-    pub(super) next_target: Option<String>,
+struct BuildCompletion {
+    preview: Option<PathBuf>,
+    error: Option<io::Error>,
+    next_target: Option<String>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct BuildPanelVisibility {
+    pub(super) preview: bool,
+    pub(super) logs: bool,
 }
 
 pub(super) struct Build {
     running: Option<RunningBuild>,
     batch: Option<Batch>,
-    pub(super) status: BuildStatus,
-    pub(super) target: String,
-    pub(super) duration: Duration,
-    pub(super) logs: String,
-    pub(super) source_version: u64,
+    status: BuildStatus,
+    target: String,
+    duration: Duration,
+    logs: String,
+    source_version: u64,
+    // A failed or cancelled job leaves the last successful artifact visible.
+    preview: Option<Entity<PdfPane>>,
+    pub(super) panels: BuildPanelVisibility,
 }
 
 impl Default for Build {
@@ -57,6 +68,8 @@ impl Default for Build {
             duration: Duration::ZERO,
             logs: String::new(),
             source_version: 0,
+            preview: None,
+            panels: BuildPanelVisibility::default(),
         }
     }
 }
@@ -74,7 +87,7 @@ impl Build {
         self.batch.is_some()
     }
 
-    pub(super) fn is_cancelling(&self) -> bool {
+    fn is_cancelling(&self) -> bool {
         self.running.as_ref().is_some_and(|running| running.cancelled.load(Ordering::Relaxed))
     }
 
@@ -82,28 +95,28 @@ impl Build {
         self.running.as_ref()?.capture.as_ref()
     }
 
-    pub(super) fn clear_result(&mut self) {
+    fn clear_result(&mut self) {
         self.logs.clear();
         self.status = BuildStatus::Idle;
     }
 
-    pub(super) fn begin_batch(&mut self, targets: Vec<String>) -> String {
+    fn begin_batch(&mut self, targets: Vec<String>) -> String {
         let mut remaining = VecDeque::from(targets);
         let first = remaining.pop_front().expect("batch contains at least one target");
         self.batch = Some(Batch { remaining, waiting: None, logs: String::new(), failed: false });
         first
     }
 
-    pub(super) fn abort_batch(&mut self) {
+    fn abort_batch(&mut self) {
         self.batch = None;
     }
 
-    pub(super) fn wait_for_paint(&mut self, target: String) {
+    fn wait_for_paint(&mut self, target: String) {
         // Markdown export reads the mounted pane's layout after it has painted.
         self.batch.as_mut().expect("batch exists").waiting = Some((target, Instant::now()));
     }
 
-    pub(super) fn take_ready_target(&mut self) -> Option<String> {
+    fn take_ready_target(&mut self) -> Option<String> {
         let waiting = &mut self.batch.as_mut()?.waiting;
         if waiting.as_ref()?.1.elapsed() < Duration::from_millis(250) {
             return None;
@@ -123,7 +136,7 @@ impl Build {
         }
     }
 
-    pub(super) fn start(
+    fn start(
         &mut self,
         target: String,
         source_version: u64,
@@ -144,7 +157,7 @@ impl Build {
         (cancelled, sender)
     }
 
-    pub(super) fn poll(&mut self) -> Option<BuildCompletion> {
+    fn poll(&mut self) -> Option<BuildCompletion> {
         let running = self.running.as_ref()?;
         self.duration = running.started.elapsed();
         let result = loop {
@@ -185,6 +198,63 @@ impl Build {
         }
         Some(BuildCompletion { preview, error, next_target })
     }
+
+    pub(super) fn failed(&self) -> bool {
+        self.status == BuildStatus::Failed
+    }
+
+    pub(super) fn target(&self) -> &str {
+        &self.target
+    }
+
+    pub(super) fn status_label(&self, source_version: u64) -> String {
+        let seconds = self.duration.as_secs_f32();
+        if self.is_running() {
+            let status = if self.is_cancelling() {
+                crate::i18n::workspace::STATUS_STOPPING.get()
+            } else {
+                crate::i18n::workspace::STATUS_BUILDING.get()
+            };
+            return format!("{status} · {seconds:.1}s");
+        }
+        match self.status {
+            BuildStatus::Idle => String::new(),
+            BuildStatus::Success => format!(
+                "✓ {seconds:.1}s{}",
+                if source_version != self.source_version {
+                    crate::i18n::workspace::STATUS_NEEDS_REBUILD.get()
+                } else {
+                    ""
+                },
+            ),
+            BuildStatus::Failed => crate::i18n::workspace::status_failed_secs(seconds),
+            BuildStatus::Cancelled => crate::i18n::workspace::status_cancelled_secs(seconds),
+        }
+    }
+
+    pub(super) fn reset_workspace(&mut self, window: &mut Window, cx: &mut App) {
+        self.clear_result();
+        self.release_preview(window, cx);
+        self.panels.preview = false;
+    }
+
+    fn release_preview(&mut self, window: &mut Window, cx: &mut App) {
+        if let Some(pane) = self.preview.take() {
+            pane.update(cx, |pane, cx| pane.release(window, cx));
+        }
+    }
+
+    pub(super) fn sync_preview_visibility(&self, unobscured: bool, window: &mut Window, cx: &mut App) {
+        if let Some(pane) = &self.preview {
+            pane.update(cx, |pane, cx| pane.set_visible(self.panels.preview && unobscured, window, cx));
+        }
+    }
+
+    pub(super) fn refresh_locale(&self, window: &mut Window, cx: &mut App) {
+        if let Some(pane) = &self.preview {
+            pane.update(cx, |pane, cx| pane.refresh_locale(window, cx));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -216,17 +286,109 @@ mod tests {
     }
 }
 
-use super::{Workspace, Compile};
+use super::{Workspace, Compile, BORDER, MUTED, button, rgb};
 use crate::{model::{Engine, Project}, storage};
-use gpui_kit::{Context, Window};
 use sha2::Digest;
 use std::{collections::BTreeSet, path::Path, thread};
 
 impl Workspace {
-    pub(super) fn release_build_pdf(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(pane) = self.build_pdf.take() {
-            pane.update(cx, |pane, cx| pane.release(window, cx));
+    pub(super) fn render_preview(&self, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(pane) = &self.build.preview {
+            let path = pane.read(cx).path().to_owned();
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .h(px(36.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .bg(rgb(0xfafaf9))
+                        .border_b_1()
+                        .border_color(rgb(BORDER))
+                        .child(crate::ui::icon(IconName::FileText))
+                        .child(crate::i18n::workspace::COMPILE_PREVIEW_TITLE.get())
+                        .child(div().flex_1())
+                        .child(button("export-build-pdf", crate::i18n::workspace::EXPORT_BTN.get()).on_click(cx.listener(
+                            move |app, _, window, cx| app.export_pdf(path.clone(), window, cx),
+                        )))
+                        .child(
+                            crate::ui::control("close-build-preview", IconName::Close).on_click(
+                                cx.listener(|app, _, _, cx| {
+                                    app.build.panels.preview = false;
+                                    cx.notify();
+                                }),
+                            ),
+                        ),
+                )
+                .child(div().flex_1().min_h_0().child(pane.clone()))
+                .into_any_element();
         }
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(rgb(0xf1f1ef))
+            .child(
+                div()
+                    .h(px(38.))
+                    .flex_shrink_0()
+                    .px_4()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .bg(rgb(0xffffff))
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(crate::ui::icon(IconName::FileText))
+                            .child(crate::i18n::workspace::PREVIEW_TITLE.get()),
+                    )
+                    .child(
+                        crate::ui::control("close-build-preview", IconName::Close).on_click(
+                            cx.listener(|app, _, _, cx| {
+                                app.build.panels.preview = false;
+                                cx.notify();
+                            }),
+                        ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_4()
+                    .text_color(rgb(MUTED))
+                    .child(if self.build.is_busy() {
+                        crate::i18n::workspace::STATUS_COMPILING.get()
+                    } else {
+                        crate::i18n::workspace::STATUS_COMPILE_IDLE.get()
+                    }),
+            )
+            .into_any_element()
+    }
+
+    pub(super) fn render_build_log(&self, cx: &mut Context<Self>) -> AnyElement {
+        crate::build_log::panel(self.build.logs.clone(), cx.listener(|app, _, _, cx| {
+            app.build.panels.logs = false;
+            cx.notify();
+        })).into_any_element()
+    }
+
+    pub(super) fn publish_build_preview(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.build.release_preview(window, cx);
+        self.build.preview = Some(self.new_pdf_pane(path, window, cx));
     }
 
     /// Returns true when a cancelled build has settled and the window can exit.
@@ -244,14 +406,12 @@ impl Workspace {
                 return true;
             }
             if let Some(path) = completed.preview {
-                self.release_build_pdf(window, cx);
-                self.build_pdf = Some(self.new_pdf_pane(path.clone(), window, cx));
-                self.preview = Some(path);
+                self.publish_build_preview(path, window, cx);
             }
             if let Some(error) = completed.error {
                 self.report(error, cx);
             }
-            self.show_logs = self.build.status == BuildStatus::Failed;
+            self.build.panels.logs = self.build.failed();
             if let Some(target) = completed.next_target {
                 self.prepare_batch_target(target, window, cx);
             }
@@ -408,7 +568,7 @@ impl Workspace {
             self.documents.markdown_export_pane(file).clone()
         });
         let (cancelled, sender) = self.build.start(target.clone(), self.documents.source_version(), capture.clone());
-        self.show_build_preview = true;
+        self.build.panels.preview = true;
         self.notice = None;
         if let Some((file, pane)) = markdown.zip(capture) {
             let request = crate::markdown::pdf::ExportRequest {

@@ -8,7 +8,7 @@ use crate::annotations::AnnotationItem;
 use crate::drawio::{DrawioPane, DrawioPaneEvent};
 use crate::markdown::{MarkdownEvent, MarkdownPane};
 use crate::model::DocumentBuffer;
-use crate::pdf::PdfPaneEvent;
+use crate::pdf::{PdfPane, PdfPaneEvent};
 use crate::web_view::{HtmlPane, HtmlPaneEvent};
 use gpui_kit::component::input::{Editor, EditorState};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -459,7 +459,6 @@ impl Workspace {
     }
 
     pub(super) fn clear_open_documents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.release_build_pdf(window, cx);
         self.release_all_pdf_panes(window, cx);
         self.release_all_html_panes(window, cx);
         self.release_all_drawio_panes(window, cx);
@@ -471,8 +470,6 @@ impl Workspace {
         self.documents.markdown_panes.clear();
         self.documents.focused_markdown = None;
         self.documents.markdown_changed.clear();
-        self.show_build_preview = false;
-        self.preview = None;
     }
 
     fn prepare_standalone_file(&mut self, path: &Path) -> io::Result<ProjectFile> {

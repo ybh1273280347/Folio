@@ -76,9 +76,7 @@ impl Workspace {
             self.preferences.update(cx, |pane, cx| pane.refresh_locale(window, cx));
             self.ai.update(cx, |pane, cx| pane.refresh_locale(window, cx));
             self.documents.refresh_locale(window, cx);
-            if let Some(pane) = &self.build_pdf {
-                pane.update(cx, |pane, cx| pane.refresh_locale(window, cx));
-            }
+            self.build.refresh_locale(window, cx);
         }
         if locale_changed || fallback_changed || cjk_scale_changed {
             window.refresh();

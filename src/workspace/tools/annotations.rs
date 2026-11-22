@@ -16,9 +16,9 @@ enum Snapshot {
 }
 
 impl Workspace {
-    pub(in crate::workspace) fn annotation_request(&mut self, request: &WorkspaceToolRequest, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn annotation_request(&mut self, request: &WorkspaceToolRequest, window: &mut Window, cx: &mut Context<Self>) {
         if request.action == WorkspaceToolAction::Cancel {
-            self.annotation_requests.remove(&request.id);
+            self.tool_requests.annotation_requests.remove(&request.id);
             return;
         }
         let result = self.start_annotation(request, window, cx);
@@ -77,13 +77,13 @@ impl Workspace {
                 Snapshot::Pdf { .. } => annotations::prepare_pdf(std::fs::read(&target)?, &options),
             }
         });
-        self.annotation_requests.insert(request.id.clone());
+        self.tool_requests.annotation_requests.insert(request.id.clone());
         let request = request.clone();
         cx.spawn_in(window, async move |this, cx| {
             let prepared = prepare.await;
             let _ = this.update_in(cx, |app, window, cx| {
                 // Cancellation and project changes can happen while PDF text is extracted.
-                if !app.annotation_requests.remove(&request.id) { return; }
+                if !app.tool_requests.annotation_requests.remove(&request.id) { return; }
                 let result = prepared.and_then(|prepared|
                     app.commit_annotation(&request, &params, &path, &snapshot, prepared, window, cx));
                 app.ai.read(cx).respond_workspace_tool(&request, result.unwrap_or_else(|error| error.0));

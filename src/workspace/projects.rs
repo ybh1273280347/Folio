@@ -192,13 +192,13 @@ impl Workspace {
         let watcher = DocumentWatch::new(None)?;
         self.tree.dismiss_trash();
         self.tags.reset();
-        self.tag_proposals.clear();
+        self.tool_requests.clear_tag_proposals();
         self.documents.replace_watch(watcher);
         self.projects.config.active_id = None;
         self.projects.config.active_workspace = Some(WorkspaceLocation::LooseFiles);
         self.projects.active_session = Some("loose".into());
         self.tree.clear_directory();
-        self.build.clear_result();
+        self.build.reset_workspace(window, cx);
         self.clear_open_documents(window, cx);
 
         let session = self.projects.workspace_sessions
@@ -257,7 +257,7 @@ impl Workspace {
 
         self.tree.dismiss_trash();
         self.tags.reset();
-        self.tag_proposals.clear();
+        self.tool_requests.clear_tag_proposals();
         self.projects.active_session = Some(id.to_owned());
         if default_space {
             self.projects.config.active_id = None;
@@ -269,14 +269,12 @@ impl Workspace {
         self.documents.replace_watch(watcher);
         self.tree.replace_listing(files, folders);
         self.refresh_tags(cx);
-        self.build.clear_result();
         self.notice = None;
-        self.preview = None;
+        self.build.reset_workspace(window, cx);
         self.clear_open_documents(window, cx);
         self.tree.reset_selection();
         if previous_pdf.exists() {
-            self.build_pdf = Some(self.new_pdf_pane(previous_pdf.clone(), window, cx));
-            self.preview = Some(previous_pdf);
+            self.publish_build_preview(previous_pdf, window, cx);
         }
         let session = self.projects.workspace_sessions.get(id).cloned().unwrap_or_default();
         self.tree.restore_collapsed_folders(session.collapsed_folders);

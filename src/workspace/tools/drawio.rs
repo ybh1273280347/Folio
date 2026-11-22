@@ -12,13 +12,13 @@ use std::path::Path;
 use super::super::Workspace;
 
 impl Workspace {
-    pub(in crate::workspace) fn drawio_request(
+    pub(super) fn drawio_request(
         &mut self,
         request: &WorkspaceToolRequest,
         cx: &mut Context<Self>,
     ) {
         if request.action == crate::ai::WorkspaceToolAction::Cancel {
-            self.drawio_requests.remove(&request.id);
+            self.tool_requests.drawio_requests.remove(&request.id);
             return;
         }
         let operation: Request = match serde_json::from_value(request.arguments.clone()) {
@@ -93,12 +93,12 @@ impl Workspace {
             _ => unreachable!(),
         };
         let params = serde_json::to_value(operation.params).expect("Draw.io parameters serialize");
-        self.drawio_requests.insert(request.id.clone(), request.clone());
+        self.tool_requests.drawio_requests.insert(request.id.clone(), request.clone());
         let dispatch = pane.update(cx, |pane, cx| {
             pane.request_tool(&request.id, operation_name, params, cx)
         });
         if let Err(code) = dispatch {
-            self.drawio_requests.remove(&request.id);
+            self.tool_requests.drawio_requests.remove(&request.id);
             self.ai.read(cx).respond_workspace_tool(
                 request,
                 Failure::new(code, match code {
@@ -116,7 +116,7 @@ impl Workspace {
         result: Value,
         cx: &mut Context<Self>,
     ) {
-        if let Some(request) = self.drawio_requests.remove(request_id) {
+        if let Some(request) = self.tool_requests.drawio_requests.remove(request_id) {
             self.ai.read(cx).respond_workspace_tool(&request, result);
         }
     }
