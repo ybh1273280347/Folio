@@ -1,6 +1,6 @@
 /** Route workspace tool calls across JSONL, including cancellations from the SDK. */
 import { randomUUID } from 'node:crypto';
-import { ToolFailure } from './tool-failure.mjs';
+import { ToolFailure } from '../tool-failure.mjs';
 
 export const cancelled = () => ({ status: 'cancelled', error: { code: 'cancelled', message: '操作已取消。' } });
 

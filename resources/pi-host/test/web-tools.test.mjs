@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import http from 'node:http';
 import { once } from 'node:events';
-import { webTools } from '../web-tools.mjs';
+import { webTools } from '../tools/web/tools.mjs';
 
 test.beforeEach(t => {
   t.mock.method(childProcess, 'execFile', (_command, _args, _options, callback) => {

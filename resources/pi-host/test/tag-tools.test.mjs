@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { tagTools } from '../tag-tools.mjs';
+import { tagTools } from '../tools/workspace/tag-tools.mjs';
 
 const confirmation = {
   kind:'files', created_tags:[], files:[{path:'note.md', add:['重点'], remove:[]}],

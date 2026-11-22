@@ -8,7 +8,7 @@ import readline from 'node:readline';
 import http from 'node:http';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
-import { searchExa, searchBaidu } from '../web-tools.mjs';
+import { searchExa, searchBaidu } from '../tools/web/tools.mjs';
 
 /** The driver exercises the public JSONL boundary; server gates replace timed waits. */
 function driver(child) {
@@ -109,11 +109,11 @@ test('annotation tools cross the real SDK and JSONL request/reply boundary', { t
     args: {path:'note.md', quote:'target', comment:'解释'},
     message: '给 target 加批注',
   });
-  const pending = await client.event(sessionId, 'annotation_request');
+  const pending = await client.event(sessionId, 'workspace_tool_request');
   assert.equal(pending.projectKey, project.projectKey);
   assert.equal(pending.params.quote, 'target');
   const result = {status:'ok', created:true, annotation:{id:42, path:'note.md', quote:'target', comment:'解释'}};
-  assert.equal((await client.request({...project, sessionId, type:'annotation_response', id:pending.id, result})).success, true);
+  assert.equal((await client.request({...project, sessionId, type:'workspace_tool_response', channel:'annotation', id:pending.id, result})).success, true);
   const ended = await client.event(sessionId, 'tool_execution_end');
   assert.equal(ended.isError, false);
   assert.deepEqual(JSON.parse(ended.result.content[0].text), result);
@@ -129,7 +129,7 @@ test('compile tool crosses the real SDK and JSONL request/reply boundary', { tim
     args: {paths:['chapters/ch1.tex', 'chapters/ch2.tex'], engine:'xelatex'},
     message: '批量编译这两章 tex',
   });
-  const pending = await client.event(sessionId, 'compile_request');
+  const pending = await client.event(sessionId, 'workspace_tool_request');
   assert.equal(pending.projectKey, project.projectKey);
   assert.equal(pending.operation, 'compile_tex');
   assert.deepEqual(pending.params, {paths:['chapters/ch1.tex', 'chapters/ch2.tex'], engine:'xelatex'});
@@ -141,7 +141,7 @@ test('compile tool crosses the real SDK and JSONL request/reply boundary', { tim
       {source:'chapters/ch2.tex', pdf:'chapters/ch2.pdf', engine:'xelatex', status:'success', elapsed_ms:170},
     ],
   };
-  assert.equal((await client.request({...project, sessionId, type:'compile_response', id:pending.id, result})).success, true);
+  assert.equal((await client.request({...project, sessionId, type:'workspace_tool_response', channel:'compile', id:pending.id, result})).success, true);
   const ended = await client.event(sessionId, 'tool_execution_end');
   assert.equal(ended.isError, false);
   assert.deepEqual(JSON.parse(ended.result.content[0].text), result);
@@ -157,7 +157,7 @@ test('the tag tool commits its exact preview directly in the originating SDK ses
     name:'folio_file_tags_update', args, message:'把 Notes 里的资料改为已掌握',
   });
   const owner = {...project, sessionId};
-  const preview = await client.event(sessionId, 'tag_request', 'preview_files');
+  const preview = await client.event(sessionId, 'workspace_tool_request', 'preview_files');
   const proposal_id = preview.params.proposal_id;
   assert.deepEqual(preview.params.edit, args);
   const confirmation = {
@@ -170,14 +170,14 @@ test('the tag tool commits its exact preview directly in the originating SDK ses
       {path:'Notes/sheet.pdf', add:['已掌握'], remove:['待复习']},
     ],
   };
-  assert.equal((await client.request({...owner, type:'tag_response', id:preview.id, result:{status:'ok', confirmation}})).success, true);
-  const commit = await client.event(sessionId, 'tag_request', 'commit');
+  assert.equal((await client.request({...owner, type:'workspace_tool_response', channel:'tag', id:preview.id, result:{status:'ok', confirmation}})).success, true);
+  const commit = await client.event(sessionId, 'workspace_tool_request', 'commit');
   assert.deepEqual(commit.params, {proposal_id});
   const result = {status:'ok', updated:2, paths:['Notes/note.md', 'Notes/sheet.pdf'], created_tags:['已掌握'],
     tag_colors:[{tag:'已掌握', color:'green'}]};
-  assert.equal((await client.request({...owner, type:'tag_response', id:commit.id, result})).success, true);
-  const discard = await client.event(sessionId, 'tag_request', 'discard');
-  assert.equal((await client.request({...owner, type:'tag_response', id:discard.id, result:{status:'ok'}})).success, true);
+  assert.equal((await client.request({...owner, type:'workspace_tool_response', channel:'tag', id:commit.id, result})).success, true);
+  const discard = await client.event(sessionId, 'workspace_tool_request', 'discard');
+  assert.equal((await client.request({...owner, type:'workspace_tool_response', channel:'tag', id:discard.id, result:{status:'ok'}})).success, true);
   const ended = await client.event(sessionId, 'tool_execution_end');
   assert.equal(ended.toolCallId, 'workspace-tool');
   assert.deepEqual(ended.result.details.tagApproval, confirmation);
