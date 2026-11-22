@@ -443,26 +443,29 @@ fn render_pdf_cover_thumb(
     cover: Option<&Arc<RenderImage>>,
     w: f32,
     h: f32,
+    framed: bool,
     palette: crate::theme::Palette,
 ) -> AnyElement {
     let paper_border = fg_alpha(palette.text, if palette.is_dark() { 0.18 } else { 0.14 });
     let frame = div()
         .w(px(w))
         .h(px(h))
-        .rounded(px(3.5))
-        .border_1()
-        .border_color(paper_border)
         .bg(gpui_kit::rgb(0xffffff))
         .overflow_hidden()
         .flex_shrink_0()
-        .shadow(vec![
-            BoxShadow::new(
-                px(0.),
-                px(1.5),
-                hsla(0., 0., 0., if palette.is_dark() { 0.42 } else { 0.11 }),
-            )
-            .blur_radius(px(4.)),
-        ]);
+        .when(framed, |el| {
+            el.rounded(px(3.5))
+                .border_1()
+                .border_color(paper_border)
+                .shadow(vec![
+                    BoxShadow::new(
+                        px(0.),
+                        px(1.5),
+                        hsla(0., 0., 0., if palette.is_dark() { 0.42 } else { 0.11 }),
+                    )
+                    .blur_radius(px(4.)),
+                ])
+        });
 
     if let Some(image) = cover {
         frame
@@ -1187,9 +1190,13 @@ impl Workspace {
         }
 
         let panel_w = self.kb_panel_width(window);
-        let cols = if panel_w >= 860.0 {
+        let cols = if panel_w >= 1100.0 {
+            5
+        } else if panel_w >= 860.0 {
+            4
+        } else if panel_w >= 620.0 {
             3
-        } else if panel_w >= 560.0 {
+        } else if panel_w >= 460.0 {
             2
         } else {
             1
@@ -1521,7 +1528,7 @@ impl Workspace {
                     .id(SharedString::from(format!("kb-book-{group_idx}")))
                     .flex_1()
                     .min_w_0()
-                    .when(cols > 1 && !expanded, |el| el.h(px(236.)))
+                    .when(cols > 1 && !expanded, |el| el.h(px(284.)))
                     .rounded(px(9.))
                     .border_1()
                     .border_color(gpui_kit::rgb(palette.border))
@@ -1553,15 +1560,13 @@ impl Workspace {
         let palette = self.settings.theme.palette;
         let t = KbType::from_ui_font(self.settings.interface_font_size);
         let panel_w = self.kb_panel_width(window);
-        let pdf_cols = if panel_w >= 1080.0 {
-            4
-        } else if panel_w >= 780.0 {
-            3
-        } else if panel_w >= 520.0 {
-            2
+        let use_book_tiles = panel_w >= 340.0;
+        let card_w = if panel_w >= 640.0 {
+            148.0_f32
         } else {
-            1
+            134.0_f32
         };
+        let thumb_h = (card_w * 1.38).round();
         let chrome_bg = if palette.is_dark() {
             mix_color(palette.background, palette.surface, 0.35)
         } else {
@@ -1570,11 +1575,6 @@ impl Workspace {
         let canvas_bg = kb_desk_bg(palette);
         let hover_bg = gpui_kit::rgb(palette.hover);
         let row_hover = mix_color(palette.surface, palette.hover, 0.55);
-        let cover_stage_bg = if palette.is_dark() {
-            mix_color(palette.background, palette.surface, 0.45)
-        } else {
-            mix_color(palette.background, palette.border, 0.38)
-        };
         let card_shadow = kb_paper_shadow(palette.is_dark());
         let seg_bg = fg_alpha(palette.text, 0.045);
         let kb = &self.right_panel.kb;
@@ -2217,7 +2217,7 @@ impl Workspace {
                         None
                     };
 
-                    if pdf_cols == 1 {
+                    if !use_book_tiles {
                         div()
                             .id(SharedString::from(format!("pdf-mgr-row-{idx}")))
                             .rounded(px(8.))
@@ -2243,7 +2243,7 @@ impl Workspace {
                                     .items_center()
                                     .gap_2p5()
                                     .child(checkbox_el)
-                                    .child(render_pdf_cover_thumb(cover_img, 36.0, 48.0, palette))
+                                    .child(render_pdf_cover_thumb(cover_img, 36.0, 48.0, true, palette))
                                     .child(
                                         div()
                                             .id(SharedString::from(format!("pdf-row-open-{idx}")))
@@ -2340,9 +2340,9 @@ impl Workspace {
                     } else {
                         div()
                             .id(SharedString::from(format!("pdf-mgr-row-{idx}")))
-                            .flex_1()
-                            .min_w_0()
-                            .rounded(px(9.))
+                            .w(px(card_w))
+                            .flex_shrink_0()
+                            .rounded(px(7.))
                             .border_1()
                             .border_color(row_border)
                             .bg(row_bg)
@@ -2360,17 +2360,15 @@ impl Workspace {
                             .child(
                                 div()
                                     .relative()
-                                    .h(px(144.))
                                     .w_full()
-                                    .bg(cover_stage_bg)
+                                    .h(px(thumb_h))
                                     .border_b_1()
-                                    .border_color(gpui_kit::rgb(palette.border))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
+                                    .border_color(fg_alpha(palette.border, 0.75))
+                                    .overflow_hidden()
                                     .child(
                                         div()
                                             .id(SharedString::from(format!("pdf-row-open-{idx}")))
+                                            .size_full()
                                             .cursor_pointer()
                                             .tooltip(move |window, cx| {
                                                 gpui_kit::component::tooltip::Tooltip::new(
@@ -2391,32 +2389,48 @@ impl Workspace {
                                             }))
                                             .child(render_pdf_cover_thumb(
                                                 cover_img,
-                                                84.0,
-                                                114.0,
+                                                card_w - 2.0,
+                                                thumb_h,
+                                                false,
                                                 palette,
                                             )),
                                     )
                                     .child(
                                         div()
                                             .absolute()
-                                            .top_2()
-                                            .left_2()
+                                            .top_1p5()
+                                            .left_1p5()
+                                            .rounded(px(4.))
+                                            .bg(fg_alpha(palette.surface, 0.85))
+                                            .p(px(1.5))
                                             .child(checkbox_el),
                                     )
                                     .child(
                                         div()
+                                            .id(SharedString::from(format!(
+                                                "pdf-row-tier-{idx}"
+                                            )))
                                             .absolute()
-                                            .top_2()
-                                            .right_2()
+                                            .top_1p5()
+                                            .right_1p5()
                                             .px_1p5()
-                                            .py(px(1.5))
+                                            .py(px(1.))
                                             .rounded(px(4.))
                                             .bg(fg_alpha(palette.surface, 0.90))
                                             .border_1()
-                                            .border_color(gpui_kit::rgb(palette.border))
+                                            .border_color(fg_alpha(palette.border, 0.8))
                                             .text_size(px(t.micro))
                                             .font_medium()
                                             .text_color(tier_color)
+                                            .when(has_error, |el| {
+                                                let tip = err_tip.clone();
+                                                el.tooltip(move |window, cx| {
+                                                    gpui_kit::component::tooltip::Tooltip::new(
+                                                        tip.clone(),
+                                                    )
+                                                    .build(window, cx)
+                                                })
+                                            })
                                             .child(tier_label),
                                     )
                                     .when_some(action_btn, |stage, btn| {
@@ -2428,7 +2442,7 @@ impl Workspace {
                                                 .rounded(px(5.))
                                                 .bg(fg_alpha(palette.surface, 0.92))
                                                 .border_1()
-                                                .border_color(gpui_kit::rgb(palette.border))
+                                                .border_color(fg_alpha(palette.border, 0.8))
                                                 .child(btn),
                                         )
                                     }),
@@ -2449,14 +2463,14 @@ impl Workspace {
                             })
                             .child(
                                 div()
-                                    .px_2p5()
-                                    .py_2()
+                                    .px_2()
+                                    .py_1p5()
                                     .flex()
                                     .flex_col()
-                                    .gap(px(2.))
+                                    .gap(px(1.5))
                                     .child(
                                         div()
-                                            .text_size(px(t.body))
+                                            .text_size(px(t.meta))
                                             .font_medium()
                                             .text_color(gpui_kit::rgb(palette.text))
                                             .text_ellipsis()
@@ -2483,6 +2497,23 @@ impl Workspace {
                 })
                 .collect();
 
+            let layout_el = if !use_book_tiles {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .children(cards)
+                    .into_any_element()
+            } else {
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_start()
+                    .gap(px(12.))
+                    .children(cards)
+                    .into_any_element()
+            };
+
             div()
                 .id("kb-pdf-mgr-scroll")
                 .flex_1()
@@ -2491,7 +2522,7 @@ impl Workspace {
                 .bg(canvas_bg)
                 .p_3()
                 .pb_4()
-                .child(render_grid_rows(cards, pdf_cols, 10.0))
+                .child(layout_el)
                 .into_any_element()
         };
 

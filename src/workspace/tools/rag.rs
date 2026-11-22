@@ -322,7 +322,7 @@ impl Workspace {
                 let thumb = std::fs::read(&abs).ok().and_then(|bytes| {
                     let doc = gpui_pdf::parse(Arc::new(bytes)).ok()?;
                     let (page_w, _) = gpui_pdf::page_dims(&doc).into_iter().next()?;
-                    let scale = (150.0 / page_w.max(1.0)).clamp(0.14, 0.45);
+                    let scale = (240.0 / page_w.max(1.0)).clamp(0.18, 0.65);
                     gpui_pdf::render_page(&doc, 0, scale).ok()
                 });
                 rendered.push((hash, thumb));
