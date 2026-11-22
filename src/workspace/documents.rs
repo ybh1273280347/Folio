@@ -1132,6 +1132,9 @@ impl Workspace {
             self.refresh_tags(cx);
         }
         let changed = std::mem::take(&mut self.documents.document_watch.paths);
+        if refresh_tree {
+            self.reconcile_rag_on_tree_change(&previous);
+        }
         if refresh_tree || !changed.is_empty() {
             self.schedule_rag_sync();
         }
@@ -1349,7 +1352,9 @@ impl Workspace {
         } else { full.to_string_lossy().into_owned() };
         self.relocate_file_state(key, &renamed, window, cx);
         let annotation_result = crate::annotations::relocate_annotations(&old, &full);
-        self.relocate_tags(&[(key.to_owned(), renamed.clone())], false, cx);
+        let relocated = [(key.to_owned(), renamed.clone())];
+        self.relocate_tags(&relocated, false, cx);
+        self.relocate_rag_paths(&relocated, false, cx);
         if let Some(workspace) = self.projects.directory() {
             let root = PathBuf::from(&workspace.folder);
             self.tree.reload_files(&root)?;

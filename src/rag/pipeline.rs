@@ -63,7 +63,6 @@ pub fn sync_project(
 
     for rel_path in eligible_paths {
         check_cancelled(cancelled)?;
-        live_set.insert(rel_path.clone());
 
         let Some(kind) = doc_kind(rel_path) else {
             continue;
@@ -83,6 +82,7 @@ pub fn sync_project(
             && prev.mtime_ns == mtime_ns
             && prev.file_size == file_size
         {
+            live_set.insert(rel_path.clone());
             skipped_unchanged += 1;
             continue;
         }
@@ -90,6 +90,7 @@ pub fn sync_project(
         let Ok(bytes) = fs::read(&abs_path) else {
             continue;
         };
+        live_set.insert(rel_path.clone());
         let content_hash = sha256_hex(&bytes);
         if kind == "pdf"
             && (derived_hashes.contains(&content_hash) || has_folio_pdf_fingerprint(&bytes))

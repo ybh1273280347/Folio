@@ -461,6 +461,7 @@ impl Workspace {
         self.tree.files = files::list_files(&root)?;
         self.tree.folders = files::list_folders(&root)?;
         self.relocate_tags(&relocated, false, cx);
+        self.relocate_rag_paths(&relocated, false, cx);
         self.projects.save()?;
         self.remember_session()?;
         cx.notify();
@@ -486,7 +487,9 @@ impl Workspace {
         // Folder-local .folio stores move with the directory.
         self.tree.files = files::list_files(&root)?;
         self.tree.folders = files::list_folders(&root)?;
-        self.relocate_tags(&[(dragged.0.clone(), renamed.clone())], true, cx);
+        let relocated = [(dragged.0.clone(), renamed.clone())];
+        self.relocate_tags(&relocated, true, cx);
+        self.relocate_rag_paths(&relocated, true, cx);
         self.projects.save()?;
         self.remember_session()?;
         if !cx.reduce_motion() {
@@ -894,7 +897,9 @@ impl Workspace {
                     self.relocate_folder_state(&folder_path, &renamed, window, cx);
                     self.tree.files = files::list_files(&root)?;
                     self.tree.folders = files::list_folders(&root)?;
-                    self.relocate_tags(&[(folder_path, renamed)], true, cx);
+                    let relocated = [(folder_path, renamed)];
+                    self.relocate_tags(&relocated, true, cx);
+                    self.relocate_rag_paths(&relocated, true, cx);
                     self.projects.save()?;
                 }
             }
