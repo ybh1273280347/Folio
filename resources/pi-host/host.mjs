@@ -229,7 +229,15 @@ async function createRecord(cwd, manager) {
       const writeBefore = !stat ? '' : stat.isFile() && stat.size <= 512 * 1024 ? fs.readFileSync(target, 'utf8') : undefined;
       event = { ...event, writeBefore };
     }
-    if (event.type === 'message_update' && event.assistantMessageEvent?.partial) record.partial = event.assistantMessageEvent.partial;
+    if (event.type === 'message_update' && event.assistantMessageEvent?.partial) {
+      const { partial, ...assistantMessageEvent } = event.assistantMessageEvent;
+      record.partial = partial;
+      // Reconnects use the cumulative snapshot; the live panel needs only deltas and the active tool call.
+      if (assistantMessageEvent.type.startsWith('toolcall_')) {
+        assistantMessageEvent.toolCall ??= partial.content[assistantMessageEvent.contentIndex];
+      }
+      event = { type: event.type, usage: event.message.usage, assistantMessageEvent };
+    }
     if (event.type === 'message_end') record.partial = undefined;
     if (event.type === 'agent_start') record.running = true;
     if (event.type === 'agent_settled') {

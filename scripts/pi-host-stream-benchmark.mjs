@@ -56,6 +56,7 @@ readline.createInterface({ input: child.stdout }).on('line', line => {
   if (measure && event.type === 'message_update') {
     measure.bytes += Buffer.byteLength(line) + 1;
     measure.events += 1;
+    measure.textEvents += Number(['text_start', 'text_delta'].includes(event.assistantMessageEvent?.type));
     if (measure.firstTextMs === undefined
       && ['text_start', 'text_delta'].includes(event.assistantMessageEvent?.type)) {
       measure.firstTextMs = Number(process.hrtime.bigint() - measure.startedAt) / 1e6;
@@ -87,12 +88,16 @@ try {
     const created = await command({ type: 'create_session' });
     if (!created.success) throw new Error(created.error ?? diagnostic);
     const sessionId = created.data.sessionId;
-    const measure = { startedAt: process.hrtime.bigint(), bytes: 0, events: 0 };
+    const measure = { startedAt: process.hrtime.bigint(), bytes: 0, events: 0, textEvents: 0 };
     sessions.set(sessionId, measure);
     const completed = await command({ type: 'prompt', sessionId, message: `benchmark ${round}` });
     if (!completed.success) throw new Error(completed.error ?? diagnostic);
+    const snapshot = await command({ type: 'snapshot', sessionId });
+    if (!snapshot.success || snapshot.data.messages.at(-1)?.content?.[0]?.text !== content.repeat(chunkCount)) {
+      throw new Error('The completed transcript snapshot differs from the streamed answer');
+    }
     measurements.push({ bytes: measure.bytes, events: measure.events,
-      firstTextMs: measure.firstTextMs, settledMs: measure.settledMs });
+      textEvents: measure.textEvents, firstTextMs: measure.firstTextMs, settledMs: measure.settledMs });
     sessions.delete(sessionId);
   }
   process.stdout.write(`${JSON.stringify({ rounds, chunkCount, chunkBytes, measurements })}\n`);

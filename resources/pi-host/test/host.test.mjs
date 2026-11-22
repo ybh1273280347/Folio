@@ -415,8 +415,10 @@ test('tool argument deltas reach the conversation before generation ends', { tim
   const sessionId = created.data.sessionId;
   const run = client.request({ ...project, sessionId, type: 'prompt', message: '检查文件' });
   const delta = await client.event(sessionId, 'message_update', 'toolcall_delta');
-  assert.equal(delta.assistantMessageEvent.partial.content[1].name, 'read');
-  assert.match(delta.assistantMessageEvent.partial.content[1].arguments.path, /README/);
+  assert.equal(delta.assistantMessageEvent.toolCall.name, 'read');
+  assert.match(delta.assistantMessageEvent.toolCall.arguments.path, /README/);
+  assert.equal('partial' in delta.assistantMessageEvent, false);
+  assert.equal('message' in delta, false);
   const snapshot = await client.request({ ...project, sessionId, type: 'snapshot' });
   assert.equal(snapshot.data.isStreaming, true);
   assert.equal(snapshot.data.messages.at(-1).content[1].name, 'read');
