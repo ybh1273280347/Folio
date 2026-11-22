@@ -1,6 +1,7 @@
 //! Live document buffers and their editor/reader projections.
 
 use super::*;
+use crate::annotations::AnnotationItem;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum PaneRole {
@@ -51,9 +52,27 @@ pub(super) struct Documents {
     pub(super) html_panes: BTreeMap<PaneKey, Entity<HtmlPane>>,
     pub(super) drawio_panes: BTreeMap<PaneKey, Entity<DrawioPane>>,
     pub(super) image_panes: BTreeMap<PaneKey, Entity<crate::image::ImagePane>>,
-    pub(super) markdown_changed: BTreeSet<String>,
-    pub(super) source_version: u64,
+    markdown_changed: BTreeSet<String>,
+    source_version: u64,
     pub(super) document_watch: DocumentWatch,
+}
+
+impl Documents {
+    pub(super) fn open_buffer_at(&self, path: &Path) -> Option<(&str, &DocumentBuffer)> {
+        self.open.iter().find_map(|(key, document)| {
+            (dunce::canonicalize(&document.path).ok().as_deref() == Some(path))
+                .then_some((key.as_str(), &document.buffer))
+        })
+    }
+
+    pub(super) fn source_version(&self) -> u64 {
+        self.source_version
+    }
+
+    fn source_changed(&mut self, path: &str) {
+        self.markdown_changed.insert(path.to_owned());
+        self.source_version += 1;
+    }
 }
 
 /// One watcher and its pending changes belong to the same workspace selection.
@@ -96,8 +115,7 @@ impl Workspace {
         if document.buffer.text != text {
             document.buffer.set_text(text);
             document.last_edit = Instant::now();
-            self.documents.markdown_changed.insert(path.to_owned());
-            self.documents.source_version += 1;
+            self.documents.source_changed(path);
         }
     }
 }
@@ -719,6 +737,51 @@ impl Workspace {
             }
         }
     }
+    /// Publish a prepared Markdown replacement only after the disk revision matches.
+    /// Update both editable views immediately without changing tabs or keyboard focus.
+    pub(super) fn save_markdown_snapshot(
+        &mut self,
+        path: &Path,
+        open_key: Option<&str>,
+        text: &str,
+        expected_revision: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> io::Result<bool> {
+        let Ok(saved) = files::save_document_at(path, text, expected_revision)? else {
+            return Ok(false);
+        };
+        if let Some(key) = open_key {
+            self.documents.open.get_mut(key).expect("opened document").buffer.replace_from_disk(saved);
+            self.documents.source_changed(key);
+        }
+        for pane in self.documents.markdown_panes.values() {
+            if dunce::canonicalize(pane.read(cx).path()).ok().as_deref() == Some(path) {
+                pane.update(cx, |pane, cx| pane.sync(text, window, cx));
+            }
+        }
+        Ok(true)
+    }
+
+    /// Refresh every open projection after the annotation sidecar has been saved.
+    pub(super) fn sync_document_annotations(
+        &self,
+        path: &Path,
+        items: &[AnnotationItem],
+        cx: &mut Context<Self>,
+    ) {
+        for pane in self.documents.markdown_panes.values() {
+            if dunce::canonicalize(pane.read(cx).path()).ok().as_deref() == Some(path) {
+                pane.update(cx, |pane, cx| pane.sync_annotations(items, cx));
+            }
+        }
+        for pane in self.documents.pdf_panes.values() {
+            if dunce::canonicalize(pane.read(cx).path()).ok().as_deref() == Some(path) {
+                pane.update(cx, |pane, cx| pane.sync_annotations(items, cx));
+            }
+        }
+    }
+
     pub(super) fn save_active(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
         let path = self.documents.focused_markdown
             .clone()

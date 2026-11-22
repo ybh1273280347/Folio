@@ -1887,7 +1887,7 @@ impl Render for Workspace {
                 BuildStatus::Success => format!(
                     "✓ {:.1}s{}",
                     self.build.duration.as_secs_f32(),
-                    if self.documents.source_version != self.build.source_version {
+                    if self.documents.source_version() != self.build.source_version {
                         crate::i18n::workspace::STATUS_NEEDS_REBUILD.get()
                     } else {
                         ""
