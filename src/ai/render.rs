@@ -14,15 +14,18 @@ impl ChatPane {
         let top = self.scroll.top_item();
         let active = turns.partition_point(|turn| turn.item <= top).saturating_sub(1);
         let row_height = (typo.sm * 1.7).max(px(26.));
+        let trigger_size = px(26.);
+        let gap = px(6.);
         let row = div()
             .id("ai-turn-navigation")
+            .relative()
             .flex()
             .items_center()
-            .gap_1p5()
+            .gap(gap)
             .child(
                 div()
                     .id("ai-turn-navigation-toggle")
-                    .size(px(26.))
+                    .size(trigger_size)
                     .flex_shrink_0()
                     .flex()
                     .items_center()
@@ -34,28 +37,52 @@ impl ChatPane {
                         el.bg(gpui_kit::rgb(palette.hover))
                             .text_color(gpui_kit::rgb(palette.accent))
                     })
-                    .cursor_pointer()
                     .child(crate::ui::icon(IconName::List).size(px(14.)))
-                    .tooltip(|window, cx| {
-                        Tooltip::new(crate::i18n::ai::TURN_NAVIGATION.get()).build(window, cx)
-                    })
-                    .on_click(cx.listener(move |pane, _, _, cx| {
-                        pane.turn_navigation_open = !pane.turn_navigation_open;
-                        if pane.turn_navigation_open {
+                    .on_hover(cx.listener(move |pane, hovered, _, cx| {
+                        if *hovered && !pane.turn_navigation_open {
+                            pane.turn_navigation_open = true;
                             pane.turn_navigation_scroll.scroll_to_item(active);
+                            cx.notify();
                         }
-                        cx.notify();
                     })),
             )
             .when(self.turn_navigation_open, |row| {
+                let pane = cx.entity().downgrade();
                 row.w_full()
                     .h_full()
                     .max_w(px(374.))
                     .max_h(row_height * turns.len().min(9) as f32 + typo.sm * 1.5 + px(16.))
-                    .on_mouse_down_out(cx.listener(|pane, _, _, cx| {
-                        pane.turn_navigation_open = false;
-                        cx.notify();
-                    }))
+                    .child(canvas(|_, _, _| (), move |bounds, (), window, cx| {
+                        // Use geometry because the popup's hitbox blocks mouse hits on its parent.
+                        // Include the narrow bridge from the trigger to the list.
+                        let close = move |cx: &mut App| {
+                            let _ = pane.update(cx, |pane, cx| {
+                                pane.turn_navigation_open = false;
+                                cx.notify();
+                            });
+                        };
+                        let contains = move |point: Point<Pixels>| {
+                            bounds.contains(&point)
+                                && (point.x >= bounds.left() + trigger_size + gap
+                                    || (point.y - bounds.center().y).abs() <= trigger_size / 2.)
+                        };
+                        // A quick pass over the trigger can finish before the expanded row paints.
+                        if !contains(window.mouse_position()) {
+                            let close = close.clone();
+                            window.defer(cx, move |_, cx| close(cx));
+                        }
+                        let on_move = close.clone();
+                        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                            if phase.capture() && !contains(event.position) {
+                                on_move(cx);
+                            }
+                        });
+                        window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                            if phase.capture() {
+                                close(cx);
+                            }
+                        });
+                    }).absolute().inset_0())
                     .child(
                         div()
                             .relative()
