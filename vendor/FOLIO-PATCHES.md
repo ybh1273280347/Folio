@@ -10,6 +10,7 @@
 - `gpui-kit-markdown-editor`：批注的选区计数和跳转共用引用匹配，跨块引用按已保存的 Markdown 摘录匹配连续叶块。保留 inline atom 的源范围映射，并用唯一的正文高亮恢复位次已变化的批注。
 - `gpui-kit-markdown-editor`：公式规范化遇到没有 TeX 起始定界符的文本时跳过预解析，减少 AI 流式渲染和 Markdown 导入的重复解析。
 - `gpui-base 0.9.1`：为 Folio 的 Markdown 源码编辑器提供后台全文换行。宽度变化时保留现有索引，按实际字体与编辑区几何异步重排。长逻辑行的字形只按视口附近的软换行行整形，原文偏移和折行行号映射保留完整。
+- `gpui-base` 与 `gpui-kit-markdown-editor`：编辑区和 PDF 共享列表分组与相邻容器的留白。透明编辑区同时淡化行内代码的胶囊底色和标记背景。
 
 Mermaid 适配保留编辑器原有的 `code_ui` 模块、投影缓存和折叠按钮 bounds；自定义节点使用 `editor_host::BlockState`。预览点击在编辑器 entity 的 `update` 内设置焦点，避免通过 `read(cx)` 跨越可变 App 借用。
 
