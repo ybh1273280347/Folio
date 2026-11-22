@@ -1014,10 +1014,11 @@ impl Workspace {
         self.restore_trash(ids, window, cx);
     }
 
-    fn restore_trash(&mut self, mut ids: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
-        while let Some(id) = ids.first().cloned() {
+    fn restore_trash(&mut self, ids: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let mut index = 0;
+        while let Some(id) = ids.get(index).cloned() {
             let Some(entry) = self.tree.trash_entries.iter().find(|entry| entry.id == id).cloned() else {
-                ids.remove(0);
+                index += 1;
                 continue;
             };
             if !entry.project_root.is_dir() {
@@ -1026,7 +1027,7 @@ impl Workspace {
             }
             let mut target = entry.project_root.join(&entry.relative);
             if target.exists() {
-                let retry = ids.clone();
+                let retry = ids[index..].to_vec();
                 let Some(choice) = self.ask(
                     Dialog::TrashConflict,
                     crate::i18n::workspace::DIALOG_TRASH_CONFLICT_TITLE.get().into(),
@@ -1058,7 +1059,7 @@ impl Workspace {
                             number += 1;
                         }
                     }
-                    _ => { ids.remove(0); continue; }
+                    _ => { index += 1; continue; }
                 }
             }
             let result = std::fs::create_dir_all(target.parent().expect("file parent"))
@@ -1070,7 +1071,7 @@ impl Workspace {
                     self.report(error, cx);
                 }
             }
-            ids.remove(0);
+            index += 1;
         }
         if let Err(error) = self.refresh_files(window, cx) { self.report(error, cx); }
         cx.notify();
