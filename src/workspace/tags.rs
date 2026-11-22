@@ -353,19 +353,16 @@ impl Workspace {
         &mut self,
         id: String,
         name: String,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let retry_id = id.clone();
-        let retry_name = name.clone();
         if self.ask(
             Dialog::DeleteTag,
             crate::i18n::tags::dialog_delete_tag_title(&name),
             crate::i18n::tags::DIALOG_DELETE_TAG_BODY.get().into(),
             DialogButtons::Confirm(crate::i18n::tags::DIALOG_DELETE_TAG_CONFIRM.get().into()),
-            window,
             cx,
-            move |app, window, cx| app.delete_tag(retry_id, retry_name, window, cx),
+            move |app, _, cx| app.delete_tag(retry_id, name, cx),
         ) == Some(rfd::MessageDialogResult::Ok)
         {
             self.change_tags(Change::Delete(&id), cx);
@@ -954,7 +951,7 @@ impl Workspace {
             )
             .child(
                 tag_control("tag-delete", IconName::Trash, crate::i18n::tags::DELETE_TAG.get()).on_click(cx.listener(
-                    move |app, _, window, cx| app.delete_tag(id.clone(), name.clone(), window, cx),
+                    move |app, _, _, cx| app.delete_tag(id.clone(), name.clone(), cx),
                 )),
             )
             .into_any_element()

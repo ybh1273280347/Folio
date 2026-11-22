@@ -905,10 +905,7 @@ impl Workspace {
             && (self.documents.open
                 .get(path)
                 .is_some_and(|document| document.buffer.is_dirty())
-                || self
-                    .dialog_response
-                    .as_ref()
-                    .is_some_and(|(kind, _)| *kind == Dialog::CloseTab))
+                || self.dialogs.has_response(Dialog::CloseTab))
         {
             let retry_path = path.to_owned();
             match self.ask(
@@ -916,7 +913,6 @@ impl Workspace {
                 crate::i18n::workspace::dialog_close_unsaved_title(path),
                 crate::i18n::workspace::DIALOG_UNSAVED_FILE_BODY.get().into(),
                 DialogButtons::SaveDiscardCancel,
-                window,
                 cx,
                 move |app, window, cx| {
                     if app.documents.reading_panes.contains(&retry_path) && !app.documents.tabs.contains(&retry_path) {
@@ -1194,7 +1190,7 @@ impl Workspace {
             }
         }
         // Autosave only idle, conflict-free drafts. Manual saves and builds share this revision path.
-        if !self.tree.name_dialog_open() && !self.dialog_open {
+        if !self.tree.name_dialog_open() && !self.dialogs.is_open() {
             let paths: Vec<_> = self.documents.open
                 .iter()
                 .filter(|(_, document)| {

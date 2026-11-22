@@ -19,13 +19,16 @@ flowchart LR
 
 | 需求 | 从哪里进入 | 该模块负责什么 |
 | --- | --- | --- |
-| 切换空间、打开保存文档、标签页、阅读分栏和文件树 | [workspace.rs](src/workspace.rs)、[workspace/](src/workspace/) | 应用状态和面板生命周期。空间切换走 `projects`，文档缓冲、监听与保存走 `documents`，文件树命令走 `file_tree`。 |
+| 项目登记、空间切换与会话恢复 | [workspace/projects.rs](src/workspace/projects.rs) | 管理项目配置、当前空间和已保存的导航会话。切换前准备新目录和监听器，切换时协调文档、文件树和构建预览。 |
+| 打开、保存和同步文档 | [workspace/documents.rs](src/workspace/documents.rs)、[workspace/documents/](src/workspace/documents/) | 管理草稿、来源版本、文件监听、页签和阅读分栏。编辑区与阅读分栏共享文档缓冲，关闭、移动和批注写回在此更新窗格。 |
+| 文件树、选区、筛选和回收站 | [workspace/file_tree.rs](src/workspace/file_tree.rs) | 管理目录索引、选区、折叠、搜索、拖放和回收站视图。文件操作成功后通知文档、项目和标签模块更新各自的记录。 |
+| 窗口布局、右侧面板和弹窗 | [workspace.rs](src/workspace.rs)、[workspace/panels.rs](src/workspace/panels.rs)、[workspace/dialogs.rs](src/workspace/dialogs.rs) | Workspace 组合各视图并协调专注模式。右侧面板管理功能中心、AI 和终端的切换及搜索焦点。确认弹窗保存待恢复的动作，选择后由原动作消费结果。 |
 | Markdown 编辑、内容扩展与导出 | [markdown/](src/markdown/) | `pane` 管编辑、选区、大纲与面板交互，`extensions` 提供编辑器、AI 和批注共用的公式与 Callout 扩展，`pdf` 消费 GPUI 文档绘制操作。通用块模型与输入行为在 [vendored 编辑器](vendor/gpui-kit-markdown-editor/)。 |
 | 公式、Mermaid、SVG 和字体 | [math.rs](src/math.rs)、[math_layout.rs](src/math_layout.rs)、[mermaid.rs](src/mermaid.rs)、[svg/](src/svg/) | 公式排版和图表各自维护渲染生命周期。通用 SVG 字节清理、兼容预处理与 `usvg` 字体配置由 `svg` 提供，图片、Draw.io、Mermaid 与 PDF 出口按需要直接调用。 |
 | 文件预览与画布操作 | [pdf.rs](src/pdf.rs)、[image/](src/image/)、[drawio/](src/drawio/)、[web_view/](src/web_view/) | PDF 与图片各自管理查看器，Draw.io 拥有图表读写、画布通信与导出。WebView2 宿主与本地资源映射由 `web_view` 提供，轻量 HTML 预览也在这里。 |
-| 编译与构建预览 | [build/](src/build/)、[workspace/build.rs](src/workspace/build.rs) | `build` 提供公共的构建结果、LaTeX 执行和后台批量策略。Workspace 负责保存草稿、启动前台构建、接收进度和切换预览。Markdown、图片各自生成 PDF，通过共享的构建结果回到前台。 |
+| 编译与构建预览 | [build/](src/build/)、[workspace/build.rs](src/workspace/build.rs) | `build` 提供公共的构建结果、LaTeX 执行和后台批量策略。Workspace 的构建模块协调草稿保存，管理前台任务、日志和已发布的 PDF 预览。Markdown、图片各自生成 PDF，通过共享的构建结果回到前台。 |
 | 标签、批注与撤销 | [tags/](src/tags/)、[annotations/](src/annotations/) | 标签查询、变更与撤销规则由 `tags` 管理。批注记录、定位和文件搬移由 `annotations` 管理。Workspace 与面板负责把结果反映到文件树、编辑区或阅读区。 |
-| AI 会话、工具和取消 | [ai/](src/ai/)、[workspace/tools/](src/workspace/tools/)、[pi-host/](resources/pi-host/) | Rust AI 层负责面板、会话视图和消息路由。Node 负责 Pi 会话和工具注册。需要原生能力的工具由 Workspace 取得当前项目、文档或画布，再调用对应功能。 |
+| AI 会话、工具和取消 | [ai/](src/ai/)、[workspace/tools/](src/workspace/tools/)、[pi-host/](resources/pi-host/) | Rust AI 层负责面板、会话视图和消息路由。Node 负责 Pi 会话和工具注册。Workspace 工具模块持有待完成的请求，按通道分派，取得当前项目、文档或画布后调用对应功能。 |
 | 设置、主题、文案与终端 | [preferences.rs](src/preferences.rs)、[storage.rs](src/storage.rs)、[workspace/appearance.rs](src/workspace/appearance.rs)、[i18n/](src/i18n/)、[terminal/](src/terminal/) | 设置视图产生变更，`storage` 读取和迁移持久化设置，Workspace 同步各面板。共用配色与 UI 组件见 [theme.rs](src/theme.rs) 和 [ui.rs](src/ui.rs)。终端会话、ConPTY 与退出清理由终端模块负责。 |
 
 新增代码先按行为归属现有模块。模块目录收纳同一功能的实现、状态和测试。顶层共享组件服务于实际存在的多个调用方。只有 Workspace 才掌握当前窗口和文档上下文，功能层通过参数获得需要的路径、源内容或快照。
@@ -34,7 +37,7 @@ flowchart LR
 
 | 数据 | 权威来源与写入入口 |
 | --- | --- |
-| 文档与草稿 | 文档保存于原路径，未保存内容由打开的文档缓冲维护。保存使用已有版本校验，外部修改冲突或文件删除时保留草稿并走冲突流程。编辑面板和阅读面板是同一文档的不同视图。 |
+| 文档与草稿 | 文档保存于原路径，未保存内容由打开的文档缓冲维护。编辑保存与 AI 批注正文写入复用磁盘版本校验。外部修改冲突或文件删除时保留草稿并走冲突流程。编辑面板和阅读面板是同一文档的不同视图。 |
 | 空间、标签页和设置 | 默认空间 `~/.Folio`、已登记项目和独立文件分别保存导航状态。`projects.json`、`workspace-sessions.json` 与 `preferences.json` 在 Folio 数据目录，默认 `%APPDATA%\folio-gpui`，可通过 `FOLIO_USER_DATA` 指定。打开的面板和文件树可从配置与磁盘重建。 |
 | 文件标签与批注 | 标签以 SQLite 数据库为准，项目及默认空间使用 `.folio/metadata.sqlite3`，独立文件使用应用数据目录的 `loose-metadata.sqlite3`。批注记录保存在文件旁的 `.folio/annotations.json`，Markdown 内联高亮还写入正文。手动与 AI 操作共用数据和写入规则。 |
 | AI 会话 | Pi JSONL 保存对话和会话名称。Folio 的 `ai-tabs.json` 与 `ai-session-metadata.json` 保存标签、置顶和标题来源等应用状态。面板切换只改变交互视图，运行中任务仍由原会话承接。 |

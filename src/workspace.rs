@@ -1,17 +1,20 @@
-//! Workspace orchestration: disk-backed drafts, project actions and asynchronous builds.
-//! Disk revisions arbitrate external edits; conflicted drafts never autosave over them.
+//! Window composition, actions and orchestration across Workspace submodules.
 mod appearance;
 mod build;
+mod dialogs;
 mod documents;
 mod file_tree;
+mod panels;
 mod projects;
 mod tags;
 mod tools;
 use build::{Build, BuildPanelVisibility};
+use dialogs::{Dialog, DialogButtons, Dialogs};
 use documents::Documents;
 use file_tree::FileTree;
+use panels::{RightPanel, RightPanelView};
 use projects::Projects;
-use crate::ai::{AiPane, AiPaneEvent, AttachedFile};
+use crate::ai::{AiPane, AiPaneEvent};
 use gpui_kit::component::Sizable;
 use crate::theme::color as rgb;
 use crate::math::MathRenderer;
@@ -197,13 +200,6 @@ pub fn bind_shortcuts(settings: &AppSettings, cx: &mut App) {
     ));
     cx.bind_keys(bindings);
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RightPanelView {
-    Hub,
-    Ai,
-    Terminal,
-}
-
 #[derive(Clone, Copy)]
 struct ZenSnapshot {
     sidebar_open: bool,
@@ -213,37 +209,11 @@ struct ZenSnapshot {
     was_fullscreen: bool,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Dialog {
-    Drafts,
-    CloseTab,
-    DeleteSelected,
-    RemoveProject,
-    TrashPurge,
-    TrashClear,
-    TrashConflict,
-    DeleteTag,
-}
-#[derive(Clone)]
-enum DialogButtons {
-    SaveDiscardCancel,
-    Confirm(String),
-    RestoreConflict,
-}
-#[derive(Clone)]
-struct DialogPrompt {
-    kind: Dialog,
-    title: String,
-    description: String,
-    buttons: DialogButtons,
-}
-
 pub struct Workspace {
     tool_requests: tools::ToolRequests,
     projects: Projects,
     settings: AppSettings,
-    background_image: Option<Arc<RenderImage>>,
-    background_image_load: Option<Task<()>>,
+    backdrop: appearance::Backdrop,
     preferences: Entity<Preferences>,
     math: Entity<MathRenderer>,
     show_preferences: bool,
@@ -255,11 +225,7 @@ pub struct Workspace {
     zen_snapshot: Option<ZenSnapshot>,
     terminal: Entity<TerminalPane>,
     ai: Entity<AiPane>,
-    right_panel_open: bool,
-    right_panel_maximized: bool,
-    right_panel_view: RightPanelView,
-    right_panel_search: Entity<InputState>,
-    right_panel_selected: usize,
+    right_panel: RightPanel,
     sidebar_drag: Option<(f32, f32)>,
     right_panel_drag: Option<(f32, f32)>,
     resize_save_task: Task<()>,
@@ -267,10 +233,7 @@ pub struct Workspace {
     notice_until: Option<Instant>,
     focus: FocusHandle,
     close_requested: bool,
-    dialog_response: Option<(Dialog, rfd::MessageDialogResult)>,
-    dialog_prompt: Option<DialogPrompt>,
-    dialog_retry: Option<Box<dyn FnOnce(&mut Self, &mut Window, &mut Context<Self>)>>,
-    dialog_open: bool,
+    dialogs: Dialogs,
     editor_zoom_hud: crate::ui::ZoomHud,
     _tick: Task<()>,
     _history_escape: Subscription,
@@ -290,7 +253,7 @@ impl Workspace {
                     return;
                 }
                 TerminalPaneEvent::ToggleMaximize => {
-                    app.right_panel_maximized = !app.right_panel_maximized;
+                    app.right_panel.maximized = !app.right_panel.maximized;
                 }
             }
             cx.notify();
@@ -308,7 +271,7 @@ impl Workspace {
                 app.open_right_panel(RightPanelView::Hub, window, cx);
             }
             AiPaneEvent::ToggleMaximize => {
-                app.right_panel_maximized = !app.right_panel_maximized;
+                app.right_panel.maximized = !app.right_panel.maximized;
                 cx.notify();
             }
         })
@@ -318,36 +281,7 @@ impl Workspace {
         })
         .detach();
         let tree = FileTree::new(window, cx);
-        let right_panel_search = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(crate::i18n::workspace::SEARCH_HUB_PLACEHOLDER.get())
-        });
-        cx.subscribe_in(
-            &right_panel_search,
-            window,
-            |app, _, event: &InputEvent, window, cx| {
-                match event {
-                    InputEvent::Change => {
-                        app.right_panel_selected = 0;
-                        cx.notify();
-                    }
-                    InputEvent::PressEnter { .. } => {
-                        if app.right_panel_open && app.right_panel_view == RightPanelView::Hub {
-                            let props = app.hub_props(cx);
-                            let items = crate::right_panel::filtered_actions(&props);
-                            if let Some(item) = items
-                                .get(app.right_panel_selected.min(items.len().saturating_sub(1)))
-                            {
-                                let action = item.action.clone();
-                                app.execute_right_panel_action(action, window, cx);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            },
-        )
-        .detach();
+        let right_panel = RightPanel::new(window, cx);
         let tags = tags::TagPanel::new(window, cx);
         let entity = cx.entity();
         window.on_window_should_close(cx, move |window, cx| {
@@ -381,71 +315,7 @@ impl Workspace {
                             cx.stop_propagation();
                             return;
                         }
-                        if app.right_panel_open
-                            && app.right_panel_view == RightPanelView::Hub
-                            && !app.show_preferences
-                        {
-                            let hub_focused = app
-                                .right_panel_search
-                                .read(cx)
-                                .focus_handle(cx)
-                                .is_focused(window);
-                            if hub_focused {
-                                match key {
-                                    "up" => {
-                                        let len = crate::right_panel::filtered_actions(
-                                            &app.hub_props(cx),
-                                        )
-                                        .len();
-                                        if len > 0 {
-                                            app.right_panel_selected =
-                                                if app.right_panel_selected == 0 {
-                                                    len - 1
-                                                } else {
-                                                    app.right_panel_selected - 1
-                                                };
-                                            cx.stop_propagation();
-                                            cx.notify();
-                                        }
-                                        return;
-                                    }
-                                    "down" => {
-                                        let len = crate::right_panel::filtered_actions(
-                                            &app.hub_props(cx),
-                                        )
-                                        .len();
-                                        if len > 0 {
-                                            app.right_panel_selected =
-                                                (app.right_panel_selected + 1) % len;
-                                            cx.stop_propagation();
-                                            cx.notify();
-                                        }
-                                        return;
-                                    }
-                                    "escape" => {
-                                        if !app.right_panel_search.read(cx).value().is_empty() {
-                                            app.right_panel_search.update(cx, |input, cx| {
-                                                input.set_value("", window, cx);
-                                            });
-                                            app.right_panel_selected = 0;
-                                        } else {
-                                            app.close_right_panel(window, cx);
-                                        }
-                                        cx.stop_propagation();
-                                        return;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        if key == "escape"
-                            && !app.show_preferences
-                            && app.right_panel_open
-                            && app.right_panel_view == RightPanelView::Ai
-                            && app.ai.update(cx, |pane, cx| pane.dismiss_history(window, cx))
-                        {
-                            cx.stop_propagation();
-                        }
+                        app.handle_right_panel_keys(key, window, cx);
                     });
                 }
             }
@@ -454,8 +324,7 @@ impl Workspace {
             tool_requests: tools::ToolRequests::default(),
             projects,
             settings,
-            background_image: None,
-            background_image_load: None,
+            backdrop: appearance::Backdrop::default(),
             preferences,
             math,
             show_preferences: false,
@@ -467,11 +336,7 @@ impl Workspace {
             zen_snapshot: None,
             terminal,
             ai,
-            right_panel_open: false,
-            right_panel_maximized: false,
-            right_panel_view: RightPanelView::Hub,
-            right_panel_search,
-            right_panel_selected: 0,
+            right_panel,
             sidebar_drag: None,
             right_panel_drag: None,
             resize_save_task: Task::ready(()),
@@ -479,10 +344,7 @@ impl Workspace {
             notice_until: None,
             focus: cx.focus_handle(),
             close_requested: false,
-            dialog_response: None,
-            dialog_prompt: None,
-            dialog_retry: None,
-            dialog_open: false,
+            dialogs: Dialogs::default(),
             editor_zoom_hud: crate::ui::ZoomHud::default(),
             _tick: tick,
             _history_escape: history_escape,
@@ -506,58 +368,6 @@ impl Workspace {
         app
     }
 
-    fn load_background_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Dropping the retained task prevents an older selection from publishing after replacement.
-        self.background_image_load = None;
-        if self.background_image.is_some() {
-            self.set_background_image(None, window, cx);
-        }
-        self.preferences.update(cx, |panel, cx| panel.set_background_image_error(None, cx));
-        let Some(path) = self.settings.background_image.clone() else {
-            return;
-        };
-        let load = ImageAssetLoader::load(path.into(), cx);
-        let load = cx.background_executor().spawn(load);
-        self.background_image_load = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = load.await;
-            let _ = this.update_in(cx, |app, window, cx| match result {
-                Ok(image) => app.set_background_image(Some(image), window, cx),
-                Err(error) => app.preferences.update(cx, |panel, cx| {
-                    panel.set_background_image_error(
-                        Some(crate::i18n::workspace::err_read_background_image(&error)),
-                        cx,
-                    );
-                }),
-            });
-        }));
-    }
-
-    fn has_visible_background(&self) -> bool {
-        self.background_image.is_some() && self.settings.background_image_opacity > 0
-    }
-
-    fn sync_backdrop_visible(&self, cx: &mut Context<Self>) {
-        self.documents.set_backdrop_visible(self.has_visible_background(), cx);
-    }
-
-    fn set_background_image(
-        &mut self,
-        image: Option<Arc<RenderImage>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(previous) = std::mem::replace(&mut self.background_image, image) {
-            cx.drop_image(previous, Some(window));
-        }
-        // Document surfaces follow the decoded image only when its opacity is non-zero.
-        self.sync_backdrop_visible(cx);
-        cx.notify();
-    }
-
-    fn is_right_panel_open(&self) -> bool {
-        self.right_panel_open
-    }
-
     fn is_sidebar_open(&self) -> bool {
         self.settings.sidebar_open
     }
@@ -579,54 +389,6 @@ impl Workspace {
         cx.notify();
     }
 
-    fn open_right_panel(
-        &mut self,
-        view: RightPanelView,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.right_panel_open = true;
-        self.right_panel_maximized = false;
-        self.right_panel_view = view;
-
-        let directory = self.terminal_directory();
-        match view {
-            RightPanelView::Hub => {
-                self.terminal.update(cx, |pane, _| pane.hide());
-                self.right_panel_selected = 0;
-                self.right_panel_search.update(cx, |input, cx| {
-                    input.set_value("", window, cx);
-                    input.focus(window, cx);
-                });
-            }
-            RightPanelView::Terminal => {
-                self.terminal
-                    .update(cx, |pane, cx| pane.open(directory, window, cx));
-            }
-            RightPanelView::Ai => {
-                self.terminal.update(cx, |pane, _| pane.hide());
-                let project_name = self.active_project_name();
-                self.ai.update(cx, |pane, cx| {
-                    pane.set_directory(directory, cx);
-                    pane.set_project_name(project_name, cx);
-                    pane.open(window, cx);
-                });
-            }
-        }
-        cx.notify();
-    }
-
-    fn close_right_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.right_panel_open {
-            return;
-        }
-        self.right_panel_open = false;
-        self.right_panel_maximized = false;
-        self.terminal.update(cx, |pane, _| pane.hide());
-        self.focus.focus(window, cx);
-        cx.notify();
-    }
-
     fn focus_active_or_workspace(&self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.focus_document_tab(self.documents.active(), window, cx) {
             self.focus.focus(window, cx);
@@ -637,8 +399,8 @@ impl Workspace {
         if !self.zen_mode {
             let snapshot = ZenSnapshot {
                 sidebar_open: self.settings.sidebar_open,
-                right_panel_open: self.right_panel_open,
-                right_panel_maximized: self.right_panel_maximized,
+                right_panel_open: self.right_panel.open,
+                right_panel_maximized: self.right_panel.maximized,
                 build_panels: self.build.panels,
                 was_fullscreen: window.is_fullscreen(),
             };
@@ -646,9 +408,9 @@ impl Workspace {
             self.zen_mode = true;
             self.tree.dismiss_trash();
             self.settings.sidebar_open = false;
-            if self.right_panel_open {
-                self.right_panel_open = false;
-                self.right_panel_maximized = false;
+            if self.right_panel.open {
+                self.right_panel.open = false;
+                self.right_panel.maximized = false;
                 self.terminal.update(cx, |pane, _| pane.hide());
             }
             self.build.panels = BuildPanelVisibility::default();
@@ -670,9 +432,9 @@ impl Workspace {
             self.settings.sidebar_open = snapshot.sidebar_open;
             self.build.panels = snapshot.build_panels;
             if snapshot.right_panel_open {
-                self.open_right_panel(self.right_panel_view, window, cx);
-                self.right_panel_maximized = snapshot.right_panel_maximized;
-            } else if self.right_panel_open {
+                self.open_right_panel(self.right_panel.view, window, cx);
+                self.right_panel.maximized = snapshot.right_panel_maximized;
+            } else if self.right_panel.open {
                 self.close_right_panel(window, cx);
             }
             if window.is_fullscreen() != snapshot.was_fullscreen {
@@ -683,120 +445,6 @@ impl Workspace {
         if !self.focus.contains_focused(window, cx) {
             self.focus_active_or_workspace(window, cx);
         }
-        cx.notify();
-    }
-
-    fn toggle_right_shortcut(
-        &mut self,
-        view: RightPanelView,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.is_right_panel_open() && self.right_panel_view == view {
-            self.close_right_panel(window, cx);
-        } else {
-            self.open_right_panel(view, window, cx);
-        }
-    }
-
-    fn hub_props(&self, cx: &App) -> crate::right_panel::RightPanelHubProps {
-        crate::right_panel::RightPanelHubProps {
-            query: self.right_panel_search.read(cx).value().to_string(),
-            selected_index: self.right_panel_selected,
-            preview_open: self.build.panels.preview,
-            logs_open: self.build.panels.logs,
-            zen_mode: self.zen_mode,
-            build_running: self.build.is_running(),
-            build_failed: self.build.failed(),
-            build_target: self.build.target().to_owned(),
-            ai_shortcut: AppSettings::format_key_badge(&self.settings.key_for("toggle_ai")),
-            terminal_shortcut: AppSettings::format_key_badge(
-                &self.settings.key_for("toggle_terminal"),
-            ),
-            zen_shortcut: AppSettings::format_key_badge(&self.settings.key_for("toggle_zen")),
-            terminal_sessions: self.terminal.read(cx).session_count(),
-            ai_tasks: self.ai.read(cx).active_tasks(),
-        }
-    }
-
-    fn execute_right_panel_action(
-        &mut self,
-        action: crate::right_panel::RightPanelAction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        use crate::right_panel::RightPanelAction;
-        match action {
-            RightPanelAction::OpenAi => {
-                self.open_right_panel(RightPanelView::Ai, window, cx);
-            }
-            RightPanelAction::OpenTerminal => {
-                self.open_right_panel(RightPanelView::Terminal, window, cx);
-            }
-            RightPanelAction::TogglePreview => {
-                self.build.panels.preview = !self.build.panels.preview;
-                cx.notify();
-            }
-            RightPanelAction::ToggleLogs => {
-                self.build.panels.logs = !self.build.panels.logs;
-                cx.notify();
-            }
-            RightPanelAction::ToggleZen => {
-                self.toggle_zen_mode(window, cx);
-            }
-            RightPanelAction::OpenFile => {
-                self.open_file_dialog(window, cx);
-            }
-            RightPanelAction::OpenPreferences => {
-                self.preferences.update(cx, |panel, cx| {
-                    panel.sync(&self.settings, window, cx);
-                });
-                self.show_preferences = true;
-                cx.notify();
-            }
-            RightPanelAction::ActivateAiTask(id) => {
-                self.open_right_panel(RightPanelView::Ai, window, cx);
-                self.ai.update(cx, |pane, cx| pane.activate(id, cx));
-            }
-        }
-    }
-
-    fn focused_attached_file(&self) -> Option<AttachedFile> {
-        let clean_key = self.documents.focused_markdown().unwrap_or(self.documents.active());
-        if clean_key.is_empty() {
-            return None;
-        }
-        let path = self.document_path(clean_key);
-        let display = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| clean_key.to_owned());
-        Some(AttachedFile { display, path })
-    }
-
-    fn open_ai_with_selection(
-        &mut self,
-        source: String,
-        file_path: Option<PathBuf>,
-        text: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_right_panel(RightPanelView::Ai, window, cx);
-        let directory = self.terminal_directory();
-        let attached = file_path.map(|path| AttachedFile {
-            display: path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| source.clone()),
-            path,
-        });
-        let project_name = self.active_project_name();
-        self.ai.update(cx, |pane, cx| {
-            pane.set_directory(directory, cx);
-            pane.set_project_name(project_name, cx);
-            pane.attach_selection(source, attached, text, window, cx);
-        });
         cx.notify();
     }
 
@@ -844,7 +492,7 @@ impl Workspace {
                     .to_string_lossy(),
             )
             .add_filter("PDF", &["pdf"]);
-        self.dialog_open = true;
+        self.dialogs.set_native_open(true);
         let app_entity = cx.entity();
         window
             .spawn(cx, async move |cx| {
@@ -854,7 +502,7 @@ impl Workspace {
                     Ok(())
                 };
                 let _ = app_entity.update(cx, |app, cx| {
-                    app.dialog_open = false;
+                    app.dialogs.set_native_open(false);
                     if let Err(error) = result {
                         app.report(error, cx);
                     }
@@ -862,68 +510,13 @@ impl Workspace {
             })
             .detach();
     }
-    /// The prompt re-enters the original operation with the selected response.
-    fn ask(
-        &mut self,
-        kind: Dialog,
-        title: String,
-        description: String,
-        buttons: DialogButtons,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-        retry: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-    ) -> Option<rfd::MessageDialogResult> {
-        if self
-            .dialog_response
-            .as_ref()
-            .is_some_and(|(pending, _)| *pending == kind)
-        {
-            return Some(
-                self.dialog_response
-                    .take()
-                    .expect("matched dialog response")
-                    .1,
-            );
-        }
-        self.dialog_open = true;
-        self.dialog_prompt = Some(DialogPrompt {
-            kind,
-            title,
-            description,
-            buttons,
-        });
-        self.dialog_retry = Some(Box::new(retry));
-        cx.notify();
-        None
-    }
-
-    fn answer_dialog(
-        &mut self,
-        result: rfd::MessageDialogResult,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let prompt = self.dialog_prompt.take().expect("visible prompt exists");
-        self.dialog_open = false;
-        self.dialog_response = Some((prompt.kind, result));
-        let retry = self
-            .dialog_retry
-            .take()
-            .expect("visible prompt has retry action");
-        retry(self, window, cx);
-        cx.notify();
-    }
     fn confirm_drafts(
         &mut self,
-        window: &mut Window,
         cx: &mut Context<Self>,
         retry: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> bool {
         if !self.documents.open_buffers().any(|(_, buffer)| buffer.is_dirty())
-            && !self
-                .dialog_response
-                .as_ref()
-                .is_some_and(|(kind, _)| *kind == Dialog::Drafts)
+            && !self.dialogs.has_response(Dialog::Drafts)
         {
             return true;
         }
@@ -932,7 +525,6 @@ impl Workspace {
             crate::i18n::workspace::DIALOG_UNSAVED_ALL_TITLE.get().into(),
             crate::i18n::workspace::DIALOG_UNSAVED_ALL_BODY.get().into(),
             DialogButtons::SaveDiscardCancel,
-            window,
             cx,
             retry,
         ) {
@@ -943,7 +535,7 @@ impl Workspace {
     }
 
     fn request_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.confirm_drafts(window, cx, |app, window, cx| {
+        if !self.confirm_drafts(cx, |app, window, cx| {
             if app.request_close(window, cx) {
                 window.remove_window();
             }
@@ -1006,8 +598,7 @@ impl Render for Workspace {
         let modal_open = trash_open || self.show_preferences
             || self.tags.is_editing()
             || self.tree.name_dialog_open()
-            || self.dialog_prompt.is_some()
-            || self.dialog_open;
+            || self.dialogs.blocks_workspace();
         self.documents.sync_pane_visibility(self.zen_mode, trash_open, modal_open, window, cx);
         self.build.sync_preview_visibility(!self.zen_mode && !trash_open, window, cx);
         let engine = self.projects.directory().map(|project| project.engine);
@@ -1024,7 +615,7 @@ impl Render for Workspace {
             .map(|file| file.path.clone())
             .collect();
         let resize_app = cx.entity();
-        let right_panel_visible = self.is_right_panel_open();
+        let right_panel_visible = self.right_panel.open;
         let sidebar_visible = self.is_sidebar_open();
         let sidebar_target_w = self.settings.sidebar_width.clamp(170., 520.);
         let right_target_w = self.settings.terminal.panel_width.clamp(280., 1600.);
@@ -1053,7 +644,7 @@ impl Render for Workspace {
 
         let right_progress = transition_with_status(
             "workspace-right-panel-motion",
-            if right_panel_visible && !self.right_panel_maximized {
+            if right_panel_visible && !self.right_panel.maximized {
                 1.0_f32
             } else {
                 0.0_f32
@@ -1065,7 +656,7 @@ impl Render for Workspace {
         .value
         .clamp(0.0, 1.0);
         let right_rendered = right_panel_visible || right_progress > 0.001;
-        let right_now_w = if right_panel_visible && self.right_panel_maximized {
+        let right_now_w = if right_panel_visible && self.right_panel.maximized {
             0.0
         } else {
             right_target_w * right_progress
@@ -1141,39 +732,9 @@ impl Render for Workspace {
                     .child(self.render_build_log(cx)),
             );
         }
-        let right_panel_content = right_rendered.then(|| match self.right_panel_view {
-            RightPanelView::Hub => {
-                let props = self.hub_props(cx);
-                let action_app = cx.entity();
-                let clear_app = cx.entity();
-                crate::right_panel::render_hub(
-                    &props,
-                    &self.right_panel_search,
-                    self.settings.theme.palette,
-                    window,
-                    cx,
-                    move |action, window, cx| {
-                        action_app.update(cx, |app, cx| {
-                            app.execute_right_panel_action(action, window, cx);
-                        });
-                    },
-                    move |window, cx| {
-                        clear_app.update(cx, |app, cx| {
-                            app.right_panel_search.update(cx, |input, cx| {
-                                input.set_value("", window, cx);
-                                input.focus(window, cx);
-                            });
-                            app.right_panel_selected = 0;
-                            cx.notify();
-                        });
-                    },
-                )
-            }
-            RightPanelView::Ai => self.ai.clone().into_any_element(),
-            RightPanelView::Terminal => self.terminal.clone().into_any_element(),
-        });
+        let right_panel_content = right_rendered.then(|| self.render_right_panel(window, cx));
 
-        let maximized = right_panel_visible && self.right_panel_maximized;
+        let maximized = right_panel_visible && self.right_panel.maximized;
         let editor_with_terminal: AnyElement = if maximized {
             div()
                 .flex()
@@ -1267,7 +828,7 @@ impl Render for Workspace {
             })
             // Paint once at window coordinates so text panes share the same crop as they scroll.
             .when(show_backdrop, |app| {
-                app.when_some(self.background_image.clone(), |app, image| {
+                app.when_some(self.backdrop.image().cloned(), |app, image| {
                     app.child(
                         img(image)
                             .absolute()
@@ -1299,8 +860,7 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|app, _: &ToggleZen, window, cx| {
                 if app.show_preferences
-                    || app.dialog_prompt.is_some()
-                    || app.dialog_open
+                    || app.dialogs.blocks_workspace()
                     || app.tree.name_dialog_open()
                 {
                     cx.propagate();
@@ -1499,7 +1059,7 @@ impl Render for Workspace {
                                 .build(window, cx)
                             })
                             .on_click(cx.listener(|app, _, window, cx| {
-                                if app.is_right_panel_open() {
+                                if app.right_panel.open {
                                     app.close_right_panel(window, cx);
                                 } else {
                                     app.open_right_panel(RightPanelView::Hub, window, cx);
@@ -1753,77 +1313,7 @@ impl Render for Workspace {
                 .with_priority(10),
             );
         }
-        if let Some(prompt) = self.dialog_prompt.clone() {
-            // Confirm dialogs are only used for destructive actions.
-            let destructive = matches!(prompt.buttons, DialogButtons::Confirm(_));
-            let choices = match prompt.buttons {
-                DialogButtons::SaveDiscardCancel => vec![
-                    (
-                        crate::i18n::workspace::BTN_KEEP_EDITING.get().to_string(),
-                        rfd::MessageDialogResult::Cancel,
-                        false,
-                    ),
-                    (
-                        crate::i18n::workspace::BTN_DISCARD_CHANGES.get().to_string(),
-                        rfd::MessageDialogResult::No,
-                        false,
-                    ),
-                    (
-                        crate::i18n::common::SAVE.get().to_string(),
-                        rfd::MessageDialogResult::Yes,
-                        true,
-                    ),
-                ],
-                DialogButtons::Confirm(confirm) => vec![
-                    (
-                        crate::i18n::common::CANCEL.get().to_string(),
-                        rfd::MessageDialogResult::Cancel,
-                        false,
-                    ),
-                    (confirm, rfd::MessageDialogResult::Ok, true),
-                ],
-                DialogButtons::RestoreConflict => vec![
-                    (
-                        crate::i18n::common::SKIP.get().to_string(),
-                        rfd::MessageDialogResult::Cancel,
-                        false,
-                    ),
-                    (
-                        crate::i18n::common::KEEP_BOTH.get().to_string(),
-                        rfd::MessageDialogResult::No,
-                        false,
-                    ),
-                    (
-                        crate::i18n::common::REPLACE.get().to_string(),
-                        rfd::MessageDialogResult::Yes,
-                        true,
-                    ),
-                ],
-            };
-            let choices =
-                choices
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, (label, result, primary))| {
-                        let id = ("prompt-choice", index);
-                        let button = match (primary, destructive) {
-                            (true, true) => crate::ui::button_danger(id, label),
-                            (true, false) => crate::ui::button_primary(id, label),
-                            (false, _) => crate::ui::button_secondary(id, label).px_3(),
-                        }
-                        .min_w(px(64.))
-                        .on_click(cx.listener(
-                            move |app, _, window, cx| app.answer_dialog(result.clone(), window, cx),
-                        ));
-                        button.into_any_element()
-                    });
-            app = app.child(crate::ui::modal_overlay(
-                prompt.title,
-                prompt.description,
-                div().flex().justify_end().gap_2().children(choices),
-            ));
-        }
-        app
+        app.children(self.render_dialog(cx))
     }
 }
 

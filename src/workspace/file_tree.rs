@@ -488,7 +488,7 @@ impl Workspace {
     pub(super) fn new_default_markdown(&mut self, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
         if !self.projects.is_default() {
             if self.build.is_busy() { return Ok(()); }
-            if !self.confirm_drafts(window, cx, |app, window, cx| {
+            if !self.confirm_drafts(cx, |app, window, cx| {
                 if let Err(error) = app.new_default_markdown(window, cx) { app.report(error, cx); }
             }) { return Ok(()); }
             self.select_project("__folio_default", window, cx)?;
@@ -509,7 +509,7 @@ impl Workspace {
         if self.build.is_busy() {
             return Ok(false);
         }
-        if !self.confirm_drafts(window, cx, retry) {
+        if !self.confirm_drafts(cx, retry) {
             return Ok(false);
         }
         self.select_project("__folio_default", window, cx)?;
@@ -758,7 +758,6 @@ impl Workspace {
             crate::i18n::workspace::dialog_trash_title(paths.len()),
             crate::i18n::workspace::DIALOG_TRASH_BODY.get().into(),
             DialogButtons::Confirm(crate::i18n::workspace::DIALOG_TRASH_CONFIRM.get().into()),
-            window,
             cx,
             move |app, window, cx| app.confirm_trash(retry, window, cx),
         ) != Some(rfd::MessageDialogResult::Ok)
@@ -1032,7 +1031,6 @@ impl Workspace {
                     crate::i18n::workspace::DIALOG_TRASH_CONFLICT_TITLE.get().into(),
                     target.display().to_string(),
                     DialogButtons::RestoreConflict,
-                    window,
                     cx,
                     move |app, window, cx| app.restore_trash(retry, window, cx),
                 ) else { return; };
@@ -1077,7 +1075,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn purge_trash(&mut self, ids: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+    fn purge_trash(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
         if ids.is_empty() { return; }
         let all = ids.len() > 1 || ids.len() == self.tree.trash_entries.len();
         let retry = ids.clone();
@@ -1086,9 +1084,8 @@ impl Workspace {
             crate::i18n::workspace::dialog_purge_title(ids.len()),
             crate::i18n::workspace::DIALOG_PURGE_BODY.get().into(),
             DialogButtons::Confirm(crate::i18n::workspace::DIALOG_PURGE_CONFIRM.get().into()),
-            window,
             cx,
-            move |app, window, cx| app.purge_trash(retry, window, cx),
+            move |app, _, cx| app.purge_trash(retry, cx),
         ) != Some(rfd::MessageDialogResult::Ok) { return; }
         for id in ids {
             if let Some(entry) = self.tree.trash_entries.iter().find(|entry| entry.id == id).cloned() {
@@ -1125,15 +1122,15 @@ impl Workspace {
                 .child(crate::ui::button_secondary(SharedString::from(format!("trash-restore-{}", entry.id)), crate::i18n::workspace::TRASH_RESTORE.get())
                     .on_click(cx.listener(move |app, _, window, cx| app.restore_trash(vec![restore.clone()], window, cx))))
                 .child(crate::ui::button_danger_soft(SharedString::from(format!("trash-purge-{}", entry.id)), crate::i18n::workspace::TRASH_PURGE.get())
-                    .on_click(cx.listener(move |app, _, window, cx| app.purge_trash(vec![purge.clone()], window, cx))))
+                    .on_click(cx.listener(move |app, _, _, cx| app.purge_trash(vec![purge.clone()], cx))))
         });
         div().size_full().flex().flex_col().bg(rgb(0xffffff))
             .child(div().flex().items_center().justify_between().px_5().py_4().border_b_1().border_color(rgb(BORDER))
                 .child(div().font_semibold().child(crate::i18n::workspace::trash_title(self.tree.trash_entries.len())))
                 .child(crate::ui::button_danger_soft("trash-clear", crate::i18n::workspace::TRASH_CLEAR.get())
-                    .on_click(cx.listener(|app, _, window, cx| {
+                    .on_click(cx.listener(|app, _, _, cx| {
                         let ids = app.tree.trash_entries.iter().map(|entry| entry.id.clone()).collect();
-                        app.purge_trash(ids, window, cx);
+                        app.purge_trash(ids, cx);
                     }))))
             .child(div().id("trash-list").flex_1().min_h_0().overflow_y_scroll()
                 .when(self.tree.trash_entries.is_empty(), |area| area.p_5().text_color(rgb(MUTED)).child(crate::i18n::workspace::TRASH_EMPTY.get()))
@@ -1867,7 +1864,7 @@ impl Workspace {
                 .on_click(cx.listener(|app, _, window, cx| {
                 app.tree.show_trash = false;
                 if app.projects.directory().is_none() { return; }
-                if app.build.is_busy() || !app.confirm_drafts(window, cx, |app, window, cx| {
+                if app.build.is_busy() || !app.confirm_drafts(cx, |app, window, cx| {
                     if let Err(error) = app.select_loose_files(window, cx) { app.report(error, cx); }
                 }) { return; }
                 if let Err(error) = app.select_loose_files(window, cx) { app.report(error, cx); }
