@@ -96,7 +96,7 @@ pub struct Preferences {
     ai_title_model: Entity<InputState>,
     ai_exa_key: Entity<InputState>,
     ai_qianfan_key: Entity<InputState>,
-    rag_mineru_key: Entity<InputState>,
+    rag_ocr_token: Entity<InputState>,
     rag_server_bin: Entity<InputState>,
     rag_embed_url: Entity<InputState>,
     rag_embed_model_path: Entity<InputState>,
@@ -509,10 +509,10 @@ impl Preferences {
         cx.subscribe(&ai_qianfan_key, |panel,input,event: &InputEvent,cx| {
             if matches!(event,InputEvent::Change) { panel.settings.ai.baidu_qianfan_api_key=input.read(cx).value().trim().to_owned(); panel.changed(cx); }
         }).detach();
-        let rag_mineru_key = cx.new(|cx| InputState::new(window, cx).placeholder(p::RAG_MINERU_PLACEHOLDER.get()).masked(true));
-        rag_mineru_key.update(cx, |input, cx| input.set_value(settings.rag.mineru_api_key.clone(), window, cx));
-        cx.subscribe(&rag_mineru_key, |panel, input, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) { panel.settings.rag.mineru_api_key = input.read(cx).value().trim().to_owned(); panel.changed(cx); }
+        let rag_ocr_token = cx.new(|cx| InputState::new(window, cx).placeholder(p::RAG_OCR_PLACEHOLDER.get()).masked(true));
+        rag_ocr_token.update(cx, |input, cx| input.set_value(settings.rag.paddleocr_token.clone(), window, cx));
+        cx.subscribe(&rag_ocr_token, |panel, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) { panel.settings.rag.paddleocr_token = input.read(cx).value().trim().to_owned(); panel.changed(cx); }
         }).detach();
         let rag_server_bin = cx.new(|cx| InputState::new(window, cx).placeholder("llama-server"));
         rag_server_bin.update(cx, |input, cx| input.set_value(settings.rag.server_bin.clone(), window, cx));
@@ -576,7 +576,7 @@ impl Preferences {
             ai_title_model,
             ai_exa_key,
             ai_qianfan_key,
-            rag_mineru_key,
+            rag_ocr_token,
             rag_server_bin,
             rag_embed_url,
             rag_embed_model_path,
@@ -695,7 +695,7 @@ impl Preferences {
         self.ai_title_model.update(cx, |input,cx| input.set_value(settings.ai.title_model_id.clone(),window,cx));
         self.ai_exa_key.update(cx, |input,cx| input.set_value(settings.ai.exa_api_key.clone(),window,cx));
         self.ai_qianfan_key.update(cx, |input,cx| input.set_value(settings.ai.baidu_qianfan_api_key.clone(),window,cx));
-        self.rag_mineru_key.update(cx, |input, cx| input.set_value(settings.rag.mineru_api_key.clone(), window, cx));
+        self.rag_ocr_token.update(cx, |input, cx| input.set_value(settings.rag.paddleocr_token.clone(), window, cx));
         self.rag_server_bin.update(cx, |input, cx| input.set_value(settings.rag.server_bin.clone(), window, cx));
         self.rag_embed_url.update(cx, |input, cx| input.set_value(settings.rag.embed_url.clone(), window, cx));
         self.rag_embed_model_path.update(cx, |input, cx| input.set_value(settings.rag.embed_model_path.clone(), window, cx));
@@ -723,8 +723,8 @@ impl Preferences {
         self.ai_qianfan_key.update(cx, |input, cx| {
             input.set_placeholder(p::QIANFAN_PLACEHOLDER.get(), window, cx);
         });
-        self.rag_mineru_key.update(cx, |input, cx| {
-            input.set_placeholder(p::RAG_MINERU_PLACEHOLDER.get(), window, cx);
+        self.rag_ocr_token.update(cx, |input, cx| {
+            input.set_placeholder(p::RAG_OCR_PLACEHOLDER.get(), window, cx);
         });
         let system_default = p::SYSTEM_DEFAULT.get().to_owned();
         let default_items: Vec<String> = std::iter::once(system_default.clone())
@@ -1227,7 +1227,7 @@ impl Preferences {
         let baidu_ready = !self.settings.translate.baidu_app_id.trim().is_empty()
             && !self.settings.translate.baidu_api_key.trim().is_empty();
         let ai_ready = !self.settings.ai.base_url.trim().is_empty();
-        let mineru_ready = !self.settings.rag.mineru_api_key.trim().is_empty();
+        let ocr_ready = !crate::rag::ocr::resolve_ocr_token(&self.settings.rag).is_empty();
 
         let copy_btn = |id: &'static str, value: String, copied: bool| {
             div()
@@ -1389,26 +1389,26 @@ impl Preferences {
                                     .px_2()
                                     .py(px(2.))
                                     .rounded(px(4.))
-                                    .when(mineru_ready, |b| {
+                                    .when(ocr_ready, |b| {
                                         b.bg(rgb(0xeaf5ee))
                                             .border_1()
                                             .border_color(rgb(0xc6e5d0))
                                             .text_color(rgb(0x237844))
                                     })
-                                    .when(!mineru_ready, |b| {
+                                    .when(!ocr_ready, |b| {
                                         b.bg(rgb(0xfff4e5))
                                             .border_1()
                                             .border_color(rgb(0xf2d3a6))
                                             .text_color(rgb(0x9a5b13))
                                     })
                                     .text_xs()
-                                    .child(if mineru_ready { p::CONFIGURED.get() } else { p::KEY_REQUIRED.get() }),
+                                    .child(if ocr_ready { p::CONFIGURED.get() } else { p::KEY_REQUIRED.get() }),
                             ),
                     )
                     .child(div().h(px(1.)).bg(rgb(0xebebe6)))
                     .child(div().flex().items_center().gap_2()
-                        .child(div().w(px(108.)).flex_shrink_0().text_xs().text_color(rgb(0x5b5b58)).child("MinerU API Key"))
-                        .child(div().flex_1().min_w_0().child(Input::new(&self.rag_mineru_key).mask_toggle())))
+                        .child(div().w(px(108.)).flex_shrink_0().text_xs().text_color(rgb(0x5b5b58)).child("PaddleOCR Token"))
+                        .child(div().flex_1().min_w_0().child(Input::new(&self.rag_ocr_token).mask_toggle())))
                     .child(div().flex().items_center().gap_2()
                         .child(div().w(px(108.)).flex_shrink_0().text_xs().text_color(rgb(0x5b5b58)).child("llama-server"))
                         .child(div().flex_1().min_w_0().child(Input::new(&self.rag_server_bin))))

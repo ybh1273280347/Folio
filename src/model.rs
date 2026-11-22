@@ -375,8 +375,7 @@ pub struct RagConfig {
     pub rerank_model_path: String,
     pub auto_manage_server: bool,
     pub idle_release_secs: u64,
-    pub mineru_api_key: String,
-    pub mineru_mode: String,
+    pub paddleocr_token: String,
 }
 
 impl Default for RagConfig {
@@ -392,8 +391,7 @@ impl Default for RagConfig {
             rerank_model_path: String::new(),
             auto_manage_server: true,
             idle_release_secs: 300,
-            mineru_api_key: String::new(),
-            mineru_mode: "manual".to_owned(),
+            paddleocr_token: String::new(),
         }
     }
 }

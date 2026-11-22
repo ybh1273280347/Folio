@@ -155,12 +155,15 @@ pub const KEY_REQUIRED: BiText = BiText::new("需配置密钥", "Key Required");
 pub const BAIDU_APP_ID_PLACEHOLDER: BiText = BiText::new("填写百度翻译 APP ID", "Enter Baidu Translate APP ID");
 pub const BAIDU_API_KEY_PLACEHOLDER: BiText = BiText::new("填写百度翻译密钥（API Key）", "Enter Baidu Translate API Key");
 pub const API_KEY_SECRET_LABEL: BiText = BiText::new("API Key（密钥）", "API Key");
-pub const RAG_SERVICE_TITLE: BiText = BiText::new("本地知识库（RAG）与 MinerU", "Local Knowledge Base (RAG) & MinerU");
+pub const RAG_SERVICE_TITLE: BiText = BiText::new("本地知识库（RAG）与 PaddleOCR", "Local Knowledge Base (RAG) & PaddleOCR");
 pub const RAG_SERVICE_DESC: BiText = BiText::new(
-    "本地 llama-server 向量/重排 + MinerU 离线 PDF 精修",
-    "Local llama-server embedding/rerank + MinerU offline PDF parsing",
+    "本地 llama-server 向量/重排 + PaddleOCR-VL 扫描 PDF 精修",
+    "Local llama-server embedding/rerank + PaddleOCR-VL scanned PDF parsing",
 );
-pub const RAG_MINERU_PLACEHOLDER: BiText = BiText::new("填写 MinerU API Token（用于 PDF 精修）", "Enter MinerU API Token (for PDF parsing)");
+pub const RAG_OCR_PLACEHOLDER: BiText = BiText::new(
+    "可选：留空时自动复用 PaddleOCR MCP Token",
+    "Optional: auto-reuses PaddleOCR MCP Token when blank",
+);
 pub const RAG_AUTO_MANAGE: BiText = BiText::new("按需拉起 / 空闲释放 llama-server", "Auto-start & idle-reap llama-server");
 
 // Shortcuts section

@@ -714,7 +714,7 @@ impl Workspace {
                 } else {
                     None
                 };
-                let is_accurate = hit.parse_tier == "mineru";
+                let is_accurate = matches!(hit.parse_tier.as_str(), "accurate" | "mineru");
 
                 div()
                     .id(SharedString::from(format!("kb-hit-{idx}")))
