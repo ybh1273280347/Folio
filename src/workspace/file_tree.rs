@@ -1,6 +1,7 @@
 //! File tree actions, selection and rendering.
 
 use super::*;
+use std::collections::HashMap;
 use std::sync::{Mutex, atomic::{AtomicBool, Ordering}};
 
 struct TreeSelectionDrag {
@@ -1246,6 +1247,13 @@ impl Workspace {
             }
         }
         let no_tag_results = self.tags.filter.is_some() && entries.is_empty();
+        let files_by_path: HashMap<_, _> = self
+            .tree
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| (file.path.as_str(), index))
+            .collect();
         let mut entries: Vec<_> = entries.iter().collect();
         // Group sibling files as PDF, Markdown, TeX sources/support, then other
         // extensions. Component-wise keys keep folders first and children together.
@@ -1571,10 +1579,10 @@ impl Workspace {
                         })
                         .into_any_element();
                 }
-                let file = self.tree.files
-                    .iter()
-                    .find(|file| &file.path == path)
-                    .expect("tree entry is a listed file");
+                let file = self.tree.files[*files_by_path
+                    .get(path.as_str())
+                    .expect("tree entry is a listed file")]
+                    .clone();
                 let open = file.clone();
                 let rename = file.path.clone();
                 let delete = file.path.clone();
