@@ -297,6 +297,26 @@ pub fn tool_compile_tex_files(count: usize) -> String {
     }
 }
 pub const TOOL_COMPILE_TEX: BiText = BiText::new("批量编译 TeX 文档", "Compile TeX files");
+pub fn tool_kb_search(query: &str) -> String {
+    match locale() {
+        Locale::ZhCn => {
+            if query.is_empty() {
+                "检索知识库".to_owned()
+            } else {
+                format!("检索知识库 {query}")
+            }
+        }
+        Locale::En => {
+            if query.is_empty() {
+                "Search knowledge base".to_owned()
+            } else {
+                format!("Search knowledge base: {query}")
+            }
+        }
+    }
+}
+pub const TOOL_KB_STATUS: BiText = BiText::new("查看知识库索引状态", "Check knowledge base status");
+pub const TOOL_KB_REINDEX: BiText = BiText::new("更新知识库索引", "Update knowledge base index");
 pub fn tool_drawio(operation: &str, path: &str) -> String {
     let action = match (locale(), operation) {
         (Locale::ZhCn, "read") => "读取",

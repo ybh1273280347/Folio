@@ -1,8 +1,8 @@
 //! Incremental indexing, annotation sync, hybrid RRF fusion, and position-aware reranking.
 
 use super::{
-    DirtyDocument, RagConfig, RagError, ReindexReport, SearchHit, SearchMode, SearchRequest,
-    SearchResponse,
+    AccuratePdfMode, DirtyDocument, RagConfig, RagError, ReindexReport, SearchHit, SearchRequest,
+    SearchResponse, SubSearchType,
     chunker::{chunk_annotations, chunk_text_document, extract_and_chunk_pdf},
     client::{EmbeddingClient, RerankClient},
     doc_kind, mineru, sha256_hex,
@@ -35,7 +35,8 @@ pub struct SyncOptions<'a> {
     pub config: &'a RagConfig,
     pub embed_client: Option<&'a EmbeddingClient>,
     pub force_rebuild: bool,
-    pub upgrade_pdfs: bool,
+    pub accurate_mode: Option<AccuratePdfMode>,
+    pub accurate_paths: &'a [String],
 }
 
 pub fn sync_project(
@@ -195,8 +196,15 @@ pub fn sync_project(
         .map_err(|e| RagError::new("store_error", e))?;
 
     let mut mineru_stats = mineru::MinerUUpgradeStats::default();
-    if opts.upgrade_pdfs {
-        mineru_stats = mineru::upgrade_pdfs(root, store, opts.config, cancelled)?;
+    if let Some(accurate_mode) = opts.accurate_mode {
+        mineru_stats = mineru::upgrade_pdfs(
+            root,
+            store,
+            opts.config,
+            accurate_mode,
+            opts.accurate_paths,
+            cancelled,
+        )?;
     }
 
     let mut embedded_chunks = 0usize;
@@ -235,8 +243,8 @@ pub fn sync_project(
         embedded_chunks,
         pending_vectors: stats.pending_vectors,
         embed_server_ready,
-        mineru_upgraded_pdfs: mineru_stats.upgraded_pdfs,
-        mineru_failed_pdfs: mineru_stats.failed_pdfs,
+        accurate_upgraded_pdfs: mineru_stats.upgraded_pdfs,
+        accurate_failed_pdfs: mineru_stats.failed_pdfs,
         needs_ocr_files: stats.needs_ocr_files,
     })
 }
@@ -343,11 +351,43 @@ pub fn search_project(
     cancelled: &AtomicBool,
 ) -> Result<SearchResponse, RagError> {
     check_cancelled(cancelled)?;
-    let query = req.query.trim();
-    if query.is_empty() {
-        return Err(RagError::new("invalid_request", "query 不能为空。"));
+    let mut lex_queries: Vec<(f64, String)> = Vec::new();
+    let mut vec_queries: Vec<(f64, String)> = Vec::new();
+    let mut seen_lex: HashSet<String> = HashSet::new();
+    let mut seen_vec: HashSet<String> = HashSet::new();
+    let mut first = true;
+    for item in &req.searches {
+        let q = item.query.trim();
+        if q.is_empty() {
+            continue;
+        }
+        let weight = if first {
+            first = false;
+            2.0
+        } else {
+            1.0
+        };
+        match item.kind {
+            SubSearchType::Lex => {
+                if seen_lex.insert(q.to_owned()) {
+                    lex_queries.push((weight, q.to_owned()));
+                }
+            }
+            SubSearchType::Vec => {
+                if seen_vec.insert(q.to_owned()) {
+                    vec_queries.push((weight, q.to_owned()));
+                }
+            }
+        }
+    }
+    if lex_queries.is_empty() && vec_queries.is_empty() {
+        return Err(RagError::new(
+            "invalid_request",
+            "searches 不能为空，且至少需要一条有效查询。",
+        ));
     }
 
+    let intent = req.intent.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let limit = req.limit.clamp(1, 20);
     let candidate_limit = (limit * 4).clamp(24, 60);
     let under_dir = req.under_directory.as_deref();
@@ -377,29 +417,16 @@ pub fn search_project(
             .collect()
     };
 
-    let want_lex = matches!(req.mode, SearchMode::Hybrid | SearchMode::Keyword);
-    let want_vec = matches!(req.mode, SearchMode::Hybrid | SearchMode::Semantic);
+    let want_lex = !lex_queries.is_empty();
+    let want_vec = !vec_queries.is_empty();
 
-    if want_lex {
-        let primary = store
-            .search_fts(query, allowed_paths, under_dir, &req.extensions, candidate_limit)
+    for (weight, q) in &lex_queries {
+        check_cancelled(cancelled)?;
+        let hits = store
+            .search_fts(q, allowed_paths, under_dir, &req.extensions, candidate_limit)
             .map_err(|e| RagError::new("store_error", e))?;
-        if !primary.is_empty() {
-            ranked_lists.push((2.0, dirty_filter(primary, false)));
-        }
-
-        for extra in &req.lex_queries {
-            check_cancelled(cancelled)?;
-            let extra = extra.trim();
-            if extra.is_empty() || extra == query {
-                continue;
-            }
-            let hits = store
-                .search_fts(extra, allowed_paths, under_dir, &req.extensions, candidate_limit)
-                .map_err(|e| RagError::new("store_error", e))?;
-            if !hits.is_empty() {
-                ranked_lists.push((1.0, dirty_filter(hits, false)));
-            }
+        if !hits.is_empty() {
+            ranked_lists.push((*weight, dirty_filter(hits, false)));
         }
     }
 
@@ -410,24 +437,17 @@ pub fn search_project(
         } else if let Some(client) = services.embed_client
             && client.ensure_ready()
         {
-            let mut vec_texts = vec![query];
-            for q in &req.vec_queries {
-                let q = q.trim();
-                if !q.is_empty() && q != query {
-                    vec_texts.push(q);
-                }
-            }
+            let vec_texts: Vec<&str> = vec_queries.iter().map(|(_, q)| q.as_str()).collect();
             match client.embed_queries(&vec_texts) {
                 Ok(embeddings) => {
                     vec_used = true;
-                    for (idx, emb) in embeddings.into_iter().enumerate() {
+                    for ((weight, _), emb) in vec_queries.iter().zip(embeddings) {
                         check_cancelled(cancelled)?;
-                        let weight = if idx == 0 { 2.0 } else { 1.0 };
                         let hits = store
                             .search_vec(&emb, allowed_paths, under_dir, &req.extensions, candidate_limit)
                             .map_err(|e| RagError::new("store_error", e))?;
                         if !hits.is_empty() {
-                            ranked_lists.push((weight, dirty_filter(hits, false)));
+                            ranked_lists.push((*weight, dirty_filter(hits, false)));
                         }
                     }
                 }
@@ -440,16 +460,28 @@ pub fn search_project(
         }
     }
 
-    let mut dirty_terms = vec![query.to_owned()];
-    dirty_terms.extend(req.lex_queries.iter().cloned());
+    let mut dirty_terms: Vec<String> = lex_queries.iter().map(|(_, q)| q.clone()).collect();
+    if let Some(intent_text) = intent {
+        dirty_terms.push(intent_text.to_owned());
+    }
+    if dirty_terms.is_empty() {
+        dirty_terms.extend(vec_queries.iter().map(|(_, q)| q.clone()));
+    }
     let dirty_hits = search_dirty_buffers(dirty_docs, &dirty_terms, allowed_paths, under_dir, &req.extensions);
     if !dirty_hits.is_empty() {
         ranked_lists.push((2.0, dirty_hits));
     }
 
-    if req.mode == SearchMode::Semantic && !vec_used {
+    if !want_lex && want_vec && !vec_used {
+        let fallback_query = intent.unwrap_or(&vec_queries[0].1);
         let fallback = store
-            .search_fts(query, allowed_paths, under_dir, &req.extensions, candidate_limit)
+            .search_fts(
+                fallback_query,
+                allowed_paths,
+                under_dir,
+                &req.extensions,
+                candidate_limit,
+            )
             .map_err(|e| RagError::new("store_error", e))?;
         if !fallback.is_empty() {
             ranked_lists.push((1.5, dirty_filter(fallback, false)));
@@ -458,8 +490,13 @@ pub fn search_project(
 
     let mut rrf_ranked = fuse_rrf(&ranked_lists);
     let mut rerank_used = false;
-    if req.rerank.unwrap_or(true)
+    let rerank_anchor = intent
+        .or_else(|| vec_queries.first().map(|(_, q)| q.as_str()))
+        .or_else(|| lex_queries.first().map(|(_, q)| q.as_str()));
+    let should_rerank = req.rerank.unwrap_or(want_vec || intent.is_some());
+    if should_rerank
         && rrf_ranked.len() > 1
+        && let Some(anchor) = rerank_anchor
         && let Some(reranker) = services.rerank_client
         && reranker.ensure_ready()
     {
@@ -468,12 +505,19 @@ pub fn search_project(
             store,
             reranker,
             services.rerank_model,
-            query,
+            anchor,
             &mut rrf_ranked,
         )?;
     }
 
-    let results = collapse_and_format(rrf_ranked, query, &req.lex_queries, limit);
+    let mut snippet_queries: Vec<String> = lex_queries.iter().map(|(_, q)| q.clone()).collect();
+    if let Some(intent_text) = intent {
+        snippet_queries.push(intent_text.to_owned());
+    }
+    if snippet_queries.is_empty() {
+        snippet_queries.extend(vec_queries.iter().map(|(_, q)| q.clone()));
+    }
+    let results = collapse_and_format(rrf_ranked, &snippet_queries, limit);
     let base_mode = match (want_lex, vec_used) {
         (true, true) => "hybrid",
         (false, true) => "semantic",
@@ -626,12 +670,11 @@ fn position_aware_blend(ranked: &mut [(f64, Candidate)], rerank_scores: &[f64]) 
 
 fn collapse_and_format(
     ranked: Vec<(f64, Candidate)>,
-    query: &str,
-    lex_queries: &[String],
+    queries: &[String],
     limit: usize,
 ) -> Vec<SearchHit> {
-    let mut snippet_terms: Vec<String> = query.split_whitespace().map(str::to_owned).collect();
-    for lq in lex_queries {
+    let mut snippet_terms: Vec<String> = Vec::new();
+    for lq in queries {
         for term in lq.split_whitespace() {
             snippet_terms.push(term.to_owned());
         }
@@ -777,7 +820,7 @@ fn build_snippet(chunk_text: &str, terms: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rag::{SearchMode, chunker::ChunkDraft};
+    use crate::rag::{SubSearch, chunker::ChunkDraft};
     use tempfile::tempdir;
 
     #[test]
@@ -817,7 +860,7 @@ mod tests {
             (1.0, vec![c4, c1]),
         ];
         let ranked = fuse_rrf(&lists);
-        let hits = collapse_and_format(ranked, "Alpha", &[], 5);
+        let hits = collapse_and_format(ranked, &["Alpha".to_owned()], 5);
         assert_eq!(hits.len(), 3);
         assert_eq!(hits[0].docid, "aaaa1111");
         assert!(hits.iter().any(|h| h.path == "b.md"));
@@ -871,7 +914,8 @@ mod tests {
                 config: &cfg,
                 embed_client: None,
                 force_rebuild: false,
-                upgrade_pdfs: false,
+                accurate_mode: None,
+                accurate_paths: &[],
             },
             &cancel,
         )
@@ -918,10 +962,11 @@ mod tests {
             text: "# Sec\nFresh unsaved Lagrange dual bound.\n".into(),
         }];
         let req = SearchRequest {
-            query: "Lagrange".into(),
-            lex_queries: vec![],
-            vec_queries: vec![],
-            mode: SearchMode::Hybrid,
+            searches: vec![SubSearch {
+                kind: SubSearchType::Vec,
+                query: "Lagrange".into(),
+            }],
+            intent: None,
             rerank: Some(true),
             extensions: vec![],
             under_directory: None,
@@ -946,6 +991,34 @@ mod tests {
         assert_eq!(resp.results.len(), 1);
         assert!(resp.results[0].dirty_buffer);
         assert!(resp.results[0].snippet.contains("Fresh unsaved"));
+
+        let lex_only = SearchRequest {
+            searches: vec![SubSearch {
+                kind: SubSearchType::Lex,
+                query: "Lagrange".into(),
+            }],
+            intent: None,
+            rerank: None,
+            extensions: vec![],
+            under_directory: None,
+            limit: 5,
+        };
+        let lex_resp = search_project(
+            &mut store,
+            &lex_only,
+            &dirty,
+            None,
+            SearchServices {
+                embed_client: None,
+                rerank_client: None,
+                rerank_model: "rerank",
+            },
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(lex_resp.mode_used, "keyword_only");
+        assert!(lex_resp.degraded_reason.is_none());
+        assert_eq!(lex_resp.results.len(), 1);
     }
 
     #[test]
@@ -999,7 +1072,8 @@ mod tests {
                 config: &cfg,
                 embed_client: Some(&embed_client),
                 force_rebuild: false,
-                upgrade_pdfs: false,
+                accurate_mode: None,
+                accurate_paths: &[],
             },
             &cancel,
         )
@@ -1011,10 +1085,17 @@ mod tests {
         let resp = search_project(
             &mut store,
             &SearchRequest {
-                query: "什么时候满足互补松弛？".into(),
-                lex_queries: vec!["KKT".into()],
-                vec_queries: vec!["complementary slackness condition".into()],
-                mode: SearchMode::Hybrid,
+                searches: vec![
+                    SubSearch {
+                        kind: SubSearchType::Lex,
+                        query: "KKT".into(),
+                    },
+                    SubSearch {
+                        kind: SubSearchType::Vec,
+                        query: "complementary slackness condition".into(),
+                    },
+                ],
+                intent: Some("什么时候满足互补松弛？".into()),
                 rerank: Some(true),
                 extensions: vec![],
                 under_directory: None,
@@ -1038,10 +1119,17 @@ mod tests {
             let pdf_resp = search_project(
                 &mut store,
                 &SearchRequest {
-                    query: "Adam bias-corrected first and second moment estimates".into(),
-                    lex_queries: vec!["Adam".into(), "moment".into()],
-                    vec_queries: vec![],
-                    mode: SearchMode::Hybrid,
+                    searches: vec![
+                        SubSearch {
+                            kind: SubSearchType::Lex,
+                            query: "Adam moment".into(),
+                        },
+                        SubSearch {
+                            kind: SubSearchType::Vec,
+                            query: "Adam bias-corrected first and second moment estimates".into(),
+                        },
+                    ],
+                    intent: Some("Adam bias-corrected first and second moment estimates".into()),
                     rerank: Some(true),
                     extensions: vec![],
                     under_directory: None,
@@ -1103,13 +1191,14 @@ mod tests {
                 config: &cfg,
                 embed_client: Some(&embed_client),
                 force_rebuild: false,
-                upgrade_pdfs: true,
+                accurate_mode: Some(AccuratePdfMode::All),
+                accurate_paths: &[],
             },
             &cancel,
         )
         .unwrap();
-        assert_eq!(report.mineru_upgraded_pdfs, 1);
-        assert!(report.mineru_failed_pdfs.is_empty());
+        assert_eq!(report.accurate_upgraded_pdfs, 1);
+        assert!(report.accurate_failed_pdfs.is_empty());
         assert_eq!(report.pending_vectors, 0);
 
         let pdf_hash = sha256_hex(&fs::read(root.join("adam.pdf")).unwrap());
@@ -1119,10 +1208,17 @@ mod tests {
         let resp = search_project(
             &mut store,
             &SearchRequest {
-                query: "Adam convergence regret bound beta1 beta2".into(),
-                lex_queries: vec!["AdaMax".into(), "bias correction".into()],
-                vec_queries: vec![],
-                mode: SearchMode::Hybrid,
+                searches: vec![
+                    SubSearch {
+                        kind: SubSearchType::Lex,
+                        query: "AdaMax bias correction".into(),
+                    },
+                    SubSearch {
+                        kind: SubSearchType::Vec,
+                        query: "Adam convergence regret bound beta1 beta2".into(),
+                    },
+                ],
+                intent: Some("Adam convergence regret bound beta1 beta2".into()),
                 rerank: Some(true),
                 extensions: vec![],
                 under_directory: None,

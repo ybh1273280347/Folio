@@ -687,21 +687,41 @@ impl RagStore {
         tx.commit().map_err(|e| e.to_string())
     }
 
-    pub fn pdf_upgrade_candidates(&self) -> Result<Vec<(String, String)>, String> {
-        let mut stmt = self
-            .conn
-            .prepare(
+    pub fn pdf_upgrade_candidates(
+        &self,
+        mode: super::AccuratePdfMode,
+        paths: &[String],
+    ) -> Result<Vec<(String, String)>, String> {
+        let sql = match mode {
+            super::AccuratePdfMode::OnlyOcr => {
+                "SELECT d.rel_path, d.content_hash
+                 FROM documents d
+                 JOIN contents c ON c.content_hash = d.content_hash
+                 WHERE d.active = 1 AND d.kind = 'pdf' AND d.status = 'needs_ocr' AND c.parse_tier != 'mineru'
+                 ORDER BY d.rel_path"
+            }
+            super::AccuratePdfMode::All => {
                 "SELECT d.rel_path, d.content_hash
                  FROM documents d
                  JOIN contents c ON c.content_hash = d.content_hash
                  WHERE d.active = 1 AND d.kind = 'pdf' AND c.parse_tier != 'mineru'
-                 ORDER BY d.rel_path",
-            )
-            .map_err(|e| e.to_string())?;
+                 ORDER BY d.rel_path"
+            }
+        };
+        let mut stmt = self.conn.prepare(sql).map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
             .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        let mut out = rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+        if !paths.is_empty() {
+            let wanted: HashSet<String> = paths
+                .iter()
+                .map(|p| p.trim().replace('\\', "/"))
+                .filter(|p| !p.is_empty())
+                .collect();
+            out.retain(|(rel_path, _)| wanted.contains(rel_path));
+        }
+        Ok(out)
     }
 
     pub fn mineru_counts(&self) -> Result<(usize, usize), String> {
@@ -997,5 +1017,37 @@ mod tests {
             .unwrap();
         assert_eq!(vec_hits.len(), 1);
         assert_eq!(vec_hits[0].rel_path, "notes/opt.md");
+    }
+
+    #[test]
+    fn pdf_upgrade_candidates_filters_mode_and_paths() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("rag.sqlite3");
+        let mut store = RagStore::open(&db, "test-embed", 4).unwrap();
+        store
+            .upsert_document("papers/scan.pdf", "pdf", "hash_scan", 1, 10, "needs_ocr", Some(""), Some("fast_pdf"), Some(&[]))
+            .unwrap();
+        store
+            .upsert_document("papers/text.pdf", "pdf", "hash_text", 1, 10, "indexed", Some("text"), Some("fast_pdf"), Some(&[]))
+            .unwrap();
+        store
+            .upsert_document("papers/done.pdf", "pdf", "hash_done", 1, 10, "indexed", Some("done"), Some("mineru"), Some(&[]))
+            .unwrap();
+
+        let only_ocr = store.pdf_upgrade_candidates(crate::rag::AccuratePdfMode::OnlyOcr, &[]).unwrap();
+        assert_eq!(only_ocr.len(), 1);
+        assert_eq!(only_ocr[0].0, "papers/scan.pdf");
+
+        let all = store.pdf_upgrade_candidates(crate::rag::AccuratePdfMode::All, &[]).unwrap();
+        assert_eq!(all.len(), 2);
+
+        let selected = store
+            .pdf_upgrade_candidates(
+                crate::rag::AccuratePdfMode::All,
+                &["papers\\text.pdf".to_owned()],
+            )
+            .unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].0, "papers/text.pdf");
     }
 }

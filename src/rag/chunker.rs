@@ -40,6 +40,64 @@ pub fn chunk_text_document(rel_path: &str, kind: &str, text: &str) -> ExtractedD
 }
 
 pub fn extract_and_chunk_pdf(rel_path: &str, bytes: Vec<u8>) -> Result<ExtractedDocument, String> {
+    if let Ok(inspected) = pdf_inspector::extract_pages_markdown_mem(&bytes, None) {
+        return Ok(chunk_inspected_pdf(rel_path, inspected));
+    }
+    extract_and_chunk_pdf_gpui(rel_path, bytes)
+}
+
+fn chunk_inspected_pdf(
+    rel_path: &str,
+    inspected: pdf_inspector::PagesExtractionResult,
+) -> ExtractedDocument {
+    let page_count = inspected.pages.len();
+    let mut non_ws_chars = 0usize;
+    let mut full_raw = String::new();
+    let mut chunks = Vec::new();
+
+    for page in &inspected.pages {
+        let page_num = (page.page as usize) + 1;
+        let trimmed = page.markdown.trim();
+        non_ws_chars += trimmed.chars().filter(|c| !c.is_whitespace()).count();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !full_raw.is_empty() {
+            full_raw.push_str("\n\n");
+        }
+        full_raw.push_str(&format!("<!-- page {page_num} -->\n{trimmed}"));
+
+        let heading = format!("{rel_path} > p.{page_num}");
+        for piece in split_text_with_overlap(trimmed, TARGET_CHUNK_CHARS, OVERLAP_CHARS) {
+            let seq = chunks.len();
+            chunks.push(ChunkDraft {
+                seq,
+                heading_path: heading.clone(),
+                line_start: None,
+                line_end: None,
+                page_num: Some(page_num),
+                chunk_text: format!("[{heading}]\n{piece}"),
+            });
+        }
+    }
+
+    let has_content_ocr_reason = inspected.ocr_reasons_by_page.iter().any(|entry| {
+        entry
+            .reasons
+            .iter()
+            .any(|reason| reason != pdf_inspector::OCR_REASON_NO_TEXT)
+    });
+    let needs_ocr = has_content_ocr_reason || (page_count > 0 && non_ws_chars < 40);
+
+    ExtractedDocument {
+        raw_text: full_raw,
+        parse_tier: "fast_pdf",
+        needs_ocr,
+        chunks,
+    }
+}
+
+fn extract_and_chunk_pdf_gpui(rel_path: &str, bytes: Vec<u8>) -> Result<ExtractedDocument, String> {
     let document = gpui_pdf::parse(Arc::new(bytes))
         .map_err(|err| format!("PDF 解析失败 ({rel_path}): {err:?}"))?;
     let page_count = document.pages().len();

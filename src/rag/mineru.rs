@@ -95,10 +95,12 @@ pub fn upgrade_pdfs(
     root: &Path,
     store: &mut RagStore,
     config: &RagConfig,
+    mode: super::AccuratePdfMode,
+    paths: &[String],
     cancelled: &AtomicBool,
 ) -> Result<MinerUUpgradeStats, RagError> {
     let candidates = store
-        .pdf_upgrade_candidates()
+        .pdf_upgrade_candidates(mode, paths)
         .map_err(|e| RagError::new("store_error", e))?;
     if candidates.is_empty() {
         return Ok(MinerUUpgradeStats::default());
@@ -128,8 +130,8 @@ pub fn upgrade_pdfs(
     let api_key = resolve_api_key(config);
     if api_key.is_empty() {
         return Err(RagError::new(
-            "mineru_unconfigured",
-            "未配置 MinerU API Key，请在「设置 → API 服务 → 本地知识库与 MinerU」填写后重试。",
+            "accurate_pdf_unconfigured",
+            "尚未配置深度 PDF 解析密钥，请在「设置 → API 服务」填写后重试。",
         ));
     }
 

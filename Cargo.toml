@@ -17,6 +17,7 @@ gpui-kit-markdown-editor = { path = "vendor/gpui-kit-markdown-editor", default-f
 gpui_xterm = { path = "vendor/gpui-xterm" }
 portable-pty = "0.9"
 gpui-pdf = { path = "vendor/gpui-pdf", features = ["search"] }
+pdf-inspector = "1.27.0"
 image = { version = "0.25.10", default-features = false }
 markdown = "1.0.0"
 latex-rust = { path = "vendor/latex-rust", default-features = false, features = ["std"] }

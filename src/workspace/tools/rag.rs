@@ -60,13 +60,9 @@ enum RagOperation {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SearchToolParams {
-    query: String,
-    #[serde(default, alias = "lex_queries")]
-    lex_queries: Vec<String>,
-    #[serde(default, alias = "vec_queries")]
-    vec_queries: Vec<String>,
+    searches: Vec<crate::rag::SubSearch>,
     #[serde(default)]
-    mode: crate::rag::SearchMode,
+    intent: Option<String>,
     #[serde(default)]
     rerank: Option<bool>,
     #[serde(default)]
@@ -86,8 +82,10 @@ struct SearchToolParams {
 struct ReindexToolParams {
     #[serde(default, alias = "force_rebuild")]
     force_rebuild: bool,
-    #[serde(default, alias = "upgrade_pdfs")]
-    upgrade_pdfs: bool,
+    #[serde(default)]
+    accurate: Option<crate::rag::AccuratePdfMode>,
+    #[serde(default)]
+    paths: Vec<String>,
 }
 
 fn default_match() -> String {
@@ -176,7 +174,8 @@ impl Workspace {
                     config: &config,
                     embed_client: embed_client.as_ref(),
                     force_rebuild: false,
-                    upgrade_pdfs: false,
+                    accurate_mode: None,
+                    accurate_paths: &[],
                 },
                 &cancelled,
             )?;
@@ -298,19 +297,19 @@ impl Workspace {
                     let stats = store
                         .stats()
                         .map_err(|e| RagError::new("store_error", e))?;
-                    let (mineru_upgraded_pdfs, mineru_pending_pdfs) = store
+                    let (accurate_upgraded_pdfs, accurate_pending_pdfs) = store
                         .mineru_counts()
                         .map_err(|e| RagError::new("store_error", e))?;
-                    let mineru_configured = !mineru::resolve_api_key(&config).is_empty();
+                    let accurate_configured = !mineru::resolve_api_key(&config).is_empty();
                     let report = crate::rag::StatusReport {
                         db_path: db_path.to_string_lossy().into_owned(),
                         embed_model: config.embed_model,
                         embed_dim: config.embed_dim,
                         embed_server_ready,
                         rerank_server_ready,
-                        mineru_configured,
-                        mineru_upgraded_pdfs,
-                        mineru_pending_pdfs,
+                        accurate_configured,
+                        accurate_upgraded_pdfs,
+                        accurate_pending_pdfs,
                         indexed_files: stats.indexed_files,
                         total_chunks: stats.total_chunks,
                         vector_chunks: stats.vector_chunks,
@@ -328,7 +327,8 @@ impl Workspace {
                             config: &config,
                             embed_client: embed_client.as_ref(),
                             force_rebuild: params.force_rebuild,
-                            upgrade_pdfs: params.upgrade_pdfs,
+                            accurate_mode: params.accurate,
+                            accurate_paths: &params.paths,
                         },
                         &cancelled,
                     )?;
@@ -355,17 +355,16 @@ impl Workspace {
                                 config: &config,
                                 embed_client: embed_client.as_ref(),
                                 force_rebuild: false,
-                                upgrade_pdfs: false,
+                                accurate_mode: None,
+                                accurate_paths: &[],
                             },
                             &cancelled,
                         )?;
                     }
 
                     let search_req = SearchRequest {
-                        query: params.query,
-                        lex_queries: params.lex_queries,
-                        vec_queries: params.vec_queries,
-                        mode: params.mode,
+                        searches: params.searches,
+                        intent: params.intent,
                         rerank: params.rerank,
                         extensions: params.extensions,
                         under_directory: params.under_directory,
