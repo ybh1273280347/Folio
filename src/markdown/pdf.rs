@@ -4,6 +4,7 @@ use gpui_kit::*;
 use krilla::{
     Document,
     geom::{PathBuilder, Rect, Transform},
+    metadata::Metadata,
     num::NormalizedF32,
     page::PageSettings,
     paint::Fill,
@@ -25,6 +26,8 @@ const PAGE_WIDTH: f32 = 595.276;
 const PAGE_HEIGHT: f32 = 841.89;
 
 pub(crate) struct ExportRequest {
+    pub root: PathBuf,
+    pub source: PathBuf,
     pub destination: PathBuf,
     pub preview: PathBuf,
     pub cancelled: Arc<AtomicBool>,
@@ -129,6 +132,12 @@ fn write(
         );
     }
     let mut document = Document::new();
+    document.set_metadata(
+        Metadata::new()
+            .creator("Folio".to_owned())
+            .producer("Folio-Markdown".to_owned())
+            .keywords(vec!["folio-derived".to_owned()]),
+    );
     let scale = PAGE_WIDTH / f32::from(size.width);
     let page_height = PAGE_HEIGHT / scale;
     let mut top = 0.;
@@ -435,6 +444,13 @@ fn write(
     std::fs::create_dir_all(request.preview.parent().expect("preview parent"))?;
     std::fs::write(&request.preview, &pdf)?;
     std::fs::write(&request.destination, &pdf)?;
+    let _ = crate::rag::record_derived_pdf(
+        &request.root,
+        &request.source,
+        &request.destination,
+        &pdf,
+        "markdown",
+    );
     Ok(BuildResult {
         status: BuildStatus::Success,
         elapsed: request.started.elapsed(),

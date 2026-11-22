@@ -439,7 +439,11 @@ impl RagStore {
     pub fn stats(&self) -> Result<StoreStats, String> {
         let indexed_files: usize = self
             .conn
-            .query_row("SELECT COUNT(*) FROM documents WHERE active = 1", [], |r| r.get::<_, i64>(0))
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE active = 1 AND status != 'derived'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
             .map_err(|e| e.to_string())? as usize;
         let total_chunks: usize = self
             .conn
@@ -705,7 +709,7 @@ impl RagStore {
                 "SELECT d.rel_path, d.content_hash
                  FROM documents d
                  JOIN contents c ON c.content_hash = d.content_hash
-                 WHERE d.active = 1 AND d.kind = 'pdf'
+                 WHERE d.active = 1 AND d.kind = 'pdf' AND d.status != 'derived'
                    AND c.parse_tier NOT IN ('accurate', 'mineru')
                  ORDER BY d.rel_path"
             }
@@ -742,7 +746,8 @@ impl RagStore {
             .query_row(
                 "SELECT COUNT(*) FROM documents d
                  JOIN contents c ON c.content_hash = d.content_hash
-                 WHERE d.active = 1 AND d.kind = 'pdf' AND c.parse_tier NOT IN ('accurate', 'mineru')",
+                 WHERE d.active = 1 AND d.kind = 'pdf' AND d.status != 'derived'
+                   AND c.parse_tier NOT IN ('accurate', 'mineru')",
                 [],
                 |r| r.get(0),
             )

@@ -141,6 +141,15 @@ fn run_latexmk(
     let preview = build_root.join(&project.id).join("preview.pdf");
     fs::copy(&pdf, &preview)?;
     fs::copy(&pdf, destination)?;
+    if let Ok(bytes) = fs::read(&pdf) {
+        let _ = crate::rag::record_derived_pdf(
+            Path::new(&project.folder),
+            &source,
+            destination,
+            &bytes,
+            "tex",
+        );
+    }
     Ok(BuildResult {
         status: BuildStatus::Success,
         elapsed: started.elapsed(),

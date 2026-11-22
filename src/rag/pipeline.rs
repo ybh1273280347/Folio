@@ -5,7 +5,7 @@ use super::{
     SearchResponse, SubSearchType,
     chunker::{chunk_annotations, chunk_text_document, extract_and_chunk_pdf},
     client::{EmbeddingClient, RerankClient},
-    doc_kind, ocr, sha256_hex,
+    doc_kind, has_folio_pdf_fingerprint, load_derived_pdf_hashes, ocr, sha256_hex,
     store::{RagStore, ScoredChunk, path_matches_filters},
 };
 use crate::{annotations::AnnotationItem, storage};
@@ -56,6 +56,7 @@ pub fn sync_project(
     let existing = store
         .active_documents()
         .map_err(|e| RagError::new("store_error", e))?;
+    let derived_hashes = load_derived_pdf_hashes(root);
     let mut live_set = HashSet::with_capacity(eligible_paths.len());
     let mut updated_files = 0usize;
     let mut skipped_unchanged = 0usize;
@@ -90,6 +91,27 @@ pub fn sync_project(
             continue;
         };
         let content_hash = sha256_hex(&bytes);
+        if kind == "pdf"
+            && (derived_hashes.contains(&content_hash) || has_folio_pdf_fingerprint(&bytes))
+        {
+            let derived_key = format!("derived:{content_hash}");
+            store
+                .upsert_document(
+                    rel_path,
+                    kind,
+                    &derived_key,
+                    mtime_ns,
+                    file_size,
+                    "derived",
+                    Some(""),
+                    Some("derived"),
+                    Some(&[]),
+                )
+                .map_err(|e| RagError::new("store_error", e))?;
+            updated_files += 1;
+            continue;
+        }
+
         let already_parsed = store
             .has_content(&content_hash)
             .map_err(|e| RagError::new("store_error", e))?;
@@ -1398,5 +1420,72 @@ mod tests {
         assert!(snippet.contains("n 个数据元素的有限序列"));
         assert!(snippet.contains("[公式]"));
         assert_eq!(clean_heading_text("2\\.1\\.1 **线性表**"), "2.1.1 线性表");
+    }
+
+    #[test]
+    fn derived_pdf_filtering_uses_fingerprints_only_not_filenames() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("notes.tex"), "\\section{Intro}\nUniqueTeXToken\n").unwrap();
+        // Same-named independent PDF without Folio fingerprint must still be indexed.
+        fs::write(root.join("notes.pdf"), b"%PDF-1.4\n% independent slides").unwrap();
+        // Renamed TeX build recorded in `.folio/derived-pdfs.json`.
+        let tex_out = b"%PDF-1.4\n% compiled tex output bytes";
+        fs::write(root.join("renamed-tex-output.pdf"), tex_out).unwrap();
+        crate::rag::record_derived_pdf(
+            root,
+            &root.join("notes.tex"),
+            &root.join("renamed-tex-output.pdf"),
+            tex_out,
+            "tex",
+        )
+        .unwrap();
+        // Renamed Markdown/krilla export stamped with protocol metadata.
+        fs::write(
+            root.join("renamed-md-export.pdf"),
+            b"%PDF-1.7\n1 0 obj << /Creator (Folio) /Keywords (folio-derived) >> endobj",
+        )
+        .unwrap();
+
+        let eligible = crate::rag::collect_eligible_paths(vec![
+            "notes.tex".into(),
+            "notes.pdf".into(),
+            "renamed-tex-output.pdf".into(),
+            "renamed-md-export.pdf".into(),
+        ]);
+        assert_eq!(eligible.len(), 4);
+
+        let cfg = RagConfig::default();
+        let db = root.join(".folio/rag.sqlite3");
+        let mut store = RagStore::open(&db, &cfg.embed_model, cfg.embed_dim).unwrap();
+        let cancel = AtomicBool::new(false);
+        let report = sync_project(
+            root,
+            &eligible,
+            &mut store,
+            SyncOptions {
+                config: &cfg,
+                embed_client: None,
+                force_rebuild: false,
+                accurate_mode: None,
+                accurate_paths: &[],
+            },
+            &cancel,
+        )
+        .unwrap();
+
+        // Only notes.tex + independent notes.pdf are indexed; the two fingerprinted exports are derived.
+        let stats = store.stats().unwrap();
+        assert_eq!(stats.indexed_files, 2);
+        assert_eq!(stats.needs_ocr_files, vec!["notes.pdf".to_owned()]);
+        assert_eq!(report.needs_ocr_files, vec!["notes.pdf".to_owned()]);
+        assert_eq!(
+            store
+                .pdf_upgrade_candidates(AccuratePdfMode::All, &[])
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

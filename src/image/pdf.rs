@@ -9,7 +9,7 @@ use std::{
 };
 
 use image::GenericImageView;
-use krilla::{Document, geom::Size as KrillaSize, page::PageSettings};
+use krilla::{Document, geom::Size as KrillaSize, metadata::Metadata, page::PageSettings};
 use krilla_svg::{SurfaceExt, SvgSettings};
 
 use crate::build::{BuildResult, BuildStatus};
@@ -49,6 +49,12 @@ fn svg_bytes_to_pdf(bytes: &[u8]) -> io::Result<Vec<u8>> {
         .ok_or_else(|| io::Error::other("Invalid PDF page dimensions"))?;
 
     let mut document = Document::new();
+    document.set_metadata(
+        Metadata::new()
+            .creator("Folio".to_owned())
+            .producer("Folio-Image".to_owned())
+            .keywords(vec!["folio-derived".to_owned()]),
+    );
     let mut page = document.start_page_with(settings);
     let mut surface = page.surface();
     surface
@@ -93,6 +99,12 @@ fn raster_bytes_to_pdf(bytes: &[u8], ext: &str) -> io::Result<Vec<u8>> {
         .ok_or_else(|| io::Error::other("Invalid PDF page dimensions"))?;
 
     let mut document = Document::new();
+    document.set_metadata(
+        Metadata::new()
+            .creator("Folio".to_owned())
+            .producer("Folio-Image".to_owned())
+            .keywords(vec!["folio-derived".to_owned()]),
+    );
     let mut page = document.start_page_with(settings);
     let mut surface = page.surface();
     surface.draw_image(krilla_img, size);
@@ -112,6 +124,7 @@ fn decode_rgba_for_krilla(bytes: &[u8]) -> io::Result<(u32, u32, krilla::image::
 
 /// Export an SVG or raster image file to a single-page PDF sized to the image.
 pub fn export_image_to_pdf(
+    project_root: Option<&Path>,
     source: &Path,
     destination: &Path,
     preview: &Path,
@@ -146,6 +159,9 @@ pub fn export_image_to_pdf(
     }
     fs::write(preview, &pdf)?;
     fs::write(destination, &pdf)?;
+    if let Some(root) = project_root {
+        let _ = crate::rag::record_derived_pdf(root, source, destination, &pdf, "image");
+    }
 
     Ok(BuildResult {
         status: BuildStatus::Success,
@@ -172,6 +188,7 @@ mod tests {
         .unwrap();
 
         let res = export_image_to_pdf(
+            Some(dir.path()),
             &src,
             &dest,
             &preview,
@@ -180,7 +197,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(res.status, BuildStatus::Success);
-        assert!(fs::read(&dest).unwrap().starts_with(b"%PDF-"));
+        let pdf_bytes = fs::read(&dest).unwrap();
+        assert!(pdf_bytes.starts_with(b"%PDF-"));
+        assert!(crate::rag::has_folio_pdf_fingerprint(&pdf_bytes));
+        assert!(!crate::rag::load_derived_pdf_hashes(dir.path()).is_empty());
         assert!(fs::read(&preview).unwrap().starts_with(b"%PDF-"));
     }
 
@@ -195,6 +215,7 @@ mod tests {
         img.save_with_format(&src, image::ImageFormat::Png).unwrap();
 
         let res = export_image_to_pdf(
+            Some(dir.path()),
             &src,
             &dest,
             &preview,
