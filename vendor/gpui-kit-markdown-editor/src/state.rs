@@ -1162,12 +1162,38 @@ impl BlockEditorState {
         if anchor == head {
             return None;
         }
+        if anchor.block == head.block {
+            let block = anchor.block;
+            let lo = anchor.offset.min(head.offset);
+            let hi = anchor.offset.max(head.offset);
+            let (quote, range) = if let Some(inline) = self.model.doc.inline(block)
+                && inline.text()[lo..hi].contains(super::inline::ATOM_CHAR)
+            {
+                let (expanded, starts, ends) = Self::expand_inline_plain(&inline.slice(lo..hi));
+                let trimmed_start = expanded.trim_start();
+                let quote = trimmed_start.trim_end();
+                if quote.is_empty() {
+                    return None;
+                }
+                let start = expanded.len() - trimmed_start.len();
+                let range = lo + starts[start]..lo + ends[start + quote.len()];
+                (quote.to_owned(), range)
+            } else {
+                let text = &self.model.doc.leaf_text(block)?[lo..hi];
+                let trimmed_start = text.trim_start();
+                let quote = trimmed_start.trim_end();
+                let start = lo + text.len() - trimmed_start.len();
+                (quote.to_owned(), start..start + quote.len())
+            };
+            // Rank the actual selected range with the same overlapping matches as jump.
+            return self
+                .find_quote_match(&quote, |index, id, candidate| {
+                    (id == block && candidate == range).then_some(index)
+                })
+                .map(|index| (quote, index));
+        }
         let target_block = anchor.block;
-        let lo = if anchor.block == head.block {
-            anchor.offset.min(head.offset)
-        } else {
-            anchor.offset
-        };
+        let lo = anchor.offset;
         let quote = self.selected_plain_text()?;
         let mut count = 0usize;
         for leaf in self.model.document().leaves() {
@@ -1195,58 +1221,95 @@ impl BlockEditorState {
         Some((quote, count))
     }
 
-    /// Selects and reveals the `occurrence`-th match of `quote` across the document's leaves.
+    /// Reveal a saved quote in the current document. A uniquely highlighted
+    /// match can recover a moved annotation whose saved ordinal has drifted.
     pub fn select_quote_occurrence(
         &mut self,
         quote: &str,
         occurrence: usize,
         cx: &mut Context<Self>,
     ) -> bool {
-        if quote.is_empty() {
-            return false;
-        }
-        let step = quote.chars().next().map_or(1, char::len_utf8);
-        let legacy_raw = quote.contains('\u{FFFC}');
-        let mut seen = 0usize;
-        let mut found = None;
-        for leaf in self.model.document().leaves() {
-            if !legacy_raw && let Some(inline) = self.model.doc.inline(leaf.id()) {
-                if !inline.text().contains(super::inline::ATOM_CHAR) {
-                    if let Some((start, end)) =
-                        nth_quote_range(inline.text(), quote, step, occurrence, &mut seen)
-                    {
-                        found = Some((leaf.id(), start, end));
-                        break;
-                    }
-                } else {
-                    let (expanded, starts, ends) = Self::expand_inline_plain(inline);
-                    if let Some((out_start, out_end)) =
-                        nth_quote_range(&expanded, quote, step, occurrence, &mut seen)
-                    {
-                        found = Some((leaf.id(), starts[out_start], ends[out_end]));
-                        break;
-                    }
+        let mut ordinal = None;
+        let mut marked = None;
+        let mut ambiguous_marks = false;
+        let found = self.find_quote_match(quote, |index, block, range| {
+            let start = BlockPosition::new(block, range.start);
+            let end = BlockPosition::new(block, range.end);
+            // A substring can split a grapheme even when it is valid UTF-8.
+            // Preserve its ordinal without trying to reveal an invalid range.
+            self.model.doc.validate(start).ok()?;
+            self.model.doc.validate(end).ok()?;
+            let positions = (start, end);
+            let highlighted = self.model.doc.inline(block).is_some_and(|inline| {
+                inline.pieces()
+                    .filter(|(piece, _, _)| piece.start < range.end && range.start < piece.end)
+                    .all(|(_, marks, _)| marks.highlight.is_some())
+            });
+            if index == occurrence {
+                ordinal = Some(positions);
+                if highlighted || ambiguous_marks {
+                    return ordinal;
                 }
-            } else if let Some(text) = self.model.doc.leaf_text(leaf.id())
-                && let Some((start, end)) =
-                    nth_quote_range(text, quote, step, occurrence, &mut seen)
-            {
-                found = Some((leaf.id(), start, end));
-                break;
+            }
+            if highlighted && marked != Some(positions) {
+                ambiguous_marks = marked.replace(positions).is_some();
+                if ambiguous_marks && ordinal.is_some() {
+                    return ordinal;
+                }
+            }
+            None
+        });
+        let Some((anchor, head)) = found.or(marked.filter(|_| !ambiguous_marks)).or(ordinal)
+        else {
+            return false;
+        };
+        self.set_selection(BlockSelection::Text { anchor, head }, cx)
+            .expect("quote match has valid selection endpoints");
+        self.heading_jump.set(Some(head.block));
+        self.reveal_caret(cx);
+        true
+    }
+
+    /// Visit overlapping matches in leaf order, mapping expanded atom text
+    /// back to selectable offsets. Legacy quotes with placeholders use raw text.
+    fn find_quote_match<T>(
+        &self,
+        quote: &str,
+        mut find: impl FnMut(usize, BlockId, Range<usize>) -> Option<T>,
+    ) -> Option<T> {
+        let step = quote.chars().next()?.len_utf8();
+        let legacy_raw = quote.contains(super::inline::ATOM_CHAR);
+        let mut index = 0;
+        for &block in self.model.doc.leaves() {
+            let expanded = self
+                .model
+                .doc
+                .inline(block)
+                .filter(|inline| !legacy_raw && inline.text().contains(super::inline::ATOM_CHAR))
+                .map(Self::expand_inline_plain);
+            let Some(text) = expanded
+                .as_ref()
+                .map(|(text, _, _)| text.as_str())
+                .or_else(|| self.model.doc.leaf_text(block))
+            else {
+                continue;
+            };
+            let mut from = 0;
+            while let Some(relative) = text[from..].find(quote) {
+                let start = from + relative;
+                let end = start + quote.len();
+                let range = match &expanded {
+                    Some((_, starts, ends)) => starts[start]..ends[end],
+                    None => start..end,
+                };
+                if let Some(result) = find(index, block, range) {
+                    return Some(result);
+                }
+                index += 1;
+                from = start + step;
             }
         }
-        if let Some((block, start, end)) = found {
-            let _ = self.model.set_selection(BlockSelection::Text {
-                anchor: BlockPosition::new(block, start),
-                head: BlockPosition::new(block, end),
-            });
-            self.selection_changed(cx);
-            self.heading_jump.set(Some(block));
-            self.reveal_caret(cx);
-            true
-        } else {
-            false
-        }
+        None
     }
 
     /// Case-insensitively selects and reveals the wrapped `index`-th match of `query`,
@@ -4283,27 +4346,4 @@ fn opening_pair(text: &str, open: Range<usize>, delim: &str) -> Option<Range<usi
         return None;
     }
     Some(close)
-}
-
-/// Finds the byte range of the `occurrence`-th match of `quote` in `haystack`,
-/// advancing `seen` for earlier matches.
-fn nth_quote_range(
-    haystack: &str,
-    quote: &str,
-    step: usize,
-    occurrence: usize,
-    seen: &mut usize,
-) -> Option<(usize, usize)> {
-    let mut from = 0;
-    while let Some(slice) = haystack.get(from..) {
-        let rel = slice.find(quote)?;
-        let start = from + rel;
-        let end = start + quote.len();
-        if *seen == occurrence {
-            return Some((start, end));
-        }
-        *seen += 1;
-        from = start + step;
-    }
-    None
 }
