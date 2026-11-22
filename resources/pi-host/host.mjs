@@ -415,7 +415,7 @@ async function dispatch(command) {
     'get_available_models', 'get_available_thinking_levels', 'get_commands'].includes(command.type)) {
     throw new Error('会话正在回退');
   }
-  const session = record.session;
+  let session = record.session;
   switch (command.type) {
     case 'snapshot': {
       sessions.retain(record);
@@ -426,7 +426,15 @@ async function dispatch(command) {
     }
     case 'get_state': return response(state(record));
     case 'get_messages': return response({ messages: transcript(record).messages });
-    case 'rewind': {
+    case 'get_session_stats': return response({ ...session.getSessionStats(), contextUsage: session.getContextUsage() });
+    case 'get_available_models': return response({ models: await record.models.getAvailable() });
+    case 'get_available_thinking_levels': return response({ levels: session.getAvailableThinkingLevels() });
+    case 'get_commands': return response({ commands: [
+      ...session.extensionRunner.getRegisteredCommands().map(c => ({ name: c.invocationName, description: c.description, source: 'extension' })),
+      ...session.promptTemplates.map(c => ({ name: c.name, description: c.description, source: 'prompt' })),
+      ...session.resourceLoader.getSkills().skills.map(c => ({ name: `skill:${c.name}`, description: c.description, source: 'skill' })),
+    ] });
+    case 'edit_prompt': {
       if (record.running || record.task || session.isCompacting || record.pending.size) {
         throw new Error('请等待当前会话操作结束');
       }
@@ -435,7 +443,12 @@ async function dispatch(command) {
       const index = branch.findIndex(entry => entry.id === command.entryId);
       const selected = branch[index];
       if (selected?.type !== 'message' || selected.message.role !== 'user') {
-        throw new Error('找不到要回退的用户消息');
+        throw new Error('找不到要编辑的用户消息');
+      }
+      command.images = Array.isArray(selected.message.content)
+        ? selected.message.content.filter(block => block.type === 'image') : [];
+      if (typeof command.message !== 'string' || (!command.message.trim() && !command.images.length)) {
+        throw new Error('消息不能为空');
       }
       const file = manager.getSessionFile();
       const temporary = `${file}.${randomUUID()}.tmp`;
@@ -453,26 +466,17 @@ async function dispatch(command) {
         return createRecord(command.cwd, next, { previous: record, temporary, file });
       })();
       record.rewind = rewind;
+      const previous = record;
       try {
-        const updated = await rewind;
-        response({ ...transcript(updated), draft: command.edit === true ? selected.message.content : undefined });
-        publish(updated, { type: 'session_status', ...state(updated) });
+        record = await rewind;
+        session = record.session;
       } finally {
         fs.rmSync(temporary, { force: true });
-        record.rewind = undefined;
-        const current = sessions.get(record.project, record.id);
-        if (current && !current.retained && !current.running && !current.titleController) disposeSession(current);
+        previous.rewind = undefined;
+        if (record === previous && !previous.retained && !previous.titleController) disposeSession(previous);
       }
-      return;
+      // Start the normal prompt lifecycle on the replacement record in the same dispatch.
     }
-    case 'get_session_stats': return response({ ...session.getSessionStats(), contextUsage: session.getContextUsage() });
-    case 'get_available_models': return response({ models: await record.models.getAvailable() });
-    case 'get_available_thinking_levels': return response({ levels: session.getAvailableThinkingLevels() });
-    case 'get_commands': return response({ commands: [
-      ...session.extensionRunner.getRegisteredCommands().map(c => ({ name: c.invocationName, description: c.description, source: 'extension' })),
-      ...session.promptTemplates.map(c => ({ name: c.name, description: c.description, source: 'prompt' })),
-      ...session.resourceLoader.getSkills().skills.map(c => ({ name: `skill:${c.name}`, description: c.description, source: 'skill' })),
-    ] });
     case 'prompt': {
       if (record.running || record.task) throw new Error('会话正在运行');
       record.running = true;
@@ -480,6 +484,14 @@ async function dispatch(command) {
       record.editorText = command.message;
       const first = !session.messages.some(m => m.role === 'user');
       record.preview = command.titleText ?? command.message.slice(0, 48);
+      if (command.type === 'edit_prompt') {
+        const snapshot = transcript(record);
+        // The editor can close as soon as the replacement is committed. The persisted user
+        // entry ID arrives through the same event as any newly submitted message.
+        snapshot.messages.push({ role: 'user', timestamp: Date.now(),
+          content: [{ type: 'text', text: command.message }, ...command.images] });
+        publish(record, { type: 'edit_applied', ...snapshot });
+      }
       const task = (async () => {
         // A running request keeps its model object; the next run takes the updated gateway configuration.
         if (session.model?.provider === 'magpie') {

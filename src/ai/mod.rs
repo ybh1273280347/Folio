@@ -141,6 +141,8 @@ enum ChatMessage {
     User {
         entry_id: Option<String>,
         display_text: String,
+        // Context injected ahead of the editable body, such as file references and quotes.
+        prompt_prefix: String,
         // Pi stores user-message timestamps as Unix milliseconds.
         timestamp_ms: Option<i64>,
         attached_file: Option<String>,
@@ -227,11 +229,6 @@ const AI_COPY_BUTTON_SIZE: Pixels = px(20.);
 const AI_COPY_ICON_SIZE: Pixels = px(12.);
 const AI_COPY_BUTTON_RADIUS: Pixels = px(5.);
 
-enum ChatOverlay {
-    Image(Arc<gpui::Image>),
-    Rewind { entry_id: String, edit: bool },
-}
-
 struct ChatPane {
     session: Rc<RefCell<Session>>,
     project_name: Option<String>,
@@ -243,8 +240,10 @@ struct ChatPane {
     quote_drag: Option<(usize, usize, Point<Pixels>)>,
     quote_bounds: Rc<Cell<Bounds<Pixels>>>,
     pasted_images: Vec<PastedImage>,
-    overlay: Option<(ChatOverlay, Option<FocusHandle>)>,
+    overlay: Option<(Arc<gpui::Image>, Option<FocusHandle>)>,
     overlay_focus: FocusHandle,
+    editing_entry: Option<String>,
+    edit_input: Entity<TextareaState>,
     next_image_id: u64,
     pending_ext_prefill: Option<(String, bool)>,
     pending_composer_text: Option<String>,
@@ -310,7 +309,19 @@ impl ChatPane {
                 && event.keystroke.modifiers.number_of_modifiers() == 0
             {
                 let _ = quote_view.update(cx, |pane, cx| {
-                    if pane.turn_navigation_open {
+                    if pane.overlay.is_some() && pane.overlay_focus.contains_focused(window, cx) {
+                        pane.close_overlay(window, cx);
+                        cx.stop_propagation();
+                    } else if pane.editing_entry.is_some()
+                        && pane.edit_input.read(cx).focus_handle(cx).contains_focused(window, cx)
+                    {
+                        if !pane.session.borrow().is_rewinding {
+                            pane.editing_entry = None;
+                            pane.focus(window, cx);
+                            cx.notify();
+                        }
+                        cx.stop_propagation();
+                    } else if pane.turn_navigation_open {
                         pane.turn_navigation_open = false;
                         cx.notify();
                         cx.stop_propagation();
@@ -325,6 +336,14 @@ impl ChatPane {
             TextareaState::new(window, cx)
                 .auto_grow(2, 7)
                 .submit_on_enter(true)
+        });
+        let edit_input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 7).submit_on_enter(true));
+        let sub_edit = cx.subscribe_in(&edit_input, window, |pane, _, event: &InputEvent, _, cx| {
+            match event {
+                InputEvent::PressEnter { shift: false, .. } => pane.submit_inline_edit(cx),
+                InputEvent::Change => cx.notify(),
+                _ => {}
+            }
         });
         let model_search_input = cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::ai::MODEL_SEARCH_PLACEHOLDER.get()));
         let ext_input = cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::ai::EXT_INPUT_PLACEHOLDER.get()));
@@ -391,6 +410,8 @@ impl ChatPane {
             pasted_images: Vec::new(),
             overlay: None,
             overlay_focus: cx.focus_handle(),
+            editing_entry: None,
+            edit_input,
             next_image_id: 1,
             pending_ext_prefill: None,
             pending_composer_text: None,
@@ -426,6 +447,7 @@ impl ChatPane {
             stick_to_bottom: true,
             _subscriptions: vec![
                 sub_input,
+                sub_edit,
                 sub_model_search,
                 sub_ext,
                 sub_math,
@@ -465,18 +487,8 @@ impl ChatPane {
         if let Some(text) = changes.composer_text {
             self.pending_composer_text = Some(text);
         }
-        if let Some(content) = changes.rewind_draft {
-            // Restore Pi's original prompt text, including reference paths and quoted context.
-            self.pending_composer_text = Some(extract_text_content(Some(&content)));
-            self.attach_active_file = false;
-            self.quoted_selections.clear();
-            self.pasted_images.clear();
-            for block in content.as_array().into_iter().flatten() {
-                if let Some(image) = PastedImage::from_pi(self.next_image_id, block) {
-                    self.next_image_id += 1;
-                    self.pasted_images.push(image);
-                }
-            }
+        if changes.edit_applied {
+            self.editing_entry = None;
             self.stick_to_bottom = true;
         }
         cx.notify();
@@ -487,9 +499,29 @@ impl ChatPane {
         window.focus(&handle, cx);
     }
 
-    fn open_overlay(&mut self, overlay: ChatOverlay, window: &mut Window, cx: &mut Context<Self>) {
-        self.overlay = Some((overlay, window.focused(cx)));
+    fn open_overlay(&mut self, image: Arc<gpui::Image>, window: &mut Window, cx: &mut Context<Self>) {
+        self.overlay = Some((image, window.focused(cx)));
         window.focus(&self.overlay_focus, cx);
+        cx.notify();
+    }
+
+    fn submit_inline_edit(&mut self, cx: &mut Context<Self>) {
+        let body = self.edit_input.read(cx).value().trim().to_owned();
+        let result = {
+            let mut session = self.session.borrow_mut();
+            let Some(entry_id) = self.editing_entry.as_deref() else { return };
+            let Some(ChatMessage::User { prompt_prefix, images, .. }) = session.messages.iter().find(
+                |message| matches!(message, ChatMessage::User { entry_id: Some(id), .. } if id == entry_id),
+            ) else { return };
+            if body.is_empty() && prompt_prefix.is_empty() && images.is_empty() {
+                return;
+            }
+            let payload = format!("{prompt_prefix}{body}");
+            session.edit_message(entry_id, &payload, &body)
+        };
+        if let Err(error) = result {
+            self.show_toast(crate::i18n::ai::command_failed(crate::i18n::ai::EDIT_MESSAGE.get(), &error), true, cx);
+        }
         cx.notify();
     }
 
@@ -1076,11 +1108,13 @@ impl ChatPane {
             payload.push_str("\n\n");
         }
         append_quotes(&mut payload, &quotes);
+        let prompt_prefix = payload.clone();
         payload.push_str(body_trimmed);
 
         let message = ChatMessage::User {
             entry_id: None,
             display_text: body_trimmed.to_owned(),
+            prompt_prefix,
             timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
             attached_file: attached.map(|f| f.display),
             mounted_skills: skills,
@@ -1327,6 +1361,7 @@ impl Render for ChatPane {
                             match &self.session.borrow().messages[msg_idx] {
                                 ChatMessage::User {
                                     entry_id,
+                                    prompt_prefix: _,
                                     display_text,
                                     timestamp_ms,
                                     attached_file,
@@ -1334,6 +1369,7 @@ impl Render for ChatPane {
                                     quotes,
                                     images,
                                 } => {
+                                    let editing = entry_id.is_some() && self.editing_entry == *entry_id;
                                     let text = if !display_text.is_empty() {
                                         display_text.as_str()
                                     } else if let Some(quote) = quotes.first() {
@@ -1379,7 +1415,7 @@ impl Render for ChatPane {
                                                             .id(SharedString::from(format!("ai-image-{msg_idx}-{index}")))
                                                             .cursor_pointer()
                                                             .on_click(cx.listener(move |pane, _, window, cx| {
-                                                                pane.open_overlay(ChatOverlay::Image(preview.clone()), window, cx);
+                                                                pane.open_overlay(preview.clone(), window, cx);
                                                             }))
                                                             .child(
                                                                 img(im.clone())
@@ -1489,7 +1525,17 @@ impl Render for ChatPane {
                                                             .collect::<String>()
                                                     ))
                                         }))
-                                        .when(!display_text.is_empty(), |b| {
+                                        .when(editing, |b| {
+                                            b.w(relative(0.9)).child(
+                                                Textarea::new(&self.edit_input)
+                                                    .appearance(false)
+                                                    .bordered(false)
+                                                    .aria_label(crate::i18n::ai::EDIT_MESSAGE.get())
+                                                    .font_family(ui_font.clone())
+                                                    .text_size(typo.body),
+                                            )
+                                        })
+                                        .when(!editing && !display_text.is_empty(), |b| {
                                             b.child(
                                                 TextView::markdown(
                                                     SharedString::from(format!(
@@ -1504,7 +1550,7 @@ impl Render for ChatPane {
                                             )
                                         }),
                                 )
-                                .when(!display_text.is_empty() || (can_rewind && entry_id.is_some()), |col| {
+                                .when(editing || !display_text.is_empty() || (can_rewind && entry_id.is_some()), |col| {
                                     col.child(
                                         div()
                                             .flex()
@@ -1512,7 +1558,7 @@ impl Render for ChatPane {
                                             .justify_end()
                                             .pt_0p5()
                                             .gap_1()
-                                            .when(!display_text.is_empty(), |row| row.child(ai_copy_button(
+                                            .when(!editing && !display_text.is_empty(), |row| row.child(ai_copy_button(
                                                 SharedString::from(format!(
                                                     "ai-copy-user-{msg_idx}"
                                                 )),
@@ -1520,22 +1566,42 @@ impl Render for ChatPane {
                                                 crate::i18n::common::COPIED.get(),
                                                 display_text.clone(),
                                             )))
-                                            .children(entry_id.as_ref().filter(|_| can_rewind).into_iter().flat_map(|entry_id| {
+                                            .when(editing, |row| row.children(
                                                 [
-                                                    (true, IconName::PencilLine, crate::i18n::ai::EDIT_MESSAGE.get()),
-                                                    (false, IconName::RotateCcw, crate::i18n::ai::REWIND_MESSAGE.get()),
-                                                ].map(|(edit, icon, label)| {
-                                                    let entry_id = entry_id.clone();
-                                                    Button::new(SharedString::from(format!("ai-rewind-{edit}-{msg_idx}")))
+                                                    (false, IconName::Close, crate::i18n::common::CANCEL.get()),
+                                                    (true, IconName::Check, crate::i18n::common::SAVE.get()),
+                                                ].map(|(save, icon, label)| {
+                                                    Button::new(SharedString::from(format!("ai-edit-{save}-{msg_idx}")))
                                                         .ghost().compact().with_size(px(16.)).w(px(22.)).h(px(22.))
                                                         .icon(crate::ui::icon(icon)).tooltip(label)
                                                         .on_click(cx.listener(move |pane, _, window, cx| {
-                                                            pane.open_overlay(ChatOverlay::Rewind {
-                                                                entry_id: entry_id.clone(), edit,
-                                                            }, window, cx);
+                                                            if save {
+                                                                pane.submit_inline_edit(cx);
+                                                            } else if !pane.session.borrow().is_rewinding {
+                                                                pane.editing_entry = None;
+                                                                pane.focus(window, cx);
+                                                                cx.notify();
+                                                            }
                                                         }))
                                                 })
-                                            })),
+                                            ))
+                                            .when_some(entry_id.as_ref().filter(|_| !editing && can_rewind), |row, entry_id| {
+                                                let entry_id = entry_id.clone();
+                                                let body = display_text.clone();
+                                                row.child(Button::new(SharedString::from(format!("ai-edit-message-{msg_idx}")))
+                                                    .ghost().compact().with_size(px(16.)).w(px(22.)).h(px(22.))
+                                                    .icon(crate::ui::icon(IconName::PencilLine))
+                                                    .tooltip(crate::i18n::ai::EDIT_MESSAGE.get())
+                                                    .on_click(cx.listener(move |pane, _, window, cx| {
+                                                        pane.stick_to_bottom = false;
+                                                        pane.editing_entry = Some(entry_id.clone());
+                                                        pane.edit_input.update(cx, |input, cx| {
+                                                            input.set_value(body.clone(), window, cx);
+                                                            input.focus(window, cx);
+                                                        });
+                                                        cx.notify();
+                                                    })))
+                                            }),
                                     )
                                 })
                                             .into_any_element(),
@@ -1737,13 +1803,11 @@ impl Render for ChatPane {
             })
                 .absolute().inset_0())
             .children(self.render_quote_popover(palette, typo, cx))
-            .when_some(self.overlay.as_ref(), |root, (overlay, _)| {
+            .when_some(self.overlay.as_ref(), |root, (image, _)| {
                 let viewport = window.viewport_size();
-                let dialog = Dialog::new(cx)
-                    .focus_handle(self.overlay_focus.clone())
-                    .on_close(cx.listener(|pane, _, window, cx| pane.close_overlay(window, cx)));
-                root.child(match overlay {
-                    ChatOverlay::Image(image) => dialog
+                root.child(Dialog::new(cx)
+                        .focus_handle(self.overlay_focus.clone())
+                        .on_close(cx.listener(|pane, _, window, cx| pane.close_overlay(window, cx)))
                         .accessibility_label(crate::i18n::ai::IMAGE_MESSAGE.get())
                         .backdrop(div().size_full().occlude().bg(gpui::black().opacity(0.56)))
                         .popup(
@@ -1767,37 +1831,7 @@ impl Render for ChatPane {
                                         .tooltip(crate::i18n::common::CLOSE.get())
                                         .on_click(cx.listener(|pane, _, window, cx| pane.close_overlay(window, cx))),
                                 )),
-                        ),
-                    ChatOverlay::Rewind { entry_id, edit } => {
-                        use crate::i18n::ai;
-                        let entry_id = entry_id.clone();
-                        let edit = *edit;
-                        let (label, detail) = if edit {
-                            (ai::EDIT_MESSAGE.get(), ai::EDIT_REWIND_DETAIL.get())
-                        } else {
-                            (ai::REWIND_MESSAGE.get(), ai::REWIND_DETAIL.get())
-                        };
-                        dialog.accessibility_label(label)
-                            .on_ok(|_, _, _| false)
-                            .popup(div().absolute().inset_0().child(crate::ui::modal_overlay(
-                                label,
-                                detail,
-                                div().flex().justify_end().gap_2()
-                                    .child(crate::ui::button_secondary("cancel-ai-rewind", crate::i18n::common::CANCEL.get())
-                                        .px_3().min_w(px(64.))
-                                        .on_click(cx.listener(|pane, _, window, cx| pane.close_overlay(window, cx))))
-                                    .child(crate::ui::button_danger("confirm-ai-rewind", label)
-                                        .min_w(px(64.))
-                                        .on_click(cx.listener(move |pane, _, window, cx| {
-                                            pane.close_overlay(window, cx);
-                                            let result = pane.session.borrow_mut().rewind(&entry_id, edit);
-                                            if let Err(error) = result {
-                                                pane.show_toast(ai::command_failed(ai::REWIND_MESSAGE.get(), &error), true, cx);
-                                            }
-                                        }))),
-                            )))
-                    }
-                })
+                        ))
             })
     }
 }

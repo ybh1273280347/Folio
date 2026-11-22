@@ -428,7 +428,7 @@ test('tool argument deltas reach the conversation before generation ends', { tim
   assert.equal((await run).success, true);
 });
 
-test('writes retain original content and rewinding a conversation preserves tool side effects', { timeout: 45000 }, async t => {
+test('editing a conversation replaces the turn and preserves tool side effects', { timeout: 45000 }, async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'folio-write-diff-'));
   const agentDir = path.join(directory, 'agent');
   const cwd = path.join(directory, 'project');
@@ -444,10 +444,12 @@ test('writes retain original content and rewinding a conversation preserves tool
     const role = body.messages.at(-1).role;
     const content = body.messages.findLast(message => message.role === 'user' && message.content[0].text.startsWith('# ')).content[0].text;
     const toolCallId = { '# 新文件\n第一行\n第二行\n': 'write-new', '# 覆盖\n修改后\n': 'write-overwrite' }[content];
-    const delta = { tool: { content: '完成' }, user: { tool_calls: [{ index: 0, id: toolCallId, type: 'function',
+    const written = { tool: { content: '完成' }, user: { tool_calls: [{ index: 0, id: toolCallId, type: 'function',
       function: { name: 'write', arguments: JSON.stringify({ path: '新建文件.md', content }) } }] } }[role];
+    const editReply = { '# 只解释': { delta: { content: '已解释' }, finish: 'stop' } }[content];
+    const { delta, finish } = editReply ?? { delta: written, finish: { tool: 'stop', user: 'tool_calls' }[role] };
     response.write(`data: ${JSON.stringify({ id: 'write-run', choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
-    response.end(`data: ${JSON.stringify({ id: 'write-run', choices: [{ index: 0, delta: {}, finish_reason: { tool: 'stop', user: 'tool_calls' }[role] }] })}\n\ndata: [DONE]\n\n`);
+    response.end(`data: ${JSON.stringify({ id: 'write-run', choices: [{ index: 0, delta: {}, finish_reason: finish }] })}\n\ndata: [DONE]\n\n`);
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   t.after(() => { server.closeAllConnections(); server.close(); });
@@ -500,28 +502,16 @@ test('writes retain original content and rewinding a conversation preserves tool
   const [first, second] = history.data.messages.filter(message => message.role === 'user');
   const live = await client.event(sessionId, 'user_entry');
   assert.equal(live.entryId, first.entryId);
-  const edit = await client.request({ ...owner, type: 'rewind', entryId: second.entryId, edit: true });
+  const edit = await client.request({ ...owner, type: 'edit_prompt', entryId: second.entryId, message: '# 只解释' });
   assert.equal(edit.success, true, edit.error);
-  assert.deepEqual(edit.data.draft, second.content);
-  assert.deepEqual(edit.data.messages.filter(message => message.role === 'user'), [first]);
-  assert.equal(edit.data.sessionFile, history.data.sessionFile);
-  assert.equal(fs.readFileSync(path.join(cwd, '新建文件.md'), 'utf8'), '# 覆盖\n修改后\n');
-
-  assert.equal((await client.request({ ...owner, type: 'release' })).success, true);
-  const reopened = await client.request({ ...owner, type: 'snapshot' });
-  assert.deepEqual(reopened.data.messages, edit.data.messages);
-  const resend = await client.request({ ...owner, type: 'prompt', message: '# 覆盖\n修改后\n' });
-  assert.equal(resend.success, true, resend.error);
+  const applied = await client.event(sessionId, 'edit_applied');
+  assert.equal(applied.sessionFile, history.data.sessionFile);
   assert.deepEqual(requests[4].messages.slice(0, requests[1].messages.length), requests[1].messages);
   assert.equal(requests[4].messages.filter(message => message.role === 'tool').length, 1);
-
-  const rewind = await client.request({ ...owner, type: 'rewind', entryId: first.entryId });
-  assert.equal(rewind.success, true, rewind.error);
-  assert.deepEqual(rewind.data.messages.filter(message => message.role !== 'system'), []);
-  assert.equal(rewind.data.draft, undefined);
   assert.equal((await client.request({ ...owner, type: 'release' })).success, true);
-  const empty = await client.request({ ...owner, type: 'snapshot' });
-  assert.deepEqual(empty.data.messages.filter(message => message.role !== 'system'), []);
+  const reopened = await client.request({ ...owner, type: 'snapshot' });
+  assert.deepEqual(reopened.data.messages.filter(message => message.role === 'user')
+    .map(message => message.content), [first.content, [{ type: 'text', text: '# 只解释' }]]);
   assert.equal(fs.readFileSync(path.join(cwd, '新建文件.md'), 'utf8'), '# 覆盖\n修改后\n');
 });
 
