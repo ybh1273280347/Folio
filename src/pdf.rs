@@ -31,12 +31,22 @@ pub struct PdfPane {
     annotation_comment_input: Entity<TextareaState>,
     drawer_comment_input: Entity<TextareaState>,
     annotations_drawer_open: bool,
+    pending_jump_page: Option<usize>,
     translate: crate::translate::TranslatePopover,
     _subscriptions: Vec<Subscription>,
 }
 
 impl PdfPane {
     pub fn path(&self) -> &std::path::Path { &self.path }
+
+    pub fn jump_to_page(&mut self, page_1based: usize, cx: &mut Context<Self>) {
+        let target = page_1based.saturating_sub(1);
+        if let Some(view) = &self.view {
+            view.update(cx, |v, cx| v.flash_to_page(target, cx));
+        } else {
+            self.pending_jump_page = Some(target);
+        }
+    }
 
     pub fn sync_annotations(&mut self, items: &[AnnotationItem], cx: &mut Context<Self>) {
         self.annotations = items.to_vec();
@@ -101,6 +111,7 @@ impl PdfPane {
             annotation_comment_input,
             drawer_comment_input,
             annotations_drawer_open: false,
+            pending_jump_page: None,
             translate: crate::translate::TranslatePopover::default(),
             _subscriptions: vec![sub, drawer_sub],
         };
@@ -178,6 +189,7 @@ impl PdfPane {
         let weak_drawer = weak.clone();
         let weak_translate = weak.clone();
         let weak_ask_ai = weak.clone();
+        let pending_jump = self.pending_jump_page;
         let highlights = self.build_highlights();
         view.update(cx, |v, cx| {
             v.fit_width(cx);
@@ -255,6 +267,9 @@ impl PdfPane {
                 });
             }));
             v.set_highlights(highlights, cx);
+            if let Some(page) = pending_jump {
+                v.flash_to_page(page, cx);
+            }
         });
         view
     }

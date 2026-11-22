@@ -19,8 +19,8 @@ use std::{
 
 const RRF_K: f64 = 60.0;
 const RERANK_TOP_K: usize = 25;
-const MAX_CHUNKS_PER_FILE: usize = 2;
-const SNIPPET_CHARS: usize = 320;
+const MAX_CHUNKS_PER_FILE: usize = 4;
+const SNIPPET_CHARS: usize = 120;
 const EMBED_SYNC_PAGE: usize = 64;
 
 fn check_cancelled(cancelled: &AtomicBool) -> Result<(), RagError> {
@@ -777,26 +777,154 @@ fn search_dirty_buffers(
     scored.into_iter().map(|(_, c)| c).collect()
 }
 
-fn build_snippet(chunk_text: &str, terms: &[String]) -> String {
+pub fn clean_heading_text(raw: &str) -> String {
+    let mut out = unescape_markdown_punct(raw.trim());
+    out = out.replace("**", "").replace("__", "").replace('`', "");
+    collapse_spaces(&out)
+}
+
+pub fn clean_markdown_snippet(chunk_text: &str) -> String {
     let body = chunk_text
         .strip_prefix('[')
         .and_then(|rest| rest.split_once("]\n").map(|(_, after)| after))
         .unwrap_or(chunk_text)
         .trim();
+
+    let mut cleaned_lines: Vec<String> = Vec::new();
+    let mut in_block_math = false;
+    let mut in_code_fence = false;
+
+    for raw_line in body.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.starts_with("```") {
+            in_code_fence = !in_code_fence;
+            continue;
+        }
+        if trimmed == "$$" || trimmed == "\\[" || trimmed == "\\]" {
+            if !in_block_math {
+                cleaned_lines.push("[公式]".to_owned());
+            }
+            in_block_math = !in_block_math;
+            continue;
+        }
+        if in_block_math {
+            continue;
+        }
+        if trimmed.is_empty() {
+            continue;
+        }
+        let line = if in_code_fence {
+            trimmed.to_owned()
+        } else {
+            clean_inline_markdown_line(trimmed)
+        };
+        if !line.is_empty() {
+            cleaned_lines.push(line);
+        }
+    }
+
+    collapse_spaces(&cleaned_lines.join(" "))
+}
+
+fn clean_inline_markdown_line(line: &str) -> String {
+    let mut s = line.trim_start_matches('#').trim_start();
+    if let Some(rest) = s.strip_prefix("> ") {
+        s = rest.trim_start();
+    }
+    for prefix in ["- ", "* ", "+ "] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            s = rest.trim_start();
+            break;
+        }
+    }
+    let with_math = replace_inline_math(s);
+    let unescaped = unescape_markdown_punct(&with_math);
+    unescaped
+        .replace("**", "")
+        .replace("__", "")
+        .replace('`', "")
+}
+
+fn replace_inline_math(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find("$$") {
+        out.push_str(&replace_single_dollar_math(&rest[..start]));
+        let after = &rest[start + 2..];
+        if let Some(end) = after.find("$$") {
+            out.push_str(" [公式] ");
+            rest = &after[end + 2..];
+        } else {
+            out.push_str(&replace_single_dollar_math(after));
+            rest = "";
+            break;
+        }
+    }
+    out.push_str(&replace_single_dollar_math(rest));
+    out
+}
+
+fn replace_single_dollar_math(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find('$') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        if let Some(end) = after.find('$') {
+            let expr = after[..end].trim();
+            if expr.chars().count() <= 18 && !expr.contains('\\') {
+                out.push_str(expr);
+            } else {
+                out.push_str("[公式]");
+            }
+            rest = &after[end + 1..];
+        } else {
+            out.push('$');
+            out.push_str(after);
+            return out;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn unescape_markdown_punct(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\'
+            && let Some(&next) = chars.peek()
+            && matches!(next, '.' | '-' | '_' | '*' | '#' | '(' | ')' | '[' | ']')
+        {
+            out.push(next);
+            chars.next();
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn collapse_spaces(input: &str) -> String {
+    input.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn build_snippet(chunk_text: &str, terms: &[String]) -> String {
+    let body = clean_markdown_snippet(chunk_text);
     if body.chars().count() <= SNIPPET_CHARS {
-        return body.to_owned();
+        return body;
     }
 
     let lower = body.to_ascii_lowercase();
     let match_pos = terms
         .iter()
-        .filter(|t| !t.is_empty())
-        .filter_map(|t| lower.find(&t.to_ascii_lowercase()))
+        .filter(|t| !t.trim().is_empty())
+        .filter_map(|t| lower.find(&t.trim().to_ascii_lowercase()))
         .min()
         .unwrap_or(0);
 
     let match_char_idx = body[..match_pos].chars().count();
-    let start_char = match_char_idx.saturating_sub(SNIPPET_CHARS / 3);
+    let start_char = match_char_idx.saturating_sub(28);
     let start_byte = body
         .char_indices()
         .nth(start_char)
@@ -808,11 +936,11 @@ fn build_snippet(chunk_text: &str, terms: &[String]) -> String {
 
     let mut snippet = String::new();
     if start_byte > 0 {
-        snippet.push_str("…");
+        snippet.push('…');
     }
     snippet.push_str(body[start_byte..end_byte].trim());
     if end_byte < body.len() {
-        snippet.push_str("…");
+        snippet.push('…');
     }
     snippet
 }
@@ -854,14 +982,27 @@ mod tests {
             rel_path: "b.md".into(),
             ..c1.clone()
         };
+        let c5 = Candidate {
+            key: "db:5".into(),
+            rel_path: "a.md".into(),
+            ..c1.clone()
+        };
+        let c6 = Candidate {
+            key: "db:6".into(),
+            rel_path: "a.md".into(),
+            ..c1.clone()
+        };
 
         let lists = vec![
-            (2.0, vec![c1.clone(), c2.clone(), c3.clone(), c4.clone()]),
+            (
+                2.0,
+                vec![c1.clone(), c2.clone(), c3.clone(), c5, c6, c4.clone()],
+            ),
             (1.0, vec![c4, c1]),
         ];
         let ranked = fuse_rrf(&lists);
-        let hits = collapse_and_format(ranked, &["Alpha".to_owned()], 5);
-        assert_eq!(hits.len(), 3);
+        let hits = collapse_and_format(ranked, &["Alpha".to_owned()], 6);
+        assert_eq!(hits.len(), 5);
         assert_eq!(hits[0].docid, "aaaa1111");
         assert!(hits.iter().any(|h| h.path == "b.md"));
     }
@@ -1244,5 +1385,18 @@ mod tests {
         assert!(resp.results[0].page.is_some());
 
         crate::rag::client::shutdown_managed_servers();
+    }
+
+    #[test]
+    fn clean_snippet_strips_markdown_and_centers_on_match() {
+        let raw = "[Notes/线性表.md > 2\\.1\\.1 什么是线性表]\n### 2\\.1\\.1 什么是**线性表**\n\n线性表是 $n$ 个数据元素的**有限序列**：\n$$\nL = (a_1, a_2, \\dots, a_n)\n$$\n当需要描述复杂的逻辑前驱与后继关系时，可以借助 `ArrayList` 或链式结构存储数据元素。";
+        let snippet = build_snippet(raw, &["有限序列".to_owned()]);
+        assert!(!snippet.contains("###"));
+        assert!(!snippet.contains("**"));
+        assert!(!snippet.contains("\\."));
+        assert!(!snippet.contains("$$"));
+        assert!(snippet.contains("n 个数据元素的有限序列"));
+        assert!(snippet.contains("[公式]"));
+        assert_eq!(clean_heading_text("2\\.1\\.1 **线性表**"), "2.1.1 线性表");
     }
 }

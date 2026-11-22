@@ -1338,6 +1338,23 @@ fn compact_menu_item(label: &'static str) -> PopupMenuItem {
     })
 }
 
+pub(crate) fn line_byte_range(text: &str, line0: usize) -> Option<std::ops::Range<usize>> {
+    let mut current = 0usize;
+    let mut start = 0usize;
+    for chunk in text.split_inclusive('\n') {
+        if current == line0 {
+            let trimmed = chunk.trim_end_matches(['\r', '\n']);
+            return Some(start..start + trimmed.len());
+        }
+        start += chunk.len();
+        current += 1;
+    }
+    if current == line0 {
+        return Some(start..text.len());
+    }
+    None
+}
+
 pub(in crate::workspace) fn compact_menu_icon_item(icon: IconName, label: &'static str) -> PopupMenuItem {
     PopupMenuItem::element(move |_, _| {
         div()

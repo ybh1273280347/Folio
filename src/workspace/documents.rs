@@ -10,7 +10,9 @@ use crate::markdown::{MarkdownEvent, MarkdownPane};
 use crate::model::DocumentBuffer;
 use crate::pdf::{PdfPane, PdfPaneEvent};
 use crate::web_view::{HtmlPane, HtmlPaneEvent};
-use gpui_kit::component::input::{Editor, EditorState};
+use gpui_kit::component::input::{
+    Editor, EditorState, Position, RangeDecoration, RangeDecorationCollection, RangeDecorationStyle,
+};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::sync::mpsc;
 
@@ -45,6 +47,8 @@ struct OpenDocument {
     path: PathBuf,
     buffer: DocumentBuffer,
     editor: Entity<EditorState>,
+    line_highlight: RangeDecorationCollection,
+    line_highlight_timer: Task<()>,
     last_edit: Instant,
     subscription: Subscription,
 }
@@ -589,6 +593,117 @@ impl Workspace {
         Ok(())
     }
 
+    pub(in crate::workspace) fn open_kb_location(
+        &mut self,
+        rel_path: &str,
+        line_1based: Option<usize>,
+        page_1based: Option<usize>,
+        heading: Option<&str>,
+        snippet: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.projects.directory() else {
+            return;
+        };
+        let Ok(canonical_root) = dunce::canonicalize(&project.folder) else {
+            return;
+        };
+        let clean = rel_path.strip_suffix("#annotations").unwrap_or(rel_path);
+        let abs = canonical_root.join(clean.replace('/', "\\"));
+        let Ok(resolved) = dunce::canonicalize(&abs) else {
+            self.report(crate::i18n::workspace::err_file_not_found(&abs), cx);
+            return;
+        };
+        if !resolved.is_file() || !files::is_relevant(&resolved) {
+            self.report(crate::i18n::workspace::err_unsupported_open(&resolved), cx);
+            return;
+        }
+        let Ok(relative) = resolved.strip_prefix(&canonical_root) else {
+            return;
+        };
+        if self.right_panel.maximized {
+            self.right_panel.maximized = false;
+        }
+        let key_path = relative.to_string_lossy().replace('\\', "/");
+        let file = ProjectFile {
+            kind: Self::file_kind(&resolved),
+            path: key_path.clone(),
+        };
+        if let Err(error) = self.open_file(&file, window, cx) {
+            self.report(error, cx);
+            return;
+        }
+        let pane_key = PaneKey::tab(&key_path);
+        if let Some(page) = page_1based
+            && let Some(pdf) = self.documents.pdf_panes.get(&pane_key).cloned()
+        {
+            pdf.update(cx, |pane, cx| pane.jump_to_page(page, cx));
+        } else if let Some(md) = self.documents.markdown_panes.get(&pane_key).cloned() {
+            let clean_heading = heading
+                .and_then(|h| h.rsplit(" > ").next())
+                .map(crate::rag::pipeline::clean_heading_text);
+            let s_owned = snippet.map(str::to_owned);
+            md.update(cx, |pane, cx| {
+                pane.jump_to_search_hit(
+                    line_1based,
+                    clean_heading.as_deref(),
+                    s_owned.as_deref(),
+                    window,
+                    cx,
+                );
+            });
+        } else if let Some(line) = line_1based {
+            self.jump_to_document_line(&key_path, line, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn jump_to_document_line(
+        &mut self,
+        path: &str,
+        line_1based: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(document) = self.documents.open.get_mut(path) else {
+            return;
+        };
+        let line0 = line_1based.saturating_sub(1);
+        let mut highlight_range = None;
+        document.editor.update(cx, |editor, cx| {
+            let text = editor.value().to_string();
+            highlight_range = crate::workspace::line_byte_range(&text, line0);
+            editor.set_cursor_position(Position::new(line0 as u32, 0), window, cx);
+            if let Some(line_height) = editor.line_height() {
+                let row = editor.display_map().buffer_line_to_display_row(line0);
+                let mut offset = editor.scroll_offset();
+                offset.y = editor.input_bounds().size.height * 0.25 - line_height * row;
+                editor.set_scroll_offset(offset, cx);
+            }
+            editor.focus(window, cx);
+        });
+        if let Some(range) = highlight_range {
+            document.line_highlight.set(
+                vec![RangeDecoration::new(range)
+                    .with_style(RangeDecorationStyle::Fill)
+                    .with_color(gpui_kit::base::Theme::global(cx).tokens.colors.selection)],
+                cx,
+            );
+            let key = path.to_owned();
+            document.line_highlight_timer = cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(1400))
+                    .await;
+                let _ = this.update(cx, |app, cx| {
+                    if let Some(doc) = app.documents.open.get(&key) {
+                        doc.line_highlight.clear(cx);
+                    }
+                });
+            });
+        }
+    }
+
     fn mount_document_pane(
         &mut self,
         key: &PaneKey,
@@ -649,6 +764,9 @@ impl Workspace {
                         disk.text.clone()
                     })
             });
+            let line_highlight = editor.update(cx, |editor, cx| {
+                editor.create_range_decorations_collection(Vec::new(), cx)
+            });
             let subscription = self.subscribe_editor(path.clone(), &editor, cx);
             self.documents.open.insert(
                 path.clone(),
@@ -656,6 +774,8 @@ impl Workspace {
                     path: full.clone(),
                     buffer: DocumentBuffer::from_disk(disk),
                     editor,
+                    line_highlight,
+                    line_highlight_timer: Task::ready(()),
                     last_edit: Instant::now(),
                     subscription,
                 },

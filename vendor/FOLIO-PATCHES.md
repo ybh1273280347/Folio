@@ -16,3 +16,4 @@
 Mermaid 适配保留编辑器原有的 `code_ui` 模块、投影缓存和折叠按钮 bounds；自定义节点使用 `editor_host::BlockState`。预览点击在编辑器 entity 的 `update` 内设置焦点，避免通过 `read(cx)` 跨越可变 App 借用。
 
 字体沿用 `resources/fonts`，中文公式缺字时才读取系统微软雅黑。Markdown PDF 使用 `krilla` 写入上述绘制操作；整篇 `.tex` 编译保持 `latexmk` 流程。
+- `gpui-pdf`：新增 `PdfView::flash_to_page`，用于从知识库或外部定位跳转至目标页顶部并触发 1.4 秒临时高亮边框（冷打开时由 `pending_reveal` 复用该闪烁高亮）。
