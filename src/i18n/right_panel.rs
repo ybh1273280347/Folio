@@ -32,19 +32,30 @@ pub const KB_SEARCH_PLACEHOLDER: BiText = BiText::new("搜索笔记或 PDF…", 
 pub const KB_SEARCHING: BiText = BiText::new("检索中…", "Searching…");
 pub const KB_NO_RESULTS: BiText = BiText::new("未找到相关内容", "No matching results");
 pub const KB_EMPTY_HINT: BiText = BiText::new("回车检索项目文档", "Press Enter to search");
-pub const KB_SYNC_TOOLTIP: BiText = BiText::new("立即同步索引", "Sync index");
+pub const KB_SYNC_TOOLTIP: BiText = BiText::new("增量同步索引", "Incremental sync");
+pub const KB_PDF_MANAGER_TOOLTIP: BiText = BiText::new("PDF 管理器", "PDF Manager");
+pub const KB_PDF_MANAGER_TITLE: BiText = BiText::new("PDF 管理器", "PDF Manager");
+pub const KB_BACK_TO_SEARCH: BiText = BiText::new("返回知识库", "Back to Knowledge Base");
 pub const KB_MENU_TOOLTIP: BiText = BiText::new("更多操作", "More actions");
-pub const KB_MENU_REBUILD: BiText = BiText::new("重新整理索引", "Rebuild index");
-pub const KB_MENU_ACCURATE_OCR: BiText = BiText::new("深度解析：仅扫描件", "Accurate: Scan only");
-pub const KB_MENU_ACCURATE_ALL: BiText = BiText::new("深度解析：全部 PDF", "Accurate: All PDFs");
+pub const KB_MENU_REBUILD: BiText = BiText::new("重建索引", "Rebuild index");
 pub const KB_MENU_DISABLE: BiText = BiText::new("停用知识库", "Disable Knowledge Base");
 pub const KB_FILTER_ALL: BiText = BiText::new("全部", "All");
 pub const KB_FILTER_NOTES: BiText = BiText::new("笔记", "Notes");
 pub const KB_FILTER_PDF: BiText = BiText::new("PDF", "PDF");
+pub const KB_PDF_FILTER_NEEDS_OCR: BiText = BiText::new("待OCR", "OCR");
+pub const KB_PDF_FILTER_FAST: BiText = BiText::new("Fast", "Fast");
+pub const KB_PDF_FILTER_ACCURATE: BiText = BiText::new("精确", "Accurate");
+pub const KB_SELECT_ALL: BiText = BiText::new("全选", "All");
+pub const KB_PDF_EMPTY: BiText = BiText::new("暂无可管理的 PDF", "No PDFs in index");
+pub const KB_ONLY_OCR_BTN: BiText = BiText::new("仅待OCR", "Scan only");
+pub const KB_EXPORT_MD_BTN: BiText = BiText::new("导出 .md", "Export .md");
+pub const KB_CANCEL_BTN: BiText = BiText::new("取消", "Cancel");
 pub const KB_COLLAPSE_HITS: BiText = BiText::new("收起", "Collapse");
 pub const KB_DRAFT_BADGE: BiText = BiText::new("草稿", "Draft");
 pub const KB_ANNOT_BADGE: BiText = BiText::new("批注", "Note");
 pub const KB_ACCURATE_BADGE: BiText = BiText::new("精修", "Accurate");
+pub const KB_FAST_BADGE: BiText = BiText::new("Fast", "Fast");
+pub const KB_NEEDS_OCR_BADGE: BiText = BiText::new("待OCR", "Needs OCR");
 pub const KB_OPEN_SETTINGS: BiText = BiText::new("打开设置", "Open settings");
 
 pub fn kb_search_summary(hits: usize, docs: usize, truncated: bool) -> String {
@@ -79,23 +90,31 @@ pub fn kb_ocr_badge(count: usize) -> String {
     format!("{count} OCR")
 }
 
-pub fn kb_ocr_heading(count: usize) -> String {
+pub fn kb_selected_count(count: usize) -> String {
     match locale() {
-        Locale::ZhCn => format!("{count} 篇扫描件待识别"),
-        Locale::En => {
-            if count == 1 {
-                "1 PDF needs OCR".to_owned()
-            } else {
-                format!("{count} PDFs need OCR")
-            }
-        }
+        Locale::ZhCn => format!("已选 {count}"),
+        Locale::En => format!("{count} selected"),
     }
 }
 
 pub fn kb_refine_selected(count: usize) -> String {
     match locale() {
-        Locale::ZhCn => format!("深度解析 ({count})"),
+        Locale::ZhCn => format!("精确解析 ({count})"),
         Locale::En => format!("Accurate ({count})"),
+    }
+}
+
+pub fn kb_exported_md(rel_path: &str) -> String {
+    match locale() {
+        Locale::ZhCn => format!("已导出：{rel_path}"),
+        Locale::En => format!("Exported: {rel_path}"),
+    }
+}
+
+pub fn kb_exported_count(count: usize) -> String {
+    match locale() {
+        Locale::ZhCn => format!("已导出 {count} 篇 Markdown"),
+        Locale::En => format!("Exported {count} Markdown file(s)"),
     }
 }
 

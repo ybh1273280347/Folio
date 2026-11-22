@@ -78,6 +78,8 @@ pub struct SearchHit {
     pub page: Option<usize>,
     pub score: f64,
     pub snippet: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub markdown_cache: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub dirty_buffer: bool,
 }
@@ -91,6 +93,36 @@ pub struct SearchResponse {
     pub indexed_files: usize,
     pub pending_vectors: usize,
     pub results: Vec<SearchHit>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedPdfInfo {
+    pub path: String,
+    pub parse_tier: String,
+    pub markdown_cache: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PdfPageMarkdown {
+    pub page: usize,
+    pub markdown: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PdfReadResult {
+    pub path: String,
+    pub source: &'static str,
+    pub parse_tier: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub markdown_cache: Option<String>,
+    pub total_pages: usize,
+    pub start_page: usize,
+    pub end_page: usize,
+    pub needs_ocr: bool,
+    pub pages: Vec<PdfPageMarkdown>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -109,6 +141,8 @@ pub struct StatusReport {
     pub vector_chunks: usize,
     pub pending_vectors: usize,
     pub needs_ocr_files: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cached_pdf_markdowns: Vec<CachedPdfInfo>,
 }
 
 #[derive(Clone, Debug, Serialize)]

@@ -49,12 +49,22 @@ pub struct ScoredChunk {
     pub rel_path: String,
     pub kind: String,
     pub parse_tier: String,
+    pub content_hash: String,
     pub heading_path: String,
     pub line_start: Option<usize>,
     pub line_end: Option<usize>,
     pub page_num: Option<usize>,
     pub chunk_text: String,
     pub raw_score: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PdfLibraryItem {
+    pub rel_path: String,
+    pub content_hash: String,
+    pub status: String,
+    pub parse_tier: String,
+    pub last_error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -532,7 +542,7 @@ impl RagStore {
                 .prepare(
                     "SELECT c.id, d.docid, d.rel_path, d.kind, ct.parse_tier, c.heading_path,
                             c.line_start, c.line_end, c.page_num, c.chunk_text,
-                            -bm25(chunks_fts) AS score
+                            -bm25(chunks_fts) AS score, d.content_hash
                      FROM chunks_fts
                      JOIN chunks c ON c.id = chunks_fts.rowid
                      JOIN documents d ON d.content_hash = c.content_hash AND d.active = 1
@@ -559,7 +569,7 @@ impl RagStore {
                 .conn
                 .prepare(
                     "SELECT c.id, d.docid, d.rel_path, d.kind, ct.parse_tier, c.heading_path,
-                            c.line_start, c.line_end, c.page_num, c.chunk_text
+                            c.line_start, c.line_end, c.page_num, c.chunk_text, d.content_hash
                      FROM chunks c
                      JOIN documents d ON d.content_hash = c.content_hash AND d.active = 1
                      JOIN contents ct ON ct.content_hash = c.content_hash
@@ -583,6 +593,7 @@ impl RagStore {
                             page_num: row.get::<_, Option<i64>>(8)?.map(|v| v as usize),
                             chunk_text: row.get(9)?,
                             raw_score: 1.0,
+                            content_hash: row.get(10)?,
                         })
                     })
                     .map_err(|e| e.to_string())?;
@@ -630,7 +641,7 @@ impl RagStore {
             .prepare(
                 "SELECT v.chunk_id, d.docid, d.rel_path, d.kind, ct.parse_tier, c.heading_path,
                         c.line_start, c.line_end, c.page_num, c.chunk_text,
-                        (1.0 - v.distance) AS score
+                        (1.0 - v.distance) AS score, d.content_hash
                  FROM chunks_vec v
                  JOIN chunks c ON c.id = v.chunk_id
                  JOIN documents d ON d.content_hash = c.content_hash AND d.active = 1
@@ -832,6 +843,59 @@ impl RagStore {
         drop(stmt);
         tx.commit().map_err(|e| e.to_string())
     }
+
+    pub fn pdf_library_items(&self) -> Result<Vec<PdfLibraryItem>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT d.rel_path, d.content_hash, d.status, c.parse_tier,
+                        CASE WHEN j.state = 'failed' THEN j.err_msg ELSE NULL END
+                 FROM documents d
+                 JOIN contents c ON c.content_hash = d.content_hash
+                 LEFT JOIN ocr_jobs j ON j.content_hash = d.content_hash
+                 WHERE d.active = 1 AND d.kind = 'pdf' AND d.status != 'derived'
+                 ORDER BY (d.status = 'needs_ocr') DESC, d.rel_path ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(PdfLibraryItem {
+                    rel_path: row.get(0)?,
+                    content_hash: row.get(1)?,
+                    status: row.get(2)?,
+                    parse_tier: row.get(3)?,
+                    last_error: row.get(4)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn cached_accurate_pdfs(&self) -> Result<Vec<(String, String, String)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT d.rel_path, d.content_hash, c.parse_tier
+                 FROM documents d
+                 JOIN contents c ON c.content_hash = d.content_hash
+                 WHERE d.active = 1 AND d.kind = 'pdf' AND d.status != 'derived'
+                   AND c.parse_tier IN ('accurate', 'mineru')
+                 ORDER BY d.rel_path",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    }
 }
 
 fn map_scored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScoredChunk> {
@@ -847,6 +911,7 @@ fn map_scored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScoredChunk> {
         page_num: row.get::<_, Option<i64>>(8)?.map(|v| v as usize),
         chunk_text: row.get(9)?,
         raw_score: row.get(10)?,
+        content_hash: row.get(11)?,
     })
 }
 

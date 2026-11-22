@@ -1,14 +1,15 @@
 //! Bridges `rag` workspace tool requests and debounced background sync to `crate::rag`.
 
 use super::super::Workspace;
+use super::super::panels::PdfOcrPhase;
 use crate::{
     ai::{WorkspaceToolAction, WorkspaceToolRequest},
     rag::{
         DirtyDocument, RagError, SearchRequest,
         client::{EmbeddingClient, RerankClient, reap_idle_servers},
-        collect_eligible_paths, ocr,
+        collect_eligible_paths, ocr::{self, OcrProgressEvent},
         pipeline::{SearchServices, SyncOptions, search_project, sync_project},
-        store::RagStore,
+        store::{PdfLibraryItem, RagStore, StoreStats},
     },
     tags::Snapshot,
 };
@@ -16,11 +17,12 @@ use gpui_kit::{AppContext, Context, Window};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
     time::{Duration, Instant},
 };
@@ -28,9 +30,37 @@ use std::{
 const SYNC_DEBOUNCE: Duration = Duration::from_millis(2500);
 const REAP_INTERVAL: Duration = Duration::from_secs(15);
 
+pub(in crate::workspace) enum OcrRunnerEvent {
+    Progress(OcrProgressEvent),
+    ItemDone {
+        rel_path: String,
+        stats: Option<StoreStats>,
+        pdf_items: Option<Vec<PdfLibraryItem>>,
+    },
+    ItemFailed {
+        rel_path: String,
+        message: String,
+        stats: Option<StoreStats>,
+        pdf_items: Option<Vec<PdfLibraryItem>>,
+    },
+    ItemCancelled {
+        rel_path: String,
+    },
+    BatchFinished {
+        project_key: String,
+    },
+}
+
+struct OcrRunnerHandle {
+    events: mpsc::Receiver<OcrRunnerEvent>,
+    global_cancel: Arc<AtomicBool>,
+    item_cancels: HashMap<String, Arc<AtomicBool>>,
+}
+
 pub(in crate::workspace) struct RagSyncState {
     pending_deadline: Option<Instant>,
     in_flight: Option<(String, Arc<AtomicBool>)>,
+    ocr_runner: Option<OcrRunnerHandle>,
     last_reap: Instant,
 }
 
@@ -39,6 +69,7 @@ impl Default for RagSyncState {
         Self {
             pending_deadline: None,
             in_flight: None,
+            ocr_runner: None,
             last_reap: Instant::now(),
         }
     }
@@ -55,6 +86,19 @@ enum RagOperation {
         #[serde(default)]
         params: ReindexToolParams,
     },
+    ReadPdf {
+        params: ReadPdfToolParams,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReadPdfToolParams {
+    path: String,
+    #[serde(default, alias = "start_page")]
+    start_page: Option<usize>,
+    #[serde(default, alias = "end_page")]
+    end_page: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,6 +163,36 @@ impl Workspace {
         if let Some((_, cancelled)) = self.rag_sync.in_flight.take() {
             cancelled.store(true, Ordering::Relaxed);
         }
+        self.cancel_all_pdf_ocr_silent();
+    }
+
+    fn cancel_all_pdf_ocr_silent(&mut self) {
+        if let Some(handle) = self.rag_sync.ocr_runner.take() {
+            handle.global_cancel.store(true, Ordering::Relaxed);
+            for cancel in handle.item_cancels.values() {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        }
+        self.right_panel.kb.ocr_progress.clear();
+    }
+
+    pub(in crate::workspace) fn cancel_all_pdf_ocr(&mut self, cx: &mut Context<Self>) {
+        self.cancel_all_pdf_ocr_silent();
+        cx.notify();
+    }
+
+    pub(in crate::workspace) fn cancel_pdf_ocr_item(
+        &mut self,
+        rel_path: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(handle) = &self.rag_sync.ocr_runner
+            && let Some(cancel) = handle.item_cancels.get(rel_path)
+        {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.right_panel.kb.ocr_progress.remove(rel_path);
+        cx.notify();
     }
 
     pub(in crate::workspace) fn kb_enabled(&self) -> bool {
@@ -138,13 +212,11 @@ impl Workspace {
         if !self.kb_enabled() {
             return None;
         }
-        let stats = self.right_panel.kb.stats.as_ref()?;
-        if !stats.needs_ocr_files.is_empty() {
-            return Some((
-                crate::i18n::right_panel::kb_ocr_badge(stats.needs_ocr_files.len()),
-                true,
-            ));
+        let red_count = self.right_panel.kb.red_dot_count();
+        if red_count > 0 {
+            return Some((crate::i18n::right_panel::kb_ocr_badge(red_count), true));
         }
+        let stats = self.right_panel.kb.stats.as_ref()?;
         Some((crate::i18n::right_panel::kb_doc_count(stats.indexed_files), false))
     }
 
@@ -170,6 +242,7 @@ impl Workspace {
     pub(in crate::workspace) fn refresh_kb_snapshot(&mut self, cx: &mut Context<Self>) {
         let Some((project_key, root)) = self.active_rag_root() else {
             self.right_panel.kb.stats = None;
+            self.right_panel.kb.pdf_items.clear();
             cx.notify();
             return;
         };
@@ -179,27 +252,32 @@ impl Workspace {
         self.right_panel.kb.accurate_configured = accurate_configured;
         if !db_path.exists() {
             self.right_panel.kb.stats = None;
+            self.right_panel.kb.pdf_items.clear();
             cx.notify();
             return;
         }
 
         let task = cx.background_spawn(async move {
-            let stats = RagStore::open(&db_path, &config.embed_model, config.embed_dim)
-                .and_then(|store| store.stats())
+            let snapshot = RagStore::open(&db_path, &config.embed_model, config.embed_dim)
+                .and_then(|store| {
+                    let stats = store.stats()?;
+                    let items = store.pdf_library_items()?;
+                    Ok((stats, items))
+                })
                 .ok();
-            (stats, accurate_configured)
+            (snapshot, accurate_configured)
         });
 
         cx.spawn(async move |this, cx| {
-            let (stats, accurate_configured) = task.await;
+            let (snapshot, accurate_configured) = task.await;
             let _ = this.update(cx, |app, cx| {
                 if app
                     .active_rag_root()
                     .is_some_and(|(active_key, _)| active_key == project_key)
                 {
                     app.right_panel.kb.accurate_configured = accurate_configured;
-                    if let Some(stats) = stats {
-                        app.right_panel.kb.apply_stats(stats);
+                    if let Some((stats, items)) = snapshot {
+                        app.right_panel.kb.apply_snapshot(stats, items);
                     }
                     cx.notify();
                 }
@@ -252,7 +330,10 @@ impl Workspace {
                 &cancelled,
             )?;
             let stats = store.stats().map_err(|e| RagError::new("store_error", e))?;
-            Ok::<_, RagError>(stats)
+            let items = store
+                .pdf_library_items()
+                .map_err(|e| RagError::new("store_error", e))?;
+            Ok::<_, RagError>((stats, items))
         });
 
         cx.spawn(async move |this, cx| {
@@ -271,8 +352,8 @@ impl Workspace {
                     .is_some_and(|(active_key, _)| active_key == project_key)
                 {
                     match outcome {
-                        Ok(stats) => {
-                            app.right_panel.kb.apply_stats(stats);
+                        Ok((stats, items)) => {
+                            app.right_panel.kb.apply_snapshot(stats, items);
                             app.right_panel.kb.sync_error = None;
                         }
                         Err(err) if err.code == "cancelled" => {}
@@ -285,6 +366,188 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    pub(in crate::workspace) fn run_pdf_ocr_batch(
+        &mut self,
+        paths: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        let Some((project_key, root)) = self.active_rag_root() else {
+            return;
+        };
+        let config = self.settings.rag.clone();
+        let accurate_configured = !ocr::resolve_ocr_token(&config).is_empty();
+        self.right_panel.kb.accurate_configured = accurate_configured;
+        if !accurate_configured {
+            self.right_panel.kb.ocr_error = Some(
+                "尚未配置 PaddleOCR Token，请在「设置 → API 服务」填写后重试。".to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+
+        self.cancel_all_pdf_ocr_silent();
+        self.right_panel.kb.ocr_error = None;
+        let by_path: HashMap<String, String> = self
+            .right_panel
+            .kb
+            .pdf_items
+            .iter()
+            .map(|item| (item.rel_path.clone(), item.content_hash.clone()))
+            .collect();
+        let mut queue: Vec<(String, String, Arc<AtomicBool>)> = Vec::new();
+        let mut item_cancels = HashMap::new();
+
+        for rel_path in paths {
+            let Some(content_hash) = by_path.get(&rel_path) else {
+                continue;
+            };
+            let cancel = Arc::new(AtomicBool::new(false));
+            item_cancels.insert(rel_path.clone(), cancel.clone());
+            self.right_panel
+                .kb
+                .ocr_progress
+                .insert(rel_path.clone(), PdfOcrPhase::Queued);
+            queue.push((rel_path, content_hash.clone(), cancel));
+        }
+        if queue.is_empty() {
+            return;
+        }
+
+        let db_path = root.join(".folio").join("rag.sqlite3");
+        let global_cancel = Arc::new(AtomicBool::new(false));
+        let global_cancel_worker = global_cancel.clone();
+        let (tx, rx) = mpsc::channel();
+        let project_key_worker = project_key.clone();
+
+        self.rag_sync.ocr_runner = Some(OcrRunnerHandle {
+            events: rx,
+            global_cancel,
+            item_cancels,
+        });
+        cx.notify();
+
+        std::thread::spawn(move || {
+            let Ok(mut store) = RagStore::open(&db_path, &config.embed_model, config.embed_dim)
+            else {
+                let _ = tx.send(OcrRunnerEvent::BatchFinished {
+                    project_key: project_key_worker,
+                });
+                return;
+            };
+
+            for (rel_path, hash, item_cancel) in queue {
+                if global_cancel_worker.load(Ordering::Relaxed)
+                    || item_cancel.load(Ordering::Relaxed)
+                {
+                    let _ = tx.send(OcrRunnerEvent::ItemCancelled { rel_path });
+                    continue;
+                }
+
+                let outcome = ocr::process_single_pdf_with_progress(
+                    &root,
+                    &mut store,
+                    &config,
+                    &rel_path,
+                    &hash,
+                    &item_cancel,
+                    &mut |ev| {
+                        let _ = tx.send(OcrRunnerEvent::Progress(ev));
+                    },
+                );
+
+                match outcome {
+                    Ok(()) => {
+                        let stats = store.stats().ok();
+                        let pdf_items = store.pdf_library_items().ok();
+                        let _ = tx.send(OcrRunnerEvent::ItemDone {
+                            rel_path,
+                            stats,
+                            pdf_items,
+                        });
+                    }
+                    Err(err) if err.code == "cancelled" => {
+                        let _ = tx.send(OcrRunnerEvent::ItemCancelled { rel_path });
+                    }
+                    Err(err) => {
+                        let stats = store.stats().ok();
+                        let pdf_items = store.pdf_library_items().ok();
+                        let _ = tx.send(OcrRunnerEvent::ItemFailed {
+                            rel_path,
+                            message: err.message,
+                            stats,
+                            pdf_items,
+                        });
+                    }
+                }
+            }
+
+            let _ = tx.send(OcrRunnerEvent::BatchFinished {
+                project_key: project_key_worker,
+            });
+        });
+    }
+
+    pub(in crate::workspace) fn export_pdf_markdown_item(
+        &mut self,
+        rel_path: &str,
+        content_hash: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((_, root)) = self.active_rag_root() else {
+            return;
+        };
+        match ocr::export_pdf_markdown_to_sibling(&root, rel_path, content_hash) {
+            Ok(out_rel) => {
+                let _ = self.tree.reload_watched_listing(&root);
+                self.schedule_rag_sync();
+                self.report(crate::i18n::right_panel::kb_exported_md(&out_rel), cx);
+            }
+            Err(err) => {
+                self.right_panel.kb.ocr_error = Some(err);
+                cx.notify();
+            }
+        }
+    }
+
+    pub(in crate::workspace) fn export_selected_pdf_markdowns(&mut self, cx: &mut Context<Self>) {
+        let Some((_, root)) = self.active_rag_root() else {
+            return;
+        };
+        let targets: Vec<(String, String)> = self
+            .right_panel
+            .kb
+            .pdf_items
+            .iter()
+            .filter(|item| {
+                self.right_panel.kb.selected_pdfs.contains(&item.rel_path)
+                    && matches!(item.parse_tier.as_str(), "accurate" | "mineru")
+            })
+            .map(|item| (item.rel_path.clone(), item.content_hash.clone()))
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        let mut exported = 0usize;
+        for (rel_path, hash) in targets {
+            match ocr::export_pdf_markdown_to_sibling(&root, &rel_path, &hash) {
+                Ok(_) => exported += 1,
+                Err(err) => {
+                    self.right_panel.kb.ocr_error = Some(err);
+                }
+            }
+        }
+        if exported > 0 {
+            let _ = self.tree.reload_watched_listing(&root);
+            self.schedule_rag_sync();
+            self.report(crate::i18n::right_panel::kb_exported_count(exported), cx);
+        } else {
+            cx.notify();
+        }
     }
 
     pub(in crate::workspace) fn disable_kb(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -360,8 +623,11 @@ impl Workspace {
                 },
                 &cancel,
             )?;
-            let stats = store.stats().ok();
-            Ok::<_, RagError>((response, stats))
+            let snapshot = store
+                .stats()
+                .ok()
+                .zip(store.pdf_library_items().ok());
+            Ok::<_, RagError>((response, snapshot))
         });
 
         cx.spawn(async move |this, cx| {
@@ -376,11 +642,11 @@ impl Workspace {
                 }
                 app.right_panel.kb.searching = false;
                 match outcome {
-                    Ok((resp, stats)) => {
+                    Ok((resp, snapshot)) => {
                         app.right_panel.kb.results = resp.results;
                         app.right_panel.kb.search_error = None;
-                        if let Some(stats) = stats {
-                            app.right_panel.kb.apply_stats(stats);
+                        if let Some((stats, items)) = snapshot {
+                            app.right_panel.kb.apply_snapshot(stats, items);
                         }
                     }
                     Err(err) => {
@@ -440,11 +706,97 @@ impl Workspace {
         cx.notify();
     }
 
+    fn poll_ocr_runner(&mut self, cx: &mut Context<Self>) {
+        let mut drained = Vec::new();
+        let mut finished = false;
+        if let Some(handle) = &mut self.rag_sync.ocr_runner {
+            while let Ok(ev) = handle.events.try_recv() {
+                if matches!(ev, OcrRunnerEvent::BatchFinished { .. }) {
+                    finished = true;
+                }
+                drained.push(ev);
+            }
+        }
+        if finished {
+            self.rag_sync.ocr_runner = None;
+        }
+        let has_events = !drained.is_empty();
+        for ev in drained {
+            match ev {
+                OcrRunnerEvent::Progress(OcrProgressEvent::Started {
+                    rel_path,
+                    total_pages,
+                }) => {
+                    self.right_panel.kb.ocr_progress.insert(
+                        rel_path,
+                        PdfOcrPhase::Running {
+                            extracted_pages: 0,
+                            total_pages,
+                        },
+                    );
+                }
+                OcrRunnerEvent::Progress(OcrProgressEvent::PageProgress {
+                    rel_path,
+                    extracted_pages,
+                    total_pages,
+                }) => {
+                    self.right_panel.kb.ocr_progress.insert(
+                        rel_path,
+                        PdfOcrPhase::Running {
+                            extracted_pages,
+                            total_pages,
+                        },
+                    );
+                }
+                OcrRunnerEvent::ItemDone {
+                    rel_path,
+                    stats,
+                    pdf_items,
+                } => {
+                    self.right_panel.kb.ocr_progress.remove(&rel_path);
+                    self.right_panel.kb.selected_pdfs.remove(&rel_path);
+                    if let (Some(stats), Some(items)) = (stats, pdf_items) {
+                        self.right_panel.kb.apply_snapshot(stats, items);
+                    }
+                    self.schedule_rag_sync();
+                }
+                OcrRunnerEvent::ItemFailed {
+                    rel_path,
+                    message,
+                    stats,
+                    pdf_items,
+                } => {
+                    self.right_panel.kb.ocr_progress.remove(&rel_path);
+                    self.right_panel.kb.ocr_error = Some(message);
+                    if let (Some(stats), Some(items)) = (stats, pdf_items) {
+                        self.right_panel.kb.apply_snapshot(stats, items);
+                    }
+                }
+                OcrRunnerEvent::ItemCancelled { rel_path } => {
+                    self.right_panel.kb.ocr_progress.remove(&rel_path);
+                }
+                OcrRunnerEvent::BatchFinished { project_key } => {
+                    self.right_panel.kb.ocr_progress.clear();
+                    if self
+                        .active_rag_root()
+                        .is_some_and(|(active, _)| active == project_key)
+                    {
+                        self.refresh_kb_snapshot(cx);
+                    }
+                }
+            }
+        }
+        if has_events || self.rag_sync.ocr_runner.is_some() {
+            cx.notify();
+        }
+    }
+
     pub(in crate::workspace) fn poll_rag(&mut self, cx: &mut Context<Self>) {
         if self.rag_sync.last_reap.elapsed() >= REAP_INTERVAL {
             self.rag_sync.last_reap = Instant::now();
             cx.background_spawn(async { reap_idle_servers() }).detach();
         }
+        self.poll_ocr_runner(cx);
         if let Some(deadline) = self.rag_sync.pending_deadline
             && Instant::now() >= deadline
             && self.rag_sync.in_flight.is_none()
@@ -510,12 +862,30 @@ impl Workspace {
             .insert(request.id.clone(), cancelled.clone());
 
         let task = cx.background_spawn(async move {
+            if let RagOperation::ReadPdf { params } = operation {
+                let res = ocr::read_pdf_markdown(
+                    &root,
+                    &params.path,
+                    params.start_page,
+                    params.end_page,
+                )?;
+                let value = serde_json::to_value(res)
+                    .map_err(|e| RagError::new("serialize_error", e.to_string()))?;
+                let mut map = match value {
+                    Value::Object(m) => m,
+                    _ => serde_json::Map::new(),
+                };
+                map.insert("status".to_owned(), json!("ok"));
+                return Ok((Value::Object(map), None));
+            }
+
             let embed_client = EmbeddingClient::from_config(&config).ok();
             let rerank_client = RerankClient::from_config(&config).ok();
             let mut store = RagStore::open(&db_path, &config.embed_model, config.embed_dim)
                 .map_err(|e| RagError::new("store_error", e))?;
 
             match operation {
+                RagOperation::ReadPdf { .. } => unreachable!(),
                 RagOperation::Status => {
                     let embed_server_ready = embed_client
                         .as_ref()
@@ -526,10 +896,26 @@ impl Workspace {
                     let stats = store
                         .stats()
                         .map_err(|e| RagError::new("store_error", e))?;
+                    let items = store.pdf_library_items().unwrap_or_default();
                     let (accurate_upgraded_pdfs, accurate_pending_pdfs) = store
                         .ocr_counts()
                         .map_err(|e| RagError::new("store_error", e))?;
                     let accurate_configured = !ocr::resolve_ocr_token(&config).is_empty();
+                    let cached_pdf_markdowns = store
+                        .cached_accurate_pdfs()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|(path, hash, parse_tier)| {
+                            ocr::cache_dir(&root, &hash)
+                                .join("full.md")
+                                .exists()
+                                .then(|| crate::rag::CachedPdfInfo {
+                                    path,
+                                    parse_tier,
+                                    markdown_cache: format!(".folio/pdf-cache/{hash}/full.md"),
+                                })
+                        })
+                        .collect();
                     let report = crate::rag::StatusReport {
                         db_path: db_path.to_string_lossy().into_owned(),
                         embed_model: config.embed_model,
@@ -544,8 +930,9 @@ impl Workspace {
                         vector_chunks: stats.vector_chunks,
                         pending_vectors: stats.pending_vectors,
                         needs_ocr_files: stats.needs_ocr_files.clone(),
+                        cached_pdf_markdowns,
                     };
-                    Ok((json!({ "status": "ok", "report": report }), Some(stats)))
+                    Ok((json!({ "status": "ok", "report": report }), Some((stats, items))))
                 }
                 RagOperation::Reindex { params } => {
                     let report = sync_project(
@@ -561,8 +948,11 @@ impl Workspace {
                         },
                         &cancelled,
                     )?;
-                    let stats = store.stats().ok();
-                    Ok((json!({ "status": "ok", "report": report }), stats))
+                    let snapshot = store
+                        .stats()
+                        .ok()
+                        .zip(store.pdf_library_items().ok());
+                    Ok((json!({ "status": "ok", "report": report }), snapshot))
                 }
                 RagOperation::Search { params } => {
                     let allowed_paths = resolve_tag_filter(
@@ -611,7 +1001,10 @@ impl Workspace {
                         },
                         &cancelled,
                     )?;
-                    let latest_stats = store.stats().ok();
+                    let snapshot = store
+                        .stats()
+                        .ok()
+                        .zip(store.pdf_library_items().ok());
                     Ok((
                         json!({
                             "status": "ok",
@@ -621,7 +1014,7 @@ impl Workspace {
                             "pending_vectors": response.pending_vectors,
                             "results": response.results,
                         }),
-                        latest_stats,
+                        snapshot,
                     ))
                 }
             }
@@ -633,13 +1026,13 @@ impl Workspace {
             let _ = this.update(cx, |app, cx| {
                 app.tool_requests.rag_requests.remove(&request.id);
                 let payload = match outcome {
-                    Ok((payload, stats)) => {
-                        if let Some(stats) = stats
+                    Ok((payload, snapshot)) => {
+                        if let Some((stats, items)) = snapshot
                             && app
                                 .active_rag_root()
                                 .is_some_and(|(active_key, _)| active_key == project_key)
                         {
-                            app.right_panel.kb.apply_stats(stats);
+                            app.right_panel.kb.apply_snapshot(stats, items);
                             cx.notify();
                         }
                         payload

@@ -326,6 +326,24 @@ pub fn tool_kb_search(query: &str) -> String {
 }
 pub const TOOL_KB_STATUS: BiText = BiText::new("查看知识库索引状态", "Check knowledge base status");
 pub const TOOL_KB_REINDEX: BiText = BiText::new("更新知识库索引", "Update knowledge base index");
+pub fn tool_pdf_read(path: &str) -> String {
+    match locale() {
+        Locale::ZhCn => {
+            if path.is_empty() {
+                "读取 PDF 文本".to_owned()
+            } else {
+                format!("读取 PDF 文本 {path}")
+            }
+        }
+        Locale::En => {
+            if path.is_empty() {
+                "Read PDF text".to_owned()
+            } else {
+                format!("Read PDF text: {path}")
+            }
+        }
+    }
+}
 pub fn tool_drawio(operation: &str, path: &str) -> String {
     let action = match (locale(), operation) {
         (Locale::ZhCn, "read") => "读取",
