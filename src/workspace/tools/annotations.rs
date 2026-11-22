@@ -37,11 +37,6 @@ impl Workspace {
         annotations::resolve_path(&root, &params.path)
     }
 
-    fn annotation_document_key(&self, path: &Path) -> Option<String> {
-        self.documents.open.iter().find_map(|(key, document)|
-            (dunce::canonicalize(&document.path).ok().as_deref() == Some(path)).then(|| key.clone()))
-    }
-
     fn start_annotation(&mut self, request: &WorkspaceToolRequest, window: &mut Window, cx: &mut Context<Self>) -> Result<(), Failure> {
         let params: Params = serde_json::from_value(request.arguments["params"].clone())
             .map_err(|e| Failure::new("invalid_request", e.to_string()))?;
@@ -55,8 +50,7 @@ impl Workspace {
         }
         annotations::validate_create(&params)?;
         let snapshot = if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("md")) {
-            if let Some(key) = self.annotation_document_key(&path) {
-                let buffer = &self.documents.open[&key].buffer;
+            if let Some((_, buffer)) = self.documents.open_buffer_at(&path) {
                 if buffer.conflict.is_some() || buffer.deleted {
                     return Err(Failure::new("document_conflict", crate::i18n::tags::ERR_ANN_DOC_CONFLICT.get()));
                 }
@@ -104,23 +98,21 @@ impl Workspace {
         if self.annotation_path(request, params)? != path {
             return Err(Failure::new("document_changed", crate::i18n::tags::ERR_ANN_PATH_CHANGED.get()));
         }
-        let key = self.annotation_document_key(path);
-        let expected_revision = match snapshot {
+        let (open_key, expected_revision) = match snapshot {
             Snapshot::Markdown { text, revision } => {
-                if let Some(key) = &key {
-                    let buffer = &self.documents.open[key].buffer;
+                if let Some((key, buffer)) = self.documents.open_buffer_at(path) {
                     if &buffer.text != text || buffer.conflict.is_some() || buffer.deleted {
                         return Err(Failure::new("document_changed", crate::i18n::tags::ERR_ANN_DOC_CHANGED.get()));
                     }
-                    buffer.revision.clone()
-                } else { revision.clone() }
+                    (Some(key.to_owned()), buffer.revision.clone())
+                } else { (None, revision.clone()) }
             }
             Snapshot::Pdf { length, modified } => {
                 let metadata = std::fs::metadata(path)?;
                 if metadata.len() != *length || metadata.modified()? != *modified {
                     return Err(Failure::new("document_changed", crate::i18n::tags::ERR_ANN_PDF_CHANGED.get()));
                 }
-                String::new()
+                (None, String::new())
             }
         };
         // This completion runs serially on GPUI. Always merge the latest per-directory store,
@@ -128,20 +120,10 @@ impl Workspace {
         let mut items = annotations::try_load_annotations(path)?;
         if let Some(existing) = annotations::existing(&items, &prepared, path)? { return Ok(existing); }
         prepared.item.id = items.iter().map(|item| item.id).max().unwrap_or(0) + 1;
-        if let Some(text) = &prepared.markdown {
-            let saved = files::save_document_at(path, text, &expected_revision)?
-                .map_err(|_| Failure::new("document_changed", crate::i18n::tags::ERR_ANN_DISK_CHANGED.get()))?;
-            if let Some(key) = &key {
-                self.documents.open.get_mut(key).expect("opened document").buffer.replace_from_disk(saved);
-                self.documents.markdown_changed.insert(key.clone());
-                self.documents.source_version += 1;
-            }
-            // Update both editing/reading panes without changing tabs or keyboard focus.
-            for pane in self.documents.markdown_panes.values() {
-                if dunce::canonicalize(pane.read(cx).path()).ok().as_deref() == Some(path) {
-                    pane.update(cx, |pane, cx| pane.sync(text, window, cx));
-                }
-            }
+        if let Some(text) = &prepared.markdown
+            && !self.save_markdown_snapshot(path, open_key.as_deref(), text, &expected_revision, window, cx)?
+        {
+            return Err(Failure::new("document_changed", crate::i18n::tags::ERR_ANN_DISK_CHANGED.get()));
         }
         items.push(prepared.item.clone());
         if let Err(error) = annotations::save_annotations(path, &items) {
@@ -153,16 +135,7 @@ impl Workspace {
             };
             return Err(Failure::new("save_failed", format!("{prefix}: {error}")));
         }
-        for pane in self.documents.markdown_panes.values() {
-            if dunce::canonicalize(pane.read(cx).path()).ok().as_deref() == Some(path) {
-                pane.update(cx, |pane, cx| pane.sync_annotations(&items, cx));
-            }
-        }
-        for pane in self.documents.pdf_panes.values() {
-            if dunce::canonicalize(pane.read(cx).path()).ok().as_deref() == Some(path) {
-                pane.update(cx, |pane, cx| pane.sync_annotations(&items, cx));
-            }
-        }
+        self.sync_document_annotations(path, &items, cx);
         cx.notify();
         Ok(json!({"status":"ok", "created":true, "annotation":annotations::item_json(&prepared.item, path)}))
     }

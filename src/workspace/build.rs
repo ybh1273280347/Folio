@@ -408,7 +408,7 @@ impl Workspace {
             self.documents.markdown_panes.get(&PaneKey::reading(file))
                 .unwrap_or_else(|| &self.documents.markdown_panes[&PaneKey::tab(file)]).clone()
         });
-        let (cancelled, sender) = self.build.start(target.clone(), self.documents.source_version, capture.clone());
+        let (cancelled, sender) = self.build.start(target.clone(), self.documents.source_version(), capture.clone());
         self.show_build_preview = true;
         self.notice = None;
         if let Some((file, pane)) = markdown.zip(capture) {
