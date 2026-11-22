@@ -508,8 +508,7 @@ impl Workspace {
                 self.report(crate::i18n::right_panel::kb_exported_md(&out_rel), cx);
             }
             Err(err) => {
-                self.right_panel.kb.ocr_error = Some(err);
-                cx.notify();
+                self.report(err, cx);
             }
         }
     }
@@ -533,11 +532,12 @@ impl Workspace {
             return;
         }
         let mut exported = 0usize;
+        let mut last_err: Option<String> = None;
         for (rel_path, hash) in targets {
             match ocr::export_pdf_markdown_to_sibling(&root, &rel_path, &hash) {
                 Ok(_) => exported += 1,
                 Err(err) => {
-                    self.right_panel.kb.ocr_error = Some(err);
+                    last_err = Some(err);
                 }
             }
         }
@@ -545,8 +545,8 @@ impl Workspace {
             let _ = self.tree.reload_watched_listing(&root);
             self.schedule_rag_sync();
             self.report(crate::i18n::right_panel::kb_exported_count(exported), cx);
-        } else {
-            cx.notify();
+        } else if let Some(err) = last_err {
+            self.report(err, cx);
         }
     }
 
@@ -767,7 +767,7 @@ impl Workspace {
                     pdf_items,
                 } => {
                     self.right_panel.kb.ocr_progress.remove(&rel_path);
-                    self.right_panel.kb.ocr_error = Some(message);
+                    self.report(message, cx);
                     if let (Some(stats), Some(items)) = (stats, pdf_items) {
                         self.right_panel.kb.apply_snapshot(stats, items);
                     }

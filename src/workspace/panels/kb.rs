@@ -381,8 +381,9 @@ impl Workspace {
         let menu_app = cx.entity();
         let header = div()
             .h(px(32.))
-            .px_1p5()
+            .px_2()
             .flex_shrink_0()
+            .overflow_hidden()
             .flex()
             .items_center()
             .justify_between()
@@ -1009,9 +1010,12 @@ impl Workspace {
         let hi_bg = fg_alpha(palette.accent, 0.20).into();
         let hi_fg = gpui_kit::rgb(palette.text).into();
 
+        let body_size = (self.settings.interface_font_size as f32 - 2.0).max(10.0);
+        let snippet_max_h = (body_size * 1.45 * 3.0).ceil();
+
         let mut snippet_style = window.text_style();
         snippet_style.font_family = crate::ui::sans_font(&self.settings.interface_font).into();
-        snippet_style.font_size = px(11.5).into();
+        snippet_style.font_size = px(body_size).into();
         snippet_style.color = fg_alpha(palette.text, 0.85).into();
 
         let cards: Vec<AnyElement> = groups
@@ -1269,9 +1273,10 @@ impl Workspace {
                                                 )
                                                 .child(
                                                     div()
-                                                        .max_h(px(52.))
+                                                        .max_h(px(snippet_max_h))
                                                         .overflow_hidden()
-                                                        .line_height(relative(1.42))
+                                                        .text_size(px(body_size))
+                                                        .line_height(relative(1.45))
                                                         .child(styled_snippet),
                                                 )
                                         },
@@ -1432,8 +1437,9 @@ impl Workspace {
 
         let header = div()
             .h(px(32.))
-            .px_1p5()
+            .px_2()
             .flex_shrink_0()
+            .overflow_hidden()
             .flex()
             .items_center()
             .justify_between()
@@ -1677,29 +1683,68 @@ impl Workspace {
                         .px_2p5()
                         .py_1p5()
                         .rounded(px(6.))
-                        .bg(fg_alpha(0xdc2626, 0.08))
+                        .bg(mix_color(palette.surface, palette.danger, 0.1))
                         .border_1()
-                        .border_color(fg_alpha(0xdc2626, 0.25))
+                        .border_color(mix_color(palette.border, palette.danger, 0.35))
                         .flex()
                         .items_center()
                         .justify_between()
                         .gap_2()
-                        .text_size(px(11.5))
-                        .text_color(gpui_kit::rgb(0xdc2626))
-                        .child(div().flex_1().min_w_0().text_ellipsis().child(msg))
-                        .when(!kb.accurate_configured, |banner| {
-                            banner.child(
-                                div()
-                                    .id("pdf-mgr-open-settings")
-                                    .text_size(px(11.))
-                                    .text_color(gpui_kit::rgb(palette.accent))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(|app, _, window, cx| {
-                                        app.open_kb_api_settings(window, cx);
-                                    }))
-                                    .child(rp::KB_OPEN_SETTINGS.get()),
-                            )
-                        }),
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .min_w_0()
+                                .child(
+                                    crate::ui::icon(IconName::ShieldAlert)
+                                        .w(px(13.))
+                                        .h(px(13.))
+                                        .flex_shrink_0()
+                                        .text_color(gpui_kit::rgb(palette.danger)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_size(px(11.5))
+                                        .text_color(gpui_kit::rgb(palette.danger))
+                                        .child(msg),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .flex_shrink_0()
+                                .when(!kb.accurate_configured, |banner| {
+                                    banner.child(
+                                        div()
+                                            .id("pdf-mgr-open-settings")
+                                            .px_1p5()
+                                            .py_0p5()
+                                            .rounded(px(4.))
+                                            .text_size(px(11.))
+                                            .font_medium()
+                                            .text_color(gpui_kit::rgb(palette.accent))
+                                            .cursor_pointer()
+                                            .hover(move |s| s.bg(hover_bg))
+                                            .on_click(cx.listener(|app, _, window, cx| {
+                                                app.open_kb_api_settings(window, cx);
+                                            }))
+                                            .child(rp::KB_OPEN_SETTINGS.get()),
+                                    )
+                                })
+                                .child(
+                                    crate::ui::control("pdf-mgr-dismiss-err", IconName::Close).on_click(
+                                        cx.listener(|app, _, _, cx| {
+                                            app.right_panel.kb.ocr_error = None;
+                                            cx.notify();
+                                        }),
+                                    ),
+                                ),
+                        ),
                 )
             });
 
@@ -2005,9 +2050,14 @@ impl Workspace {
             .collect();
         let only_ocr_count = only_ocr_targets.len();
 
+        let btn_font_size = (self.settings.interface_font_size as f32 - 2.5).max(10.0);
+        let run_disabled = selected_count == 0 || ocr_active;
+        let only_ocr_disabled = only_ocr_count == 0 || ocr_active;
+        let export_disabled = selected_accurate_count == 0;
+
         let footer = div()
-            .px_3()
-            .py_2()
+            .px_2p5()
+            .py_1p5()
             .flex_shrink_0()
             .border_t_1()
             .border_color(gpui_kit::rgb(palette.border))
@@ -2015,80 +2065,128 @@ impl Workspace {
             .flex()
             .items_center()
             .justify_between()
-            .gap_1p5()
+            .flex_wrap()
+            .gap_1()
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_1p5()
+                    .flex_wrap()
+                    .gap_1()
+                    .min_w_0()
                     .child(
-                        Button::new("pdf-mgr-run-selected")
-                            .primary()
-                            .compact()
-                            .h(px(26.))
-                            .px_2p5()
-                            .text_size(px(11.5))
-                            .disabled(selected_count == 0 || ocr_active)
-                            .icon(
+                        div()
+                            .id("pdf-mgr-run-selected")
+                            .h(px(24.))
+                            .px_2()
+                            .rounded(px(5.))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_size(px(btn_font_size))
+                            .font_medium()
+                            .bg(if run_disabled {
+                                fg_alpha(palette.text, 0.06)
+                            } else {
+                                gpui_kit::rgb(palette.accent).into()
+                            })
+                            .text_color(if run_disabled {
+                                fg_alpha(palette.muted, 0.7)
+                            } else {
+                                gpui_kit::rgb(palette.on_accent).into()
+                            })
+                            .when(!run_disabled, |el| {
+                                el.cursor_pointer()
+                                    .hover(move |s| s.opacity(0.9))
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.run_pdf_ocr_batch(selected_paths_for_run.clone(), cx);
+                                    }))
+                            })
+                            .child(
                                 crate::ui::icon(IconName::Sparkles)
                                     .w(px(11.))
                                     .h(px(11.)),
                             )
-                            .label(rp::kb_refine_selected(selected_count))
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                app.run_pdf_ocr_batch(selected_paths_for_run.clone(), cx);
-                            })),
+                            .child(rp::kb_refine_selected(selected_count)),
                     )
                     .child(
-                        Button::new("pdf-mgr-run-only-ocr")
-                            .ghost()
-                            .compact()
-                            .h(px(26.))
+                        div()
+                            .id("pdf-mgr-run-only-ocr")
+                            .h(px(24.))
                             .px_2()
-                            .text_size(px(11.5))
-                            .disabled(only_ocr_count == 0 || ocr_active)
-                            .label(if only_ocr_count > 0 {
+                            .rounded(px(5.))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_size(px(btn_font_size))
+                            .text_color(if only_ocr_disabled {
+                                fg_alpha(palette.muted, 0.6)
+                            } else {
+                                gpui_kit::rgb(palette.text).into()
+                            })
+                            .when(!only_ocr_disabled, |el| {
+                                el.cursor_pointer()
+                                    .hover(move |s| s.bg(hover_bg))
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.run_pdf_ocr_batch(only_ocr_targets.clone(), cx);
+                                    }))
+                            })
+                            .child(if only_ocr_count > 0 {
                                 format!("{} ({only_ocr_count})", rp::KB_ONLY_OCR_BTN.get())
                             } else {
                                 rp::KB_ONLY_OCR_BTN.get().to_owned()
-                            })
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                app.run_pdf_ocr_batch(only_ocr_targets.clone(), cx);
-                            })),
+                            }),
                     )
                     .child(
-                        Button::new("pdf-mgr-export-selected")
-                            .ghost()
-                            .compact()
-                            .h(px(26.))
+                        div()
+                            .id("pdf-mgr-export-selected")
+                            .h(px(24.))
                             .px_2()
-                            .text_size(px(11.5))
-                            .disabled(selected_accurate_count == 0)
-                            .icon(
+                            .rounded(px(5.))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_size(px(btn_font_size))
+                            .text_color(if export_disabled {
+                                fg_alpha(palette.muted, 0.6)
+                            } else {
+                                gpui_kit::rgb(palette.text).into()
+                            })
+                            .when(!export_disabled, |el| {
+                                el.cursor_pointer()
+                                    .hover(move |s| s.bg(hover_bg))
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.export_selected_pdf_markdowns(cx);
+                                    }))
+                            })
+                            .child(
                                 crate::ui::icon(IconName::FileDown)
                                     .w(px(11.))
                                     .h(px(11.)),
                             )
-                            .label(rp::KB_EXPORT_MD_BTN.get())
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.export_selected_pdf_markdowns(cx);
-                            })),
+                            .child(rp::KB_EXPORT_MD_BTN.get()),
                     ),
             )
             .when(ocr_active, |bar| {
                 bar.child(
-                    Button::new("pdf-mgr-cancel-all")
-                        .ghost()
-                        .compact()
-                        .h(px(26.))
+                    div()
+                        .id("pdf-mgr-cancel-all")
+                        .h(px(24.))
                         .px_2()
-                        .text_size(px(11.5))
-                        .text_color(gpui_kit::rgb(0xdc2626))
-                        .icon(crate::ui::icon(IconName::Close).w(px(11.)).h(px(11.)))
-                        .label(rp::KB_CANCEL_BTN.get())
+                        .rounded(px(5.))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_size(px(btn_font_size))
+                        .font_medium()
+                        .text_color(gpui_kit::rgb(palette.danger))
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(mix_color(palette.surface, palette.danger, 0.1)))
                         .on_click(cx.listener(|app, _, _, cx| {
                             app.cancel_all_pdf_ocr(cx);
-                        })),
+                        }))
+                        .child(crate::ui::icon(IconName::Close).w(px(11.)).h(px(11.)))
+                        .child(rp::KB_CANCEL_BTN.get()),
                 )
             });
 
