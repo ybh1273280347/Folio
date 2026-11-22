@@ -429,6 +429,7 @@ pub fn search_project(
                 rel_path: chunk.rel_path,
                 kind: chunk.kind,
                 parse_tier: chunk.parse_tier,
+                content_hash: Some(chunk.content_hash),
                 heading_path: chunk.heading_path,
                 line_start: chunk.line_start,
                 line_end: chunk.line_end,
@@ -567,6 +568,7 @@ struct Candidate {
     rel_path: String,
     kind: String,
     parse_tier: String,
+    content_hash: Option<String>,
     heading_path: String,
     line_start: Option<usize>,
     line_end: Option<usize>,
@@ -716,6 +718,16 @@ fn collapse_and_format(
         }
         *count += 1;
 
+        let markdown_cache = if cand.kind == "pdf"
+            && matches!(cand.parse_tier.as_str(), "accurate" | "mineru")
+        {
+            cand.content_hash
+                .as_ref()
+                .map(|h| format!(".folio/pdf-cache/{h}/full.md"))
+        } else {
+            None
+        };
+
         out.push(SearchHit {
             docid: cand.docid,
             path: cand.rel_path,
@@ -727,6 +739,7 @@ fn collapse_and_format(
             page: cand.page_num,
             score: (score * 1000.0).round() / 1000.0,
             snippet: build_snippet(&cand.chunk_text, &snippet_terms),
+            markdown_cache,
             dirty_buffer: cand.dirty_buffer,
         });
         if out.len() >= limit {
@@ -784,6 +797,7 @@ fn search_dirty_buffers(
                         rel_path: doc.rel_path.clone(),
                         kind: kind.to_owned(),
                         parse_tier: "dirty_buffer".to_owned(),
+                        content_hash: None,
                         heading_path: chunk.heading_path,
                         line_start: chunk.line_start,
                         line_end: chunk.line_end,
@@ -981,6 +995,7 @@ mod tests {
             rel_path: "a.md".into(),
             kind: "md".into(),
             parse_tier: "source".into(),
+            content_hash: None,
             heading_path: "a.md > H1".into(),
             line_start: Some(1),
             line_end: Some(10),

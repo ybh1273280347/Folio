@@ -2891,6 +2891,7 @@ fn summarize_tool_call(name: &str, args: &Value, diffs: &[FileDiff]) -> String {
         }
         "folio_kb_status" => crate::i18n::ai::TOOL_KB_STATUS.get().into(),
         "folio_kb_reindex" => crate::i18n::ai::TOOL_KB_REINDEX.get().into(),
+        "folio_pdf_read" => crate::i18n::ai::tool_pdf_read(args["path"].as_str().unwrap_or_default()),
         "folio_tex_compile" => {
             if let Some(folder) = args["under_directory"].as_str() {
                 crate::i18n::ai::tool_compile_tex_folder(folder)

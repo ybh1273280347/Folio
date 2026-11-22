@@ -59,4 +59,12 @@ test('folio_kb_status and folio_kb_reindex forward accurate options and map canc
     request.mock.calls[1].arguments.slice(0, 2),
     ['reindex', { force_rebuild: true, accurate: 'only_ocr', paths: ['papers/scan.pdf'] }],
   );
+
+  const pdfReadTool = tools.find(item => item.name === 'folio_pdf_read');
+  assert.ok(pdfReadTool);
+  await pdfReadTool.execute('call-4', { path: 'papers/scan.pdf', start_page: 2, end_page: 5 });
+  assert.deepEqual(
+    request.mock.calls[2].arguments.slice(0, 2),
+    ['read_pdf', { path: 'papers/scan.pdf', start_page: 2, end_page: 5 }],
+  );
 });

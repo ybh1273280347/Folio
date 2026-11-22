@@ -1,9 +1,10 @@
 //! PaddleOCR-VL async Jobs API (`paddleocr.aistudio-app.com`) and `.folio/pdf-cache/<sha256>/` persistence.
 
 use super::{
-    AccuratePdfMode, RagConfig, RagError,
+    AccuratePdfMode, PdfPageMarkdown, PdfReadResult, RagConfig, RagError,
     chunker::{ExtractedDocument, chunk_text_document},
     client::Endpoint,
+    sha256_hex,
     store::RagStore,
 };
 use crate::http::{self, RequestOptions};
@@ -12,7 +13,10 @@ use serde_json::{Value, json};
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -20,6 +24,19 @@ const PADDLEOCR_HOST: &str = "paddleocr.aistudio-app.com";
 const PADDLEOCR_JOBS_PATH: &str = "/api/v2/ocr/jobs";
 const PADDLEOCR_MODEL: &str = "PaddleOCR-VL-1.6";
 const POLL_TIMEOUT: Duration = Duration::from_secs(600);
+
+#[derive(Clone, Debug)]
+pub enum OcrProgressEvent {
+    Started {
+        rel_path: String,
+        total_pages: Option<usize>,
+    },
+    PageProgress {
+        rel_path: String,
+        extracted_pages: usize,
+        total_pages: Option<usize>,
+    },
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PageAnchor {
@@ -152,7 +169,7 @@ pub fn upgrade_pdfs(
         if cancelled.load(Ordering::Relaxed) {
             return Err(RagError::cancelled());
         }
-        match process_single_pdf(root, store, &token, &rel_path, &hash, cancelled) {
+        match process_single_pdf(root, store, &token, &rel_path, &hash, cancelled, &mut |_| {}) {
             Ok(()) => stats.upgraded_pdfs += 1,
             Err(err) if err.code == "cancelled" => return Err(err),
             Err(err) => {
@@ -165,6 +182,38 @@ pub fn upgrade_pdfs(
     Ok(stats)
 }
 
+pub fn process_single_pdf_with_progress(
+    root: &Path,
+    store: &mut RagStore,
+    config: &RagConfig,
+    rel_path: &str,
+    hash: &str,
+    cancelled: &AtomicBool,
+    on_progress: &mut dyn FnMut(OcrProgressEvent),
+) -> Result<(), RagError> {
+    let token = resolve_ocr_token(config);
+    if token.is_empty() {
+        return Err(RagError::new(
+            "accurate_pdf_unconfigured",
+            "尚未配置 PaddleOCR Token，请在「设置 → API 服务」填写后重试。",
+        ));
+    }
+    match process_single_pdf(root, store, &token, rel_path, hash, cancelled, on_progress) {
+        Ok(()) => Ok(()),
+        Err(err) if err.code == "cancelled" => Err(err),
+        Err(err) => {
+            let _ = store.upsert_ocr_job(hash, rel_path, None, "failed", Some(&err.message));
+            Err(err)
+        }
+    }
+}
+
+fn pdf_total_pages(bytes: &[u8]) -> Option<usize> {
+    gpui_pdf::parse(Arc::new(bytes.to_vec()))
+        .ok()
+        .map(|doc| doc.pages().len())
+}
+
 fn process_single_pdf(
     root: &Path,
     store: &mut RagStore,
@@ -172,10 +221,17 @@ fn process_single_pdf(
     rel_path: &str,
     hash: &str,
     cancelled: &AtomicBool,
+    on_progress: &mut dyn FnMut(OcrProgressEvent),
 ) -> Result<(), RagError> {
     let abs = root.join(rel_path.replace('/', "\\"));
     let bytes = fs::read(&abs)
         .map_err(|e| RagError::new("io_error", format!("读取 PDF 失败 ({rel_path}): {e}")))?;
+    let expected_pages = pdf_total_pages(&bytes);
+    on_progress(OcrProgressEvent::Started {
+        rel_path: rel_path.to_owned(),
+        total_pages: expected_pages,
+    });
+
     let file_name = Path::new(rel_path)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -238,10 +294,13 @@ fn process_single_pdf(
         .upsert_ocr_job(hash, rel_path, Some(&job_id), "polling", None)
         .map_err(|e| RagError::new("store_error", e))?;
 
-    let jsonl_url = poll_job_until_done(&auth, &job_id, cancelled)?;
+    let jsonl_url = poll_job_until_done(&auth, &job_id, rel_path, expected_pages, cancelled, on_progress)?;
     let jsonl_text = download_jsonl(&jsonl_url)?;
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(RagError::cancelled());
+    }
     let out_dir = cache_dir(root, hash);
-    parse_paddleocr_jsonl_to_cache(&jsonl_text, &out_dir)
+    parse_paddleocr_jsonl_to_cache_checked(&jsonl_text, expected_pages, &out_dir)
         .map_err(|e| RagError::new("ocr_parse", e))?;
 
     if let Some(extracted) = load_cached_pdf(root, rel_path, hash) {
@@ -290,7 +349,10 @@ pub fn build_multipart_body(
 fn poll_job_until_done(
     auth: &str,
     job_id: &str,
+    rel_path: &str,
+    expected_pages: Option<usize>,
     cancelled: &AtomicBool,
+    on_progress: &mut dyn FnMut(OcrProgressEvent),
 ) -> Result<String, RagError> {
     let deadline = Instant::now() + POLL_TIMEOUT;
     let poll_path = format!("{PADDLEOCR_JOBS_PATH}/{job_id}");
@@ -326,6 +388,15 @@ fn poll_job_until_done(
         };
 
         match data.state.as_str() {
+            "running" => {
+                if let Some(progress) = data.extract_progress {
+                    on_progress(OcrProgressEvent::PageProgress {
+                        rel_path: rel_path.to_owned(),
+                        extracted_pages: progress.extracted_pages.unwrap_or(0),
+                        total_pages: progress.total_pages.or(expected_pages),
+                    });
+                }
+            }
             "done" => {
                 let json_url = data
                     .result_url
@@ -379,9 +450,19 @@ fn download_jsonl(url: &str) -> Result<String, RagError> {
         .map_err(|e| RagError::new("ocr_parse", format!("OCR 结果编码异常: {e}")))
 }
 
+#[cfg(test)]
 pub fn parse_paddleocr_jsonl_to_cache(jsonl_text: &str, out_dir: &Path) -> Result<(), String> {
+    parse_paddleocr_jsonl_to_cache_checked(jsonl_text, None, out_dir)
+}
+
+pub fn parse_paddleocr_jsonl_to_cache_checked(
+    jsonl_text: &str,
+    expected_total_pages: Option<usize>,
+    out_dir: &Path,
+) -> Result<(), String> {
     let mut full_md = String::new();
     let mut anchors: Vec<PageAnchor> = Vec::new();
+    let mut page_texts: Vec<PdfPageMarkdown> = Vec::new();
     let mut page_idx = 0usize;
 
     for raw_line in jsonl_text.lines() {
@@ -406,6 +487,10 @@ pub fn parse_paddleocr_jsonl_to_cache(jsonl_text: &str, out_dir: &Path) -> Resul
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .trim();
+            page_texts.push(PdfPageMarkdown {
+                page: page_num,
+                markdown: md_text.to_owned(),
+            });
             if md_text.is_empty() {
                 continue;
             }
@@ -426,17 +511,201 @@ pub fn parse_paddleocr_jsonl_to_cache(jsonl_text: &str, out_dir: &Path) -> Resul
         }
     }
 
+    if let Some(expected) = expected_total_pages
+        && expected > 0
+        && page_idx < expected
+    {
+        return Err(format!(
+            "OCR 返回页数不完整 ({page_idx}/{expected})，保留原快速索引状态"
+        ));
+    }
+
     if full_md.trim().is_empty() {
         return Err("OCR 结果中未提取到有效文本".to_owned());
     }
 
     fs::create_dir_all(out_dir).map_err(|e| format!("创建缓存目录失败: {e}"))?;
     fs::write(out_dir.join("full.md"), full_md).map_err(|e| e.to_string())?;
+    let pages_text_bytes = serde_json::to_vec(&page_texts).map_err(|e| e.to_string())?;
+    fs::write(out_dir.join("pages_text.json"), pages_text_bytes).map_err(|e| e.to_string())?;
     if !anchors.is_empty() {
         let json_bytes = serde_json::to_vec(&anchors).map_err(|e| e.to_string())?;
         fs::write(out_dir.join("pages.json"), json_bytes).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+pub fn export_pdf_markdown_to_sibling(
+    root: &Path,
+    rel_path: &str,
+    content_hash: &str,
+) -> Result<String, String> {
+    let md_path = cache_dir(root, content_hash).join("full.md");
+    let markdown = fs::read_to_string(&md_path)
+        .map_err(|_| format!("未找到精确解析缓存 ({rel_path})，请先完成全篇精确解析"))?;
+    if markdown.trim().is_empty() {
+        return Err(format!("解析缓存为空 ({rel_path})"));
+    }
+    let normalized = rel_path.replace('\\', "/");
+    let target_rel = match normalized.rsplit_once('/') {
+        Some((dir, file_name)) => {
+            let stem = file_name
+                .strip_suffix(".pdf")
+                .or_else(|| file_name.strip_suffix(".PDF"))
+                .unwrap_or(file_name);
+            format!("{dir}/{stem}_folio-parse.md")
+        }
+        None => {
+            let stem = normalized
+                .strip_suffix(".pdf")
+                .or_else(|| normalized.strip_suffix(".PDF"))
+                .unwrap_or(&normalized);
+            format!("{stem}_folio-parse.md")
+        }
+    };
+    let dest = root.join(target_rel.replace('/', "\\"));
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建导出目录失败: {e}"))?;
+    }
+    fs::write(&dest, markdown).map_err(|e| format!("写入 Markdown 失败: {e}"))?;
+    Ok(target_rel)
+}
+
+pub fn read_pdf_markdown(
+    root: &Path,
+    rel_path: &str,
+    start_page: Option<usize>,
+    end_page: Option<usize>,
+) -> Result<PdfReadResult, RagError> {
+    let abs = crate::files::project_path(root, rel_path)
+        .map_err(|e| RagError::new("invalid_path", e.to_string()))?;
+    let bytes = fs::read(&abs)
+        .map_err(|e| RagError::new("io_error", format!("读取 PDF 失败 ({rel_path}): {e}")))?;
+    let norm_rel = rel_path.trim().replace('\\', "/");
+    let content_hash = sha256_hex(&bytes);
+    let cache = cache_dir(root, &content_hash);
+    let full_md_path = cache.join("full.md");
+    let req_start = start_page.unwrap_or(1).max(1);
+    let req_end = end_page
+        .unwrap_or_else(|| req_start.saturating_add(4))
+        .max(req_start)
+        .min(req_start.saturating_add(19));
+
+    if let Ok(raw) = fs::read(&cache.join("pages_text.json"))
+        && let Ok(cached_pages) = serde_json::from_slice::<Vec<PdfPageMarkdown>>(&raw)
+        && !cached_pages.is_empty()
+    {
+        let total_pages = cached_pages.iter().map(|p| p.page).max().unwrap_or(cached_pages.len());
+        let start = req_start.min(total_pages);
+        let end = req_end.min(total_pages);
+        let pages = cached_pages
+            .into_iter()
+            .filter(|p| p.page >= start && p.page <= end)
+            .collect();
+        return Ok(PdfReadResult {
+            path: norm_rel,
+            source: "paddleocr_cache",
+            parse_tier: "accurate",
+            markdown_cache: full_md_path
+                .exists()
+                .then(|| format!(".folio/pdf-cache/{content_hash}/full.md")),
+            total_pages,
+            start_page: start,
+            end_page: end,
+            needs_ocr: false,
+            pages,
+        });
+    }
+
+    if full_md_path.exists()
+        && let Ok(full_md) = fs::read_to_string(&full_md_path)
+        && !full_md.trim().is_empty()
+    {
+        let total_pages = pdf_total_pages(&bytes).unwrap_or(1).max(1);
+        return Ok(PdfReadResult {
+            path: norm_rel,
+            source: "paddleocr_cache",
+            parse_tier: "accurate",
+            markdown_cache: Some(format!(".folio/pdf-cache/{content_hash}/full.md")),
+            total_pages,
+            start_page: 1,
+            end_page: total_pages,
+            needs_ocr: false,
+            pages: vec![PdfPageMarkdown {
+                page: 1,
+                markdown: full_md,
+            }],
+        });
+    }
+
+    if let Ok(inspected) = pdf_inspector::extract_pages_markdown_mem(&bytes, None) {
+        let total_pages = inspected.pages.len().max(1);
+        let non_ws: usize = inspected
+            .pages
+            .iter()
+            .map(|p| p.markdown.chars().filter(|c| !c.is_whitespace()).count())
+            .sum();
+        let has_content_ocr_reason = inspected.ocr_reasons_by_page.iter().any(|entry| {
+            entry
+                .reasons
+                .iter()
+                .any(|reason| reason != pdf_inspector::OCR_REASON_NO_TEXT)
+        });
+        let needs_ocr = has_content_ocr_reason || (!inspected.pages.is_empty() && non_ws < 40);
+        let start = req_start.min(total_pages);
+        let end = req_end.min(total_pages);
+        let pages = inspected
+            .pages
+            .into_iter()
+            .filter_map(|p| {
+                let page_num = (p.page as usize) + 1;
+                (page_num >= start && page_num <= end).then(|| PdfPageMarkdown {
+                    page: page_num,
+                    markdown: p.markdown.trim().to_owned(),
+                })
+            })
+            .collect();
+        return Ok(PdfReadResult {
+            path: norm_rel,
+            source: "pdf_inspector",
+            parse_tier: "fast_pdf",
+            markdown_cache: None,
+            total_pages,
+            start_page: start,
+            end_page: end,
+            needs_ocr,
+            pages,
+        });
+    }
+
+    let document = gpui_pdf::parse(Arc::new(bytes))
+        .map_err(|e| RagError::new("pdf_parse", format!("PDF 解析失败 ({rel_path}): {e:?}")))?;
+    let total_pages = document.pages().len().max(1);
+    let start = req_start.min(total_pages);
+    let end = req_end.min(total_pages);
+    let mut non_ws = 0usize;
+    let mut pages = Vec::new();
+    for idx in (start - 1)..end.min(document.pages().len()) {
+        let text = gpui_pdf::extract_page_text(&document, idx)
+            .map(|page| page.text())
+            .unwrap_or_default();
+        non_ws += text.chars().filter(|c| !c.is_whitespace()).count();
+        pages.push(PdfPageMarkdown {
+            page: idx + 1,
+            markdown: text.trim().to_owned(),
+        });
+    }
+    Ok(PdfReadResult {
+        path: norm_rel,
+        source: "pdf_inspector",
+        parse_tier: "fast_pdf",
+        markdown_cache: None,
+        total_pages,
+        start_page: start,
+        end_page: end,
+        needs_ocr: !document.pages().is_empty() && non_ws < 40,
+        pages,
+    })
 }
 
 fn normalize_anchor(s: &str) -> String {
@@ -499,9 +768,20 @@ struct PollJobResponse {
 struct PollJobData {
     state: String,
     #[serde(default)]
+    extract_progress: Option<PollExtractProgress>,
+    #[serde(default)]
     result_url: Option<PollResultUrl>,
     #[serde(default)]
     error_msg: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PollExtractProgress {
+    #[serde(default)]
+    total_pages: Option<usize>,
+    #[serde(default)]
+    extracted_pages: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -536,13 +816,38 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let hash = "deadbeef12345678";
-        parse_paddleocr_jsonl_to_cache(&jsonl, &cache_dir(dir.path(), hash)).unwrap();
+        let out_dir = cache_dir(dir.path(), hash);
+        parse_paddleocr_jsonl_to_cache(&jsonl, &out_dir).unwrap();
 
         let extracted = load_cached_pdf(dir.path(), "papers/opt.pdf", hash).unwrap();
         assert_eq!(extracted.parse_tier, "accurate");
         assert_eq!(extracted.chunks.len(), 2);
         assert_eq!(extracted.chunks[0].page_num, Some(1));
         assert_eq!(extracted.chunks[1].page_num, Some(2));
+
+        assert!(
+            parse_paddleocr_jsonl_to_cache_checked(&jsonl, Some(3), &cache_dir(dir.path(), "incomplete"))
+                .is_err()
+        );
+
+        let pdf_dir = dir.path().join("papers");
+        fs::create_dir_all(&pdf_dir).unwrap();
+        let dummy_pdf = b"%PDF-1.4\n% page1 page2";
+        fs::write(pdf_dir.join("opt.pdf"), dummy_pdf).unwrap();
+        let real_hash = sha256_hex(dummy_pdf);
+        parse_paddleocr_jsonl_to_cache_checked(&jsonl, Some(2), &cache_dir(dir.path(), &real_hash)).unwrap();
+
+        let exported_rel = export_pdf_markdown_to_sibling(dir.path(), "papers/opt.pdf", &real_hash).unwrap();
+        assert_eq!(exported_rel, "papers/opt_folio-parse.md");
+        let exported = fs::read_to_string(dir.path().join("papers/opt_folio-parse.md")).unwrap();
+        assert!(exported.contains("Gradient descent"));
+
+        let read_res = read_pdf_markdown(dir.path(), "papers/opt.pdf", Some(2), Some(2)).unwrap();
+        assert_eq!(read_res.source, "paddleocr_cache");
+        assert_eq!(read_res.total_pages, 2);
+        assert_eq!(read_res.pages.len(), 1);
+        assert_eq!(read_res.pages[0].page, 2);
+        assert!(read_res.pages[0].markdown.contains("KKT Conditions"));
     }
 
     #[test]
