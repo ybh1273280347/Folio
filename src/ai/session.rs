@@ -468,6 +468,7 @@ impl Session {
                         split_injected_prompt(&raw);
                     self.messages.push(ChatMessage::User {
                         display_text,
+                        timestamp_ms: msg.get("timestamp").and_then(Value::as_i64),
                         attached_file,
                         mounted_skills,
                         quotes,

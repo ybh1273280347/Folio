@@ -3,166 +3,176 @@
 use super::*;
 
 impl ChatPane {
-    pub(super) fn render_message_navigation(
+    pub(super) fn render_turn_navigation(
         &self,
-        anchors: &[MessageAnchor],
+        turns: &[TurnAnchor],
         palette: Palette,
+        typo: AiTypography,
+        ui_font: &SharedString,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let nav_hovered = self.nav_hovered;
-        let rail = div()
-            .id("ai-nav-rail")
-            .h_full()
-            .max_h(px(anchors.len() as f32 * 14.))
-            .w(px(26.))
-            .py_1()
-            .px_0p5()
-            .rounded(px(8.))
+        let top = self.scroll.top_item();
+        let active = turns.partition_point(|turn| turn.item <= top).saturating_sub(1);
+        let row_height = (typo.sm * 1.7).max(px(26.));
+        let row = div()
+            .id("ai-turn-navigation")
             .flex()
-            .flex_col()
-            .on_hover(cx.listener(|pane, hovered, _, cx| {
-                if pane.nav_hovered != *hovered {
-                    pane.nav_hovered = *hovered;
-                    if !hovered {
-                        pane.hovered_anchor = None;
-                    }
-                    cx.notify();
-                }
-            }))
-            .children(anchors.iter().enumerate().map(|(index, anchor)| {
-                let item = anchor.item;
-                let next = anchors.get(index + 1).map_or(usize::MAX, |next| next.item);
-                let user = anchor.user;
-                let is_hovered = self.hovered_anchor == Some(item);
-                let scroll = self.scroll.clone();
-                let preview = anchor.preview.clone();
-                let label = if user {
-                    crate::i18n::ai::YOUR_MESSAGE.get()
-                } else {
-                    crate::i18n::ai::AI_ANSWER_SOURCE.get()
-                };
-                let row = div()
-                    .id(("ai-message-anchor", item))
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .rounded(px(4.))
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .id("ai-turn-navigation-toggle")
+                    .w(px(26.))
+                    .h(px(64.))
+                    .max_h_full()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(8.))
+                    .bg(fg_alpha(palette.text, 0.05))
+                    .text_color(gpui_kit::rgb(palette.muted))
+                    .hover(|style| style.bg(gpui_kit::rgb(palette.hover)))
+                    .when(self.turn_navigation_open, |el| {
+                        el.bg(gpui_kit::rgb(palette.hover))
+                            .text_color(gpui_kit::rgb(palette.accent))
+                    })
                     .cursor_pointer()
-                    .on_hover(cx.listener(move |pane, hovered, _, cx| {
-                        let next_hover = if *hovered {
-                            Some(item)
-                        } else if pane.hovered_anchor == Some(item) {
-                            None
-                        } else {
-                            pane.hovered_anchor
-                        };
-                        if pane.hovered_anchor != next_hover {
-                            pane.hovered_anchor = next_hover;
-                            cx.notify();
-                        }
-                    }))
-                    .child(
-                        canvas(
-                            |_, _, _| (),
-                            move |bounds, (), window, _| {
-                                // Read during paint so wheel scrolling and scrollbar dragging both update the marker.
-                                let top = scroll.top_item();
-                                let active = (index == 0 || top >= item) && top < next;
-                                let width = if is_hovered { 16. } else { 14. };
-                                let color = if active {
-                                    fg_alpha(palette.accent, if is_hovered { 0.85 } else { 0.68 })
-                                } else if is_hovered {
-                                    fg_alpha(palette.text, 0.34)
-                                } else if user {
-                                    fg_alpha(palette.text, 0.16)
-                                } else {
-                                    fg_alpha(palette.text, 0.08)
-                                };
-                                let x = bounds.center().x - px(width / 2.);
-                                let y = bounds.center().y - px(1.25);
-                                window.paint_quad(
-                                    gpui::fill(
-                                        gpui::Bounds::new(point(x, y), size(px(width), px(2.5))),
-                                        color,
-                                    )
-                                    .corner_radii(px(1.5)),
-                                );
-                            },
-                        )
-                        .size_full(),
-                    )
-                    .tooltip(move |window, cx| {
-                        let preview = preview.clone();
-                        Tooltip::element(move |_, _| {
-                            div()
-                                .w(px(220.))
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(gpui_kit::rgb(palette.muted))
-                                        .child(label),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(gpui_kit::rgb(palette.text))
-                                        .child(preview.clone()),
-                                )
-                        })
-                        .p_2()
-                        .build(window, cx)
+                    .child(crate::ui::icon(IconName::List))
+                    .tooltip(|window, cx| {
+                        Tooltip::new(crate::i18n::ai::TURN_NAVIGATION.get()).build(window, cx)
                     })
                     .on_click(cx.listener(move |pane, _, _, cx| {
-                        pane.stick_to_bottom = false;
-                        pane.scroll.scroll_to_top_of_item(item);
+                        pane.turn_navigation_open = !pane.turn_navigation_open;
+                        if pane.turn_navigation_open {
+                            pane.turn_navigation_scroll.scroll_to_item(active);
+                        }
                         cx.notify();
-                    }));
-
-                row.with_animation(
-                    (
-                        "ai-nav-anchor-anim",
-                        ((item as u64) << 1) | u64::from(is_hovered),
-                    ),
-                    Animation::new(Duration::from_millis(120)).with_easing(ease_out_quint()),
-                    move |el, t| {
-                        let alpha = if is_hovered {
-                            0.05 * t
-                        } else {
-                            0.05 * (1. - t)
-                        };
-                        el.bg(fg_alpha(palette.text, alpha))
-                    },
-                )
-            }));
+                    })),
+            )
+            .when(self.turn_navigation_open, |row| {
+                row.w_full()
+                    .h_full()
+                    .max_w(px(374.))
+                    .max_h(row_height * turns.len().min(9) as f32 + typo.sm * 1.5 + px(16.))
+                    .on_mouse_down_out(cx.listener(|pane, _, _, cx| {
+                        pane.turn_navigation_open = false;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .relative()
+                            .h_full()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .p_1()
+                            .rounded(px(10.))
+                            .border_1()
+                            .border_color(subtle_border(palette.border))
+                            .bg(gpui_kit::rgb(palette.surface))
+                            .shadow(popover_shadow(palette.is_dark()))
+                            .font_family(ui_font.clone())
+                            .text_size(typo.sm)
+                            .occlude()
+                            .on_scroll(|_, _, cx| cx.stop_propagation())
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .px_2()
+                                    .py_0p5()
+                                    .line_height(relative(1.5))
+                                    .text_color(gpui_kit::rgb(palette.muted))
+                                    .child(format!(
+                                        "{} ({})",
+                                        crate::i18n::ai::TURN_NAVIGATION.get(),
+                                        turns.len(),
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .relative()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .child(
+                                        div()
+                                            .id("ai-turn-navigation-list")
+                                            .size_full()
+                                            .flex()
+                                            .flex_col()
+                                            .overflow_y_scroll()
+                                            .track_scroll(&self.turn_navigation_scroll)
+                                            .pr_2()
+                                            .children(turns.iter().enumerate().map(|(index, turn)| {
+                                                let item = turn.item;
+                                                let timestamp = turn.timestamp_ms
+                                                    .and_then(chrono::DateTime::from_timestamp_millis)
+                                                    .map(|time| {
+                                                        time.with_timezone(&chrono::Local)
+                                                            .format("%m-%d %H:%M")
+                                                            .to_string()
+                                                    })
+                                                    .unwrap_or_else(|| "—".into());
+                                                div()
+                                                    .id(("ai-turn-anchor", item))
+                                                    .h(row_height)
+                                                    .flex_shrink_0()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .px_2()
+                                                    .rounded(px(5.))
+                                                    .cursor_pointer()
+                                                    .text_color(gpui_kit::rgb(palette.text))
+                                                    .when(index == active, |el| {
+                                                        el.bg(fg_alpha(palette.accent, 0.12))
+                                                    })
+                                                    .hover(|style| style.bg(gpui_kit::rgb(palette.hover)))
+                                                    .child(
+                                                        div()
+                                                            .flex_shrink_0()
+                                                            .w(typo.sm * 6.8)
+                                                            .text_color(gpui_kit::rgb(palette.muted))
+                                                            .child(timestamp),
+                                                    )
+                                                    .child(div().min_w_0().flex_1().text_ellipsis()
+                                                        .child(turn.preview.clone()))
+                                                    .on_click(cx.listener(move |pane, _, _, cx| {
+                                                        pane.turn_navigation_open = false;
+                                                        pane.stick_to_bottom = false;
+                                                        pane.scroll.scroll_to_top_of_item(item);
+                                                        cx.notify();
+                                                    }))
+                                            })),
+                                    )
+                                    .child(
+                                        div().absolute().inset_0().child(
+                                            Scrollbar::vertical(&self.turn_navigation_scroll)
+                                                .mode(ScrollbarMode::Always)
+                                                .styles(move |styles| {
+                                                    styles.thumb(move |style| {
+                                                        style
+                                                            .width(px(4.))
+                                                            .radius(px(2.))
+                                                            .bg(fg_alpha(palette.text, 0.20))
+                                                    })
+                                                }),
+                                        ),
+                                    ),
+                            ),
+                    )
+            });
 
         div()
             .absolute()
             .left_1()
+            .right_3()
             .top_2()
             .bottom_2()
-            .w(px(28.))
             .flex()
             .items_center()
-            .child(rail.with_animation(
-                ("ai-nav-rail-anim", if nav_hovered { 1u64 } else { 0u64 }),
-                Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()),
-                move |el, t| {
-                    let opacity = if nav_hovered {
-                        0.72 + 0.28 * t
-                    } else {
-                        1.0 - 0.28 * t
-                    };
-                    let bg_alpha = if nav_hovered {
-                        0.03 * t
-                    } else {
-                        0.03 * (1. - t)
-                    };
-                    el.opacity(opacity).bg(fg_alpha(palette.text, bg_alpha))
-                },
-            ))
+            .child(row)
             .into_any_element()
     }
 

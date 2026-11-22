@@ -139,6 +139,8 @@ enum AssistantPart {
 enum ChatMessage {
     User {
         display_text: String,
+        // Pi stores user-message timestamps as Unix milliseconds.
+        timestamp_ms: Option<i64>,
         attached_file: Option<String>,
         mounted_skills: Vec<String>,
         quotes: Vec<SelectionQuote>,
@@ -156,10 +158,10 @@ enum ChatMessage {
     },
 }
 
-/// Navigation targets use immediate scroll-child indices; consecutive assistant messages share one row.
-struct MessageAnchor {
+/// Each turn starts at the user message's immediate transcript scroll-child index.
+struct TurnAnchor {
     item: usize,
-    user: bool,
+    timestamp_ms: Option<i64>,
     preview: String,
 }
 
@@ -242,8 +244,8 @@ struct ChatPane {
     toast: Option<(String, bool)>,
     toast_task: Task<()>,
     toast_anim_gen: u64,
-    nav_hovered: bool,
-    hovered_anchor: Option<usize>,
+    turn_navigation_open: bool,
+    turn_navigation_scroll: ScrollHandle,
     model_popover_open: bool,
     model_popover_anim_gen: u64,
     model_search_input: Entity<InputState>,
@@ -293,13 +295,17 @@ impl ChatPane {
         });
         let quote_view = cx.entity().downgrade();
         let quote_window = window.window_handle();
-        let sub_quote_escape = cx.intercept_keystrokes(move |event, window, cx| {
+        let sub_popover_escape = cx.intercept_keystrokes(move |event, window, cx| {
             if window.window_handle() == quote_window
                 && event.keystroke.key == "escape"
                 && event.keystroke.modifiers.number_of_modifiers() == 0
             {
                 let _ = quote_view.update(cx, |pane, cx| {
-                    if pane.quote_popover.is_some() {
+                    if pane.turn_navigation_open {
+                        pane.turn_navigation_open = false;
+                        cx.notify();
+                        cx.stop_propagation();
+                    } else if pane.quote_popover.is_some() {
                         pane.dismiss_quote(cx);
                         cx.stop_propagation();
                     }
@@ -382,8 +388,8 @@ impl ChatPane {
             toast: None,
             toast_task: Task::ready(()),
             toast_anim_gen: 0,
-            nav_hovered: false,
-            hovered_anchor: None,
+            turn_navigation_open: false,
+            turn_navigation_scroll: ScrollHandle::new(),
             model_popover_open: false,
             model_popover_anim_gen: 0,
             model_search_input,
@@ -413,7 +419,7 @@ impl ChatPane {
                 sub_ext,
                 sub_math,
                 sub_mermaid,
-                sub_quote_escape,
+                sub_popover_escape,
             ],
         };
         pane
@@ -1029,6 +1035,7 @@ impl ChatPane {
 
         let message = ChatMessage::User {
             display_text: body_trimmed.to_owned(),
+            timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
             attached_file: attached.map(|f| f.display),
             mounted_skills: skills,
             quotes,
@@ -1273,6 +1280,7 @@ impl Render for ChatPane {
                             match &self.session.borrow().messages[msg_idx] {
                                 ChatMessage::User {
                                     display_text,
+                                    timestamp_ms,
                                     attached_file,
                                     mounted_skills,
                                     quotes,
@@ -1285,8 +1293,13 @@ impl Render for ChatPane {
                                     } else {
                                         attached_file.as_deref().unwrap_or(crate::i18n::ai::IMAGE_MESSAGE.get())
                                     };
-                                    navigation.push(MessageAnchor { item, user: true,
-                                        preview: text.chars().take(160).collect() });
+                                    let preview = text.lines().map(str::trim)
+                                        .find(|line| !line.is_empty()).unwrap_or_default();
+                                    navigation.push(TurnAnchor {
+                                        item,
+                                        timestamp_ms: *timestamp_ms,
+                                        preview: preview.chars().take(160).collect(),
+                                    });
                                     rendered_messages.push(
                                         div()
                                 .w_full()
@@ -1464,21 +1477,6 @@ impl Render for ChatPane {
                                     ) {
                                         run_end += 1;
                                     }
-                                    // Preview only visible prose; thinking and tool logs stay out of navigation cards.
-                                    let preview: String = self.session.borrow().messages[run_start..run_end].iter()
-                                        .flat_map(|message| match message {
-                                            ChatMessage::Assistant { parts, .. } => parts.as_slice(),
-                                            _ => &[],
-                                        })
-                                        .filter_map(|part| match part {
-                                            AssistantPart::Text(text) => Some(text.as_str()),
-                                            _ => None,
-                                        })
-                                        .flat_map(str::chars)
-                                        .take(160)
-                                        .collect();
-                                    navigation.push(MessageAnchor { item, user: false,
-                                        preview: if preview.trim().is_empty() { crate::i18n::ai::THINKING_AND_TOOLS.get().into() } else { preview } });
                                     rendered_messages.push(self.render_assistant_run(
                                         run_start,
                                         run_end,
@@ -1557,7 +1555,9 @@ impl Render for ChatPane {
                                     }),
                             ),
                     )
-                    .child(self.render_message_navigation(&navigation, palette, cx))
+                    .when(!navigation.is_empty(), |container| {
+                        container.child(self.render_turn_navigation(&navigation, palette, typo, &ui_font, cx))
+                    })
                     .when(
                         {
                             let max_y = f32::from(self.scroll.max_offset().y);
