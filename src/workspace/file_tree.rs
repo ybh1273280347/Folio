@@ -60,6 +60,7 @@ pub(super) struct FileTree {
     collapsed_folders: BTreeSet<String>,
     folder_folds: BTreeMap<String, FolderFold>,
     dragged_folder: Rc<RefCell<Option<String>>>,
+    drop_hover: Rc<RefCell<Option<(String, Instant)>>>,
     folder_landing: Option<(String, Instant)>,
     focused_folder: Option<String>,
     focused_file: Option<String>,
@@ -102,6 +103,7 @@ impl FileTree {
             collapsed_folders: BTreeSet::new(),
             folder_folds: BTreeMap::new(),
             dragged_folder: Rc::default(),
+            drop_hover: Rc::default(),
             folder_landing: None,
             focused_folder: None,
             focused_file: None,
@@ -473,6 +475,74 @@ impl Workspace {
         self.tree.file_tree_focus.focus(window, cx);
         cx.notify();
         Ok(())
+    }
+
+    /// A row's drop destination is the folder it represents or the parent of its file.
+    fn tree_drop_target(
+        &self,
+        row: Stateful<Div>,
+        path: &str,
+        is_file: bool,
+        palette: crate::theme::Palette,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        use crate::terminal::{DraggedFolder, DraggedPaths};
+
+        let destination = if is_file {
+            path.rsplit_once('/').map_or("", |(parent, _)| parent)
+        } else {
+            path
+        };
+        let drop_files = destination.to_owned();
+        let drop_folder = drop_files.clone();
+        let folder_hover = drop_files.clone();
+        let project = self.projects.directory().expect("drop row has project").id.clone();
+        let folder_project = project.clone();
+        let hover = self.tree.drop_hover.clone();
+        let path = path.to_owned();
+        let style_target = move |style: StyleRefinement, window: &mut Window, cx: &mut App| {
+            let accent = gpui_kit::rgb(palette.accent);
+            if path.is_empty() {
+                return style.bg(accent.opacity(0.12));
+            }
+
+            let mut hover = hover.borrow_mut();
+            // Both layout and paint can query GPUI's drag-over style in one frame.
+            // Keep the transition keyed to the hovered row across those calls.
+            let now = Instant::now();
+            if hover.as_ref().is_none_or(|(row, _)| row != &path) {
+                *hover = Some((path.clone(), now));
+            }
+            let started = hover.as_ref().expect("hover started").1;
+            let progress = (now.duration_since(started).as_secs_f32() / 0.10).min(1.);
+            let strength = if cx.reduce_motion() { 1. } else { 1. - (1. - progress).powi(2) };
+            if strength < 1. {
+                window.request_animation_frame();
+            }
+            style.rounded(px(5.)).bg(accent.opacity(0.08 + 0.10 * strength))
+                .shadow(vec![BoxShadow::new(
+                    px(0.),
+                    px(2. * strength),
+                    hsla(0., 0., 0., 0.22 * strength),
+                ).blur_radius(px(6.))])
+        };
+        let folder_style = style_target.clone();
+        row.drag_over::<DraggedPaths>(move |style, dragged, window, cx| {
+            if dragged.1.as_deref() == Some(project.as_str()) { style_target(style, window, cx) } else { style }
+        })
+        .drag_over::<DraggedFolder>(move |style, dragged, window, cx| {
+            if dragged.1 == folder_project && !Path::new(&folder_hover).starts_with(&dragged.0) {
+                folder_style(style, window, cx)
+            } else {
+                style
+            }
+        })
+        .on_drop(cx.listener(move |app, dragged: &DraggedPaths, window, cx| {
+            if let Err(error) = app.move_tree_files(dragged, &drop_files, window, cx) { app.report(error, cx); }
+        }))
+        .on_drop(cx.listener(move |app, dragged: &DraggedFolder, window, cx| {
+            if let Err(error) = app.move_tree_folder(dragged, &drop_folder, window, cx) { app.report(error, cx); }
+        }))
     }
 
     fn relocate_folder_state(&mut self, old: &str, renamed: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1179,6 +1249,10 @@ impl Workspace {
             self.tree.dragging_tree_item.store(false, Ordering::Relaxed);
             self.tree.dragged_folder.borrow_mut().take();
         }
+        self.tree.drop_hover.borrow_mut().take_if(|(row, _)| {
+            !cx.has_active_drag() || !self.tree.tree_row_bounds.lock().expect("tree bounds")
+                .get(row).is_some_and(|(_, bounds)| bounds.contains(&window.mouse_position()))
+        });
         let lifted_folder = self.tree.dragged_folder.borrow().clone();
         let now = Instant::now();
         let mut folds = BTreeMap::new();
@@ -1362,7 +1436,6 @@ impl Workspace {
             })
             .peekable();
         let drag_palette = crate::theme::palette();
-        let drop_fill = gpui_kit::rgb(drag_palette.accent).opacity(0.18);
         let build_row = |path: &String, folder: &bool, interactive: bool| {
                 let row_path = path.clone();
                 let is_file = !*folder && self.projects.directory().is_some();
@@ -1389,7 +1462,7 @@ impl Workspace {
                     let preview_font_size = self.settings.interface_font_size;
                     let trash_bounds = self.tree.trash_bounds.clone();
                     let dragging = self.tree.dragging_tree_item.clone();
-                    let folder_bounds = self.tree.tree_row_bounds.clone();
+                    let row_bounds = self.tree.tree_row_bounds.clone();
                     let close_id = SharedString::from(format!("close-default-file-{key}"));
                     let name = Path::new(path)
                         .file_name()
@@ -1400,7 +1473,7 @@ impl Workspace {
                         .id(SharedString::from(format!("default-file-{key}")))
                         .on_drag(crate::terminal::DraggedPaths(vec![full], None), move |paths, offset, _, cx| {
                             dragging.store(true, Ordering::Relaxed);
-                            cx.new(|_| crate::terminal::PathsPreview { paths: paths.0.clone(), offset, font: preview_font.clone(), font_size: preview_font_size, palette: drag_palette, trash_bounds: trash_bounds.clone(), source_folder: None, can_trash: false, folder_bounds: folder_bounds.clone() })
+                            cx.new(|_| crate::terminal::PathsPreview { paths: paths.0.clone(), offset, font: preview_font.clone(), font_size: preview_font_size, palette: drag_palette, trash_bounds: trash_bounds.clone(), source_folder: None, can_trash: false, row_bounds: row_bounds.clone() })
                         })
                         .flex()
                         .items_center()
@@ -1473,35 +1546,15 @@ impl Workspace {
                     let trash_bounds = self.tree.trash_bounds.clone();
                     let dragging = self.tree.dragging_tree_item.clone();
                     let dragged_folder = self.tree.dragged_folder.clone();
-                    let drop_folder = path.clone();
-                    let folder_bounds = self.tree.tree_row_bounds.clone();
-                    let drop_project = self.projects.directory().expect("folder has project").id.clone();
-                    let folder_project = drop_project.clone();
-                    let folder_target = path.clone();
-                    let folder_highlight = path.clone();
+                    let row_bounds = self.tree.tree_row_bounds.clone();
                     return div()
                         .id(SharedString::from(format!("folder-{path}")))
                         .on_drag(folder_drag, move |dragged, offset, _, cx| {
                             dragging.store(true, Ordering::Relaxed);
                             dragged_folder.replace(Some(dragged.0.clone()));
-                            cx.new(|_| crate::terminal::PathsPreview { paths: vec![dragged.2.clone()], offset, font: folder_font.clone(), font_size: folder_font_size, palette: drag_palette, trash_bounds: trash_bounds.clone(), source_folder: Some(dragged.0.clone()), can_trash: true, folder_bounds: folder_bounds.clone() })
+                            cx.new(|_| crate::terminal::PathsPreview { paths: vec![dragged.2.clone()], offset, font: folder_font.clone(), font_size: folder_font_size, palette: drag_palette, trash_bounds: trash_bounds.clone(), source_folder: Some(dragged.0.clone()), can_trash: true, row_bounds: row_bounds.clone() })
                         })
-                        .drag_over::<crate::terminal::DraggedPaths>(move |style, dragged, _, _| {
-                            if dragged.1.as_deref() == Some(drop_project.as_str()) { style.bg(rgb(0xdde9f6)) } else { style }
-                        })
-                        .on_drop(cx.listener(move |app, dragged: &crate::terminal::DraggedPaths, window, cx| {
-                            cx.stop_propagation();
-                            if let Err(error) = app.move_tree_files(dragged, &drop_folder, window, cx) { app.report(error, cx); }
-                        }))
-                        .drag_over::<crate::terminal::DraggedFolder>(move |style, dragged, _, _| {
-                            if dragged.1 == folder_project && !Path::new(&folder_highlight).starts_with(&dragged.0) {
-                                style.bg(drop_fill)
-                            } else { style }
-                        })
-                        .on_drop(cx.listener(move |app, dragged: &crate::terminal::DraggedFolder, window, cx| {
-                            cx.stop_propagation();
-                            if let Err(error) = app.move_tree_folder(dragged, &folder_target, window, cx) { app.report(error, cx); }
-                        }))
+                        .when(interactive, |row| self.tree_drop_target(row, path, false, drag_palette, cx))
                         .relative()
                         .flex()
                         .h(px(PROJECT_ROW_HEIGHT))
@@ -1697,13 +1750,14 @@ impl Workspace {
                 let drag_project = self.projects.directory().expect("file has project").id.clone();
                 let trash_bounds = self.tree.trash_bounds.clone();
                 let dragging = self.tree.dragging_tree_item.clone();
-                let folder_bounds = self.tree.tree_row_bounds.clone();
+                let row_bounds = self.tree.tree_row_bounds.clone();
                 div()
                     .id(SharedString::from(format!("file-{}", file.path)))
                     .on_drag(crate::terminal::DraggedPaths(dragged_paths, Some(drag_project)), move |paths, offset, _, cx| {
                         dragging.store(true, Ordering::Relaxed);
-                        cx.new(|_| crate::terminal::PathsPreview { paths: paths.0.clone(), offset, font: preview_font.clone(), font_size: preview_font_size, palette: drag_palette, trash_bounds: trash_bounds.clone(), source_folder: None, can_trash: true, folder_bounds: folder_bounds.clone() })
+                        cx.new(|_| crate::terminal::PathsPreview { paths: paths.0.clone(), offset, font: preview_font.clone(), font_size: preview_font_size, palette: drag_palette, trash_bounds: trash_bounds.clone(), source_folder: None, can_trash: true, row_bounds: row_bounds.clone() })
                     })
+                    .when(interactive, |row| self.tree_drop_target(row, path, true, drag_palette, cx))
                     .flex()
                     .items_center()
                     .h(px(PROJECT_ROW_HEIGHT))
@@ -2236,20 +2290,13 @@ impl Workspace {
                     }))
                     .when(no_tag_results, |tree| tree.child(div().px_3().py_2().text_xs().text_color(rgb(MUTED)).child(crate::i18n::workspace::NO_MATCHING_FILES.get())))
                     .children(tree_rows)
-                    .when_some(self.projects.directory(), |tree, project| {
-                        let project_id = project.id.clone();
-                        let folder_project = project.id.clone();
+                    .when(self.projects.directory().is_some(), |tree| {
                         let bounds = self.tree.tree_row_bounds.clone();
                         let paste_root_app = cx.entity();
                         // Empty space belongs to the root; folder rows retain their own drop targets.
-                        tree.child(div().id("project-root-drop").relative()
+                        let root_target = self.tree_drop_target(div().id("project-root-drop"), "", false, drag_palette, cx);
+                        tree.child(root_target.relative()
                             .flex_grow(1.).h(px(48.)).flex_shrink_0()
-                            .drag_over::<crate::terminal::DraggedPaths>(move |style, dragged, _, _| {
-                                if dragged.1.as_deref() == Some(project_id.as_str()) { style.bg(rgb(0xdde9f6)) } else { style }
-                            })
-                            .drag_over::<crate::terminal::DraggedFolder>(move |style, dragged, _, _| {
-                                if dragged.1 == folder_project { style.bg(drop_fill) } else { style }
-                            })
                             .child(canvas(move |area, _, _| {
                                 bounds.lock().expect("tree bounds").insert(String::new(), (false, area));
                             }, |_, _, _, _| {}).absolute().top_0().left_0().size_full())
@@ -2259,14 +2306,6 @@ impl Workspace {
                                 app.tree.focused_file = None;
                                 app.tree.file_tree_focus.focus(window, cx);
                                 cx.notify();
-                            }))
-                            .on_drop(cx.listener(|app, dragged: &crate::terminal::DraggedPaths, window, cx| {
-                                cx.stop_propagation();
-                                if let Err(error) = app.move_tree_files(dragged, "", window, cx) { app.report(error, cx); }
-                            }))
-                            .on_drop(cx.listener(|app, dragged: &crate::terminal::DraggedFolder, window, cx| {
-                                cx.stop_propagation();
-                                if let Err(error) = app.move_tree_folder(dragged, "", window, cx) { app.report(error, cx); }
                             }))
                             .context_menu(move |menu, _, _| {
                                 let app = paste_root_app.clone();

@@ -71,7 +71,7 @@ pub struct PathsPreview {
     pub trash_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     pub source_folder: Option<String>,
     pub can_trash: bool,
-    pub folder_bounds: Arc<Mutex<BTreeMap<String, (bool, Bounds<Pixels>)>>>,
+    pub row_bounds: Arc<Mutex<BTreeMap<String, (bool, Bounds<Pixels>)>>>,
 }
 
 impl Render for PathsPreview {
@@ -83,10 +83,13 @@ impl Render for PathsPreview {
         let mouse = window.mouse_position();
         let over_trash = self.trash_bounds.lock().expect("trash bounds")
             .is_some_and(|bounds| bounds.contains(&mouse));
-        let folders = self.folder_bounds.lock().expect("tree bounds");
-        let target = folders.iter()
-            .find(|(_, (is_file, bounds))| !is_file && bounds.contains(&mouse))
-            .map(|(path, _)| path.as_str());
+        let rows = self.row_bounds.lock().expect("tree bounds");
+        let target = rows.iter()
+            .find(|(_, (_, bounds))| bounds.contains(&mouse))
+            .map(|(path, (is_file, _))| {
+                // File rows receive drops on behalf of their parent directory.
+                if *is_file { path.rsplit_once('/').map_or("", |(parent, _)| parent) } else { path.as_str() }
+            });
         let invalid_folder = self.source_folder.as_ref().is_some_and(|source| {
             target.is_some_and(|target| Path::new(target).starts_with(source))
         });
@@ -116,30 +119,28 @@ impl Render for PathsPreview {
         } else {
             crate::ui::file_icon(&name, false, false)
         };
-        // GPUI anchors the drag view at the original grab offset. Adding it
-        // back keeps the chip a fixed distance from the pointer.
-        div().pl(self.offset.x + px(10.)).pt(self.offset.y + px(9.))
-            .child(div().relative().flex().items_center().gap(px(6.)).h(px(28.))
-                .px_2().max_w(px(300.)).rounded(px(7.))
+        // GPUI subtracts the original grab offset. A relative translation cancels
+        // it without adding layout padding, even when the first move overshoots the row.
+        div().child(div().relative().left(self.offset.x + px(7.)).top(self.offset.y + px(6.))
+            .flex().flex_col().items_start().gap(px(3.))
+            .font_family(self.font.clone()).text_size(px(f32::from(self.font_size).clamp(11., 13.)))
+            .child(div().flex().items_center().gap(px(5.)).h(px(24.))
+                .px_2().max_w(px(240.)).rounded(px(5.))
                 .border_1().border_color(rgb(palette.border))
                 .bg(rgb(palette.surface)).text_color(rgb(palette.text))
-                .font_family(self.font.clone()).text_size(px(f32::from(self.font_size).clamp(11., 14.)))
-                .shadow_md()
+                .shadow(vec![BoxShadow::new(px(0.), px(2.), hsla(0., 0., 0., 0.14)).blur_radius(px(6.))])
                 .child(div().flex_shrink_0().child(icon))
                 .child(div().min_w_0().text_ellipsis().child(name))
                 .when(count > 1, |chip| chip.child(div()
                     .flex_shrink_0().rounded(px(4.)).px_1()
                     .bg(rgb(palette.selection)).text_color(rgb(palette.muted))
-                    .child(count.to_string())))
-                .when_some(hint, |chip, hint| chip.child(div()
-                    .min_w_0().max_w(px(118.)).text_ellipsis()
+                    .child(count.to_string()))))
+            // Keep the filename chip the same size as the destination changes.
+            .when_some(hint, |preview, hint| preview.child(div()
+                    .max_w(px(160.)).text_ellipsis().px_2().rounded(px(4.))
+                    .bg(rgb(palette.surface))
                     .text_color(rgb(if invalid { palette.danger } else { palette.accent }))
-                    .child(hint)))
-                .with_animation(
-                    "tree-drag-lift",
-                    Animation::new(Duration::from_millis(135)).with_easing(ease_out_quint()),
-                    |chip, t| chip.top(px(4. * (1. - t))).opacity(0.55 + 0.45 * t),
-                ))
+                    .child(hint))))
     }
 }
 
