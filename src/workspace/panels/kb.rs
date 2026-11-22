@@ -534,6 +534,10 @@ impl Workspace {
                     ),
             )
             .when(keyword_only, |row| {
+                let tip = kb
+                    .degraded_reason
+                    .clone()
+                    .unwrap_or_else(|| rp::KB_KEYWORD_ONLY_TIP.get().to_owned());
                 row.child(
                     Button::new("kb-semantic-settings")
                         .ghost()
@@ -543,7 +547,7 @@ impl Workspace {
                         .text_size(px(11.))
                         .icon(crate::ui::icon(IconName::ShieldAlert).w(px(11.)).h(px(11.)))
                         .label(rp::KB_KEYWORD_ONLY.get())
-                        .tooltip(rp::KB_KEYWORD_ONLY_TIP.get())
+                        .tooltip(tip)
                         .on_click(cx.listener(|app, _, window, cx| {
                             app.open_kb_api_settings(window, cx);
                         })),
