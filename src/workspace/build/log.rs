@@ -1,8 +1,8 @@
-//! Read-only build output, independent of interactive terminal sessions.
+//! Read-only foreground build output with selection and clipboard copy.
 use crate::theme::color as rgb;
 use gpui_kit::{assets::IconName, component::text::TextView, *};
 
-pub fn panel(
+pub(super) fn panel(
     logs: String,
     close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {

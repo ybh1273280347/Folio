@@ -1,5 +1,7 @@
 //! Foreground build jobs, batch sequencing, logs and the published PDF preview.
 
+mod log;
+
 use crate::{build::{BuildResult, BuildStatus, compiler}, markdown::MarkdownPane, pdf::PdfPane};
 use gpui_kit::{
     AnyElement, App, Context, Entity, IntoElement, ParentElement,
@@ -380,10 +382,10 @@ impl Workspace {
     }
 
     pub(super) fn render_build_log(&self, cx: &mut Context<Self>) -> AnyElement {
-        crate::build_log::panel(self.build.logs.clone(), cx.listener(|app, _, _, cx| {
+        log::panel(self.build.logs.clone(), cx.listener(|app, _, _, cx| {
             app.build.panels.logs = false;
             cx.notify();
-        })).into_any_element()
+        }))
     }
 
     pub(super) fn publish_build_preview(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {

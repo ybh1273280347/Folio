@@ -2,7 +2,68 @@
 
 use super::*;
 
+/// Holds the decoded workspace backdrop and the task for the selected image.
+#[derive(Default)]
+pub(super) struct Backdrop {
+    image: Option<Arc<RenderImage>>,
+    load: Option<Task<()>>,
+}
+
+impl Backdrop {
+    pub(super) fn image(&self) -> Option<&Arc<RenderImage>> {
+        self.image.as_ref()
+    }
+}
+
 impl Workspace {
+    pub(super) fn load_background_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Dropping the retained task prevents an older selection from publishing after replacement.
+        self.backdrop.load = None;
+        if self.backdrop.image.is_some() {
+            self.set_background_image(None, window, cx);
+        }
+        self.preferences.update(cx, |panel, cx| panel.set_background_image_error(None, cx));
+        let Some(path) = self.settings.background_image.clone() else {
+            return;
+        };
+        let load = ImageAssetLoader::load(path.into(), cx);
+        let load = cx.background_executor().spawn(load);
+        self.backdrop.load = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = load.await;
+            let _ = this.update_in(cx, |app, window, cx| match result {
+                Ok(image) => app.set_background_image(Some(image), window, cx),
+                Err(error) => app.preferences.update(cx, |panel, cx| {
+                    panel.set_background_image_error(
+                        Some(crate::i18n::workspace::err_read_background_image(&error)),
+                        cx,
+                    );
+                }),
+            });
+        }));
+    }
+
+    pub(super) fn has_visible_background(&self) -> bool {
+        self.backdrop.image.is_some() && self.settings.background_image_opacity > 0
+    }
+
+    fn sync_backdrop_visible(&self, cx: &mut Context<Self>) {
+        self.documents.set_backdrop_visible(self.has_visible_background(), cx);
+    }
+
+    fn set_background_image(
+        &mut self,
+        image: Option<Arc<RenderImage>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(previous) = std::mem::replace(&mut self.backdrop.image, image) {
+            cx.drop_image(previous, Some(window));
+        }
+        // Document surfaces follow the decoded image only when its opacity is non-zero.
+        self.sync_backdrop_visible(cx);
+        cx.notify();
+    }
+
     pub(super) fn persist_settings(&mut self, cx: &mut Context<Self>) {
         let mut settings = self.settings.clone();
         if let Some(snapshot) = &self.zen_snapshot {
@@ -69,9 +130,7 @@ impl Workspace {
         }
         if locale_changed {
             crate::i18n::apply_settings(settings);
-            self.right_panel_search.update(cx, |input, cx| {
-                input.set_placeholder(crate::i18n::workspace::SEARCH_HUB_PLACEHOLDER.get(), window, cx);
-            });
+            self.right_panel.refresh_locale(window, cx);
             self.tags.refresh_locale(window, cx);
             self.preferences.update(cx, |pane, cx| pane.refresh_locale(window, cx));
             self.ai.update(cx, |pane, cx| pane.refresh_locale(window, cx));

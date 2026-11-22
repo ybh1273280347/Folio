@@ -316,7 +316,7 @@ impl Workspace {
     pub(super) fn switch_project(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let retry_id = id.to_owned();
         if self.build.is_busy()
-            || !self.confirm_drafts(window, cx, move |app, window, cx| {
+            || !self.confirm_drafts(cx, move |app, window, cx| {
                 app.switch_project(&retry_id, window, cx)
             })
         {
@@ -331,7 +331,7 @@ impl Workspace {
             return;
         }
         if self.build.is_busy()
-            || !self.confirm_drafts(window, cx, |app, window, cx| {
+            || !self.confirm_drafts(cx, |app, window, cx| {
                 app.switch_to_default(window, cx)
             })
         {
@@ -359,7 +359,7 @@ impl Workspace {
     }
     pub(super) fn add_project(&mut self, _: &OpenProject, window: &mut Window, cx: &mut Context<Self>) {
         if self.build.is_busy()
-            || !self.confirm_drafts(window, cx, |app, window, cx| {
+            || !self.confirm_drafts(cx, |app, window, cx| {
                 app.add_project(&OpenProject, window, cx)
             })
         {
@@ -368,11 +368,11 @@ impl Workspace {
         let dialog = rfd::AsyncFileDialog::new()
             .set_parent(window)
             .set_title(crate::i18n::workspace::DIALOG_SELECT_PROJECT_FOLDER.get());
-        self.dialog_open = true;
+        self.dialogs.set_native_open(true);
         cx.spawn_in(window, async move |this, cx| {
             let folder = dialog.pick_folder().await;
             let _ = this.update_in(cx, |app, window, cx| {
-                app.dialog_open = false;
+                app.dialogs.set_native_open(false);
                 if let Some(folder) = folder {
                     app.add_folder(folder.path(), window, cx);
                 }
@@ -391,11 +391,11 @@ impl Workspace {
                     "pdf", "md", "tex", "ltx", "bib", "sty", "cls", "html", "htm", "drawio",
                 ],
             );
-        self.dialog_open = true;
+        self.dialogs.set_native_open(true);
         cx.spawn_in(window, async move |this, cx| {
             let selected = dialog.pick_file().await;
             let _ = this.update_in(cx, |app, window, cx| {
-                app.dialog_open = false;
+                app.dialogs.set_native_open(false);
                 if let Some(file) = selected
                     && let Err(error) = app.open_path(file.path(), window, cx)
                 {
@@ -469,7 +469,7 @@ impl Workspace {
         }
         if !default_space_files.is_empty() {
             let retry_paths = default_space_files.clone();
-            if !self.confirm_drafts(window, cx, move |app, window, cx| app.open_paths(retry_paths.clone(), window, cx)) {
+            if !self.confirm_drafts(cx, move |app, window, cx| app.open_paths(retry_paths.clone(), window, cx)) {
                 return;
             }
             if let Err(error) = self.select_project("__folio_default", window, cx) {
@@ -487,7 +487,7 @@ impl Workspace {
         }
         if self.projects.directory().is_some() {
             let retry_paths = default_files.clone();
-            if !self.confirm_drafts(window, cx, move |app, window, cx| {
+            if !self.confirm_drafts(cx, move |app, window, cx| {
                 app.open_paths(retry_paths.clone(), window, cx);
             }) {
                 return;
@@ -518,13 +518,10 @@ impl Workspace {
 
     pub(super) fn remove_project(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let retry_id = id.to_owned();
-        let removing = self
-            .dialog_response
-            .as_ref()
-            .is_some_and(|(kind, _)| *kind == Dialog::RemoveProject);
+        let removing = self.dialogs.has_response(Dialog::RemoveProject);
         if self.build.is_busy()
             || (!removing
-                && !self.confirm_drafts(window, cx, move |app, window, cx| {
+                && !self.confirm_drafts(cx, move |app, window, cx| {
                     app.remove_project(&retry_id, window, cx)
                 }))
         {
@@ -536,7 +533,6 @@ impl Workspace {
             crate::i18n::workspace::DIALOG_REMOVE_PROJECT_TITLE.get().into(),
             crate::i18n::workspace::DIALOG_REMOVE_PROJECT_BODY.get().into(),
             DialogButtons::Confirm(crate::i18n::workspace::DIALOG_REMOVE_PROJECT_CONFIRM.get().into()),
-            window,
             cx,
             move |app, window, cx| app.remove_project(&retry_id, window, cx),
         ) != Some(rfd::MessageDialogResult::Ok)

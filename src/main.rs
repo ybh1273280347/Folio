@@ -4,7 +4,6 @@
 mod ai;
 mod annotations;
 mod build;
-mod build_log;
 mod drawio;
 mod files;
 mod image;
@@ -17,7 +16,6 @@ mod mermaid;
 mod model;
 mod pdf;
 mod preferences;
-mod right_panel;
 mod storage;
 mod svg;
 mod tags;

@@ -1,4 +1,4 @@
-//! Antigravity-inspired right-side feature hub and smooth slide-in/out drawer helpers.
+//! Feature hub actions, filtering and rendering.
 use crate::i18n::right_panel as rp;
 use crate::theme::Palette;
 use gpui_kit::{
