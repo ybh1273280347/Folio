@@ -292,7 +292,7 @@ impl Workspace {
     }
 
     fn html_root_dir(&self, full: &Path) -> PathBuf {
-        self.directory_workspace()
+        self.projects.directory()
             .map(|project| PathBuf::from(&project.folder))
             .unwrap_or_else(|| {
                 full.parent()
@@ -421,7 +421,7 @@ impl Workspace {
     }
 
     pub(super) fn document_path(&self, key: &str) -> PathBuf {
-        self.directory_workspace()
+        self.projects.directory()
             .map(|project| PathBuf::from(&project.folder).join(key))
             .unwrap_or_else(|| PathBuf::from(key))
     }
@@ -621,9 +621,9 @@ impl Workspace {
             );
         }
         if kind == FileKind::Text && !self.documents.open.contains_key(path) {
-            let disk = if self.directory_workspace().is_some() {
+            let disk = if self.projects.directory().is_some() {
                 files::read_document(
-                    Path::new(&self.directory_workspace().expect("project was checked").folder),
+                    Path::new(&self.projects.directory().expect("project was checked").folder),
                     path,
                 )?
             } else {
@@ -745,7 +745,7 @@ impl Workspace {
         overwrite: bool,
         cx: &mut Context<Self>,
     ) -> io::Result<bool> {
-        let root = self.directory_workspace().map(|project| PathBuf::from(&project.folder));
+        let root = self.projects.directory().map(|project| PathBuf::from(&project.folder));
         let document = self.documents.open
             .get_mut(path)
             .expect("save only opened text files");
@@ -882,7 +882,7 @@ impl Workspace {
         if focus_editor {
             self.focus_document_tab(path, window, cx);
         } else {
-            self.file_tree_focus.focus(window, cx);
+            self.tree.focus(window, cx);
         }
         if let Err(error) = self.remember_session() {
             self.report(error, cx);
@@ -963,7 +963,7 @@ impl Workspace {
         cx.notify();
     }
     pub(super) fn reload_disk(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let disk = if let Some(project) = self.directory_workspace() {
+        let disk = if let Some(project) = self.projects.directory() {
             files::read_document(Path::new(&project.folder), path)
         } else {
             files::read_document_at(&self.documents.open[path].path)
@@ -1000,20 +1000,12 @@ impl Workspace {
         .detach();
     }
     pub(super) fn refresh_files(&mut self, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
-        let root = self.directory_workspace().map(|project| PathBuf::from(&project.folder));
-        let previous: BTreeSet<_> = self.files.iter().map(|file| file.path.clone()).collect();
+        let root = self.projects.directory().map(|project| PathBuf::from(&project.folder));
+        let previous: BTreeSet<_> = self.tree.files().iter().map(|file| file.path.clone()).collect();
         let refresh_tree = self.documents.document_watch.paths.is_empty() || self.documents.document_watch.tree;
         if let Some(root) = &root {
             if refresh_tree {
-                self.files = files::list_files(root)?;
-                self.folders = files::list_folders(root).unwrap_or_default();
-                if self
-                    .focused_folder
-                    .as_ref()
-                    .is_some_and(|folder| !self.folders.contains(folder))
-                {
-                    self.focused_folder = None;
-                }
+                self.tree.reload_watched_listing(root)?;
             }
         }
         if refresh_tree || self.documents.document_watch.paths.iter().any(|path| {
@@ -1026,7 +1018,7 @@ impl Workspace {
         }
         let changed = std::mem::take(&mut self.documents.document_watch.paths);
         self.queue_math_preload(
-            self.files
+            self.tree.files()
                 .iter()
                 .filter(|file| {
                     file.path.to_lowercase().ends_with(".md")
@@ -1151,7 +1143,7 @@ impl Workspace {
                             | notify::EventKind::Remove(_)
                             | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
                     );
-                    let root = self.directory_workspace().map(|project| PathBuf::from(&project.folder));
+                    let root = self.projects.directory().map(|project| PathBuf::from(&project.folder));
                     let paths: Vec<_> = event
                         .paths
                         .into_iter()
@@ -1164,7 +1156,7 @@ impl Workspace {
                                             .any(|name| part.as_os_str() == *name)
                                     })
                                     && (directory_event || path.is_dir() || files::is_relevant(path)
-                                        || (tree && self.folders.iter().any(|folder| root.join(folder) == *path)))
+                                        || (tree && self.tree.folders().iter().any(|folder| root.join(folder) == *path)))
                                 })
                             } else {
                                 files::is_relevant(path)
@@ -1205,7 +1197,7 @@ impl Workspace {
             }
         }
         // Autosave only idle, conflict-free drafts. Manual saves and builds share this revision path.
-        if self.name_action.is_none() && !self.dialog_open {
+        if !self.tree.name_dialog_open() && !self.dialog_open {
             let paths: Vec<_> = self.documents.open
                 .iter()
                 .filter(|(_, document)| {
@@ -1234,15 +1226,16 @@ impl Workspace {
         let parent = old.parent().unwrap();
         files::rename_file(parent, &old.file_name().unwrap().to_string_lossy(), name)?;
         let full = parent.join(name);
-        let renamed = if let Some(workspace) = self.directory_workspace() {
+        let renamed = if let Some(workspace) = self.projects.directory() {
             full.strip_prefix(&workspace.folder).expect("same workspace").to_string_lossy().replace('\\', "/")
         } else { full.to_string_lossy().into_owned() };
         self.relocate_file_state(key, &renamed, window, cx);
         let annotation_result = crate::annotations::relocate_annotations(&old, &full);
         self.relocate_tags(&[(key.to_owned(), renamed.clone())], false, cx);
-        if let Some(workspace) = self.directory_workspace() {
-            self.files = files::list_files(Path::new(&workspace.folder))?;
-            storage::save_projects(&self.config)?;
+        if let Some(workspace) = self.projects.directory() {
+            let root = PathBuf::from(&workspace.folder);
+            self.tree.reload_files(&root)?;
+            self.projects.save()?;
         }
         self.remember_session()?;
         cx.notify();
@@ -1256,8 +1249,14 @@ impl Workspace {
         annotation_result
     }
 
-    // Keep live buffers and Markdown panes: moving a file must not reload unsaved edits.
     pub(super) fn relocate_file_state(&mut self, key: &str, renamed: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.relocate_document(key, renamed, window, cx);
+        self.tree.relocate_file(key, renamed);
+        self.projects.relocate_main_file(key, renamed);
+    }
+
+    // Keep live buffers and Markdown panes: moving a file must not reload unsaved edits.
+    fn relocate_document(&mut self, key: &str, renamed: &str, window: &mut Window, cx: &mut Context<Self>) {
         let full = self.document_path(renamed);
         let renamed = renamed.to_owned();
         if let Some(mut document) = self.documents.open.remove(key) {
@@ -1305,17 +1304,8 @@ impl Workspace {
         }
         if self.documents.active == key { self.documents.active = renamed.clone(); }
         if self.documents.focused_markdown.as_deref() == Some(key) { self.documents.focused_markdown = Some(renamed.clone()); }
-        if self.focused_file.as_deref() == Some(key) { self.focused_file = Some(renamed.clone()); }
-        for paths in [&mut self.selected_files, &mut self.documents.markdown_changed] {
-            if paths.remove(key) { paths.insert(renamed.clone()); }
-        }
-        if self.default_workspace.main_file == key && self.directory_workspace().is_some_and(|p| p.id == self.default_workspace.id) {
-            self.default_workspace.main_file = renamed.clone();
-        }
-        if let Some(project) = self.config.projects.iter_mut().find(|p| Some(&p.id) == self.config.active_id.as_ref()) {
-            if project.main_file == key {
-                project.main_file = if renamed.to_ascii_lowercase().ends_with(".tex") { renamed } else { String::new() };
-            }
+        if self.documents.markdown_changed.remove(key) {
+            self.documents.markdown_changed.insert(renamed.clone());
         }
     }
 

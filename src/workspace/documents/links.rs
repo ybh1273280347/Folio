@@ -34,8 +34,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let workspace_root = self
-            .directory_workspace()
+        let workspace_root = self.projects.directory()
             .map(|project| PathBuf::from(&project.folder));
         let target = match classify_markdown_link(source_file, workspace_root.as_deref(), raw_url) {
             MarkdownLinkTarget::External(url) => {
@@ -80,7 +79,7 @@ impl Workspace {
             }
             return;
         }
-        if self.directory_workspace().is_none() && files::is_relevant(&resolved) {
+        if self.projects.directory().is_none() && files::is_relevant(&resolved) {
             match self.prepare_standalone_file(&resolved).and_then(|file| {
                 self.open_internal_link_file(&file, anchor.as_deref(), window, cx)
             }) {

@@ -28,7 +28,7 @@ impl Workspace {
     }
 
     fn annotation_path(&self, request: &WorkspaceToolRequest, params: &Params) -> Result<PathBuf, Failure> {
-        let project = self.directory_workspace().ok_or_else(||
+        let project = self.projects.directory().ok_or_else(||
             Failure::new("project_not_active", crate::i18n::tags::ERR_AGENT_SWITCH_PROJECT_RETRY.get()))?;
         let root = dunce::canonicalize(&project.folder)?;
         if request.project_key != crate::ai::project_key(&root) {

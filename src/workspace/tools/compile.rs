@@ -57,8 +57,7 @@ impl Workspace {
             ));
         }
 
-        let mut project = self
-            .directory_workspace()
+        let mut project = self.projects.directory()
             .cloned()
             .ok_or_else(|| {
                 Failure::new(
@@ -108,8 +107,7 @@ impl Workspace {
                 if app.compile_requests.remove(&request.id).is_none() {
                     return;
                 }
-                if let Some(active_root) = app
-                    .directory_workspace()
+                if let Some(active_root) = app.projects.directory()
                     .and_then(|project| dunce::canonicalize(&project.folder).ok())
                     && request.project_key == crate::ai::project_key(&active_root)
                 {
