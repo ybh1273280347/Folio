@@ -11,25 +11,34 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum SearchMode {
-    #[default]
-    Hybrid,
-    Keyword,
-    Semantic,
+pub enum SubSearchType {
+    Lex,
+    Vec,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubSearch {
+    #[serde(rename = "type")]
+    pub kind: SubSearchType,
+    pub query: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AccuratePdfMode {
+    OnlyOcr,
+    All,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchRequest {
-    pub query: String,
+    pub searches: Vec<SubSearch>,
     #[serde(default)]
-    pub lex_queries: Vec<String>,
-    #[serde(default)]
-    pub vec_queries: Vec<String>,
-    #[serde(default)]
-    pub mode: SearchMode,
+    pub intent: Option<String>,
     #[serde(default)]
     pub rerank: Option<bool>,
     #[serde(default)]
@@ -88,9 +97,9 @@ pub struct StatusReport {
     pub embed_dim: usize,
     pub embed_server_ready: bool,
     pub rerank_server_ready: bool,
-    pub mineru_configured: bool,
-    pub mineru_upgraded_pdfs: usize,
-    pub mineru_pending_pdfs: usize,
+    pub accurate_configured: bool,
+    pub accurate_upgraded_pdfs: usize,
+    pub accurate_pending_pdfs: usize,
     pub indexed_files: usize,
     pub total_chunks: usize,
     pub vector_chunks: usize,
@@ -108,8 +117,8 @@ pub struct ReindexReport {
     pub embedded_chunks: usize,
     pub pending_vectors: usize,
     pub embed_server_ready: bool,
-    pub mineru_upgraded_pdfs: usize,
-    pub mineru_failed_pdfs: Vec<String>,
+    pub accurate_upgraded_pdfs: usize,
+    pub accurate_failed_pdfs: Vec<String>,
     pub needs_ocr_files: Vec<String>,
 }
 
