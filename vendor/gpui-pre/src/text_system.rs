@@ -367,6 +367,11 @@ impl TextSystem {
         Ok(())
     }
 
+    /// Generation of font metrics used to invalidate width-only layout caches.
+    pub fn font_generation(&self) -> usize {
+        self.font_generation.load(Ordering::Acquire)
+    }
+
     /// Takes the receiver for missing-glyph reports.
     ///
     /// Only one receiver is available for each text system. Returns `None` when

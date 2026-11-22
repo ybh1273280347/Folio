@@ -50,5 +50,6 @@ opt-level = 2
 codegen-units = 16
 
 [patch.crates-io]
+gpui-base = { path = "vendor/gpui-base" }
 gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
