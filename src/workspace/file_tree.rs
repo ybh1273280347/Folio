@@ -79,7 +79,7 @@ pub(super) struct FileTree {
     show_trash: bool,
     next_trash_cleanup: Instant,
     file_tree_focus: FocusHandle,
-    sidebar_scroll: ScrollHandle,
+    file_scroll: ScrollHandle,
     name_action: Option<NameAction>,
     name_input: Entity<InputState>,
 }
@@ -122,7 +122,7 @@ impl FileTree {
             show_trash: false,
             next_trash_cleanup: Instant::now(),
             file_tree_focus: cx.focus_handle(),
-            sidebar_scroll: ScrollHandle::new(),
+            file_scroll: ScrollHandle::new(),
             name_action: None,
             name_input,
         }
@@ -152,8 +152,8 @@ impl FileTree {
         self.file_tree_focus.focus(window, cx);
     }
 
-    pub(super) fn scroll_to_tags(&self, project_count: usize) {
-        self.sidebar_scroll.scroll_to_top_of_item(project_count + 2);
+    pub(super) fn scroll_to_tags(&self) {
+        self.file_scroll.set_offset(point(px(0.), px(0.)));
     }
 
     pub(super) fn is_trash_open(&self) -> bool {
@@ -262,6 +262,20 @@ const CREATABLE_PRESETS: &[CreatablePreset] = &[
         folder_label: crate::i18n::workspace::MENU_NEW_TXT,
     },
 ];
+
+fn new_file_menu_item(label: &'static str, icon: impl Fn() -> AnyElement + 'static) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| {
+        div()
+            .w_full()
+            .h(px(20.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_xs()
+            .child(icon())
+            .child(label)
+    })
+}
 
 impl Workspace {
     pub(super) fn apply_tree_filter(&mut self, cx: &App) {
@@ -801,20 +815,8 @@ impl Workspace {
                                 let sample_path = preset.sample_path;
                                 let menu_label = preset.menu_label;
                                 menu.item(
-                                    PopupMenuItem::element(move |_, _| {
-                                        div()
-                                            .w_full()
-                                            .h(px(20.))
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .text_xs()
-                                            .child(crate::ui::file_icon(
-                                                sample_path,
-                                                ext == "drawio",
-                                                false,
-                                            ))
-                                            .child(menu_label)
+                                    new_file_menu_item(menu_label, move || {
+                                        crate::ui::file_icon(sample_path, ext == "drawio", false)
                                     })
                                     .on_click(move |_, window, cx| {
                                         preset_app.update(cx, |app, cx| {
@@ -833,16 +835,8 @@ impl Workspace {
                             });
                         let other_app = menu_app.clone();
                         menu.separator().item(
-                            PopupMenuItem::element(move |_, _| {
-                                div()
-                                    .w_full()
-                                    .h(px(20.))
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .text_xs()
-                                    .child(crate::ui::icon(IconName::Plus).size(px(13.)))
-                                    .child(crate::i18n::workspace::MENU_NEW_OTHER.get())
+                            new_file_menu_item(crate::i18n::workspace::MENU_NEW_OTHER.get(), || {
+                                crate::ui::icon(IconName::Plus).size(px(13.)).into_any_element()
                             })
                             .on_click(move |_, window, cx| {
                                 other_app.update(cx, |app, cx| {
@@ -1736,7 +1730,10 @@ impl Workspace {
                                 let preset_app = app.clone();
                                 let preset_folder = deleted.clone();
                                 let ext = preset.ext;
-                                menu.item(compact_menu_item(preset.folder_label.get()).on_click(
+                                let sample_path = preset.sample_path;
+                                menu.item(new_file_menu_item(preset.folder_label.get(), move || {
+                                    crate::ui::file_icon(sample_path, ext == "drawio", false)
+                                }).on_click(
                                     move |_, window, cx| {
                                         preset_app.update(cx, |app, cx| {
                                             app.tree.focused_folder = Some(preset_folder.clone());
@@ -1752,7 +1749,9 @@ impl Workspace {
                                     },
                                 ))
                             });
-                            menu.item(compact_menu_item(crate::i18n::workspace::MENU_NEW_FILE.get()).on_click(
+                            menu.item(new_file_menu_item(crate::i18n::workspace::MENU_NEW_FILE.get(), || {
+                                    crate::ui::icon(IconName::Plus).size(px(13.)).into_any_element()
+                                }).on_click(
                                     move |_, window, cx| {
                                         create_file_app.update(cx, |app, cx| {
                                             app.start_name(
@@ -2142,16 +2141,14 @@ impl Workspace {
                 }) { return; }
                 if let Err(error) = app.select_loose_files(window, cx) { app.report(error, cx); }
             })))
-            .child(div().relative().flex_1().min_h_0().overflow_hidden().child(
-                div().id("sidebar-content-scroll").flex().flex_col().size_full().overflow_y_scroll()
-                .track_scroll(&self.tree.sidebar_scroll)
-                .child(div().pt_5().pb_2().px_4().flex_shrink_0().text_xs().text_color(rgb(MUTED)).child(crate::i18n::workspace::PROJECTS_HEADER.get()))
-                .children(projects)
-                .child(div().id("add-project").flex().flex_shrink_0().items_center().gap_2().mx_2().px_2().h(px(32.))
+            .child(div().pt_5().pb_2().px_4().flex_shrink_0().text_xs().text_color(rgb(MUTED)).child(crate::i18n::workspace::PROJECTS_HEADER.get()))
+            .child(div().id("sidebar-projects-scroll").flex().flex_col().min_h_0().max_h(relative(0.35))
+                .overflow_y_scroll().children(projects))
+            .child(div().id("add-project").flex().flex_shrink_0().items_center().gap_2().mx_2().px_2().h(px(32.))
                     .rounded(px(4.)).cursor_pointer().text_color(rgb(MUTED))
                     .hover(|style| style.bg(rgb(0xefefed)))
                     .child(crate::ui::icon(IconName::Plus)).child(crate::i18n::workspace::ADD_LOCAL_PROJECT.get())
-                    .on_click(cx.listener(|app, _, window, cx| app.add_project(&OpenProject, window, cx))))
+                .on_click(cx.listener(|app, _, window, cx| app.add_project(&OpenProject, window, cx))))
             .child(
                 div()
                     .flex()
@@ -2228,10 +2225,21 @@ impl Workspace {
                         ),
                 )
             })
+            // The toolbar stays above this viewport, even as the project's tree grows.
+            .child(div().relative().flex_1().min_h_0().overflow_hidden().child(
+                div().id("sidebar-content-scroll").flex().flex_col().size_full().overflow_y_scroll()
+                .track_scroll(&self.tree.file_scroll)
             .children(self.render_tag_filter(cx))
             .when(!self.tags.is_editing(), |sidebar| sidebar.children(self.render_tag_panel(cx)))
             .when(!self.tree.selected_files.is_empty(), |sidebar| {
                 let sel_count = self.tree.selected_files.len();
+                let action_icon = |id, icon, color, hover, active| {
+                    div().id(id).size(px(24.)).flex_shrink_0().flex().items_center()
+                        .justify_center().cursor_pointer().text_color(rgb(color))
+                        .hover(move |style| style.text_color(rgb(hover)))
+                        .active(move |style| style.text_color(rgb(active)))
+                        .child(crate::ui::icon(icon))
+                };
                 sidebar.child(
                     div()
                         .mx_2()
@@ -2262,21 +2270,13 @@ impl Workspace {
                                 .flex_shrink_0()
                                 .items_center()
                                 .gap_1()
-                                .child(crate::ui::control("batch-tags", IconName::Tag)
-                                    .size(px(24.))
+                                .child(action_icon("batch-tags", IconName::Tag, 0x7d838b, 0x343a40, 0x1f2328)
                                     .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(crate::i18n::workspace::BATCH_EDIT_TAGS_TOOLTIP.get()).build(window, cx))
                                     .on_click(cx.listener(|app, _, window, cx| {
                                         app.edit_file_tags(app.tree.selected_files.iter().cloned().collect(), window, cx);
                                     })))
                                 .child(
-                                    crate::ui::button_secondary("batch-compile", "")
-                                        .w(px(24.))
-                                        .min_h(px(22.))
-                                        .px_0()
-                                        .py_0()
-                                        .child(
-                                            crate::ui::icon(IconName::Play).w(px(11.)).h(px(11.)),
-                                        )
+                                    action_icon("batch-compile", IconName::Play, 0x454b53, 0x343a40, 0x1f2328)
                                         .tooltip(|window, cx| {
                                             gpui_kit::component::tooltip::Tooltip::new(
                                                 crate::i18n::workspace::TOOLTIP_BATCH_COMPILE.get(),
@@ -2288,14 +2288,7 @@ impl Workspace {
                                         })),
                                 )
                                 .child(
-                                    crate::ui::button_danger_soft("batch-delete", "")
-                                        .w(px(24.))
-                                        .min_h(px(22.))
-                                        .px_0()
-                                        .py_0()
-                                        .child(
-                                            crate::ui::icon(IconName::Trash).w(px(12.)).h(px(12.)),
-                                        )
+                                    action_icon("batch-delete", IconName::Trash, 0xcf1322, 0xbf2f37, 0xa8071a)
                                         .tooltip(|window, cx| {
                                             gpui_kit::component::tooltip::Tooltip::new(
                                                 crate::i18n::common::DELETE.get(),
@@ -2307,8 +2300,7 @@ impl Workspace {
                                         })),
                                 )
                                 .child(
-                                    crate::ui::control("clear-selection", IconName::Close)
-                                        .size(px(24.))
+                                    action_icon("clear-selection", IconName::Close, 0x7d838b, 0x343a40, 0x1f2328)
                                         .tooltip(|window, cx| {
                                             gpui_kit::component::tooltip::Tooltip::new(
                                                 crate::i18n::workspace::TOOLTIP_CLEAR_SELECTION.get(),
@@ -2468,7 +2460,7 @@ impl Workspace {
                     }),
             ))
                 .child(div().absolute().top(px(20.)).bottom(px(20.)).left_0().right_0().child(
-                    Scrollbar::vertical(&self.tree.sidebar_scroll)
+                    Scrollbar::vertical(&self.tree.file_scroll)
                         .mode(ScrollbarMode::Always)
                         .styles(|styles| styles
                             .thumb(|style| style.bg(rgb(0xd9d9d7)).width(px(6.)).inset(px(1.)).radius(px(4.)).min_length(px(24.)))
