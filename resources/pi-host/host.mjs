@@ -15,6 +15,7 @@ import { drawioTools } from './tools/workspace/drawio-tools.mjs';
 import { tagTools } from './tools/workspace/tag-tools.mjs';
 import { pythonTool } from './tools/local/python.mjs';
 import { WorkspaceToolBridge } from './tools/workspace/bridge.mjs';
+import { SessionRegistry } from './sessions/registry.mjs';
 
 // stdout is a protocol channel, including while third-party extensions initialize.
 console.log = (...args) => console.error(format(...args));
@@ -80,12 +81,10 @@ const root = process.env.FOLIO_USER_DATA ?? path.join(os.homedir(), 'AppData', '
 fs.mkdirSync(root, { recursive: true });
 const metadataPath = path.join(root, 'ai-session-metadata.json');
 const metadata = fs.existsSync(metadataPath) ? JSON.parse(fs.readFileSync(metadataPath, 'utf8')) : {};
-const sessions = new Map();
-const opening = new Map();
-// New tabs need an identity immediately; SDK/model discovery is deferred until the view attaches.
-const prepared = new Map();
 const projectKey = cwd => fs.realpathSync.native(cwd).replaceAll('/', '\\').replace(/\\+$/, '').toLowerCase();
-const key = (project, id) => JSON.stringify([project, id]);
+const sessions = new SessionRegistry();
+const key = (project, id) => sessions.identity(project, id);
+const disposeSession = record => sessions.dispose(record, workspaceToolChannels.map(({ bridge }) => bridge));
 let settings = JSON.parse(process.env.FOLIO_AI_SETTINGS ?? '{}');
 
 function saveMetadata() {
@@ -178,8 +177,7 @@ async function createRecord(cwd, manager) {
   const project = projectKey(cwd);
   if (projectKey(manager.getCwd()) !== project) throw new Error('会话不属于当前项目');
   const id = manager.getSessionId();
-  const identity = key(project, id);
-  if (sessions.has(identity)) return sessions.get(identity);
+  if (sessions.get(project, id)) return sessions.get(project, id);
   const record = { project, id, cwd, manager, sequence: 0, running: false, failed: false,
     pending: new Map(), editorText: '', retained: true, models: await ModelRuntime.create() };
   await configureModels(record);
@@ -241,25 +239,16 @@ async function createRecord(cwd, manager) {
     publish(record, event);
     if (event.type === 'agent_settled') {
       publish(record, { type: 'session_status', ...state(record) });
-      if (!record.retained && !record.titleController) disposeRecord(record);
+      if (!record.retained && !record.titleController) disposeSession(record);
     }
   });
-  sessions.set(identity, record);
+  sessions.register(record);
   await session.bindExtensions({ mode: 'rpc', uiContext: uiContext(record),
     abortHandler: () => { void session.abort(); },
     shutdownHandler: () => { void session.abort(); },
     onError: error => publish(record, { type: 'extension_error', error: String(error.error ?? error) }),
   });
   return record;
-}
-
-function disposeRecord(record) {
-  for (const { bridge } of workspaceToolChannels) {
-    bridge.dispose({ projectKey: record.project, sessionId: record.id });
-  }
-  record.unsubscribe();
-  record.session.dispose();
-  sessions.delete(key(record.project, record.id));
 }
 
 async function list(cwd) {
@@ -269,13 +258,13 @@ async function list(cwd) {
   const result = new Map(entries.map(entry => [entry.id, { id: entry.id, path: entry.path,
     name: entry.name, firstMessage: entry.firstMessage, messageCount: entry.messageCount,
     modified: entry.modified, projectKey: project, pinned: Boolean(metadata[key(project, entry.id)]?.pinned) }]));
-  for (const [identity, entry] of prepared) {
+  for (const [identity, entry] of sessions.preparedFor(project)) {
     if (entry.project !== project) continue;
     const id = entry.manager.getSessionId();
     result.set(id, { id, firstMessage: '', messageCount: 0, modified: entry.created,
       pinned: Boolean(metadata[identity]?.pinned), isStreaming: false });
   }
-  for (const record of sessions.values()) {
+  for (const record of sessions.records()) {
     if (record.project !== project) continue;
     result.set(record.id, { ...result.get(record.id), id: record.id, path: record.session.sessionFile,
       name: record.session.sessionName, firstMessage: result.get(record.id)?.firstMessage ?? record.preview ?? '',
@@ -289,24 +278,12 @@ async function list(cwd) {
 async function target(command) {
   const project = projectKey(command.cwd);
   if (command.projectKey !== project) throw new Error('项目标识不匹配');
-  const identity = key(project, command.sessionId);
   // A startup extension can ask for UI before binding completes; its response must not wait on itself.
-  if (command.type === 'extension_ui_response' && sessions.has(identity)) return sessions.get(identity);
-  if (opening.has(identity)) return opening.get(identity);
-  if (sessions.has(identity)) return sessions.get(identity);
-  // Reserve initialization before the asynchronous disk lookup; parallel snapshot/model requests share it.
-  const promise = (async () => {
-    const descriptor = prepared.get(identity);
+  return sessions.open(project, command.sessionId, async descriptor => {
     const entry = descriptor ? undefined : (await list(command.cwd)).find(entry => entry.id === command.sessionId);
     if (!descriptor && !entry) throw new Error('找不到当前项目的会话');
     return createRecord(command.cwd, descriptor?.manager ?? SessionManager.open(entry.path));
-  })();
-  opening.set(identity, promise);
-  try {
-    const record = await promise;
-    prepared.delete(identity);
-    return record;
-  } finally { opening.delete(identity); }
+  });
 }
 
 async function generateTitle(record, text) {
@@ -325,7 +302,7 @@ async function generateTitle(record, text) {
     const title = [...(response.choices[0].message.content ?? '').trim().replace(/^["“”'「」]+|["“”'「」]+$/g, '').replace(/\s+/g, ' ')].slice(0, 24).join('');
     if (!title) throw new Error('标题模型返回空内容');
     // A manual rename or deletion can finish while the separate model request is pending.
-    if (!sessions.has(identity) || metadata[identity]?.titleSource === 'manual') return;
+    if (!sessions.get(record.project, record.id) || metadata[identity]?.titleSource === 'manual') return;
     record.session.setSessionName(title);
     metadata[identity] = { ...metadata[identity], titleSource: 'generated' };
     saveMetadata();
@@ -333,7 +310,9 @@ async function generateTitle(record, text) {
     if (!controller.signal.aborted) publish(record, { type: 'title_error', error: error.message });
   } finally {
     record.titleController = undefined;
-    if (!record.retained && !record.running && sessions.has(identity)) disposeRecord(record);
+    if (!record.retained && !record.running && sessions.get(record.project, record.id)) {
+      disposeSession(record);
+    }
   }
 }
 
@@ -342,7 +321,7 @@ async function dispatch(command) {
     projectKey: command.projectKey, sessionId: command.sessionId, command: command.type, success: true, data: data ?? {} });
   if (command.type === 'configure') {
     settings = command.settings;
-    await Promise.all([...sessions.values()].map(configureModels));
+    await Promise.all([...sessions.records()].map(configureModels));
     return response();
   }
   if (command.projectKey !== projectKey(command.cwd)) throw new Error('项目标识不匹配');
@@ -356,7 +335,7 @@ async function dispatch(command) {
   if (command.type === 'create_session') {
     const manager = SessionManager.create(command.cwd);
     const id = manager.getSessionId();
-    prepared.set(key(command.projectKey, id), { project: command.projectKey, manager, created: new Date().toISOString() });
+    sessions.prepare(command.projectKey, manager, new Date().toISOString());
     return response({ sessionId: id });
   }
   if (command.type === 'set_pinned') {
@@ -371,7 +350,7 @@ async function dispatch(command) {
   const session = record.session;
   switch (command.type) {
     case 'snapshot': {
-      record.retained = true;
+      sessions.retain(record);
       const messages = record.partial && session.messages.at(-1)?.role !== 'assistant'
         ? [...session.messages, record.partial] : session.messages;
       response({ ...state(record), messages, partial: Boolean(record.partial), sequence: record.sequence });
@@ -419,7 +398,9 @@ async function dispatch(command) {
         // Extension commands can finish without starting an agent run, so the host settles those runs.
         if (needsSettled) publish(record, { type: 'agent_settled' });
         publish(record, { type: 'session_status', ...state(record) });
-        if (!record.retained && !record.titleController && sessions.has(key(record.project, record.id))) disposeRecord(record);
+        if (!record.retained && !record.titleController && sessions.get(record.project, record.id)) {
+          disposeSession(record);
+        }
       }
       return response();
     }
@@ -452,10 +433,9 @@ async function dispatch(command) {
       return response();
     }
     case 'release':
-      record.retained = false;
-      if (!record.running && !record.titleController) disposeRecord(record);
+      if (sessions.release(record)) disposeSession(record);
       return response();
-    case 'retain': record.retained = true; return response();
+    case 'retain': sessions.retain(record); return response();
     case 'delete_session': {
       if ((record.running || record.pending.size) && !command.confirmed) throw new Error('删除运行中的会话需要确认');
       record.cancelling = true;
@@ -464,7 +444,7 @@ async function dispatch(command) {
       await session.abort();
       await record.task;
       const file = session.sessionFile;
-      disposeRecord(record);
+      disposeSession(record);
       if (file && fs.existsSync(file)) fs.unlinkSync(file);
       delete metadata[key(record.project, record.id)];
       saveMetadata();
@@ -487,7 +467,7 @@ input.on('line', line => {
   });
 });
 input.on('close', () => {
-  for (const record of sessions.values()) {
+  for (const record of sessions.records()) {
     record.titleController?.abort();
     for (const pending of record.pending.values()) pending.finish(undefined);
     record.session.dispose();

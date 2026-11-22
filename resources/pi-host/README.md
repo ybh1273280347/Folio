@@ -7,7 +7,7 @@
 ## 1. 目录结构与打包规则
 
 - 运行时入口：[host.mjs](host.mjs)
-- 会话生命周期与 JSONL 分派：[host.mjs](host.mjs)
+- 会话生命周期与初始化去重：[sessions/registry.mjs](sessions/registry.mjs)。宿主持有 Pi SDK 装配、JSONL 命令分派和与 GPUI 的通信。
 - Workspace 工具：[tools/workspace/](tools/workspace/) 按 annotation、compile、drawio、tag 通道归档工具定义，[bridge.mjs](tools/workspace/bridge.mjs) 管理请求与取消。
 - 本地工具：[tools/local/](tools/local/) 管理本机执行工具。
 - 联网工具：[tools/web/](tools/web/) 管理搜索、抓取和抓取脚本。
@@ -41,8 +41,8 @@ Draw.io 工具提供文件级 `folio_drawio_read`、`folio_drawio_create`、`fol
    - 导出工厂函数 `(request) => [...]`，调用 `await request('<operation>', params, signal)`。
    - 参照同类工具将结构化结果转换为 Pi 的工具结果，保留错误码和取消状态。
 2. **注册 JS 通道**（[host.mjs](host.mjs)）：
-   - 在 `workspaceToolChannels` 中按已有对象格式登记 `channel`、`factory` 和适用的超时策略。
-   - 宿主创建对应的 `WorkspaceToolBridge`，注册工具并按 `channel` 路由响应。会话释放时，宿主清理该会话的等待请求。
+   - 在 `workspaceToolChannels` 中登记 `channel`、工具工厂和该通道的超时、重试规则。
+   - 宿主创建对应的 bridge，注册工具并按 `channel` 路由响应。会话释放时清理该会话的待完成请求。
 3. **Rust RPC 协议**（[rpc.rs](../../src/ai/rpc.rs) 与 [manager.rs](../../src/ai/manager.rs)）
    - 各通道复用 `workspace_tool_request`、`workspace_tool_cancel` 与 `workspace_tool_response`。通道、请求 ID 和会话归属由现有 RPC 与宿主处理。
 4. **Rust Workspace 接入**（[workspace/tools/](../../src/workspace/tools/) 与 [workspace.rs](../../src/workspace.rs)）
