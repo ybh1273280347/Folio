@@ -527,9 +527,10 @@ impl RagStore {
             .filter(|t| (1..3).contains(&t.chars().count()))
             .collect();
 
+        const MAX_SHORT_HITS_PER_FILE: usize = 4;
         let mut merged: HashMap<i64, ScoredChunk> = HashMap::new();
         let fetch_limit = if allowed_paths.is_some() || under_dir.is_some() || !extensions.is_empty() {
-            (limit * 4).clamp(30, 200)
+            (limit * 20).clamp(200, 2000)
         } else {
             limit
         };
@@ -566,7 +567,8 @@ impl RagStore {
             }
         }
 
-        // FTS5 trigram skips tokens shorter than 3 chars (e.g. 2-char CJK words); scan active chunks via LIKE.
+        // FTS5 trigram skips tokens shorter than 3 chars (e.g. 1-2 char CJK words);
+        // scan active chunks without premature LIMIT so large earlier PDFs cannot starve notes.
         if !short_terms.is_empty() {
             let mut stmt = self
                 .conn
@@ -576,14 +578,17 @@ impl RagStore {
                      FROM chunks c
                      JOIN documents d ON d.content_hash = c.content_hash AND d.active = 1
                      JOIN contents ct ON ct.content_hash = c.content_hash
-                     WHERE c.chunk_text LIKE ?1 ESCAPE '\\'
-                     LIMIT ?2",
+                     WHERE (
+                         c.chunk_text LIKE ?1 ESCAPE '\\'
+                         OR d.rel_path LIKE ?1 ESCAPE '\\'
+                         OR c.heading_path LIKE ?1 ESCAPE '\\'
+                     )",
                 )
                 .map_err(|e| e.to_string())?;
-            for term in short_terms {
+            for term in &short_terms {
                 let pattern = format!("%{}%", escape_like(term));
                 let rows = stmt
-                    .query_map(params![pattern, fetch_limit as i64], |row| {
+                    .query_map(params![pattern], |row| {
                         Ok(ScoredChunk {
                             chunk_id: row.get(0)?,
                             docid: row.get(1)?,
@@ -595,17 +600,24 @@ impl RagStore {
                             line_end: row.get::<_, Option<i64>>(7)?.map(|v| v as usize),
                             page_num: row.get::<_, Option<i64>>(8)?.map(|v| v as usize),
                             chunk_text: row.get(9)?,
-                            raw_score: 1.0,
+                            raw_score: 0.0,
                             content_hash: row.get(10)?,
                         })
                     })
                     .map_err(|e| e.to_string())?;
                 for row in rows {
-                    let hit = row.map_err(|e| e.to_string())?;
+                    let mut hit = row.map_err(|e| e.to_string())?;
                     if path_matches_filters(&hit.rel_path, allowed_paths, under_dir, extensions) {
+                        let term_score = score_short_term_hit(
+                            term,
+                            &hit.rel_path,
+                            &hit.heading_path,
+                            &hit.chunk_text,
+                        );
+                        hit.raw_score = term_score;
                         merged
                             .entry(hit.chunk_id)
-                            .and_modify(|existing| existing.raw_score += 1.0)
+                            .and_modify(|existing| existing.raw_score += term_score)
                             .or_insert(hit);
                     }
                 }
@@ -613,8 +625,40 @@ impl RagStore {
         }
 
         let mut results: Vec<ScoredChunk> = merged.into_values().collect();
-        results.sort_by(|a, b| b.raw_score.total_cmp(&a.raw_score));
-        results.truncate(limit);
+        results.sort_by(|a, b| {
+            b.raw_score
+                .total_cmp(&a.raw_score)
+                .then_with(|| a.chunk_id.cmp(&b.chunk_id))
+        });
+        if !short_terms.is_empty() && results.len() > limit {
+            let mut per_file: HashMap<String, usize> = HashMap::new();
+            let mut diverse = Vec::with_capacity(limit);
+            let mut overflow = Vec::new();
+            for hit in results {
+                let base_path = hit.rel_path.strip_suffix("#annotations").unwrap_or(&hit.rel_path);
+                let count = per_file.get(base_path).copied().unwrap_or(0);
+                if count < MAX_SHORT_HITS_PER_FILE {
+                    if let Some(slot) = per_file.get_mut(base_path) {
+                        *slot = count + 1;
+                    } else {
+                        per_file.insert(base_path.to_owned(), 1);
+                    }
+                    diverse.push(hit);
+                    if diverse.len() >= limit {
+                        break;
+                    }
+                } else {
+                    overflow.push(hit);
+                }
+            }
+            if diverse.len() < limit {
+                let need = limit - diverse.len();
+                diverse.extend(overflow.into_iter().take(need));
+            }
+            results = diverse;
+        } else {
+            results.truncate(limit);
+        }
         Ok(results)
     }
 
@@ -1039,6 +1083,29 @@ fn escape_like(input: &str) -> String {
     out
 }
 
+fn score_short_term_hit(term: &str, rel_path: &str, heading_path: &str, chunk_text: &str) -> f64 {
+    let needle = term.to_lowercase();
+    let path_match = rel_path.to_lowercase().contains(&needle);
+    let heading_match = heading_path.to_lowercase().contains(&needle);
+    let body = chunk_text
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once("]\n").map(|(_, b)| b))
+        .unwrap_or(chunk_text);
+    let body_hits = body.to_lowercase().matches(&needle).count();
+
+    let mut score = 0.5;
+    if path_match {
+        score += 4.0;
+    }
+    if heading_match {
+        score += 3.0;
+    }
+    if body_hits > 0 {
+        score += (body_hits.min(12) as f64).sqrt() * 1.25;
+    }
+    score
+}
+
 fn f32_slice_to_le_bytes(vec: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(vec.len() * 4);
     for v in vec {
@@ -1183,5 +1250,97 @@ mod tests {
             .unwrap();
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].0, "papers/text.pdf");
+    }
+
+    #[test]
+    fn short_term_search_does_not_starve_notes_behind_many_pdf_chunks() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("rag.sqlite3");
+        let mut store = RagStore::open(&db, "test-embed", 4).unwrap();
+
+        for pdf_idx in 0..2 {
+            let chunks: Vec<ChunkDraft> = (0..40)
+                .map(|seq| ChunkDraft {
+                    seq,
+                    heading_path: format!("第{pdf_idx}章 > 例题"),
+                    line_start: None,
+                    line_end: None,
+                    page_num: Some(seq + 1),
+                    chunk_text: format!(
+                        "[pdf_{pdf_idx}.pdf]\n入栈出栈清空栈操作序列第{seq}题。"
+                    ),
+                })
+                .collect();
+            store
+                .upsert_document(
+                    &format!("pdf_{pdf_idx}.pdf"),
+                    "pdf",
+                    &format!("hash_pdf_{pdf_idx}"),
+                    100,
+                    200,
+                    "indexed",
+                    Some("pdf raw"),
+                    Some("fast_pdf"),
+                    Some(&chunks),
+                )
+                .unwrap();
+        }
+
+        let titled_note = vec![ChunkDraft {
+            seq: 0,
+            heading_path: "栈的定义与性质".into(),
+            line_start: Some(1),
+            line_end: Some(4),
+            page_num: None,
+            chunk_text: "[notes/第三章栈与队列系统笔记.md > 栈的定义与性质]\n栈是仅在表尾进行插入和删除的线性表。".into(),
+        }];
+        store
+            .upsert_document(
+                "notes/第三章栈与队列系统笔记.md",
+                "md",
+                "hash_note_titled",
+                100,
+                64,
+                "indexed",
+                Some("note raw"),
+                Some("source"),
+                Some(&titled_note),
+            )
+            .unwrap();
+
+        let body_note = vec![ChunkDraft {
+            seq: 0,
+            heading_path: "考前复习".into(),
+            line_start: Some(1),
+            line_end: Some(3),
+            page_num: None,
+            chunk_text: "[notes/review.md > 考前复习]\n记得复习栈的应用。".into(),
+        }];
+        store
+            .upsert_document(
+                "notes/review.md",
+                "md",
+                "hash_note_body",
+                100,
+                40,
+                "indexed",
+                Some("review raw"),
+                Some("source"),
+                Some(&body_note),
+            )
+            .unwrap();
+
+        let all_hits = store.search_fts("栈", None, None, &[], 60).unwrap();
+        assert_eq!(all_hits[0].rel_path, "notes/第三章栈与队列系统笔记.md");
+        assert!(all_hits.iter().any(|h| h.rel_path == "notes/review.md"));
+
+        let md_hits = store
+            .search_fts("栈", None, None, &["md".to_owned()], 20)
+            .unwrap();
+        let md_paths: Vec<&str> = md_hits.iter().map(|h| h.rel_path.as_str()).collect();
+        assert_eq!(
+            md_paths,
+            vec!["notes/第三章栈与队列系统笔记.md", "notes/review.md"]
+        );
     }
 }

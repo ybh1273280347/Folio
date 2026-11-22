@@ -18,6 +18,19 @@ pub(in crate::workspace) enum KbFilter {
     Pdf,
 }
 
+impl KbFilter {
+    pub(in crate::workspace) fn extensions(self) -> Vec<String> {
+        match self {
+            Self::All => Vec::new(),
+            Self::Notes => ["md", "txt", "tex", "ltx", "bib"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            Self::Pdf => vec!["pdf".to_owned()],
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::workspace) enum PdfManagerFilter {
     #[default]
@@ -992,8 +1005,15 @@ impl Workspace {
                         .hover(move |s| s.bg(hover_bg).text_color(gpui_kit::rgb(palette.text)))
                 })
                 .on_click(cx.listener(move |app, _, _, cx| {
+                    if app.right_panel.kb.filter == filter_val {
+                        return;
+                    }
                     app.right_panel.kb.filter = filter_val;
-                    cx.notify();
+                    if !app.right_panel.kb.search.read(cx).value().trim().is_empty() {
+                        app.submit_kb_search(cx);
+                    } else {
+                        cx.notify();
+                    }
                 }))
                 .when_some(icon, |el, ic| {
                     el.child(crate::ui::icon(ic).w(px(11.)).h(px(11.)))

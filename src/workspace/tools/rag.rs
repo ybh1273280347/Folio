@@ -680,7 +680,7 @@ impl Workspace {
             }],
             intent: None,
             rerank: Some(false),
-            extensions: Vec::new(),
+            extensions: self.right_panel.kb.filter.extensions(),
             under_directory: None,
             limit: 20,
         };
