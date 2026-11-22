@@ -11,12 +11,7 @@ use crate::{
 };
 use gpui_kit::{Context, Window};
 use serde::Deserialize;
-use std::{
-    collections::HashMap,
-    sync::{Arc, atomic::{AtomicBool, Ordering}},
-};
-
-pub(in crate::workspace) type CompileRequests = HashMap<String, Arc<AtomicBool>>;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 #[derive(Debug, Deserialize)]
 struct CompileOperation {
@@ -25,14 +20,14 @@ struct CompileOperation {
 }
 
 impl Workspace {
-    pub(in crate::workspace) fn compile_request(
+    pub(super) fn compile_request(
         &mut self,
         request: &WorkspaceToolRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if request.action == WorkspaceToolAction::Cancel {
-            if let Some(cancelled) = self.compile_requests.remove(&request.id) {
+            if let Some(cancelled) = self.tool_requests.compile_requests.remove(&request.id) {
                 cancelled.store(true, Ordering::Relaxed);
             }
             return;
@@ -84,7 +79,7 @@ impl Workspace {
             .map_err(|error| Failure::new("build_root_unavailable", error.to_string()))?
             .join("builds");
         let cancelled = Arc::new(AtomicBool::new(false));
-        self.compile_requests
+        self.tool_requests.compile_requests
             .insert(request.id.clone(), cancelled.clone());
 
         let worker_cancelled = cancelled.clone();
@@ -104,7 +99,7 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             let outcome = task.await;
             let _ = this.update_in(cx, |app, window, cx| {
-                if app.compile_requests.remove(&request.id).is_none() {
+                if app.tool_requests.compile_requests.remove(&request.id).is_none() {
                     return;
                 }
                 if let Some(active_root) = app.projects.directory()

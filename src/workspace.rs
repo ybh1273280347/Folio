@@ -7,19 +7,17 @@ mod file_tree;
 mod projects;
 mod tags;
 mod tools;
-use build::Build;
+use build::{Build, BuildPanelVisibility};
 use documents::Documents;
 use file_tree::FileTree;
 use projects::Projects;
-use crate::ai::{AiPane, AiPaneEvent, AttachedFile, WorkspaceToolAction, WorkspaceToolRequest};
+use crate::ai::{AiPane, AiPaneEvent, AttachedFile};
 use gpui_kit::component::Sizable;
 use crate::theme::color as rgb;
 use crate::math::MathRenderer;
-use crate::pdf::PdfPane;
 use crate::preferences::{Preferences, SettingsChanged};
 use crate::terminal::{TerminalPane, TerminalPaneEvent};
 use crate::{
-    build::BuildStatus,
     files,
     model::{
         AppSettings, Engine, FileKind,
@@ -211,8 +209,7 @@ struct ZenSnapshot {
     sidebar_open: bool,
     right_panel_open: bool,
     right_panel_maximized: bool,
-    show_logs: bool,
-    show_build_preview: bool,
+    build_panels: BuildPanelVisibility,
     was_fullscreen: bool,
 }
 
@@ -242,10 +239,7 @@ struct DialogPrompt {
 }
 
 pub struct Workspace {
-    annotation_requests: BTreeSet<String>,
-    compile_requests: tools::CompileRequests,
-    drawio_requests: std::collections::HashMap<String, WorkspaceToolRequest>,
-    tag_proposals: tools::TagProposals,
+    tool_requests: tools::ToolRequests,
     projects: Projects,
     settings: AppSettings,
     background_image: Option<Arc<RenderImage>>,
@@ -255,10 +249,8 @@ pub struct Workspace {
     show_preferences: bool,
     tags: tags::TagPanel,
     tree: FileTree,
-    show_build_preview: bool,
     documents: Documents,
     build: Build,
-    show_logs: bool,
     zen_mode: bool,
     zen_snapshot: Option<ZenSnapshot>,
     terminal: Entity<TerminalPane>,
@@ -271,8 +263,6 @@ pub struct Workspace {
     sidebar_drag: Option<(f32, f32)>,
     right_panel_drag: Option<(f32, f32)>,
     resize_save_task: Task<()>,
-    preview: Option<PathBuf>,
-    build_pdf: Option<Entity<PdfPane>>,
     notice: Option<String>,
     notice_until: Option<Instant>,
     focus: FocusHandle,
@@ -309,26 +299,7 @@ impl Workspace {
         let initial_dir = dirs::home_dir().expect("user home");
         let ai = cx.new(|cx| AiPane::new(initial_dir, settings.clone(), math.clone(), window, cx));
         cx.subscribe_in(&ai, window, |app, _, event: &AiPaneEvent, window, cx| match event {
-            AiPaneEvent::WorkspaceTool(request) => match request.channel.as_str() {
-                "annotation" => app.annotation_request(request, window, cx),
-                "compile" => app.compile_request(request, window, cx),
-                "drawio" => app.drawio_request(request, cx),
-                "tag" => app.tag_request(request, cx),
-                _ if request.action == WorkspaceToolAction::Request => {
-                    app.ai.read(cx).respond_workspace_tool(
-                        request,
-                        serde_json::json!({
-                            "status": "error",
-                            "error": {
-                                "code": "unknown_workspace_tool",
-                                "message": "Folio 未注册此 workspace tool 通道。",
-                                "retryable": false
-                            }
-                        }),
-                    );
-                }
-                _ => {}
-            },
+            AiPaneEvent::WorkspaceTool(request) => app.dispatch_workspace_tool(request, window, cx),
             AiPaneEvent::UndoTags(items) => app.undo_tag_confirmations(items, cx),
             AiPaneEvent::OpenFile(path) => {
                 app.open_path_from_ai(path, window, cx);
@@ -480,10 +451,7 @@ impl Workspace {
             }
         });
         let mut app = Self {
-            annotation_requests: BTreeSet::new(),
-            compile_requests: Default::default(),
-            drawio_requests: Default::default(),
-            tag_proposals: Default::default(),
+            tool_requests: tools::ToolRequests::default(),
             projects,
             settings,
             background_image: None,
@@ -493,10 +461,8 @@ impl Workspace {
             show_preferences: false,
             tags,
             tree,
-            show_build_preview: false,
             documents: Documents::default(),
             build: Build::default(),
-            show_logs: false,
             zen_mode: false,
             zen_snapshot: None,
             terminal,
@@ -509,8 +475,6 @@ impl Workspace {
             sidebar_drag: None,
             right_panel_drag: None,
             resize_save_task: Task::ready(()),
-            preview: None,
-            build_pdf: None,
             notice: None,
             notice_until: None,
             focus: cx.focus_handle(),
@@ -675,8 +639,7 @@ impl Workspace {
                 sidebar_open: self.settings.sidebar_open,
                 right_panel_open: self.right_panel_open,
                 right_panel_maximized: self.right_panel_maximized,
-                show_logs: self.show_logs,
-                show_build_preview: self.show_build_preview,
+                build_panels: self.build.panels,
                 was_fullscreen: window.is_fullscreen(),
             };
             self.zen_snapshot = Some(snapshot);
@@ -688,8 +651,7 @@ impl Workspace {
                 self.right_panel_maximized = false;
                 self.terminal.update(cx, |pane, _| pane.hide());
             }
-            self.show_logs = false;
-            self.show_build_preview = false;
+            self.build.panels = BuildPanelVisibility::default();
             self.notice = None;
             self.notice_until = None;
             if !window.is_fullscreen() {
@@ -706,8 +668,7 @@ impl Workspace {
         self.zen_mode = false;
         if let Some(snapshot) = self.zen_snapshot.take() {
             self.settings.sidebar_open = snapshot.sidebar_open;
-            self.show_logs = snapshot.show_logs;
-            self.show_build_preview = snapshot.show_build_preview;
+            self.build.panels = snapshot.build_panels;
             if snapshot.right_panel_open {
                 self.open_right_panel(self.right_panel_view, window, cx);
                 self.right_panel_maximized = snapshot.right_panel_maximized;
@@ -742,12 +703,12 @@ impl Workspace {
         crate::right_panel::RightPanelHubProps {
             query: self.right_panel_search.read(cx).value().to_string(),
             selected_index: self.right_panel_selected,
-            preview_open: self.show_build_preview,
-            logs_open: self.show_logs,
+            preview_open: self.build.panels.preview,
+            logs_open: self.build.panels.logs,
             zen_mode: self.zen_mode,
             build_running: self.build.is_running(),
-            build_failed: matches!(self.build.status, BuildStatus::Failed),
-            build_target: self.build.target.clone(),
+            build_failed: self.build.failed(),
+            build_target: self.build.target().to_owned(),
             ai_shortcut: AppSettings::format_key_badge(&self.settings.key_for("toggle_ai")),
             terminal_shortcut: AppSettings::format_key_badge(
                 &self.settings.key_for("toggle_terminal"),
@@ -773,11 +734,11 @@ impl Workspace {
                 self.open_right_panel(RightPanelView::Terminal, window, cx);
             }
             RightPanelAction::TogglePreview => {
-                self.show_build_preview = !self.show_build_preview;
+                self.build.panels.preview = !self.build.panels.preview;
                 cx.notify();
             }
             RightPanelAction::ToggleLogs => {
-                self.show_logs = !self.show_logs;
+                self.build.panels.logs = !self.build.panels.logs;
                 cx.notify();
             }
             RightPanelAction::ToggleZen => {
@@ -1017,113 +978,6 @@ impl Workspace {
         self.documents.poll_web_panes(window, cx);
     }
 
-    fn render_preview(&self, cx: &mut Context<Self>) -> AnyElement {
-        if let Some(pane) = &self.build_pdf {
-            return div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .h(px(36.))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .px_3()
-                        .bg(rgb(0xfafaf9))
-                        .border_b_1()
-                        .border_color(rgb(BORDER))
-                        .child(crate::ui::icon(IconName::FileText))
-                        .child(crate::i18n::workspace::COMPILE_PREVIEW_TITLE.get())
-                        .child(div().flex_1())
-                        .when_some(self.preview.clone(), |bar, path| {
-                            bar.child(button("export-build-pdf", crate::i18n::workspace::EXPORT_BTN.get()).on_click(cx.listener(
-                                move |app, _, window, cx| app.export_pdf(path.clone(), window, cx),
-                            )))
-                        })
-                        .child(
-                            crate::ui::control("close-build-preview", IconName::Close).on_click(
-                                cx.listener(|app, _, _, cx| {
-                                    app.show_build_preview = false;
-                                    cx.notify();
-                                }),
-                            ),
-                        ),
-                )
-                .child(div().flex_1().min_h_0().child(pane.clone()))
-                .into_any_element();
-        }
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(rgb(0xf1f1ef))
-            .child(
-                div()
-                    .h(px(38.))
-                    .flex_shrink_0()
-                    .px_4()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .bg(rgb(0xffffff))
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(crate::ui::icon(IconName::FileText))
-                            .child(crate::i18n::workspace::PREVIEW_TITLE.get()),
-                    )
-                    .when_some(self.preview.clone(), |toolbar, path| {
-                        toolbar.child(
-                            button("reveal-output", crate::i18n::workspace::MENU_REVEAL_IN_EXPLORER.get())
-                                .on_click(move |_, _, cx| reveal_path(&path, cx)),
-                        )
-                    })
-                    .child(
-                        crate::ui::control("close-build-preview", IconName::Close).on_click(
-                            cx.listener(|app, _, _, cx| {
-                                app.show_build_preview = false;
-                                cx.notify();
-                            }),
-                        ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap_4()
-                    .text_color(rgb(MUTED))
-                    .child(if self.build.is_busy() {
-                        crate::i18n::workspace::STATUS_COMPILING.get()
-                    } else if self.preview.is_some() {
-                        crate::i18n::workspace::STATUS_COMPILE_OK.get()
-                    } else {
-                        crate::i18n::workspace::STATUS_COMPILE_IDLE.get()
-                    })
-                    .when_some(self.preview.clone(), |area, path| {
-                        area.child(
-                            crate::ui::button_secondary("open-output", crate::i18n::workspace::BTN_OPEN_OUTPUT_PDF.get()).on_click(
-                                move |_, _, cx| {
-                                    cx.open_url(&format!(
-                                        "file:///{}",
-                                        path.to_string_lossy().replace('\\', "/")
-                                    ))
-                                },
-                            ),
-                        )
-                    }),
-            )
-            .into_any_element()
-    }
 }
 
 fn button(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Stateful<Div> {
@@ -1155,15 +1009,7 @@ impl Render for Workspace {
             || self.dialog_prompt.is_some()
             || self.dialog_open;
         self.documents.sync_pane_visibility(self.zen_mode, trash_open, modal_open, window, cx);
-        if let Some(pane) = &self.build_pdf {
-            pane.update(cx, |pane, cx| {
-                pane.set_visible(
-                    self.show_build_preview && !self.zen_mode && !trash_open,
-                    window,
-                    cx,
-                )
-            });
-        }
+        self.build.sync_preview_visibility(!self.zen_mode && !trash_open, window, cx);
         let engine = self.projects.directory().map(|project| project.engine);
         let engine_app = cx.entity();
         let main_app = cx.entity();
@@ -1243,7 +1089,7 @@ impl Render for Workspace {
                     .size(px(area_width * self.settings.editor_ratio))
                     .child(self.render_editor(cx)),
             );
-        if self.show_build_preview {
+        if self.build.panels.preview {
             work_area = work_area.child(
                 resizable_panel()
                     .size(px(area_width * (1. - self.settings.editor_ratio)))
@@ -1261,37 +1107,8 @@ impl Render for Workspace {
         } else {
             crate::i18n::workspace::BTN_COMPILE_BUILD.get()
         };
-        let status = if self.build.is_running() {
-            format!(
-                "{} · {:.1}s",
-                if self.build.is_cancelling() {
-                    crate::i18n::workspace::STATUS_STOPPING.get()
-                } else {
-                    crate::i18n::workspace::STATUS_BUILDING.get()
-                },
-                self.build.duration.as_secs_f32()
-            )
-        } else {
-            match self.build.status {
-                BuildStatus::Idle => String::new(),
-                BuildStatus::Success => format!(
-                    "✓ {:.1}s{}",
-                    self.build.duration.as_secs_f32(),
-                    if self.documents.source_version() != self.build.source_version {
-                        crate::i18n::workspace::STATUS_NEEDS_REBUILD.get()
-                    } else {
-                        ""
-                    }
-                ),
-                BuildStatus::Failed => {
-                    crate::i18n::workspace::status_failed_secs(self.build.duration.as_secs_f32())
-                }
-                BuildStatus::Cancelled => {
-                    crate::i18n::workspace::status_cancelled_secs(self.build.duration.as_secs_f32())
-                }
-            }
-        };
-        let mut vertical_work_area = v_resizable(if self.show_logs {
+        let status = self.build.status_label(self.documents.source_version());
+        let mut vertical_work_area = v_resizable(if self.build.panels.logs {
             "work-with-logs"
         } else {
             "work-no-logs"
@@ -1307,7 +1124,7 @@ impl Render for Workspace {
                         .expect("work area has a panel"),
                 );
                 app.update(cx, |app, cx| {
-                    if app.show_logs {
+                    if app.build.panels.logs {
                         app.settings.log_height = log_height;
                         app.persist_settings(cx);
                     }
@@ -1315,16 +1132,13 @@ impl Render for Workspace {
             }
         })
         .child(resizable_panel().child(work_area));
-        if self.show_logs {
+        if self.build.panels.logs {
             vertical_work_area = vertical_work_area.child(
                 resizable_panel()
                     .size(px(self.settings.log_height))
                     .size_range(px(100.)..px(700.))
                     .fixed()
-                    .child(crate::build_log::panel(self.build.logs.clone(), cx.listener(|app, _, _, cx| {
-                        app.show_logs = false;
-                        cx.notify();
-                    }))),
+                    .child(self.render_build_log(cx)),
             );
         }
         let right_panel_content = right_rendered.then(|| match self.right_panel_view {

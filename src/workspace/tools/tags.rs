@@ -10,17 +10,17 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-pub(in crate::workspace) type TagProposals = BTreeMap<(String, String, Uuid), PendingTagEdit>;
+pub(super) type TagProposals = BTreeMap<(String, String, Uuid), PendingTagEdit>;
 
-pub(in crate::workspace) struct PendingTagEdit {
+pub(super) struct PendingTagEdit {
     request_id: String,
     edit: Proposal,
 }
 
 impl Workspace {
-    pub(in crate::workspace) fn tag_request(&mut self, request: &WorkspaceToolRequest, cx: &mut Context<Self>) {
+    pub(super) fn tag_request(&mut self, request: &WorkspaceToolRequest, cx: &mut Context<Self>) {
         if request.action == WorkspaceToolAction::Cancel {
-            self.tag_proposals.retain(|(project, session, _), pending| {
+            self.tool_requests.tag_proposals.retain(|(project, session, _), pending| {
                 request.project_key != *project
                     || request.session_id != *session
                     || request.id != pending.request_id
@@ -63,7 +63,7 @@ impl Workspace {
         let owner = |proposal| (request.project_key.clone(), request.session_id.clone(), proposal);
         // Discard must work after the user has switched spaces or stopped the run.
         if let Request::Discard(id) = operation {
-            self.tag_proposals.remove(&owner(id.proposal_id));
+            self.tool_requests.tag_proposals.remove(&owner(id.proposal_id));
             return Ok(Some(json!({ "status": "ok" })));
         }
         let store = self.tag_tool_store(request)?;
@@ -81,7 +81,7 @@ impl Workspace {
             Request::PreviewDefinition(draft) => (draft.proposal_id, Edit::Definition(draft.edit)),
             Request::Commit(id) => {
                 let pending = self
-                    .tag_proposals
+                    .tool_requests.tag_proposals
                     .remove(&owner(id.proposal_id))
                     .ok_or_else(|| {
                         Failure::new("stale_preview", crate::i18n::tags::ERR_AGENT_STALE_TAG_CHANGES.get())
@@ -96,7 +96,7 @@ impl Workspace {
         let Some(confirmation) = proposal.confirmation() else {
             return Ok(Some(json!({ "status": "ok", "updated": 0 })));
         };
-        self.tag_proposals.insert(
+        self.tool_requests.tag_proposals.insert(
             owner(id),
             PendingTagEdit {
                 request_id: request.id.clone(),
