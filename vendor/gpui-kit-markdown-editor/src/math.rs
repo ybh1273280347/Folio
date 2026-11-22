@@ -78,6 +78,11 @@ pub(crate) fn math_range_at(source: &str, caret: usize) -> Option<(usize, usize,
 }
 
 pub fn normalize_math(source: &str) -> String {
+    // With no possible TeX opener, there is nothing to rewrite or protect in code spans.
+    if !source.contains('$') && !source.contains("\\(") && !source.contains("\\[") {
+        return source.to_owned();
+    }
+
     fn code_ranges(node: &markdown::mdast::Node, ranges: &mut Vec<std::ops::Range<usize>>) {
         if matches!(
             node,
