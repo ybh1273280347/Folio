@@ -67,8 +67,8 @@ pub struct PathsPreview {
     pub offset: Point<Pixels>,
     pub font: SharedString,
     pub font_size: u8,
+    pub palette: Palette,
     pub trash_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
-    pub is_folder: bool,
     pub source_folder: Option<String>,
     pub can_trash: bool,
     pub folder_bounds: Arc<Mutex<BTreeMap<String, (bool, Bounds<Pixels>)>>>,
@@ -76,32 +76,70 @@ pub struct PathsPreview {
 
 impl Render for PathsPreview {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        use crate::i18n::media;
+        use gpui_kit::rgb;
+
         let count = self.paths.len();
-        let over_trash = self.trash_bounds.lock().expect("trash bounds").is_some_and(|bounds| bounds.contains(&window.mouse_position()));
+        let mouse = window.mouse_position();
+        let over_trash = self.trash_bounds.lock().expect("trash bounds")
+            .is_some_and(|bounds| bounds.contains(&mouse));
         let folders = self.folder_bounds.lock().expect("tree bounds");
-        let hovered_folder = folders.iter().find(|(_, (is_file, bounds))| !is_file && bounds.contains(&window.mouse_position()));
+        let target = folders.iter()
+            .find(|(_, (is_file, bounds))| !is_file && bounds.contains(&mouse))
+            .map(|(path, _)| path.as_str());
         let invalid_folder = self.source_folder.as_ref().is_some_and(|source| {
-            hovered_folder.is_some_and(|(target, _)| Path::new(target).starts_with(source))
+            target.is_some_and(|target| Path::new(target).starts_with(source))
         });
-        let over_root = self.can_trash && !invalid_folder && hovered_folder.is_some_and(|(path, _)| path.is_empty());
-        let over_folder = self.can_trash && !invalid_folder && hovered_folder.is_some_and(|(path, _)| !path.is_empty());
-        div().pl(self.offset.x + px(12.)).pt(self.offset.y + px(12.))
-            .child(
-                div().flex().flex_col().gap_1().p_2().min_w(px(160.)).max_w(px(300.))
-                    .rounded(px(6.)).border_1().border_color(gpui_kit::rgb(0xd8d8d8))
-                    .bg(gpui_kit::rgb(0xffffff)).text_color(gpui_kit::rgb(0x333333))
-                    .font_family(self.font.clone()).text_size(px(self.font_size as f32)).shadow_sm()
-                    .child(div().flex().items_center().gap_1()
-                        .child(crate::ui::icon(IconName::Copy).w(px(14.)).h(px(14.)))
-                    .child(if over_trash && !self.can_trash { crate::i18n::media::TERM_NO_DELETE_LOOSE.get().into() } else if over_trash { crate::i18n::media::term_move_to_trash(count) } else if invalid_folder { crate::i18n::media::TERM_INVALID_FOLDER_DROP.get().into() } else if over_root { crate::i18n::media::term_move_to_root(count) } else if over_folder { crate::i18n::media::term_move_to_folder(count) } else if count == 1 { crate::i18n::media::TERM_COPY_PATH.get().into() } else { crate::i18n::media::term_copy_paths(count) }))
-                    .children(self.paths.iter().take(4).map(|path| {
-                        let name = path.file_name().expect("file has name").to_string_lossy().into_owned();
-                        div().flex().items_center().gap_2().min_w_0()
-                            .child(if self.is_folder { div().child(crate::ui::icon(IconName::Folder)).into_any_element() } else { crate::ui::file_icon(&name, false, false) })
-                            .child(div().min_w_0().text_ellipsis().child(name))
-                    }))
-                    .when(count > 4, |preview| preview.child(div().text_color(gpui_kit::rgb(0x787774)).child(crate::i18n::media::term_more_items(count - 4)))),
-            )
+        // The pointer hint describes the current destination. Away from a drop
+        // target the chip only identifies what is being carried.
+        let hint = if over_trash {
+            Some(if self.can_trash { media::DRAG_TRASH } else { media::DRAG_LOOSE_FILE }.get().into())
+        } else if invalid_folder {
+            Some(media::DRAG_INVALID_FOLDER.get().into())
+        } else if self.can_trash {
+            target.map(|path| {
+                let name = Path::new(path).file_name().map_or_else(
+                    || media::DRAG_PROJECT_ROOT.get().into(),
+                    |name| name.to_string_lossy(),
+                );
+                format!("→ {name}")
+            })
+        } else {
+            None
+        };
+        let invalid = (over_trash && !self.can_trash) || invalid_folder;
+        let palette = self.palette;
+        let name = self.paths[0].file_name().expect("dragged item has a name")
+            .to_string_lossy().into_owned();
+        let icon = if self.source_folder.is_some() {
+            crate::ui::icon(IconName::Folder).size(px(15.)).into_any_element()
+        } else {
+            crate::ui::file_icon(&name, false, false)
+        };
+        // GPUI anchors the drag view at the original grab offset. Adding it
+        // back keeps the chip a fixed distance from the pointer.
+        div().pl(self.offset.x + px(10.)).pt(self.offset.y + px(9.))
+            .child(div().relative().flex().items_center().gap(px(6.)).h(px(28.))
+                .px_2().max_w(px(300.)).rounded(px(7.))
+                .border_1().border_color(rgb(palette.border))
+                .bg(rgb(palette.surface)).text_color(rgb(palette.text))
+                .font_family(self.font.clone()).text_size(px(f32::from(self.font_size).clamp(11., 14.)))
+                .shadow_md()
+                .child(div().flex_shrink_0().child(icon))
+                .child(div().min_w_0().text_ellipsis().child(name))
+                .when(count > 1, |chip| chip.child(div()
+                    .flex_shrink_0().rounded(px(4.)).px_1()
+                    .bg(rgb(palette.selection)).text_color(rgb(palette.muted))
+                    .child(count.to_string())))
+                .when_some(hint, |chip, hint| chip.child(div()
+                    .min_w_0().max_w(px(118.)).text_ellipsis()
+                    .text_color(rgb(if invalid { palette.danger } else { palette.accent }))
+                    .child(hint)))
+                .with_animation(
+                    "tree-drag-lift",
+                    Animation::new(Duration::from_millis(135)).with_easing(ease_out_quint()),
+                    |chip, t| chip.top(px(4. * (1. - t))).opacity(0.55 + 0.45 * t),
+                ))
     }
 }
 
