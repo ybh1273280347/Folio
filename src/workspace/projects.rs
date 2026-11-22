@@ -37,7 +37,7 @@ impl Workspace {
                 tabs: self.documents.tabs().to_vec(),
                 active: self.documents.active().to_owned(),
                 reading_panes: self.documents.reading_panes().to_vec(),
-                collapsed_folders: Some(self.collapsed_folders.clone()),
+                collapsed_folders: Some(self.tree.collapsed_folders().clone()),
             },
         );
         storage::save_workspace_sessions(&self.workspace_sessions)
@@ -53,18 +53,14 @@ impl Workspace {
         }
         self.remember_session()?;
         let watcher = DocumentWatch::new(None)?;
-        self.show_trash = false;
+        self.tree.dismiss_trash();
         self.tags.reset();
         self.tag_proposals.clear();
         self.documents.replace_watch(watcher);
         self.config.active_id = None;
         self.config.active_workspace = Some(WorkspaceLocation::LooseFiles);
         self.active_session = Some("loose".into());
-        self.files.clear();
-        self.folders.clear();
-        self.collapsed_folders.clear();
-        self.focused_folder = None;
-        self.selected_files.clear();
+        self.tree.clear_directory();
         self.build.clear_result();
         self.clear_open_documents(window, cx);
 
@@ -123,7 +119,7 @@ impl Workspace {
             .join(&project.id)
             .join("preview.pdf");
 
-        self.show_trash = false;
+        self.tree.dismiss_trash();
         self.tags.reset();
         self.tag_proposals.clear();
         self.active_session = Some(id.to_owned());
@@ -135,48 +131,43 @@ impl Workspace {
             self.config.active_workspace = Some(WorkspaceLocation::Project(id.to_owned()));
         }
         self.documents.replace_watch(watcher);
-        self.files = files;
-        self.folders = folders;
+        self.tree.replace_listing(files, folders);
         self.refresh_tags(cx);
         self.build.clear_result();
         self.notice = None;
         self.preview = None;
         self.clear_open_documents(window, cx);
-        self.focused_folder = None;
-        self.selected_files.clear();
+        self.tree.reset_selection();
         if previous_pdf.exists() {
             self.build_pdf = Some(self.new_pdf_pane(previous_pdf.clone(), window, cx));
             self.preview = Some(previous_pdf);
         }
         let session = self.workspace_sessions.get(id).cloned().unwrap_or_default();
-        self.collapsed_folders = session
-            .collapsed_folders
-            .clone()
-            .unwrap_or_else(|| self.folders.iter().cloned().collect());
+        self.tree.restore_collapsed_folders(session.collapsed_folders);
         for path in &session.tabs {
-            if let Some(file) = self.files.iter().find(|file| &file.path == path).cloned() {
+            if let Some(file) = self.tree.files().iter().find(|file| &file.path == path).cloned() {
                 self.open_file(&file, window, cx)?;
             }
         }
         if self.documents.tabs().is_empty() {
             let first = self
-                .files
+                .tree.files()
                 .iter()
                 .find(|file| file.path == project.main_file)
-                .or_else(|| self.files.iter().find(|file| file.kind == FileKind::Text))
+                .or_else(|| self.tree.files().iter().find(|file| file.kind == FileKind::Text))
                 .cloned();
             if let Some(first) = first {
                 self.open_file(&first, window, cx)?;
             }
         }
         for path in &session.reading_panes {
-            if let Some(file) = self.files.iter().find(|file| &file.path == path).cloned() {
+            if let Some(file) = self.tree.files().iter().find(|file| &file.path == path).cloned() {
                 self.open_reading_pane(&file, window, cx);
             }
         }
         self.documents.restore_active_tab(&session.active);
         self.queue_math_preload(
-            self.files
+            self.tree.files()
                 .iter()
                 .filter(|file| file.path.to_lowercase().ends_with(".md"))
                 .map(|file| Path::new(&project.folder).join(&file.path))

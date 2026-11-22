@@ -266,7 +266,7 @@ impl Workspace {
             return;
         }
         let targets: Vec<_> = self
-            .selected_files
+            .tree.selected_files()
             .iter()
             .filter(|path| {
                 let lower = path.to_lowercase();
@@ -298,7 +298,7 @@ impl Workspace {
     }
 
     fn prepare_batch_target(&mut self, target: String, window: &mut Window, cx: &mut Context<Self>) {
-        let file = self.files.iter().find(|file| file.path == target).cloned();
+        let file = self.tree.files().iter().find(|file| file.path == target).cloned();
         let result = file
             .ok_or_else(|| {
                 io::Error::new(

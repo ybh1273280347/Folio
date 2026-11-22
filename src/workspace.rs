@@ -9,6 +9,7 @@ mod tags;
 mod tools;
 use build::Build;
 use documents::Documents;
+use file_tree::FileTree;
 use crate::ai::{AiPane, AiPaneEvent, AttachedFile, WorkspaceToolAction, WorkspaceToolRequest};
 use gpui_kit::component::Sizable;
 use crate::theme::color as rgb;
@@ -75,13 +76,6 @@ const BG: u32 = 0xf7f6f5;
 const BORDER: u32 = 0xe8e7e3;
 const MUTED: u32 = 0x787774;
 
-struct TreeSelectionDrag {
-    start: Point<Pixels>,
-    current: Point<Pixels>,
-    original: BTreeSet<String>,
-    moved: bool,
-}
-
 #[derive(Clone)]
 struct SidebarResizeDrag;
 
@@ -98,24 +92,6 @@ impl Render for RightPanelResizeDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         Empty
     }
-}
-
-impl TreeSelectionDrag {
-    fn bounds(&self) -> Bounds<Pixels> {
-        Bounds::from_corners(
-            point(self.start.x.min(self.current.x), self.start.y.min(self.current.y)),
-            point(self.start.x.max(self.current.x), self.start.y.max(self.current.y)),
-        )
-    }
-}
-
-#[derive(Clone)]
-enum NameAction {
-    Create,
-    CreateFolder,
-    RenameFile(String),
-    RenameFolder(String),
-    RenameProject(String),
 }
 
 pub fn bind_shortcuts(settings: &AppSettings, cx: &mut App) {
@@ -282,25 +258,9 @@ pub struct Workspace {
     preferences: Entity<Preferences>,
     math: Entity<MathRenderer>,
     show_preferences: bool,
-    searching: bool,
-    search_input: Entity<InputState>,
     tags: tags::TagPanel,
-    collapsed_folders: BTreeSet<String>,
-    focused_folder: Option<String>,
-    focused_file: Option<String>,
-    selected_files: BTreeSet<String>,
-    tree_row_bounds: Arc<Mutex<BTreeMap<String, (bool, Bounds<Pixels>)>>>,
-    tree_drag: Option<TreeSelectionDrag>,
-    trash_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
-    dragging_tree_item: Arc<AtomicBool>,
-    trash_entries: Vec<crate::trash::TrashEntry>,
-    show_trash: bool,
-    next_trash_cleanup: Instant,
-    file_tree_focus: FocusHandle,
-    sidebar_scroll: ScrollHandle,
+    tree: FileTree,
     show_build_preview: bool,
-    files: Vec<ProjectFile>,
-    folders: Vec<String>,
     documents: Documents,
     build: Build,
     show_logs: bool,
@@ -320,8 +280,6 @@ pub struct Workspace {
     build_pdf: Option<Entity<PdfPane>>,
     notice: Option<String>,
     notice_until: Option<Instant>,
-    name_action: Option<NameAction>,
-    name_input: Entity<InputState>,
     focus: FocusHandle,
     close_requested: bool,
     dialog_response: Option<(Dialog, rfd::MessageDialogResult)>,
@@ -423,27 +381,7 @@ impl Workspace {
             app.apply_settings(event.apply_to(&app.settings), window, cx);
         })
         .detach();
-        let name_input = cx.new(|cx| InputState::new(window, cx));
-        cx.subscribe_in(
-            &name_input,
-            window,
-            |app, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) && app.name_action.is_some() {
-                    if let Err(error) = app.apply_name(window, cx) {
-                        app.report(error, cx);
-                    }
-                }
-            },
-        )
-        .detach();
-        let search_input = cx.new(|cx| InputState::new(window, cx));
-        cx.subscribe(&search_input, |app, _, _: &InputEvent, cx| {
-            if app.tags.filter.is_some() {
-                app.prune_tag_selection(cx);
-            }
-            cx.notify();
-        })
-            .detach();
+        let tree = FileTree::new(window, cx);
         let right_panel_search = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(crate::i18n::workspace::SEARCH_HUB_PLACEHOLDER.get())
@@ -591,25 +529,9 @@ impl Workspace {
             preferences,
             math,
             show_preferences: false,
-            searching: false,
-            search_input,
             tags,
-            collapsed_folders: BTreeSet::new(),
-            focused_folder: None,
-            focused_file: None,
-            selected_files: BTreeSet::new(),
-            tree_row_bounds: Arc::new(Mutex::new(BTreeMap::new())),
-            tree_drag: None,
-            trash_bounds: Arc::new(Mutex::new(None)),
-            dragging_tree_item: Arc::new(AtomicBool::new(false)),
-            trash_entries: Vec::new(),
-            show_trash: false,
-            next_trash_cleanup: Instant::now(),
-            file_tree_focus: cx.focus_handle(),
-            sidebar_scroll: ScrollHandle::new(),
+            tree,
             show_build_preview: false,
-            files: Vec::new(),
-            folders: Vec::new(),
             documents: Documents::default(),
             build: Build::default(),
             show_logs: false,
@@ -629,8 +551,6 @@ impl Workspace {
             build_pdf: None,
             notice: None,
             notice_until: None,
-            name_action: None,
-            name_input,
             focus: cx.focus_handle(),
             close_requested: false,
             dialog_response: None,
@@ -799,7 +719,7 @@ impl Workspace {
             };
             self.zen_snapshot = Some(snapshot);
             self.zen_mode = true;
-            self.show_trash = false;
+            self.tree.dismiss_trash();
             self.settings.sidebar_open = false;
             if self.right_panel_open {
                 self.right_panel_open = false;
@@ -1284,16 +1204,17 @@ impl Render for Workspace {
             .into_iter()
             .filter_map(|pane| pane.read(cx).export_element())
             .collect();
-        let modal_open = self.show_trash || self.show_preferences
+        let trash_open = self.tree.is_trash_open();
+        let modal_open = trash_open || self.show_preferences
             || self.tags.is_editing()
-            || self.name_action.is_some()
+            || self.tree.name_dialog_open()
             || self.dialog_prompt.is_some()
             || self.dialog_open;
-        self.documents.sync_pane_visibility(self.zen_mode, self.show_trash, modal_open, window, cx);
+        self.documents.sync_pane_visibility(self.zen_mode, trash_open, modal_open, window, cx);
         if let Some(pane) = &self.build_pdf {
             pane.update(cx, |pane, cx| {
                 pane.set_visible(
-                    self.show_build_preview && !self.zen_mode && !self.show_trash,
+                    self.show_build_preview && !self.zen_mode && !trash_open,
                     window,
                     cx,
                 )
@@ -1308,7 +1229,7 @@ impl Render for Workspace {
             .filter(|path| !path.is_empty())
             .unwrap_or_else(|| crate::i18n::workspace::SELECT_MAIN_FILE.get().into());
         let main_files: Vec<_> = self
-            .files
+            .tree.files()
             .iter()
             .filter(|file| file.path.to_lowercase().ends_with(".tex"))
             .map(|file| file.path.clone())
@@ -1623,7 +1544,7 @@ impl Render for Workspace {
                 if app.show_preferences
                     || app.dialog_prompt.is_some()
                     || app.dialog_open
-                    || app.name_action.is_some()
+                    || app.tree.name_dialog_open()
                 {
                     cx.propagate();
                     return;
@@ -1639,8 +1560,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::find_file))
             .on_action(cx.listener(|app, _: &Dismiss, _, cx| {
                 app.show_preferences = false;
-                app.name_action = None;
-                app.searching = false;
+                app.tree.dismiss_overlays();
                 cx.notify();
             }))
             .on_action(cx.listener(|app, _: &SaveAll, _, cx| {
@@ -1885,7 +1805,7 @@ impl Render for Workspace {
             .child(
                 // Constrain the resize group to the space below the title bar.
                 div().flex_1().min_h_0().overflow_hidden().child({
-                    let main_content = if self.show_trash {
+                    let main_content = if trash_open {
                         self.render_trash(cx)
                     } else {
                         editor_with_terminal
@@ -2047,83 +1967,7 @@ impl Render for Workspace {
                     )
                 },
             );
-        if let Some(action) = &self.name_action {
-            let title = match action {
-                NameAction::Create => crate::i18n::workspace::MODAL_CREATE_FILE.get(),
-                NameAction::CreateFolder => crate::i18n::workspace::MODAL_CREATE_FOLDER.get(),
-                NameAction::RenameFile(_) => crate::i18n::workspace::MODAL_RENAME_FILE.get(),
-                NameAction::RenameFolder(_) => crate::i18n::workspace::MODAL_RENAME_FOLDER.get(),
-                NameAction::RenameProject(_) => crate::i18n::workspace::MODAL_RENAME_PROJECT.get(),
-            };
-            app = app.child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(rgba(0x00000030))
-                    .occlude()
-                    .child(
-                        div()
-                            .w(px(420.))
-                            .p_6()
-                            .rounded(px(8.))
-                            .border_1()
-                            .border_color(rgb(0xe6e5e1))
-                            .shadow_lg()
-                            .bg(rgb(0xffffff))
-                            .flex()
-                            .flex_col()
-                            .gap_4()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(div().font_semibold().child(title))
-                                    .child(
-                                        crate::ui::control("close-name-dialog", IconName::Close)
-                                            .on_click(cx.listener(|app, _, _, cx| {
-                                                app.name_action = None;
-                                                cx.notify();
-                                            })),
-                                    ),
-                            )
-                            .child(Input::new(&self.name_input))
-                            .when(matches!(action, NameAction::Create), |modal| {
-                                modal.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(MUTED))
-                                        .child(crate::i18n::workspace::CREATE_FILE_HINT.get()),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .flex()
-                                    .justify_end()
-                                    .gap_3()
-                                    .child(
-                                        crate::ui::button_secondary("cancel-name", crate::i18n::common::CANCEL.get())
-                                            .on_click(cx.listener(|app, _, _, cx| {
-                                                app.name_action = None;
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .child(
-                                        crate::ui::button_primary("apply-name", crate::i18n::common::CONFIRM.get()).on_click(
-                                            cx.listener(|app, _, window, cx| {
-                                                if let Err(error) = app.apply_name(window, cx) {
-                                                    app.report(error, cx);
-                                                }
-                                            }),
-                                        ),
-                                    ),
-                            ),
-                    ),
-            );
-        }
+        app = app.children(self.render_name_dialog(cx));
         if self.show_preferences {
             app = app.child(
                 deferred(

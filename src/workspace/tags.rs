@@ -91,7 +91,7 @@ impl Workspace {
             }
         };
         let visible = if self.directory_workspace().is_some() {
-            self.files
+            self.tree.files()
                 .iter()
                 .map(|file| file.path.clone())
                 .collect::<Vec<_>>()
@@ -202,38 +202,9 @@ impl Workspace {
             .is_none_or(|tag| self.tags.snapshot.has(path, tag))
     }
 
-    pub(super) fn prune_tag_selection(&mut self, cx: &App) {
-        if self.selected_files.is_empty() {
-            return;
-        }
-        let query = if self.searching {
-            self.search_input.read(cx).value().to_lowercase()
-        } else {
-            String::new()
-        };
-        let filtered = self.tags.filter.is_some() || !query.is_empty();
-        let available: BTreeSet<_> = self.files.iter().map(|file| file.path.as_str()).collect();
-        self.selected_files.retain(|path| {
-            available.contains(path.as_str())
-                && self
-                    .tags
-                    .filter
-                    .as_deref()
-                    .is_none_or(|tag| self.tags.snapshot.has(path, tag))
-                && path.to_lowercase().contains(&query)
-                && (filtered
-                    || !self.collapsed_folders.iter().any(|folder| {
-                        path.strip_prefix(folder)
-                            .is_some_and(|suffix| suffix.starts_with('/'))
-                    }))
-        });
-    }
-
     fn select_tag(&mut self, filter: Option<String>, cx: &mut Context<Self>) {
         self.tags.filter = filter;
-        self.tree_drag = None;
-        self.focused_folder = None;
-        self.prune_tag_selection(cx);
+        self.apply_tree_filter(cx);
         cx.notify();
     }
 
@@ -251,8 +222,7 @@ impl Workspace {
             input.set_value(value.to_owned(), window, cx)
         });
         if !self.tags.is_editing() {
-            self.sidebar_scroll
-                .scroll_to_top_of_item(self.config.projects.len() + 2);
+            self.tree.scroll_to_tags(self.config.projects.len());
         }
         if focus {
             let input = self.tags.input.clone();
@@ -289,7 +259,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let paths: Vec<_> = self
-            .files
+            .tree.files()
             .iter()
             .filter(|file| Path::new(&file.path).starts_with(folder))
             .map(|file| file.path.clone())
@@ -315,12 +285,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.selected_files.is_empty() {
-            self.edit_file_tags(self.selected_files.iter().cloned().collect(), window, cx);
-        } else if let Some(folder) = self.focused_folder.clone() {
+        if !self.tree.selected_files().is_empty() {
+            self.edit_file_tags(self.tree.selected_files().iter().cloned().collect(), window, cx);
+        } else if let Some(folder) = self.tree.focused_folder().map(str::to_owned) {
             self.edit_folder_tags(&folder, window, cx);
         } else if self.documents.tabs().iter().any(|tab| tab == self.documents.active())
-            || self.files.iter().any(|file| file.path == self.documents.active())
+            || self.tree.files().iter().any(|file| file.path == self.documents.active())
         {
             self.edit_file_tags(vec![self.documents.active().to_owned()], window, cx);
         }
@@ -328,7 +298,7 @@ impl Workspace {
 
     pub(super) fn close_tag_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tags.is_editing() {
-            self.file_tree_focus.focus(window, cx);
+            self.tree.focus(window, cx);
         }
         self.tags.open = false;
         cx.notify();
@@ -708,7 +678,7 @@ impl Workspace {
             }
             Mode::Recover(id) => {
                 let id = id.clone();
-                let mut paths: Vec<_> = self.files.iter().map(|file| &file.path).collect();
+                let mut paths: Vec<_> = self.tree.files().iter().map(|file| &file.path).collect();
                 if self.directory_workspace().is_none() {
                     paths.extend(self.documents.tabs().iter().chain(self.tags.snapshot.assigned.keys()));
                     paths.sort_unstable();

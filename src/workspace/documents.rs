@@ -882,7 +882,7 @@ impl Workspace {
         if focus_editor {
             self.focus_document_tab(path, window, cx);
         } else {
-            self.file_tree_focus.focus(window, cx);
+            self.tree.focus(window, cx);
         }
         if let Err(error) = self.remember_session() {
             self.report(error, cx);
@@ -1001,19 +1001,11 @@ impl Workspace {
     }
     pub(super) fn refresh_files(&mut self, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
         let root = self.directory_workspace().map(|project| PathBuf::from(&project.folder));
-        let previous: BTreeSet<_> = self.files.iter().map(|file| file.path.clone()).collect();
+        let previous: BTreeSet<_> = self.tree.files().iter().map(|file| file.path.clone()).collect();
         let refresh_tree = self.documents.document_watch.paths.is_empty() || self.documents.document_watch.tree;
         if let Some(root) = &root {
             if refresh_tree {
-                self.files = files::list_files(root)?;
-                self.folders = files::list_folders(root).unwrap_or_default();
-                if self
-                    .focused_folder
-                    .as_ref()
-                    .is_some_and(|folder| !self.folders.contains(folder))
-                {
-                    self.focused_folder = None;
-                }
+                self.tree.reload_watched_listing(root)?;
             }
         }
         if refresh_tree || self.documents.document_watch.paths.iter().any(|path| {
@@ -1026,7 +1018,7 @@ impl Workspace {
         }
         let changed = std::mem::take(&mut self.documents.document_watch.paths);
         self.queue_math_preload(
-            self.files
+            self.tree.files()
                 .iter()
                 .filter(|file| {
                     file.path.to_lowercase().ends_with(".md")
@@ -1164,7 +1156,7 @@ impl Workspace {
                                             .any(|name| part.as_os_str() == *name)
                                     })
                                     && (directory_event || path.is_dir() || files::is_relevant(path)
-                                        || (tree && self.folders.iter().any(|folder| root.join(folder) == *path)))
+                                        || (tree && self.tree.folders().iter().any(|folder| root.join(folder) == *path)))
                                 })
                             } else {
                                 files::is_relevant(path)
@@ -1205,7 +1197,7 @@ impl Workspace {
             }
         }
         // Autosave only idle, conflict-free drafts. Manual saves and builds share this revision path.
-        if self.name_action.is_none() && !self.dialog_open {
+        if !self.tree.name_dialog_open() && !self.dialog_open {
             let paths: Vec<_> = self.documents.open
                 .iter()
                 .filter(|(_, document)| {
@@ -1241,7 +1233,8 @@ impl Workspace {
         let annotation_result = crate::annotations::relocate_annotations(&old, &full);
         self.relocate_tags(&[(key.to_owned(), renamed.clone())], false, cx);
         if let Some(workspace) = self.directory_workspace() {
-            self.files = files::list_files(Path::new(&workspace.folder))?;
+            let root = PathBuf::from(&workspace.folder);
+            self.tree.reload_files(&root)?;
             storage::save_projects(&self.config)?;
         }
         self.remember_session()?;
@@ -1305,10 +1298,10 @@ impl Workspace {
         }
         if self.documents.active == key { self.documents.active = renamed.clone(); }
         if self.documents.focused_markdown.as_deref() == Some(key) { self.documents.focused_markdown = Some(renamed.clone()); }
-        if self.focused_file.as_deref() == Some(key) { self.focused_file = Some(renamed.clone()); }
-        for paths in [&mut self.selected_files, &mut self.documents.markdown_changed] {
-            if paths.remove(key) { paths.insert(renamed.clone()); }
+        if self.documents.markdown_changed.remove(key) {
+            self.documents.markdown_changed.insert(renamed.clone());
         }
+        self.tree.relocate_file(key, &renamed);
         if self.default_workspace.main_file == key && self.directory_workspace().is_some_and(|p| p.id == self.default_workspace.id) {
             self.default_workspace.main_file = renamed.clone();
         }

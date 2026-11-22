@@ -73,7 +73,7 @@ impl Workspace {
                 return Ok(None);
             }
             Request::Query(params) => {
-                let inventory = self.files.clone();
+                let inventory = self.tree.files().to_vec();
                 self.run_tag_query(request, cx, move || store.agent_query(&inventory, params));
                 return Ok(None);
             }
@@ -86,13 +86,13 @@ impl Workspace {
                     .ok_or_else(|| {
                         Failure::new("stale_preview", crate::i18n::tags::ERR_AGENT_STALE_TAG_CHANGES.get())
                     })?;
-                let (snapshot, result) = store.agent_commit(&self.files, pending.edit)?;
+                let (snapshot, result) = store.agent_commit(self.tree.files(), pending.edit)?;
                 self.use_tag_snapshot(snapshot, cx);
                 return Ok(Some(result));
             }
             Request::Discard(_) => unreachable!("discard can run without an active project"),
         };
-        let proposal = store.agent_preview(&self.files, edit)?;
+        let proposal = store.agent_preview(self.tree.files(), edit)?;
         let Some(confirmation) = proposal.confirmation() else {
             return Ok(Some(json!({ "status": "ok", "updated": 0 })));
         };
