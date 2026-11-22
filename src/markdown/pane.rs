@@ -37,6 +37,8 @@ mod emoji;
 mod outline;
 mod view;
 
+const PREVIEW_BYTES: usize = 8 * 1024;
+
 pub enum MarkdownEvent {
     RenameTitle(String),
     Change(String),
@@ -307,6 +309,7 @@ pub struct MarkdownPane {
     // Each view keeps its editing state until the other view changes the buffer.
     source_needs_sync: bool,
     visual_needs_sync: bool,
+    pending_source_heading: Option<usize>,
     source_heading_highlight: RangeDecorationCollection,
     source_heading_highlight_timer: Task<()>,
     visual_editor: Entity<BlockEditorState>,
@@ -636,6 +639,7 @@ impl MarkdownPane {
                 .language("markdown")
                 .line_number(settings.show_line_numbers)
                 .soft_wrap(true)
+                .background_wrap_for_large_values(PREVIEW_BYTES)
                 .searchable(true)
         });
         let source_heading_highlight = source_editor.update(cx, |editor, cx| {
@@ -892,6 +896,7 @@ impl MarkdownPane {
             source_editor,
             source_needs_sync: true,
             visual_needs_sync: false,
+            pending_source_heading: None,
             source_heading_highlight,
             source_heading_highlight_timer: Task::ready(()),
             visual_editor,
@@ -970,7 +975,6 @@ impl MarkdownPane {
         self.visual_needs_sync = false;
         // Bound first-paint work in bytes, even for OCR paragraphs with no blank lines.
         // The full parse still sees the original document, preserving fences and references.
-        const PREVIEW_BYTES: usize = 8 * 1024;
         let long = self.text.len() > PREVIEW_BYTES;
         let preview_end = if long {
             let end = self.text.floor_char_boundary(PREVIEW_BYTES);
@@ -1335,6 +1339,10 @@ impl MarkdownPane {
 
     fn navigate_heading(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.source {
+            if self.source_editor.read(cx).is_loading_wrapped_value() {
+                self.pending_source_heading = Some(index);
+                return;
+            }
             let Some(heading) = self.headings.get(index) else {
                 return;
             };
@@ -1539,12 +1547,10 @@ impl MarkdownPane {
         }
         self.text = text.to_owned();
         self.source_needs_sync = true;
+        self.pending_source_heading = None;
         self.load_visual(cx);
         if self.source {
-            self.source_editor.update(cx, |editor, cx| {
-                editor.set_value(text.to_owned(), window, cx)
-            });
-            self.source_needs_sync = false;
+            self.load_source(window, cx);
         }
         cx.notify();
     }
@@ -1744,18 +1750,29 @@ impl MarkdownPane {
         cx.notify();
     }
 
+    fn load_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.source_editor.update(cx, |editor, cx| {
+            if self.text.len() > PREVIEW_BYTES {
+                editor.set_value_wrapped_in_background(self.text.clone(), window, cx);
+            } else {
+                editor.set_value(self.text.clone(), window, cx);
+            }
+        });
+        self.source_needs_sync = false;
+        cx.notify();
+    }
+
     pub fn toggle_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.source = !self.source;
         if self.source {
             self.hovered_link = None;
-            self.source_editor.update(cx, |editor, cx| {
-                if self.source_needs_sync {
-                    editor.set_value(self.text.clone(), window, cx);
-                }
-                editor.focus(window, cx);
-            });
-            self.source_needs_sync = false;
+            if self.source_needs_sync {
+                self.load_source(window, cx);
+            }
+            self.source_editor.update(cx, |editor, cx| editor.focus(window, cx));
         } else {
+            self.source_editor.update(cx, |editor, _| editor.cancel_background_wrap());
+            self.pending_source_heading = None;
             if self.visual_needs_sync {
                 self.load_visual(cx);
             }

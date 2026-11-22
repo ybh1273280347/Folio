@@ -3,7 +3,7 @@
 use super::*;
 
 impl Render for MarkdownPane {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pane_bounds = self.scroll.bounds();
         let pane_origin = pane_bounds.origin;
         let pane_size = pane_bounds.size;
@@ -129,23 +129,43 @@ impl Render for MarkdownPane {
         }
 
         if self.source {
-            let paste_pane = cx.entity();
+            let loading = self.source_editor.read(cx).is_loading_wrapped_value();
+            if !loading && self.pending_source_heading.is_some() {
+                let pane = cx.entity().downgrade();
+                window.on_next_frame(move |window, cx| {
+                    let _ = pane.update(cx, |pane, cx| {
+                        if pane.source
+                            && !pane.source_editor.read(cx).is_loading_wrapped_value()
+                            && let Some(index) = pane.pending_source_heading.take()
+                        {
+                            pane.navigate_heading(index, window, cx);
+                        }
+                    });
+                });
+            }
+            let pane = cx.entity();
+            let editor = Editor::new(&self.source_editor)
+                .appearance(false)
+                .bordered(false)
+                .size_full()
+                .font_family(if self.settings.editor_font.is_empty() {
+                    SharedString::from("Consolas")
+                } else {
+                    self.settings.editor_font.clone().into()
+                })
+                .text_size(px(self.settings.editor_font_size as f32))
+                .on_paste(move |item, window, cx| {
+                    pane.update(cx, |pane, cx| pane.handle_source_paste(item, window, cx))
+                });
             content = content.child(
-                div().relative().flex_1().min_w_0().p_2().child(
-                    Editor::new(&self.source_editor)
-                        .appearance(false)
-                        .bordered(false)
-                        .size_full()
-                        .font_family(if self.settings.editor_font.is_empty() {
-                            SharedString::from("Consolas")
-                        } else {
-                            self.settings.editor_font.clone().into()
-                        })
-                        .text_size(px(self.settings.editor_font_size as f32))
-                        .on_paste(move |item, window, cx| {
-                            paste_pane.update(cx, |pane, cx| pane.handle_source_paste(item, window, cx))
-                        }),
-                ),
+                div().relative().flex_1().min_w_0().min_h_0().p_2()
+                    // Mount the empty editor during preparation so it can measure the
+                    // actual text area without shaping the entire source in prepaint.
+                    .child(div().size_full().when(loading, |editor| editor.invisible()).child(editor))
+                    .when(loading, |source| {
+                        source.child(div().absolute().inset_2().text_sm().text_color(rgb(0x787774))
+                            .child(crate::i18n::markdown::LOADING_MORE_CONTENT.get()))
+                    }),
             );
         } else {
             // The title is document content, so it shares the body's scroll
