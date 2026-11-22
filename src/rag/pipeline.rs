@@ -7,7 +7,7 @@ use super::{
     client::{EmbeddingClient, RerankClient},
     doc_kind, has_folio_pdf_fingerprint, load_derived_markdown_entries,
     load_derived_pdf_hashes, ocr, sha256_hex,
-    store::{RagStore, ScoredChunk, is_near_duplicate, path_matches_filters},
+    store::{RagStore, ScoredChunk, path_matches_filters},
 };
 use crate::{annotations::AnnotationItem, storage};
 use std::{
@@ -616,13 +616,7 @@ pub fn search_project(
     if snippet_queries.is_empty() {
         snippet_queries.extend(vec_queries.iter().map(|(_, q)| q.clone()));
     }
-    let derived_markdowns = load_derived_markdown_entries(store.project_root());
-    let results = collapse_and_format(
-        rrf_ranked,
-        &snippet_queries,
-        limit,
-        &derived_markdowns,
-    );
+    let results = collapse_and_format(rrf_ranked, &snippet_queries, limit);
     let base_mode = match (want_lex, vec_used) {
         (true, true) => "hybrid",
         (false, true) => "semantic",
@@ -682,7 +676,7 @@ pub fn search_kb_snapshots(
             ranked_lists.push((2.0, bucket_dirty));
         }
         let rrf_ranked = fuse_rrf(&ranked_lists);
-        collapse_and_format(rrf_ranked, &queries, limit, &HashMap::new())
+        collapse_and_format(rrf_ranked, &queries, limit)
     };
 
     let all = rank_bucket(buckets.all, dirty_hits.clone());
@@ -912,7 +906,6 @@ fn collapse_and_format(
     ranked: Vec<(f64, Candidate)>,
     queries: &[String],
     limit: usize,
-    derived_markdowns: &HashMap<String, super::DerivedMarkdownEntry>,
 ) -> Vec<SearchHit> {
     let mut snippet_terms: Vec<String> = Vec::new();
     for lq in queries {
@@ -922,28 +915,18 @@ fn collapse_and_format(
     }
 
     let mut per_file: HashMap<String, usize> = HashMap::new();
-    let mut selected_texts = Vec::<String>::new();
     let mut out = Vec::new();
     for (score, cand) in ranked {
-        let base_path = cand.rel_path.strip_suffix("#annotations").unwrap_or(&cand.rel_path);
-        let source_path = derived_markdowns
-            .get(base_path)
-            .filter(|entry| entry.markdown_hash == cand.content_hash.as_deref().unwrap_or_default())
-            .map_or(base_path, |entry| entry.source_pdf_path.as_str());
-        let count = per_file.entry(source_path.to_owned()).or_insert(0);
+        let base_path = cand
+            .rel_path
+            .strip_suffix("#annotations")
+            .unwrap_or(&cand.rel_path)
+            .to_owned();
+        let count = per_file.entry(base_path).or_insert(0);
         if *count >= MAX_CHUNKS_PER_FILE {
             continue;
         }
-        let is_derived_markdown = derived_markdowns.get(base_path).is_some_and(|entry| {
-            entry.markdown_hash == cand.content_hash.as_deref().unwrap_or_default()
-        });
-        if (source_path.to_ascii_lowercase().ends_with(".pdf") || is_derived_markdown)
-            && is_near_duplicate(&cand.chunk_text, &selected_texts)
-        {
-            continue;
-        }
         *count += 1;
-        selected_texts.push(cand.chunk_text.clone());
 
         let markdown_cache = if cand.kind == "pdf"
             && matches!(cand.parse_tier.as_str(), "accurate" | "mineru" | "hybrid")
@@ -1380,137 +1363,10 @@ mod tests {
             (1.0, vec![c4, c1]),
         ];
         let ranked = fuse_rrf(&lists);
-        let hits = collapse_and_format(ranked, &["Alpha".to_owned()], 6, &HashMap::new());
+        let hits = collapse_and_format(ranked, &["Alpha".to_owned()], 6);
         assert_eq!(hits.len(), 5);
         assert_eq!(hits[0].docid, "aaaa1111");
         assert!(hits.iter().any(|h| h.path == "b.md"));
-    }
-
-    #[test]
-    fn derived_export_shares_pdf_quota_and_removes_duplicate_chunks() {
-        let pdf = Candidate {
-            key: "pdf".into(),
-            docid: "pdf-id".into(),
-            rel_path: "papers/book.pdf".into(),
-            kind: "pdf".into(),
-            parse_tier: "accurate".into(),
-            content_hash: Some("pdf-hash".into()),
-            heading_path: "Book > Page 1".into(),
-            line_start: None,
-            line_end: None,
-            page_num: Some(1),
-            chunk_text: "The quick brown fox jumps over the lazy dog.".into(),
-            dirty_buffer: false,
-        };
-        let exported = Candidate {
-            key: "export".into(),
-            docid: "md-id".into(),
-            rel_path: "papers/book_folio-parse.md".into(),
-            kind: "md".into(),
-            parse_tier: "source".into(),
-            content_hash: Some("md-hash".into()),
-            heading_path: "Book > Page 1".into(),
-            line_start: Some(1),
-            line_end: Some(2),
-            page_num: None,
-            chunk_text: "the quick brown fox jumps over the lazy dog".into(),
-            dirty_buffer: false,
-        };
-        let unique = Candidate {
-            key: "unique".into(),
-            docid: "md-id".into(),
-            rel_path: "papers/book_folio-parse.md".into(),
-            kind: "md".into(),
-            parse_tier: "source".into(),
-            content_hash: Some("md-hash".into()),
-            heading_path: "Book > Page 2".into(),
-            line_start: Some(3),
-            line_end: Some(4),
-            page_num: None,
-            chunk_text: "A distinct chapter explains a different theorem.".into(),
-            dirty_buffer: false,
-        };
-        let entries = HashMap::from([(
-            "papers/book_folio-parse.md".into(),
-            super::super::DerivedMarkdownEntry {
-                source_pdf_path: "papers/book.pdf".into(),
-                source_pdf_hash: "pdf-hash".into(),
-                markdown_hash: "md-hash".into(),
-            },
-        )]);
-        let hits = collapse_and_format(
-            vec![(1.0, pdf), (0.9, exported), (0.8, unique)],
-            &[],
-            5,
-            &entries,
-        );
-        assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].path, "papers/book.pdf");
-        assert_eq!(hits[1].snippet, "A distinct chapter explains a different theorem.");
-    }
-
-    #[test]
-    fn exported_markdown_shares_pdf_quota_and_near_duplicate_suppression() {
-        let pdf = Candidate {
-            key: "pdf".into(),
-            docid: "pdf-id".into(),
-            rel_path: "papers/book.pdf".into(),
-            kind: "pdf".into(),
-            parse_tier: "accurate".into(),
-            content_hash: Some("pdf-hash".into()),
-            heading_path: "Book > Page 1".into(),
-            line_start: None,
-            line_end: None,
-            page_num: Some(1),
-            chunk_text: "The quick brown fox jumps over the lazy dog.".into(),
-            dirty_buffer: false,
-        };
-        let exported = Candidate {
-            key: "export".into(),
-            docid: "md-id".into(),
-            rel_path: "papers/book_folio-parse.md".into(),
-            kind: "md".into(),
-            parse_tier: "source".into(),
-            content_hash: Some("md-hash".into()),
-            heading_path: "Book > Page 1".into(),
-            line_start: Some(1),
-            line_end: Some(2),
-            page_num: None,
-            chunk_text: "the quick brown fox jumps over the lazy dog".into(),
-            dirty_buffer: false,
-        };
-        let unique = Candidate {
-            key: "unique".into(),
-            docid: "md-id".into(),
-            rel_path: "papers/book_folio-parse.md".into(),
-            kind: "md".into(),
-            parse_tier: "source".into(),
-            content_hash: Some("md-hash".into()),
-            heading_path: "Book > Page 2".into(),
-            line_start: Some(3),
-            line_end: Some(4),
-            page_num: None,
-            chunk_text: "A distinct chapter explains a different theorem.".into(),
-            dirty_buffer: false,
-        };
-        let entries = HashMap::from([(
-            "papers/book_folio-parse.md".into(),
-            super::super::DerivedMarkdownEntry {
-                source_pdf_path: "papers/book.pdf".into(),
-                source_pdf_hash: "pdf-hash".into(),
-                markdown_hash: "md-hash".into(),
-            },
-        )]);
-
-        let hits = collapse_and_format(
-            vec![(1.0, pdf), (0.9, exported), (0.8, unique)],
-            &[],
-            5,
-            &entries,
-        );
-        assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].path, "papers/book.pdf");
-        assert_eq!(hits[1].snippet, "A distinct chapter explains a different theorem.");
     }
 
     #[test]
