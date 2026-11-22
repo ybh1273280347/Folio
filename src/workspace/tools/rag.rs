@@ -17,7 +17,7 @@ use gpui_kit::{AppContext, Context, RenderImage, Window};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::PathBuf,
     sync::{
         Arc,
@@ -59,7 +59,8 @@ struct OcrRunnerHandle {
 
 pub(in crate::workspace) struct RagSyncState {
     pending_deadline: Option<Instant>,
-    in_flight: Option<(String, Arc<AtomicBool>)>,
+    in_flight: Option<(u64, String, Arc<AtomicBool>)>,
+    next_sync_id: u64,
     ocr_runner: Option<OcrRunnerHandle>,
     last_reap: Instant,
 }
@@ -69,6 +70,7 @@ impl Default for RagSyncState {
         Self {
             pending_deadline: None,
             in_flight: None,
+            next_sync_id: 0,
             ocr_runner: None,
             last_reap: Instant::now(),
         }
@@ -158,11 +160,82 @@ impl Workspace {
         self.rag_sync.pending_deadline = Some(Instant::now() + SYNC_DEBOUNCE);
     }
 
-    pub(in crate::workspace) fn cancel_rag_sync(&mut self) {
-        self.rag_sync.pending_deadline = None;
-        if let Some((_, cancelled)) = self.rag_sync.in_flight.take() {
+    pub(in crate::workspace) fn live_project_paths(&self) -> HashSet<String> {
+        self.tree
+            .files()
+            .iter()
+            .map(|file| file.path.clone())
+            .collect()
+    }
+
+    fn cancel_in_flight_sync(&mut self) {
+        if let Some((_, _, cancelled)) = self.rag_sync.in_flight.take() {
             cancelled.store(true, Ordering::Relaxed);
         }
+    }
+
+    pub(in crate::workspace) fn relocate_rag_paths(
+        &mut self,
+        moves: &[(String, String)],
+        is_folder: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if moves.is_empty() {
+            return;
+        }
+        self.right_panel.kb.relocate_paths(moves, is_folder);
+        if let Some(handle) = &self.rag_sync.ocr_runner {
+            for (path, cancel) in &handle.item_cancels {
+                if let Some(next) =
+                    crate::workspace::panels::KbPanelState::remap_rel_path(path, moves, is_folder)
+                {
+                    cancel.store(true, Ordering::Relaxed);
+                    self.right_panel.kb.ocr_progress.remove(&next);
+                    self.right_panel.kb.ocr_progress.remove(path);
+                }
+            }
+        }
+        self.cancel_in_flight_sync();
+        if let Some((_, root)) = self.active_rag_root()
+            && root.join(".folio").join("rag.sqlite3").exists()
+        {
+            self.rag_sync.pending_deadline =
+                Some(Instant::now() + Duration::from_millis(400));
+        }
+        cx.notify();
+    }
+
+    pub(in crate::workspace) fn reconcile_rag_on_tree_change(
+        &mut self,
+        previous: &BTreeSet<String>,
+    ) {
+        let current = self.live_project_paths();
+        let mut removed = Vec::new();
+        for old in previous {
+            if !current.contains(old) {
+                removed.push(old.clone());
+            }
+        }
+        let added = current.iter().any(|path| !previous.contains(path));
+        if removed.is_empty() && !added {
+            return;
+        }
+        if let Some(handle) = &self.rag_sync.ocr_runner {
+            for old in &removed {
+                if let Some(cancel) = handle.item_cancels.get(old) {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        self.right_panel.kb.prune_missing_paths(&current);
+        if self.rag_sync.in_flight.is_some() {
+            self.cancel_in_flight_sync();
+        }
+    }
+
+    pub(in crate::workspace) fn cancel_rag_sync(&mut self) {
+        self.rag_sync.pending_deadline = None;
+        self.cancel_in_flight_sync();
         self.cancel_all_pdf_ocr_silent();
     }
 
@@ -279,7 +352,9 @@ impl Workspace {
                 {
                     app.right_panel.kb.accurate_configured = accurate_configured;
                     if let (Some((stats, items)), _) = (&snapshot, ()) {
+                        let live = app.live_project_paths();
                         app.right_panel.kb.apply_snapshot(stats.clone(), items.clone());
+                        app.right_panel.kb.prune_missing_paths(&live);
                         if app.right_panel.kb.pdf_manager_open {
                             app.ensure_pdf_covers_loaded(cx);
                         }
@@ -363,9 +438,7 @@ impl Workspace {
             return;
         };
         self.rag_sync.pending_deadline = None;
-        if let Some((_, old_cancel)) = self.rag_sync.in_flight.take() {
-            old_cancel.store(true, Ordering::Relaxed);
-        }
+        self.cancel_in_flight_sync();
 
         let db_path = root.join(".folio").join("rag.sqlite3");
         let config = self.settings.rag.clone();
@@ -374,8 +447,10 @@ impl Workspace {
         self.right_panel.kb.sync_error = None;
         let eligible_paths =
             collect_eligible_paths(self.tree.files().iter().map(|file| file.path.clone()));
+        let sync_id = self.rag_sync.next_sync_id.wrapping_add(1);
+        self.rag_sync.next_sync_id = sync_id;
         let cancelled = Arc::new(AtomicBool::new(false));
-        self.rag_sync.in_flight = Some((project_key.clone(), cancelled.clone()));
+        self.rag_sync.in_flight = Some((sync_id, project_key.clone(), cancelled.clone()));
         cx.notify();
 
         let task = cx.background_spawn(async move {
@@ -410,17 +485,20 @@ impl Workspace {
                     .rag_sync
                     .in_flight
                     .as_ref()
-                    .is_some_and(|(k, _)| *k == project_key);
-                if is_current {
-                    app.rag_sync.in_flight = None;
+                    .is_some_and(|(id, k, _)| *id == sync_id && *k == project_key);
+                if !is_current {
+                    return;
                 }
+                app.rag_sync.in_flight = None;
                 if app
                     .active_rag_root()
                     .is_some_and(|(active_key, _)| active_key == project_key)
                 {
                     match outcome {
                         Ok((stats, items)) => {
+                            let live = app.live_project_paths();
                             app.right_panel.kb.apply_snapshot(stats, items);
+                            app.right_panel.kb.prune_missing_paths(&live);
                             app.right_panel.kb.sync_error = None;
                             if app.right_panel.kb.pdf_manager_open {
                                 app.ensure_pdf_covers_loaded(cx);
@@ -720,11 +798,13 @@ impl Workspace {
                 app.right_panel.kb.searching = false;
                 match outcome {
                     Ok((resp, snapshot)) => {
+                        let live = app.live_project_paths();
                         app.right_panel.kb.results = resp.results;
                         app.right_panel.kb.search_error = None;
                         if let Some((stats, items)) = snapshot {
                             app.right_panel.kb.apply_snapshot(stats, items);
                         }
+                        app.right_panel.kb.prune_missing_paths(&live);
                     }
                     Err(err) => {
                         app.right_panel.kb.search_error = Some(err.message);
@@ -833,7 +913,9 @@ impl Workspace {
                     self.right_panel.kb.ocr_progress.remove(&rel_path);
                     self.right_panel.kb.selected_pdfs.remove(&rel_path);
                     if let (Some(stats), Some(items)) = (stats, pdf_items) {
+                        let live = self.live_project_paths();
                         self.right_panel.kb.apply_snapshot(stats, items);
+                        self.right_panel.kb.prune_missing_paths(&live);
                     }
                     self.schedule_rag_sync();
                 }
@@ -844,9 +926,13 @@ impl Workspace {
                     pdf_items,
                 } => {
                     self.right_panel.kb.ocr_progress.remove(&rel_path);
-                    self.report(message, cx);
+                    let live = self.live_project_paths();
+                    if live.contains(&rel_path) {
+                        self.report(message, cx);
+                    }
                     if let (Some(stats), Some(items)) = (stats, pdf_items) {
                         self.right_panel.kb.apply_snapshot(stats, items);
+                        self.right_panel.kb.prune_missing_paths(&live);
                     }
                 }
                 OcrRunnerEvent::ItemCancelled { rel_path } => {

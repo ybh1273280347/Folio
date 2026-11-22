@@ -3,7 +3,7 @@
 mod hub;
 mod kb;
 
-pub(in crate::workspace) use kb::PdfOcrPhase;
+pub(in crate::workspace) use kb::{KbPanelState, PdfOcrPhase};
 
 use super::*;
 use crate::ai::AttachedFile;

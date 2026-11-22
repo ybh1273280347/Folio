@@ -202,6 +202,112 @@ impl KbPanelState {
         self.stats = Some(stats);
     }
 
+    pub(in crate::workspace) fn remap_rel_path(
+        path: &str,
+        moves: &[(String, String)],
+        is_folder: bool,
+    ) -> Option<String> {
+        let (base, suffix) = match path.strip_suffix("#annotations") {
+            Some(base) => (base, "#annotations"),
+            None => (path, ""),
+        };
+        for (old, new) in moves {
+            if base == old {
+                return Some(format!("{new}{suffix}"));
+            }
+            if is_folder {
+                let prefix = format!("{old}/");
+                if let Some(rest) = base.strip_prefix(&prefix) {
+                    return Some(format!("{new}/{rest}{suffix}"));
+                }
+            }
+        }
+        None
+    }
+
+    pub(in crate::workspace) fn relocate_paths(
+        &mut self,
+        moves: &[(String, String)],
+        is_folder: bool,
+    ) {
+        if moves.is_empty() {
+            return;
+        }
+        let remap = |p: &str| Self::remap_rel_path(p, moves, is_folder);
+        for item in &mut self.pdf_items {
+            if let Some(next) = remap(&item.rel_path) {
+                item.rel_path = next;
+                if item
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|e| e.starts_with("读取 PDF 失败 ("))
+                {
+                    item.last_error = None;
+                }
+            }
+        }
+        self.pdf_items.sort_by(|a, b| {
+            let a_needs = a.status == "needs_ocr";
+            let b_needs = b.status == "needs_ocr";
+            b_needs.cmp(&a_needs).then_with(|| a.rel_path.cmp(&b.rel_path))
+        });
+        for hit in &mut self.results {
+            if let Some(next) = remap(&hit.path) {
+                hit.path = next;
+            }
+        }
+        if let Some(stats) = &mut self.stats {
+            for path in &mut stats.needs_ocr_files {
+                if let Some(next) = remap(path) {
+                    *path = next;
+                }
+            }
+        }
+        self.selected_pdfs = self
+            .selected_pdfs
+            .iter()
+            .map(|p| remap(p).unwrap_or_else(|| p.clone()))
+            .collect();
+        self.expanded_files = self
+            .expanded_files
+            .iter()
+            .map(|p| remap(p).unwrap_or_else(|| p.clone()))
+            .collect();
+        self.collapsing_files = self
+            .collapsing_files
+            .iter()
+            .map(|(p, v)| (remap(p).unwrap_or_else(|| p.clone()), *v))
+            .collect();
+        self.card_anim_gen = self
+            .card_anim_gen
+            .iter()
+            .map(|(p, v)| (remap(p).unwrap_or_else(|| p.clone()), *v))
+            .collect();
+        self.ocr_progress = self
+            .ocr_progress
+            .iter()
+            .map(|(p, v)| (remap(p).unwrap_or_else(|| p.clone()), v.clone()))
+            .collect();
+        self.sync_error = None;
+        self.ocr_error = None;
+    }
+
+    pub(in crate::workspace) fn prune_missing_paths(&mut self, live_files: &HashSet<String>) {
+        self.pdf_items.retain(|item| live_files.contains(&item.rel_path));
+        self.selected_pdfs.retain(|p| live_files.contains(p));
+        self.ocr_progress.retain(|p, _| live_files.contains(p));
+        self.results.retain(|hit| {
+            let base = hit.path.strip_suffix("#annotations").unwrap_or(&hit.path);
+            live_files.contains(base)
+        });
+        if let Some(stats) = &mut self.stats {
+            stats.needs_ocr_files.retain(|p| live_files.contains(p));
+        }
+        let live_hashes: HashSet<&str> =
+            self.pdf_items.iter().map(|i| i.content_hash.as_str()).collect();
+        self.pdf_covers.retain(|h, _| live_hashes.contains(h.as_str()));
+    }
+
     pub(in crate::workspace) fn red_dot_count(&self) -> usize {
         if !self.pdf_items.is_empty() {
             self.pdf_items

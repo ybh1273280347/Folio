@@ -399,6 +399,7 @@ pub fn upgrade_pdfs(
         ) {
             Ok(()) => stats.upgraded_pdfs += 1,
             Err(err) if err.code == "cancelled" => return Err(err),
+            Err(err) if err.code == "file_not_found" => {}
             Err(err) => {
                 let _ = store.upsert_ocr_job(&hash, &rel_path, None, "failed", Some(&err.message));
                 stats.failed_pdfs.push(format!("{rel_path}: {}", err.message));
@@ -437,7 +438,7 @@ pub fn process_single_pdf_with_progress(
         on_progress,
     ) {
         Ok(()) => Ok(()),
-        Err(err) if err.code == "cancelled" => Err(err),
+        Err(err) if matches!(err.code, "cancelled" | "file_not_found") => Err(err),
         Err(err) => {
             let _ = store.upsert_ocr_job(hash, rel_path, None, "failed", Some(&err.message));
             Err(err)
@@ -462,8 +463,14 @@ fn process_single_pdf(
     on_progress: &mut dyn FnMut(OcrProgressEvent),
 ) -> Result<(), RagError> {
     let abs = root.join(rel_path.replace('/', "\\"));
-    let bytes = fs::read(&abs)
-        .map_err(|e| RagError::new("io_error", format!("读取 PDF 失败 ({rel_path}): {e}")))?;
+    let bytes = fs::read(&abs).map_err(|e| {
+        let code = if e.kind() == std::io::ErrorKind::NotFound {
+            "file_not_found"
+        } else {
+            "io_error"
+        };
+        RagError::new(code, format!("读取 PDF 失败 ({rel_path}): {e}"))
+    })?;
 
     let mut base_pages: Option<Vec<PdfPageMarkdown>> = None;
     let mut target_pages: Option<Vec<usize>> = None;
