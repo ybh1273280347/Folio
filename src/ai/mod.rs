@@ -6,6 +6,7 @@ mod manager;
 mod quote;
 mod session;
 mod render;
+mod thinking;
 use session::{Session, SessionChanges};
 pub use manager::AiPane;
 pub(crate) use rpc::project_key;
@@ -46,6 +47,7 @@ use gpui_kit::{
 };
 use rpc::{RpcClient, RpcImage, RpcInbound};
 use serde_json::Value;
+use thinking::render_thinking_detail;
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, HashMap, HashSet},
@@ -2341,23 +2343,6 @@ fn render_file_edit_row(
         .into_any_element()
 }
 
-fn render_thinking_detail(
-    id: SharedString,
-    text: String,
-    streaming: bool,
-    ui_font: &SharedString,
-    ps: ProcessStyle,
-) -> AnyElement {
-    ThinkingScrollBox {
-        id,
-        text,
-        streaming,
-        ui_font: ui_font.clone(),
-        ps,
-    }
-    .into_any_element()
-}
-
 #[derive(IntoElement)]
 struct DiffPatchView {
     id: SharedString,
@@ -2411,43 +2396,6 @@ impl RenderOnce for DiffPatchView {
                     .hunk_separator(DiffHunkSeparator::Simple)
                     .change_indicator(DiffChangeIndicator::Bars)
                     .h((height + px(2.)).min(px(280.))),
-            )
-    }
-}
-
-#[derive(IntoElement)]
-struct ThinkingScrollBox {
-    id: SharedString,
-    text: String,
-    streaming: bool,
-    ui_font: SharedString,
-    ps: ProcessStyle,
-}
-
-impl RenderOnce for ThinkingScrollBox {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let scroll = window
-            .use_keyed_state((self.id.clone(), 44usize), cx, |_, _| ScrollHandle::default())
-            .read(cx)
-            .clone();
-        if self.streaming {
-            scroll.scroll_to_bottom();
-        }
-        div()
-            .on_scroll(|_, _, cx| cx.stop_propagation())
-            .child(
-                div()
-                    .id(self.id)
-                    .track_scroll(&scroll)
-                    .px_1p5()
-                    .py_1()
-                    .max_h(px(160.))
-                    .overflow_y_scroll()
-                    .font_family(self.ui_font)
-                    .text_size(self.ps.detail_size)
-                    .line_height(relative(1.55))
-                    .text_color(self.ps.fg_secondary)
-                    .child(self.text),
             )
     }
 }
