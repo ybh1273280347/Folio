@@ -2,6 +2,7 @@
 
 pub mod chunker;
 pub mod client;
+pub mod mineru;
 pub mod pipeline;
 pub mod store;
 
@@ -29,6 +30,8 @@ pub struct SearchRequest {
     pub vec_queries: Vec<String>,
     #[serde(default)]
     pub mode: SearchMode,
+    #[serde(default)]
+    pub rerank: Option<bool>,
     #[serde(default)]
     pub extensions: Vec<String>,
     pub under_directory: Option<String>,
@@ -84,6 +87,10 @@ pub struct StatusReport {
     pub embed_model: String,
     pub embed_dim: usize,
     pub embed_server_ready: bool,
+    pub rerank_server_ready: bool,
+    pub mineru_configured: bool,
+    pub mineru_upgraded_pdfs: usize,
+    pub mineru_pending_pdfs: usize,
     pub indexed_files: usize,
     pub total_chunks: usize,
     pub vector_chunks: usize,
@@ -101,6 +108,8 @@ pub struct ReindexReport {
     pub embedded_chunks: usize,
     pub pending_vectors: usize,
     pub embed_server_ready: bool,
+    pub mineru_upgraded_pdfs: usize,
+    pub mineru_failed_pdfs: Vec<String>,
     pub needs_ocr_files: Vec<String>,
 }
 

@@ -47,7 +47,10 @@ test('folio_kb_status and folio_kb_reindex map errors and cancellation to isErro
   assert.equal(statusRes.isError, false);
   assert.deepEqual(request.mock.calls[0].arguments.slice(0, 2), ['status', {}]);
 
-  const reindexRes = await reindexTool.execute('call-3', { force_rebuild: true });
+  const reindexRes = await reindexTool.execute('call-3', { force_rebuild: true, upgrade_pdfs: true });
   assert.equal(reindexRes.isError, true);
-  assert.deepEqual(request.mock.calls[1].arguments.slice(0, 2), ['reindex', { params: { force_rebuild: true } }]);
+  assert.deepEqual(
+    request.mock.calls[1].arguments.slice(0, 2),
+    ['reindex', { params: { force_rebuild: true, upgrade_pdfs: true } }],
+  );
 });

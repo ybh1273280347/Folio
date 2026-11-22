@@ -53,7 +53,7 @@ impl SettingsChanged {
             interface_font_size, editor_font_size, markdown_font_size, ai_font_size,
             math_scale, inline_math_scale, math_font, line_width_limited,
             internal_link_open_target, tool_execution_view, show_line_numbers,
-            terminal, translate, ai, keybindings,
+            terminal, translate, ai, rag, keybindings,
         );
         merged
     }
@@ -96,6 +96,12 @@ pub struct Preferences {
     ai_title_model: Entity<InputState>,
     ai_exa_key: Entity<InputState>,
     ai_qianfan_key: Entity<InputState>,
+    rag_mineru_key: Entity<InputState>,
+    rag_server_bin: Entity<InputState>,
+    rag_embed_url: Entity<InputState>,
+    rag_embed_model_path: Entity<InputState>,
+    rag_rerank_url: Entity<InputState>,
+    rag_rerank_model_path: Entity<InputState>,
     copied_api_field: Option<&'static str>,
     copied_api_task: Task<()>,
     editing_theme: bool,
@@ -503,6 +509,36 @@ impl Preferences {
         cx.subscribe(&ai_qianfan_key, |panel,input,event: &InputEvent,cx| {
             if matches!(event,InputEvent::Change) { panel.settings.ai.baidu_qianfan_api_key=input.read(cx).value().trim().to_owned(); panel.changed(cx); }
         }).detach();
+        let rag_mineru_key = cx.new(|cx| InputState::new(window, cx).placeholder(p::RAG_MINERU_PLACEHOLDER.get()).masked(true));
+        rag_mineru_key.update(cx, |input, cx| input.set_value(settings.rag.mineru_api_key.clone(), window, cx));
+        cx.subscribe(&rag_mineru_key, |panel, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) { panel.settings.rag.mineru_api_key = input.read(cx).value().trim().to_owned(); panel.changed(cx); }
+        }).detach();
+        let rag_server_bin = cx.new(|cx| InputState::new(window, cx).placeholder("llama-server"));
+        rag_server_bin.update(cx, |input, cx| input.set_value(settings.rag.server_bin.clone(), window, cx));
+        cx.subscribe(&rag_server_bin, |panel, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) { panel.settings.rag.server_bin = input.read(cx).value().trim().to_owned(); panel.changed(cx); }
+        }).detach();
+        let rag_embed_url = cx.new(|cx| InputState::new(window, cx).placeholder("http://127.0.0.1:18101"));
+        rag_embed_url.update(cx, |input, cx| input.set_value(settings.rag.embed_url.clone(), window, cx));
+        cx.subscribe(&rag_embed_url, |panel, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) { panel.settings.rag.embed_url = input.read(cx).value().trim().to_owned(); panel.changed(cx); }
+        }).detach();
+        let rag_embed_model_path = cx.new(|cx| InputState::new(window, cx).placeholder("Qwen3-Embedding-0.6B-Q8_0.gguf"));
+        rag_embed_model_path.update(cx, |input, cx| input.set_value(settings.rag.embed_model_path.clone(), window, cx));
+        cx.subscribe(&rag_embed_model_path, |panel, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) { panel.settings.rag.embed_model_path = input.read(cx).value().trim().to_owned(); panel.changed(cx); }
+        }).detach();
+        let rag_rerank_url = cx.new(|cx| InputState::new(window, cx).placeholder("http://127.0.0.1:18102"));
+        rag_rerank_url.update(cx, |input, cx| input.set_value(settings.rag.rerank_url.clone(), window, cx));
+        cx.subscribe(&rag_rerank_url, |panel, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) { panel.settings.rag.rerank_url = input.read(cx).value().trim().to_owned(); panel.changed(cx); }
+        }).detach();
+        let rag_rerank_model_path = cx.new(|cx| InputState::new(window, cx).placeholder("Qwen3-Reranker-0.6B-Q8_0.gguf"));
+        rag_rerank_model_path.update(cx, |input, cx| input.set_value(settings.rag.rerank_model_path.clone(), window, cx));
+        cx.subscribe(&rag_rerank_model_path, |panel, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) { panel.settings.rag.rerank_model_path = input.read(cx).value().trim().to_owned(); panel.changed(cx); }
+        }).detach();
         Self {
             published_settings: settings.clone(),
             settings,
@@ -540,6 +576,12 @@ impl Preferences {
             ai_title_model,
             ai_exa_key,
             ai_qianfan_key,
+            rag_mineru_key,
+            rag_server_bin,
+            rag_embed_url,
+            rag_embed_model_path,
+            rag_rerank_url,
+            rag_rerank_model_path,
             copied_api_field: None,
             copied_api_task: Task::ready(()),
             editing_theme: false,
@@ -648,6 +690,12 @@ impl Preferences {
         self.ai_title_model.update(cx, |input,cx| input.set_value(settings.ai.title_model_id.clone(),window,cx));
         self.ai_exa_key.update(cx, |input,cx| input.set_value(settings.ai.exa_api_key.clone(),window,cx));
         self.ai_qianfan_key.update(cx, |input,cx| input.set_value(settings.ai.baidu_qianfan_api_key.clone(),window,cx));
+        self.rag_mineru_key.update(cx, |input, cx| input.set_value(settings.rag.mineru_api_key.clone(), window, cx));
+        self.rag_server_bin.update(cx, |input, cx| input.set_value(settings.rag.server_bin.clone(), window, cx));
+        self.rag_embed_url.update(cx, |input, cx| input.set_value(settings.rag.embed_url.clone(), window, cx));
+        self.rag_embed_model_path.update(cx, |input, cx| input.set_value(settings.rag.embed_model_path.clone(), window, cx));
+        self.rag_rerank_url.update(cx, |input, cx| input.set_value(settings.rag.rerank_url.clone(), window, cx));
+        self.rag_rerank_model_path.update(cx, |input, cx| input.set_value(settings.rag.rerank_model_path.clone(), window, cx));
     }
     pub fn set_background_image_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
         self.background_image_error = error;
@@ -669,6 +717,9 @@ impl Preferences {
         });
         self.ai_qianfan_key.update(cx, |input, cx| {
             input.set_placeholder(p::QIANFAN_PLACEHOLDER.get(), window, cx);
+        });
+        self.rag_mineru_key.update(cx, |input, cx| {
+            input.set_placeholder(p::RAG_MINERU_PLACEHOLDER.get(), window, cx);
         });
         let system_default = p::SYSTEM_DEFAULT.get().to_owned();
         let default_items: Vec<String> = std::iter::once(system_default.clone())
@@ -1171,6 +1222,7 @@ impl Preferences {
         let baidu_ready = !self.settings.translate.baidu_app_id.trim().is_empty()
             && !self.settings.translate.baidu_api_key.trim().is_empty();
         let ai_ready = !self.settings.ai.base_url.trim().is_empty();
+        let mineru_ready = !self.settings.rag.mineru_api_key.trim().is_empty();
 
         let copy_btn = |id: &'static str, value: String, copied: bool| {
             div()
@@ -1300,6 +1352,116 @@ impl Preferences {
                     .child(div().flex().items_center().gap_2()
                         .child(div().w(px(96.)).text_xs().child(p::QIANFAN_API_KEY.get()))
                         .child(div().flex_1().min_w_0().child(Input::new(&self.ai_qianfan_key).mask_toggle()))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .p_4()
+                    .rounded(px(8.))
+                    .bg(rgb(0xfafaf8))
+                    .border_1()
+                    .border_color(rgb(0xe8e7e3))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0p5()
+                                    .min_w_0()
+                                    .child(div().font_semibold().child(p::RAG_SERVICE_TITLE.get()))
+                                    .child(div().text_xs().text_color(rgb(0x787774)).child(p::RAG_SERVICE_DESC.get())),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .px_2()
+                                    .py(px(2.))
+                                    .rounded(px(4.))
+                                    .when(mineru_ready, |b| {
+                                        b.bg(rgb(0xeaf5ee))
+                                            .border_1()
+                                            .border_color(rgb(0xc6e5d0))
+                                            .text_color(rgb(0x237844))
+                                    })
+                                    .when(!mineru_ready, |b| {
+                                        b.bg(rgb(0xfff4e5))
+                                            .border_1()
+                                            .border_color(rgb(0xf2d3a6))
+                                            .text_color(rgb(0x9a5b13))
+                                    })
+                                    .text_xs()
+                                    .child(if mineru_ready { p::CONFIGURED.get() } else { p::KEY_REQUIRED.get() }),
+                            ),
+                    )
+                    .child(div().h(px(1.)).bg(rgb(0xebebe6)))
+                    .child(div().flex().items_center().gap_2()
+                        .child(div().w(px(108.)).flex_shrink_0().text_xs().text_color(rgb(0x5b5b58)).child("MinerU API Key"))
+                        .child(div().flex_1().min_w_0().child(Input::new(&self.rag_mineru_key).mask_toggle())))
+                    .child(div().flex().items_center().gap_2()
+                        .child(div().w(px(108.)).flex_shrink_0().text_xs().text_color(rgb(0x5b5b58)).child("llama-server"))
+                        .child(div().flex_1().min_w_0().child(Input::new(&self.rag_server_bin))))
+                    .child(div().flex().items_center().gap_2()
+                        .child(div().w(px(108.)).flex_shrink_0().text_xs().text_color(rgb(0x5b5b58)).child("Embedding URL"))
+                        .child(div().flex_1().min_w_0().child(Input::new(&self.rag_embed_url)))
+                        .child(
+                            crate::ui::button_secondary("reset-rag-embed-url", p::DEFAULT_BTN.get())
+                                .px_2()
+                                .on_click(cx.listener(|panel, _, window, cx| {
+                                    let default_url = crate::model::RagConfig::default().embed_url;
+                                    panel.settings.rag.embed_url = default_url.clone();
+                                    panel.rag_embed_url.update(cx, |input, cx| input.set_value(default_url, window, cx));
+                                    panel.changed(cx);
+                                })),
+                        ))
+                    .child(div().flex().items_center().gap_2()
+                        .child(div().w(px(108.)).flex_shrink_0().text_xs().text_color(rgb(0x5b5b58)).child("Embedding GGUF"))
+                        .child(div().flex_1().min_w_0().child(Input::new(&self.rag_embed_model_path))))
+                    .child(div().flex().items_center().gap_2()
+                        .child(div().w(px(108.)).flex_shrink_0().text_xs().text_color(rgb(0x5b5b58)).child("Rerank URL"))
+                        .child(div().flex_1().min_w_0().child(Input::new(&self.rag_rerank_url)))
+                        .child(
+                            crate::ui::button_secondary("reset-rag-rerank-url", p::DEFAULT_BTN.get())
+                                .px_2()
+                                .on_click(cx.listener(|panel, _, window, cx| {
+                                    let default_url = crate::model::RagConfig::default().rerank_url;
+                                    panel.settings.rag.rerank_url = default_url.clone();
+                                    panel.rag_rerank_url.update(cx, |input, cx| input.set_value(default_url, window, cx));
+                                    panel.changed(cx);
+                                })),
+                        ))
+                    .child(div().flex().items_center().gap_2()
+                        .child(div().w(px(108.)).flex_shrink_0().text_xs().text_color(rgb(0x5b5b58)).child("Rerank GGUF"))
+                        .child(div().flex_1().min_w_0().child(Input::new(&self.rag_rerank_model_path))))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(div().text_xs().text_color(rgb(0x5b5b58)).child(p::RAG_AUTO_MANAGE.get()))
+                            .child(
+                                crate::ui::button_secondary(
+                                    "toggle-rag-auto-manage",
+                                    if self.settings.rag.auto_manage_server {
+                                        common_i18n::ENABLED.get()
+                                    } else {
+                                        common_i18n::DISABLED.get()
+                                    },
+                                )
+                                .px_2()
+                                .on_click(cx.listener(|panel, _, _, cx| {
+                                    panel.settings.rag.auto_manage_server = !panel.settings.rag.auto_manage_server;
+                                    panel.changed(cx);
+                                })),
+                            ),
+                    ),
             )
             .child(
                 div()

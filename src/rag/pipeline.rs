@@ -1,14 +1,16 @@
-//! Incremental indexing, hybrid RRF fusion, dirty-buffer fallback, and snippet formatting.
+//! Incremental indexing, annotation sync, hybrid RRF fusion, and position-aware reranking.
 
 use super::{
-    DirtyDocument, RagError, ReindexReport, SearchHit, SearchMode, SearchRequest, SearchResponse,
-    chunker::{chunk_text_document, extract_and_chunk_pdf},
-    client::EmbeddingClient,
-    doc_kind, sha256_hex,
+    DirtyDocument, RagConfig, RagError, ReindexReport, SearchHit, SearchMode, SearchRequest,
+    SearchResponse,
+    chunker::{chunk_annotations, chunk_text_document, extract_and_chunk_pdf},
+    client::{EmbeddingClient, RerankClient},
+    doc_kind, mineru, sha256_hex,
     store::{RagStore, ScoredChunk, path_matches_filters},
 };
+use crate::{annotations::AnnotationItem, storage};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
@@ -16,6 +18,7 @@ use std::{
 };
 
 const RRF_K: f64 = 60.0;
+const RERANK_TOP_K: usize = 25;
 const MAX_CHUNKS_PER_FILE: usize = 2;
 const SNIPPET_CHARS: usize = 320;
 const EMBED_SYNC_PAGE: usize = 64;
@@ -28,20 +31,24 @@ fn check_cancelled(cancelled: &AtomicBool) -> Result<(), RagError> {
     }
 }
 
+pub struct SyncOptions<'a> {
+    pub config: &'a RagConfig,
+    pub embed_client: Option<&'a EmbeddingClient>,
+    pub force_rebuild: bool,
+    pub upgrade_pdfs: bool,
+}
+
 pub fn sync_project(
     root: &Path,
     eligible_paths: &[String],
     store: &mut RagStore,
-    embed_model: &str,
-    embed_dim: usize,
-    client: Option<&EmbeddingClient>,
+    opts: SyncOptions<'_>,
     cancelled: &AtomicBool,
-    force_rebuild: bool,
 ) -> Result<ReindexReport, RagError> {
     check_cancelled(cancelled)?;
-    if force_rebuild {
+    if opts.force_rebuild {
         store
-            .reset_index(embed_model, embed_dim)
+            .reset_index(&opts.config.embed_model, opts.config.embed_dim)
             .map_err(|e| RagError::new("store_error", e))?;
     }
 
@@ -105,43 +112,60 @@ pub fn sync_project(
         }
 
         if kind == "pdf" {
-            match extract_and_chunk_pdf(rel_path, bytes) {
-                Ok(extracted) => {
-                    let status = if extracted.needs_ocr {
-                        "needs_ocr"
-                    } else {
-                        "indexed"
-                    };
-                    store
-                        .upsert_document(
-                            rel_path,
-                            kind,
-                            &content_hash,
-                            mtime_ns,
-                            file_size,
-                            status,
-                            Some(&extracted.raw_text),
-                            Some(extracted.parse_tier),
-                            Some(&extracted.chunks),
-                        )
-                        .map_err(|e| RagError::new("store_error", e))?;
-                    updated_files += 1;
-                }
-                Err(_) => {
-                    store
-                        .upsert_document(
-                            rel_path,
-                            kind,
-                            &content_hash,
-                            mtime_ns,
-                            file_size,
-                            "needs_ocr",
-                            Some(""),
-                            Some("fast_pdf"),
-                            Some(&[]),
-                        )
-                        .map_err(|e| RagError::new("store_error", e))?;
-                    updated_files += 1;
+            if let Some(cached) = mineru::load_cached_pdf(root, rel_path, &content_hash) {
+                store
+                    .upsert_document(
+                        rel_path,
+                        kind,
+                        &content_hash,
+                        mtime_ns,
+                        file_size,
+                        "indexed",
+                        Some(&cached.raw_text),
+                        Some(cached.parse_tier),
+                        Some(&cached.chunks),
+                    )
+                    .map_err(|e| RagError::new("store_error", e))?;
+                updated_files += 1;
+            } else {
+                match extract_and_chunk_pdf(rel_path, bytes) {
+                    Ok(extracted) => {
+                        let status = if extracted.needs_ocr {
+                            "needs_ocr"
+                        } else {
+                            "indexed"
+                        };
+                        store
+                            .upsert_document(
+                                rel_path,
+                                kind,
+                                &content_hash,
+                                mtime_ns,
+                                file_size,
+                                status,
+                                Some(&extracted.raw_text),
+                                Some(extracted.parse_tier),
+                                Some(&extracted.chunks),
+                            )
+                            .map_err(|e| RagError::new("store_error", e))?;
+                        updated_files += 1;
+                    }
+                    Err(_) => {
+                        store
+                            .upsert_document(
+                                rel_path,
+                                kind,
+                                &content_hash,
+                                mtime_ns,
+                                file_size,
+                                "needs_ocr",
+                                Some(""),
+                                Some("fast_pdf"),
+                                Some(&[]),
+                            )
+                            .map_err(|e| RagError::new("store_error", e))?;
+                        updated_files += 1;
+                    }
                 }
             }
         } else {
@@ -164,13 +188,20 @@ pub fn sync_project(
         }
     }
 
+    updated_files += sync_annotations(root, eligible_paths, store, &mut live_set, &existing)?;
+
     let removed_files = store
         .deactivate_missing(&live_set)
         .map_err(|e| RagError::new("store_error", e))?;
 
+    let mut mineru_stats = mineru::MinerUUpgradeStats::default();
+    if opts.upgrade_pdfs {
+        mineru_stats = mineru::upgrade_pdfs(root, store, opts.config, cancelled)?;
+    }
+
     let mut embedded_chunks = 0usize;
-    let embed_server_ready = client.is_some_and(EmbeddingClient::ensure_ready);
-    if embed_server_ready && let Some(client) = client {
+    let embed_server_ready = opts.embed_client.is_some_and(EmbeddingClient::ensure_ready);
+    if embed_server_ready && let Some(client) = opts.embed_client {
         loop {
             check_cancelled(cancelled)?;
             let pending = store
@@ -204,17 +235,111 @@ pub fn sync_project(
         embedded_chunks,
         pending_vectors: stats.pending_vectors,
         embed_server_ready,
+        mineru_upgraded_pdfs: mineru_stats.upgraded_pdfs,
+        mineru_failed_pdfs: mineru_stats.failed_pdfs,
         needs_ocr_files: stats.needs_ocr_files,
     })
 }
 
+fn sync_annotations(
+    root: &Path,
+    eligible_paths: &[String],
+    store: &mut RagStore,
+    live_set: &mut HashSet<String>,
+    existing: &HashMap<String, super::store::DocumentMeta>,
+) -> Result<usize, RagError> {
+    let mut dirs: BTreeSet<String> = BTreeSet::new();
+    for path in eligible_paths {
+        let dir = path
+            .rsplit_once('/')
+            .map_or("", |(parent, _)| parent)
+            .to_owned();
+        dirs.insert(dir);
+    }
+
+    let mut updated = 0usize;
+    for dir in dirs {
+        let sidecar = if dir.is_empty() {
+            root.join(".folio").join("annotations.json")
+        } else {
+            root.join(dir.replace('/', "\\"))
+                .join(".folio")
+                .join("annotations.json")
+        };
+        let Ok(meta) = fs::metadata(&sidecar) else {
+            continue;
+        };
+        let Ok(items) = storage::read_json::<Vec<AnnotationItem>>(&sidecar) else {
+            continue;
+        };
+        if items.is_empty() {
+            continue;
+        }
+        let mtime_ns = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos() as i64);
+
+        let mut grouped: BTreeMap<String, Vec<AnnotationItem>> = BTreeMap::new();
+        for item in items {
+            let target_rel = if dir.is_empty() {
+                item.file.clone()
+            } else {
+                format!("{dir}/{}", item.file)
+            };
+            if live_set.contains(&target_rel) {
+                grouped.entry(target_rel).or_default().push(item);
+            }
+        }
+
+        for (target_rel, group) in grouped {
+            let syn_path = format!("{target_rel}#annotations");
+            let extracted = chunk_annotations(&target_rel, &group);
+            if extracted.chunks.is_empty() {
+                continue;
+            }
+            live_set.insert(syn_path.clone());
+            let hash = sha256_hex(extracted.raw_text.as_bytes());
+            let byte_len = extracted.raw_text.len() as i64;
+            if let Some(prev) = existing.get(&syn_path)
+                && prev.mtime_ns == mtime_ns
+                && prev.file_size == byte_len
+            {
+                continue;
+            }
+            store
+                .upsert_document(
+                    &syn_path,
+                    "annotation",
+                    &hash,
+                    mtime_ns,
+                    byte_len,
+                    "indexed",
+                    Some(&extracted.raw_text),
+                    Some(extracted.parse_tier),
+                    Some(&extracted.chunks),
+                )
+                .map_err(|e| RagError::new("store_error", e))?;
+            updated += 1;
+        }
+    }
+    Ok(updated)
+}
+
+pub struct SearchServices<'a> {
+    pub embed_client: Option<&'a EmbeddingClient>,
+    pub rerank_client: Option<&'a RerankClient>,
+    pub rerank_model: &'a str,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn search_project(
-    store: &RagStore,
+    store: &mut RagStore,
     req: &SearchRequest,
     dirty_docs: &[DirtyDocument],
     allowed_paths: Option<&HashSet<String>>,
-    client: Option<&EmbeddingClient>,
+    services: SearchServices<'_>,
     cancelled: &AtomicBool,
 ) -> Result<SearchResponse, RagError> {
     check_cancelled(cancelled)?;
@@ -282,7 +407,7 @@ pub fn search_project(
     if want_vec {
         if stats.vector_chunks == 0 {
             degraded_reason = Some("向量索引尚未构建（请确认 llama-server 可用并运行索引）".to_owned());
-        } else if let Some(client) = client
+        } else if let Some(client) = services.embed_client
             && client.ensure_ready()
         {
             let mut vec_texts = vec![query];
@@ -315,7 +440,6 @@ pub fn search_project(
         }
     }
 
-    // Search open dirty buffers in memory so unsaved edits are immediately discoverable.
     let mut dirty_terms = vec![query.to_owned()];
     dirty_terms.extend(req.lex_queries.iter().cloned());
     let dirty_hits = search_dirty_buffers(dirty_docs, &dirty_terms, allowed_paths, under_dir, &req.extensions);
@@ -323,7 +447,6 @@ pub fn search_project(
         ranked_lists.push((2.0, dirty_hits));
     }
 
-    // If Semantic mode was requested while vector service was offline, fall back to FTS5 rather than failing empty.
     if req.mode == SearchMode::Semantic && !vec_used {
         let fallback = store
             .search_fts(query, allowed_paths, under_dir, &req.extensions, candidate_limit)
@@ -333,13 +456,34 @@ pub fn search_project(
         }
     }
 
-    let results = fuse_rrf_and_collapse(&ranked_lists, query, &req.lex_queries, limit);
-    let mode_used = match (want_lex, vec_used) {
+    let mut rrf_ranked = fuse_rrf(&ranked_lists);
+    let mut rerank_used = false;
+    if req.rerank.unwrap_or(true)
+        && rrf_ranked.len() > 1
+        && let Some(reranker) = services.rerank_client
+        && reranker.ensure_ready()
+    {
+        check_cancelled(cancelled)?;
+        rerank_used = apply_rerank_blend(
+            store,
+            reranker,
+            services.rerank_model,
+            query,
+            &mut rrf_ranked,
+        )?;
+    }
+
+    let results = collapse_and_format(rrf_ranked, query, &req.lex_queries, limit);
+    let base_mode = match (want_lex, vec_used) {
         (true, true) => "hybrid",
         (false, true) => "semantic",
         _ => "keyword_only",
-    }
-    .to_owned();
+    };
+    let mode_used = if rerank_used {
+        format!("{base_mode}+rerank")
+    } else {
+        base_mode.to_owned()
+    };
 
     Ok(SearchResponse {
         mode_used,
@@ -365,12 +509,7 @@ struct Candidate {
     dirty_buffer: bool,
 }
 
-fn fuse_rrf_and_collapse(
-    lists: &[(f64, Vec<Candidate>)],
-    query: &str,
-    lex_queries: &[String],
-    limit: usize,
-) -> Vec<SearchHit> {
+fn fuse_rrf(lists: &[(f64, Vec<Candidate>)]) -> Vec<(f64, Candidate)> {
     let mut scores: HashMap<String, f64> = HashMap::new();
     let mut items: HashMap<String, Candidate> = HashMap::new();
 
@@ -394,11 +533,104 @@ fn fuse_rrf_and_collapse(
         .filter_map(|(k, score)| items.remove(&k).map(|c| (score, c)))
         .collect();
     ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+    ranked
+}
 
-    let mut snippet_terms: Vec<String> = query
-        .split_whitespace()
-        .map(str::to_owned)
+fn apply_rerank_blend(
+    store: &mut RagStore,
+    reranker: &RerankClient,
+    rerank_model: &str,
+    query: &str,
+    ranked: &mut [(f64, Candidate)],
+) -> Result<bool, RagError> {
+    let count = ranked.len().min(RERANK_TOP_K);
+    let keys: Vec<String> = ranked[..count]
+        .iter()
+        .map(|(_, c)| {
+            let text_hash = sha256_hex(c.chunk_text.as_bytes());
+            sha256_hex(format!("{rerank_model}\0{query}\0{text_hash}").as_bytes())
+        })
         .collect();
+
+    let cached = store
+        .get_rerank_scores(&keys)
+        .map_err(|e| RagError::new("store_error", e))?;
+
+    let mut miss_indices = Vec::new();
+    let mut miss_texts = Vec::new();
+    for (idx, key) in keys.iter().enumerate() {
+        if !cached.contains_key(key) {
+            miss_indices.push(idx);
+            miss_texts.push(ranked[idx].1.chunk_text.as_str());
+        }
+    }
+
+    let mut fresh_scores: HashMap<usize, f64> = HashMap::new();
+    if !miss_texts.is_empty() {
+        let Ok(scores) = reranker.rerank(query, &miss_texts) else {
+            return Ok(false);
+        };
+        let mut to_cache = Vec::with_capacity(scores.len());
+        for (idx, score) in miss_indices.into_iter().zip(scores) {
+            fresh_scores.insert(idx, score);
+            to_cache.push((keys[idx].clone(), score));
+        }
+        let _ = store.put_rerank_scores(&to_cache);
+    }
+
+    let mut rerank_scores = Vec::with_capacity(count);
+    for (idx, key) in keys.iter().enumerate() {
+        let score = cached
+            .get(key)
+            .copied()
+            .or_else(|| fresh_scores.get(&idx).copied())
+            .unwrap_or(0.0);
+        rerank_scores.push(score);
+    }
+
+    position_aware_blend(&mut ranked[..count], &rerank_scores);
+    ranked[..count].sort_by(|a, b| b.0.total_cmp(&a.0));
+    Ok(true)
+}
+
+pub fn position_aware_blend_scores(rrf_scores: &[f64], rerank_scores: &[f64]) -> Vec<f64> {
+    let max_rrf = rrf_scores
+        .iter()
+        .copied()
+        .fold(0.0_f64, f64::max)
+        .max(1e-9);
+    rrf_scores
+        .iter()
+        .zip(rerank_scores)
+        .enumerate()
+        .map(|(idx, (rrf, rerank))| {
+            let norm_rrf = (rrf / max_rrf).clamp(0.0, 1.0);
+            let clamped_rerank = rerank.clamp(0.0, 1.0);
+            let w_rrf = match idx {
+                0..=2 => 0.75,
+                3..=9 => 0.60,
+                _ => 0.40,
+            };
+            w_rrf * norm_rrf + (1.0 - w_rrf) * clamped_rerank
+        })
+        .collect()
+}
+
+fn position_aware_blend(ranked: &mut [(f64, Candidate)], rerank_scores: &[f64]) {
+    let rrf_scores: Vec<f64> = ranked.iter().map(|(s, _)| *s).collect();
+    let blended = position_aware_blend_scores(&rrf_scores, rerank_scores);
+    for ((slot, _), score) in ranked.iter_mut().zip(blended) {
+        *slot = score;
+    }
+}
+
+fn collapse_and_format(
+    ranked: Vec<(f64, Candidate)>,
+    query: &str,
+    lex_queries: &[String],
+    limit: usize,
+) -> Vec<SearchHit> {
+    let mut snippet_terms: Vec<String> = query.split_whitespace().map(str::to_owned).collect();
     for lq in lex_queries {
         for term in lq.split_whitespace() {
             snippet_terms.push(term.to_owned());
@@ -408,7 +640,12 @@ fn fuse_rrf_and_collapse(
     let mut per_file: HashMap<String, usize> = HashMap::new();
     let mut out = Vec::new();
     for (score, cand) in ranked {
-        let count = per_file.entry(cand.rel_path.clone()).or_insert(0);
+        let base_path = cand
+            .rel_path
+            .strip_suffix("#annotations")
+            .unwrap_or(&cand.rel_path)
+            .to_owned();
+        let count = per_file.entry(base_path).or_insert(0);
         if *count >= MAX_CHUNKS_PER_FILE {
             continue;
         }
@@ -579,11 +816,74 @@ mod tests {
             (2.0, vec![c1.clone(), c2.clone(), c3.clone(), c4.clone()]),
             (1.0, vec![c4, c1]),
         ];
-        let hits = fuse_rrf_and_collapse(&lists, "Alpha", &[], 5);
-        // Max 2 per file, so c3 is collapsed and b.md enters Top 3.
+        let ranked = fuse_rrf(&lists);
+        let hits = collapse_and_format(ranked, "Alpha", &[], 5);
         assert_eq!(hits.len(), 3);
         assert_eq!(hits[0].docid, "aaaa1111");
         assert!(hits.iter().any(|h| h.path == "b.md"));
+    }
+
+    #[test]
+    fn position_aware_blend_protects_top_ranks_and_promotes_lower_hits() {
+        let mut rrf = vec![0.10; 12];
+        rrf[0] = 1.0; // rank 1
+        rrf[11] = 0.2; // rank 12
+        let mut rerank = vec![0.1; 12];
+        rerank[0] = 0.0; // reranker dislikes rank 1
+        rerank[11] = 1.0; // reranker strongly prefers rank 12
+
+        let blended = position_aware_blend_scores(&rrf, &rerank);
+        // Rank 1 keeps 0.75 weight from RRF (0.75) vs rank 12 getting 0.60*1.0 + 0.40*0.2 = 0.68.
+        assert!((blended[0] - 0.75).abs() < 1e-6);
+        assert!((blended[11] - 0.68).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sync_project_indexes_annotations_and_cached_mineru_pdfs() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("papers")).unwrap();
+        fs::create_dir_all(root.join("papers/.folio")).unwrap();
+        fs::write(root.join("papers/sample.pdf"), b"%PDF-1.4 dummy").unwrap();
+        let pdf_hash = sha256_hex(b"%PDF-1.4 dummy");
+        let cache = mineru::cache_dir(root, &pdf_hash);
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(
+            cache.join("full.md"),
+            "# Theorem\n\nProximal gradient convergence rate.\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("papers/.folio/annotations.json"),
+            r#"[{"id":1,"file":"sample.pdf","page":2,"quote":"Proximal gradient","occurrence":0,"color":"yellow","comment":"Key step in proof"}]"#,
+        )
+        .unwrap();
+
+        let db = root.join(".folio/rag.sqlite3");
+        let cfg = RagConfig::default();
+        let mut store = RagStore::open(&db, &cfg.embed_model, cfg.embed_dim).unwrap();
+        let cancel = AtomicBool::new(false);
+        let report = sync_project(
+            root,
+            &["papers/sample.pdf".to_owned()],
+            &mut store,
+            SyncOptions {
+                config: &cfg,
+                embed_client: None,
+                force_rebuild: false,
+                upgrade_pdfs: false,
+            },
+            &cancel,
+        )
+        .unwrap();
+
+        assert_eq!(report.updated_files, 2); // pdf + annotation
+        let ann_hits = store
+            .search_fts("Key step in proof", None, None, &[], 5)
+            .unwrap();
+        assert_eq!(ann_hits.len(), 1);
+        assert_eq!(ann_hits[0].kind, "annotation");
+        assert_eq!(ann_hits[0].page_num, Some(3));
     }
 
     #[test]
@@ -622,12 +922,25 @@ mod tests {
             lex_queries: vec![],
             vec_queries: vec![],
             mode: SearchMode::Hybrid,
+            rerank: Some(true),
             extensions: vec![],
             under_directory: None,
             limit: 5,
         };
         let cancel = AtomicBool::new(false);
-        let resp = search_project(&store, &req, &dirty, None, None, &cancel).unwrap();
+        let resp = search_project(
+            &mut store,
+            &req,
+            &dirty,
+            None,
+            SearchServices {
+                embed_client: None,
+                rerank_client: None,
+                rerank_model: "rerank",
+            },
+            &cancel,
+        )
+        .unwrap();
         assert_eq!(resp.mode_used, "keyword_only");
         assert!(resp.degraded_reason.is_some());
         assert_eq!(resp.results.len(), 1);

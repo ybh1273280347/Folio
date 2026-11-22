@@ -645,6 +645,160 @@ impl RagStore {
         }
         Ok(results)
     }
+
+    pub fn get_rerank_scores(&self, keys: &[String]) -> Result<HashMap<String, f64>, String> {
+        let mut out = HashMap::new();
+        if keys.is_empty() {
+            return Ok(out);
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT score FROM rerank_cache WHERE cache_key = ?1")
+            .map_err(|e| e.to_string())?;
+        for key in keys {
+            if let Some(score) = stmt
+                .query_row([key], |row| row.get::<_, f64>(0))
+                .optional()
+                .map_err(|e| e.to_string())?
+            {
+                out.insert(key.clone(), score);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn put_rerank_scores(&mut self, entries: &[(String, f64)]) -> Result<(), String> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let now = unix_secs();
+        let tx = self.conn.transaction().map_err(|e| e.to_string())?;
+        let mut stmt = tx
+            .prepare(
+                "INSERT INTO rerank_cache(cache_key, score, ts) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(cache_key) DO UPDATE SET score = excluded.score, ts = excluded.ts",
+            )
+            .map_err(|e| e.to_string())?;
+        for (key, score) in entries {
+            stmt.execute(params![key, score, now])
+                .map_err(|e| e.to_string())?;
+        }
+        drop(stmt);
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    pub fn pdf_upgrade_candidates(&self) -> Result<Vec<(String, String)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT d.rel_path, d.content_hash
+                 FROM documents d
+                 JOIN contents c ON c.content_hash = d.content_hash
+                 WHERE d.active = 1 AND d.kind = 'pdf' AND c.parse_tier != 'mineru'
+                 ORDER BY d.rel_path",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    pub fn mineru_counts(&self) -> Result<(usize, usize), String> {
+        let upgraded: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents d
+                 JOIN contents c ON c.content_hash = d.content_hash
+                 WHERE d.active = 1 AND d.kind = 'pdf' AND c.parse_tier = 'mineru'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let pending: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents d
+                 JOIN contents c ON c.content_hash = d.content_hash
+                 WHERE d.active = 1 AND d.kind = 'pdf' AND c.parse_tier != 'mineru'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok((upgraded as usize, pending as usize))
+    }
+
+    pub fn upsert_mineru_job(
+        &mut self,
+        content_hash: &str,
+        rel_path: &str,
+        batch_id: Option<&str>,
+        state: &str,
+        err_msg: Option<&str>,
+    ) -> Result<(), String> {
+        let now = unix_secs();
+        self.conn
+            .execute(
+                "INSERT INTO mineru_jobs(content_hash, rel_path, batch_id, state, err_msg, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(content_hash) DO UPDATE SET
+                    rel_path = excluded.rel_path,
+                    batch_id = COALESCE(excluded.batch_id, mineru_jobs.batch_id),
+                    state = excluded.state,
+                    err_msg = excluded.err_msg,
+                    updated_at = excluded.updated_at",
+                params![content_hash, rel_path, batch_id, state, err_msg, now],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn upgrade_pdf_content(
+        &mut self,
+        content_hash: &str,
+        raw_text: &str,
+        chunks: &[ChunkDraft],
+    ) -> Result<(), String> {
+        let tx = self.conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM chunks_vec WHERE chunk_id IN (SELECT id FROM chunks WHERE content_hash = ?1)",
+            [content_hash],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM chunks WHERE content_hash = ?1", [content_hash])
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE contents SET raw_text = ?2, parse_tier = 'mineru', byte_len = ?3 WHERE content_hash = ?1",
+            params![content_hash, raw_text, raw_text.len() as i64],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE documents SET status = 'indexed' WHERE content_hash = ?1",
+            [content_hash],
+        )
+        .map_err(|e| e.to_string())?;
+
+        let mut stmt = tx
+            .prepare(
+                "INSERT INTO chunks(content_hash, seq, heading_path, line_start, line_end, page_num, chunk_text)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .map_err(|e| e.to_string())?;
+        for chunk in chunks {
+            stmt.execute(params![
+                content_hash,
+                chunk.seq as i64,
+                chunk.heading_path,
+                chunk.line_start.map(|v| v as i64),
+                chunk.line_end.map(|v| v as i64),
+                chunk.page_num.map(|v| v as i64),
+                chunk.chunk_text,
+            ])
+            .map_err(|e| e.to_string())?;
+        }
+        drop(stmt);
+        tx.commit().map_err(|e| e.to_string())
+    }
 }
 
 fn map_scored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScoredChunk> {
@@ -721,8 +875,9 @@ pub fn path_matches_filters(
     under_dir: Option<&str>,
     extensions: &[String],
 ) -> bool {
+    let base_path = rel_path.strip_suffix("#annotations").unwrap_or(rel_path);
     if let Some(allowed) = allowed_paths
-        && !allowed.contains(rel_path)
+        && !allowed.contains(base_path)
     {
         return false;
     }
@@ -730,18 +885,21 @@ pub fn path_matches_filters(
         let dir = dir.trim_matches('/').trim_matches('\\');
         if !dir.is_empty() && dir != "." {
             let prefix = format!("{dir}/");
-            if rel_path != dir && !rel_path.starts_with(&prefix) {
+            if base_path != dir && !base_path.starts_with(&prefix) {
                 return false;
             }
         }
     }
     if !extensions.is_empty() {
-        let ext = rel_path
+        let ext = base_path
             .rsplit('.')
             .next()
             .map(str::to_ascii_lowercase)
             .unwrap_or_default();
-        if !extensions.iter().any(|e| e.trim_start_matches('.').eq_ignore_ascii_case(&ext)) {
+        if !extensions
+            .iter()
+            .any(|e| e.trim_start_matches('.').eq_ignore_ascii_case(&ext))
+        {
             return false;
         }
     }

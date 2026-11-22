@@ -1,4 +1,4 @@
-//! Local llama-server HTTP client with port probing and optional on-demand lifecycle management.
+//! Local llama-server HTTP clients (Embedding & Reranker) with port probing and idle release.
 
 use super::RagConfig;
 use crate::http::{self, RequestOptions};
@@ -13,6 +13,7 @@ use std::{
 const QUERY_INSTRUCT: &str =
     "Instruct: Given a search query, retrieve relevant passages from personal notes and papers\nQuery: ";
 const EMBED_BATCH_SIZE: usize = 16;
+const RERANK_BATCH_SIZE: usize = 25;
 
 #[derive(Clone, Debug)]
 pub struct Endpoint {
@@ -24,7 +25,8 @@ pub struct Endpoint {
 
 impl Endpoint {
     pub fn parse(raw: &str) -> Result<Self, String> {
-        let parsed = url::Url::parse(raw.trim()).map_err(|e| format!("无效的服务地址 `{raw}`: {e}"))?;
+        let parsed =
+            url::Url::parse(raw.trim()).map_err(|e| format!("无效的服务地址 `{raw}`: {e}"))?;
         let https = match parsed.scheme() {
             "http" => false,
             "https" => true,
@@ -54,7 +56,7 @@ impl Endpoint {
         }
     }
 
-    fn is_loopback(&self) -> bool {
+    pub fn is_loopback(&self) -> bool {
         matches!(self.host.as_str(), "127.0.0.1" | "localhost" | "::1")
     }
 }
@@ -88,6 +90,105 @@ pub fn reap_idle_servers() {
     });
 }
 
+fn check_health(endpoint: &Endpoint) -> bool {
+    let path = endpoint.join("/health");
+    let resp = http::send(RequestOptions {
+        https: endpoint.https,
+        host: &endpoint.host,
+        port: endpoint.port,
+        method: "GET",
+        path: &path,
+        headers: &[],
+        body: &[],
+        connect_timeout_ms: 400,
+        receive_timeout_ms: 800,
+        use_system_proxy: !endpoint.is_loopback(),
+        use_env_proxy: false,
+        max_response_bytes: 65_536,
+        label: "llama-server",
+    });
+    resp.is_ok_and(|r| (200..300).contains(&r.status))
+}
+
+fn touch_managed(port: u16) {
+    let mut map = server_registry().lock().expect("server registry poisoned");
+    if let Some(entry) = map.get_mut(&port) {
+        entry.last_used = Instant::now();
+    }
+}
+
+fn probe_or_spawn(
+    endpoint: &Endpoint,
+    server_bin: &str,
+    model_path: &str,
+    auto_manage: bool,
+    idle_release_secs: u64,
+    mode_args: &[&str],
+) -> bool {
+    reap_idle_servers();
+    if check_health(endpoint) {
+        touch_managed(endpoint.port);
+        return true;
+    }
+    if !auto_manage || !endpoint.is_loopback() || model_path.is_empty() {
+        return false;
+    }
+
+    let bin = if server_bin.is_empty() {
+        "llama-server"
+    } else {
+        server_bin
+    };
+    let port_str = endpoint.port.to_string();
+    let mut cmd = Command::new(bin);
+    cmd.args(["-m", model_path])
+        .args(mode_args)
+        .args([
+            "-ngl",
+            "99",
+            "-c",
+            "4096",
+            "--host",
+            &endpoint.host,
+            "--port",
+            &port_str,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let Ok(child) = cmd.spawn() else {
+        return false;
+    };
+    {
+        let mut map = server_registry().lock().expect("server registry poisoned");
+        map.insert(
+            endpoint.port,
+            ManagedChild {
+                child,
+                last_used: Instant::now(),
+                idle_release_secs,
+            },
+        );
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if check_health(endpoint) {
+            touch_managed(endpoint.port);
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    false
+}
+
 pub struct EmbeddingClient {
     endpoint: Endpoint,
     model: String,
@@ -110,93 +211,18 @@ impl EmbeddingClient {
     }
 
     pub fn health_check(&self) -> bool {
-        let path = self.endpoint.join("/health");
-        let resp = http::send(RequestOptions {
-            https: self.endpoint.https,
-            host: &self.endpoint.host,
-            port: self.endpoint.port,
-            method: "GET",
-            path: &path,
-            headers: &[],
-            body: &[],
-            connect_timeout_ms: 400,
-            receive_timeout_ms: 800,
-            use_system_proxy: !self.endpoint.is_loopback(),
-            use_env_proxy: false,
-            max_response_bytes: 65_536,
-            label: "llama-server",
-        });
-        resp.is_ok_and(|r| (200..300).contains(&r.status))
+        check_health(&self.endpoint)
     }
 
-    /// Probes an already running server first; spawns one on demand when configured.
     pub fn ensure_ready(&self) -> bool {
-        reap_idle_servers();
-        if self.health_check() {
-            self.touch_managed();
-            return true;
-        }
-        if !self.auto_manage || !self.endpoint.is_loopback() || self.model_path.is_empty() {
-            return false;
-        }
-        let bin = if self.server_bin.is_empty() {
-            "llama-server"
-        } else {
-            self.server_bin.as_str()
-        };
-
-        let mut cmd = Command::new(bin);
-        cmd.args([
-            "-m",
+        probe_or_spawn(
+            &self.endpoint,
+            &self.server_bin,
             &self.model_path,
-            "--embedding",
-            "-ngl",
-            "99",
-            "-c",
-            "4096",
-            "-b",
-            "512",
-            "-ub",
-            "512",
-            "--host",
-            &self.endpoint.host,
-            "--port",
-            &self.endpoint.port.to_string(),
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-
-        let Ok(child) = cmd.spawn() else {
-            return false;
-        };
-        {
-            let mut map = server_registry().lock().expect("server registry poisoned");
-            map.insert(
-                self.endpoint.port,
-                ManagedChild {
-                    child,
-                    last_used: Instant::now(),
-                    idle_release_secs: self.idle_release_secs,
-                },
-            );
-        }
-
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while Instant::now() < deadline {
-            if self.health_check() {
-                self.touch_managed();
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(250));
-        }
-        false
+            self.auto_manage,
+            self.idle_release_secs,
+            &["--embedding", "-b", "512", "-ub", "512"],
+        )
     }
 
     pub fn embed_documents(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, String> {
@@ -264,15 +290,91 @@ impl EmbeddingClient {
                 all.push(item.embedding);
             }
         }
-        self.touch_managed();
+        touch_managed(self.endpoint.port);
         Ok(all)
     }
+}
 
-    fn touch_managed(&self) {
-        let mut map = server_registry().lock().expect("server registry poisoned");
-        if let Some(entry) = map.get_mut(&self.endpoint.port) {
-            entry.last_used = Instant::now();
+pub struct RerankClient {
+    endpoint: Endpoint,
+    model: String,
+    server_bin: String,
+    model_path: String,
+    auto_manage: bool,
+    idle_release_secs: u64,
+}
+
+impl RerankClient {
+    pub fn from_config(config: &RagConfig) -> Result<Self, String> {
+        Ok(Self {
+            endpoint: Endpoint::parse(&config.rerank_url)?,
+            model: config.rerank_model.clone(),
+            server_bin: config.server_bin.trim().to_owned(),
+            model_path: config.rerank_model_path.trim().to_owned(),
+            auto_manage: config.auto_manage_server,
+            idle_release_secs: config.idle_release_secs,
+        })
+    }
+
+    pub fn health_check(&self) -> bool {
+        check_health(&self.endpoint)
+    }
+
+    pub fn ensure_ready(&self) -> bool {
+        probe_or_spawn(
+            &self.endpoint,
+            &self.server_bin,
+            &self.model_path,
+            self.auto_manage,
+            self.idle_release_secs,
+            &["--reranking", "--pooling", "rank"],
+        )
+    }
+
+    pub fn rerank(&self, query: &str, documents: &[&str]) -> Result<Vec<f64>, String> {
+        if documents.is_empty() {
+            return Ok(Vec::new());
         }
+        let path = self.endpoint.join("/v1/rerank");
+        let mut scores = Vec::with_capacity(documents.len());
+        for batch in documents.chunks(RERANK_BATCH_SIZE) {
+            let payload = serde_json::to_vec(&RerankRequest {
+                model: &self.model,
+                query,
+                documents: batch,
+            })
+            .map_err(|e| e.to_string())?;
+
+            let resp = http::send(RequestOptions {
+                https: self.endpoint.https,
+                host: &self.endpoint.host,
+                port: self.endpoint.port,
+                method: "POST",
+                path: &path,
+                headers: &[("Content-Type", "application/json")],
+                body: &payload,
+                connect_timeout_ms: 2_000,
+                receive_timeout_ms: 60_000,
+                use_system_proxy: !self.endpoint.is_loopback(),
+                use_env_proxy: false,
+                max_response_bytes: 8 * 1024 * 1024,
+                label: "llama-server-rerank",
+            })?;
+            if !(200..300).contains(&resp.status) {
+                return Err(format!("Rerank 服务返回 HTTP {}", resp.status));
+            }
+            let parsed: RerankResponse = serde_json::from_slice(&resp.body)
+                .map_err(|e| format!("解析 Rerank 响应失败: {e}"))?;
+            let mut ordered = vec![0.0f64; batch.len()];
+            for item in parsed.results {
+                if item.index < ordered.len() {
+                    ordered[item.index] = item.relevance_score.or(item.score).unwrap_or(0.0);
+                }
+            }
+            scores.extend(ordered);
+        }
+        touch_managed(self.endpoint.port);
+        Ok(scores)
     }
 }
 
@@ -291,4 +393,25 @@ struct EmbedResponse {
 struct EmbedItem {
     index: usize,
     embedding: Vec<f32>,
+}
+
+#[derive(Serialize)]
+struct RerankRequest<'a> {
+    model: &'a str,
+    query: &'a str,
+    documents: &'a [&'a str],
+}
+
+#[derive(Deserialize)]
+struct RerankResponse {
+    results: Vec<RerankItem>,
+}
+
+#[derive(Deserialize)]
+struct RerankItem {
+    index: usize,
+    #[serde(default)]
+    relevance_score: Option<f64>,
+    #[serde(default)]
+    score: Option<f64>,
 }

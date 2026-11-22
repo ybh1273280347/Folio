@@ -5,9 +5,9 @@ use crate::{
     ai::{WorkspaceToolAction, WorkspaceToolRequest},
     rag::{
         DirtyDocument, RagError, SearchRequest,
-        client::EmbeddingClient,
-        collect_eligible_paths,
-        pipeline::{search_project, sync_project},
+        client::{EmbeddingClient, RerankClient},
+        collect_eligible_paths, mineru,
+        pipeline::{SearchServices, SyncOptions, search_project, sync_project},
         store::RagStore,
     },
     tags::Snapshot,
@@ -47,6 +47,8 @@ struct SearchToolParams {
     #[serde(default)]
     mode: crate::rag::SearchMode,
     #[serde(default)]
+    rerank: Option<bool>,
+    #[serde(default)]
     tags: Vec<String>,
     #[serde(default = "default_match")]
     r#match: String,
@@ -63,6 +65,8 @@ struct SearchToolParams {
 struct ReindexToolParams {
     #[serde(default, alias = "force_rebuild")]
     force_rebuild: bool,
+    #[serde(default, alias = "upgrade_pdfs")]
+    upgrade_pdfs: bool,
 }
 
 fn default_match() -> String {
@@ -130,23 +134,35 @@ impl Workspace {
             .insert(request.id.clone(), cancelled.clone());
 
         let task = cx.background_spawn(async move {
-            let client = EmbeddingClient::from_config(&config).ok();
+            let embed_client = EmbeddingClient::from_config(&config).ok();
+            let rerank_client = RerankClient::from_config(&config).ok();
             let mut store = RagStore::open(&db_path, &config.embed_model, config.embed_dim)
                 .map_err(|e| RagError::new("store_error", e))?;
 
             match operation {
                 RagOperation::Status => {
-                    let embed_server_ready = client
+                    let embed_server_ready = embed_client
                         .as_ref()
                         .is_some_and(EmbeddingClient::health_check);
+                    let rerank_server_ready = rerank_client
+                        .as_ref()
+                        .is_some_and(RerankClient::health_check);
                     let stats = store
                         .stats()
                         .map_err(|e| RagError::new("store_error", e))?;
+                    let (mineru_upgraded_pdfs, mineru_pending_pdfs) = store
+                        .mineru_counts()
+                        .map_err(|e| RagError::new("store_error", e))?;
+                    let mineru_configured = !mineru::resolve_api_key(&config).is_empty();
                     let report = crate::rag::StatusReport {
                         db_path: db_path.to_string_lossy().into_owned(),
                         embed_model: config.embed_model,
                         embed_dim: config.embed_dim,
                         embed_server_ready,
+                        rerank_server_ready,
+                        mineru_configured,
+                        mineru_upgraded_pdfs,
+                        mineru_pending_pdfs,
                         indexed_files: stats.indexed_files,
                         total_chunks: stats.total_chunks,
                         vector_chunks: stats.vector_chunks,
@@ -160,11 +176,13 @@ impl Workspace {
                         &root,
                         &eligible_paths,
                         &mut store,
-                        &config.embed_model,
-                        config.embed_dim,
-                        client.as_ref(),
+                        SyncOptions {
+                            config: &config,
+                            embed_client: embed_client.as_ref(),
+                            force_rebuild: params.force_rebuild,
+                            upgrade_pdfs: params.upgrade_pdfs,
+                        },
                         &cancelled,
-                        params.force_rebuild,
                     )?;
                     Ok(json!({ "status": "ok", "report": report }))
                 }
@@ -176,7 +194,6 @@ impl Workspace {
                         &params.r#match,
                     )?;
 
-                    // Lazy-index on first query so a fresh workspace works out of the box.
                     let stats = store
                         .stats()
                         .map_err(|e| RagError::new("store_error", e))?;
@@ -185,11 +202,13 @@ impl Workspace {
                             &root,
                             &eligible_paths,
                             &mut store,
-                            &config.embed_model,
-                            config.embed_dim,
-                            client.as_ref(),
+                            SyncOptions {
+                                config: &config,
+                                embed_client: embed_client.as_ref(),
+                                force_rebuild: false,
+                                upgrade_pdfs: false,
+                            },
                             &cancelled,
-                            false,
                         )?;
                     }
 
@@ -198,16 +217,21 @@ impl Workspace {
                         lex_queries: params.lex_queries,
                         vec_queries: params.vec_queries,
                         mode: params.mode,
+                        rerank: params.rerank,
                         extensions: params.extensions,
                         under_directory: params.under_directory,
                         limit: params.limit,
                     };
                     let response = search_project(
-                        &store,
+                        &mut store,
                         &search_req,
                         &dirty_docs,
                         allowed_paths.as_ref(),
-                        client.as_ref(),
+                        SearchServices {
+                            embed_client: embed_client.as_ref(),
+                            rerank_client: rerank_client.as_ref(),
+                            rerank_model: &config.rerank_model,
+                        },
                         &cancelled,
                     )?;
                     Ok(json!({

@@ -1,5 +1,6 @@
 //! Structure-aware chunking for Markdown, LaTeX, BibTeX, plain text, and digital PDFs.
 
+use crate::annotations::AnnotationItem;
 use std::sync::Arc;
 
 const TARGET_CHUNK_CHARS: usize = 2200;
@@ -86,6 +87,52 @@ pub fn extract_and_chunk_pdf(rel_path: &str, bytes: Vec<u8>) -> Result<Extracted
         needs_ocr,
         chunks,
     })
+}
+
+pub fn chunk_annotations(target_rel_path: &str, items: &[AnnotationItem]) -> ExtractedDocument {
+    let mut raw_text = String::new();
+    let mut chunks = Vec::new();
+    for (seq, item) in items.iter().enumerate() {
+        let is_pdf = target_rel_path.to_ascii_lowercase().ends_with(".pdf");
+        let page_num = is_pdf.then_some(item.page + 1);
+        let heading = match page_num {
+            Some(page) => format!("{target_rel_path} > 批注 p.{page}"),
+            None => format!("{target_rel_path} > 批注"),
+        };
+        let mut body = String::new();
+        if !item.quote.trim().is_empty() {
+            body.push_str("引用: ");
+            body.push_str(item.quote.trim());
+        }
+        if !item.comment.trim().is_empty() {
+            if !body.is_empty() {
+                body.push('\n');
+            }
+            body.push_str("批注: ");
+            body.push_str(item.comment.trim());
+        }
+        if body.trim().is_empty() {
+            continue;
+        }
+        if !raw_text.is_empty() {
+            raw_text.push_str("\n\n");
+        }
+        raw_text.push_str(&body);
+        chunks.push(ChunkDraft {
+            seq,
+            heading_path: heading.clone(),
+            line_start: None,
+            line_end: None,
+            page_num,
+            chunk_text: format!("[{heading}]\n{body}"),
+        });
+    }
+    ExtractedDocument {
+        raw_text,
+        parse_tier: "annotation",
+        needs_ocr: false,
+        chunks,
+    }
 }
 
 fn chunk_structured_lines(rel_path: &str, text: &str, is_tex: bool) -> Vec<ChunkDraft> {

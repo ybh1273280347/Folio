@@ -1,6 +1,6 @@
 # Folio 本地个人知识库 RAG 管线实施与审阅计划
 
-- **状态**：Stage 1 已完成并验证通过；待继续 Stage 2（MinerU 离线精修 + Rerank + 设置 UI）
+- **状态**：Stage 2 已完成并验证通过；待真机端到端联调与 Stage 3 收尾
 - **开发分支**：`feat/local-rag-pipeline`（基于 `main` `@ cbb7e9f`）
 - **Worktree 路径**：`D:/projects/my_projects/Latex/gpui-prototype-rag`
 - **目标**：在严格遵循 [ARCHITECTURE.md](../ARCHITECTURE.md) 模块边界的前提下，参考 `tobi/qmd` 的本地极简混合检索范式，为 Folio 落地一套**原生 Rust 索引存储 + 本地 `llama-server` 开源模型推理 + MinerU 离线 PDF 精修**的个人知识库 RAG 管线。

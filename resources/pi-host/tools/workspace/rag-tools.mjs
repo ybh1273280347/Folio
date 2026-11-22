@@ -27,6 +27,7 @@ export function ragTools(request) {
         lex_queries: Type.Optional(Type.Array(text, { minItems: 1, maxItems: 5 })),
         vec_queries: Type.Optional(Type.Array(text, { minItems: 1, maxItems: 4 })),
         mode: Type.Optional(Type.Union(['hybrid', 'keyword', 'semantic'].map(v => Type.Literal(v)))),
+        rerank: Type.Optional(Type.Boolean()),
         tags: Type.Optional(Type.Array(text, { minItems: 1, maxItems: 20 })),
         match: Type.Optional(Type.Union(['all', 'any'].map(v => Type.Literal(v)))),
         under_directory: Type.Optional(text),
@@ -45,9 +46,10 @@ export function ragTools(request) {
     {
       name: 'folio_kb_reindex',
       label: '更新或重建 Folio 知识库索引',
-      description: '对当前项目执行增量或全量知识库索引同步。默认按文件修改时间与 SHA-256 增量更新；传 force_rebuild: true 时强制重建。',
+      description: '对当前项目执行增量或全量知识库索引同步。默认按文件修改时间与 SHA-256 增量更新（PDF 默认先走本地快速抽取）；传 force_rebuild: true 时强制重建；传 upgrade_pdfs: true 时显式调用 MinerU API 对未精修的参考 PDF 进行公式与版面精修并持久化缓存。',
       parameters: schema({
         force_rebuild: Type.Optional(Type.Boolean()),
+        upgrade_pdfs: Type.Optional(Type.Boolean()),
       }),
       execute: run('reindex'),
     },
