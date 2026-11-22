@@ -304,6 +304,9 @@ pub struct MarkdownPane {
     title_input: Entity<InputState>,
     headings: Vec<OutlineHeading>,
     source_editor: Entity<EditorState>,
+    // Each view keeps its editing state until the other view changes the buffer.
+    source_needs_sync: bool,
+    visual_needs_sync: bool,
     source_heading_highlight: RangeDecorationCollection,
     source_heading_highlight_timer: Task<()>,
     visual_editor: Entity<BlockEditorState>,
@@ -630,6 +633,7 @@ impl MarkdownPane {
         });
         let source_editor = cx.new(|cx| {
             EditorState::new(window, cx)
+                .language("markdown")
                 .line_number(settings.show_line_numbers)
                 .soft_wrap(true)
                 .searchable(true)
@@ -742,6 +746,7 @@ impl MarkdownPane {
                     pane.loading = None;
                     pane.mermaid.update(cx, |renderer, _| renderer.retain_blocks([]));
                     pane.text = state.read(cx).value().to_string();
+                    pane.visual_needs_sync = true;
                     pane.parse_outline();
                     cx.emit(MarkdownEvent::Change(pane.text.clone()));
                     cx.notify();
@@ -756,6 +761,7 @@ impl MarkdownPane {
             |pane, editor, event: &BlockEditorEvent, window, cx| match event {
                 BlockEditorEvent::Changed { .. } => {
                     pane.text = editor.read(cx).source();
+                    pane.source_needs_sync = true;
                     pane.retain_mermaid_blocks(cx);
                     pane.parse_outline();
                     pane.slash_index = 0;
@@ -884,6 +890,8 @@ impl MarkdownPane {
             title_input,
             headings: Vec::new(),
             source_editor,
+            source_needs_sync: true,
+            visual_needs_sync: false,
             source_heading_highlight,
             source_heading_highlight_timer: Task::ready(()),
             visual_editor,
@@ -959,11 +967,11 @@ impl MarkdownPane {
 
     fn load_visual(&mut self, cx: &mut Context<Self>) {
         self.loading = None;
+        self.visual_needs_sync = false;
         // Bound first-paint work in bytes, even for OCR paragraphs with no blank lines.
         // The full parse still sees the original document, preserving fences and references.
         const PREVIEW_BYTES: usize = 8 * 1024;
-        const BACKGROUND_BYTES: usize = 32 * 1024;
-        let long = self.text.len() > BACKGROUND_BYTES;
+        let long = self.text.len() > PREVIEW_BYTES;
         let preview_end = if long {
             let end = self.text.floor_char_boundary(PREVIEW_BYTES);
             self.text[..end].rfind('\n').unwrap_or(end)
@@ -1530,11 +1538,13 @@ impl MarkdownPane {
             return;
         }
         self.text = text.to_owned();
+        self.source_needs_sync = true;
         self.load_visual(cx);
         if self.source {
             self.source_editor.update(cx, |editor, cx| {
                 editor.set_value(text.to_owned(), window, cx)
             });
+            self.source_needs_sync = false;
         }
         cx.notify();
     }
@@ -1738,17 +1748,17 @@ impl MarkdownPane {
         self.source = !self.source;
         if self.source {
             self.hovered_link = None;
-            let text = self.text.clone();
-            let source_editor = self.source_editor.clone();
-            window.defer(cx, move |window, cx| {
-                source_editor.update(cx, |editor, cx| {
-                    editor.set_value(text, window, cx);
-                    editor.set_highlighter("markdown", cx);
-                    editor.focus(window, cx);
-                });
+            self.source_editor.update(cx, |editor, cx| {
+                if self.source_needs_sync {
+                    editor.set_value(self.text.clone(), window, cx);
+                }
+                editor.focus(window, cx);
             });
+            self.source_needs_sync = false;
         } else {
-            self.load_visual(cx);
+            if self.visual_needs_sync {
+                self.load_visual(cx);
+            }
             self.defer_focus_visual(window, cx);
         }
         cx.emit(MarkdownEvent::Focus);
