@@ -60,6 +60,7 @@ pub enum AiPaneEvent {
     WorkspaceTool(WorkspaceToolRequest),
     UndoTags(Vec<crate::tags::agent::TagConfirmation>),
     OpenFile(PathBuf),
+    SyncRag,
     BackToHub,
     ToggleMaximize,
 }
@@ -2719,6 +2720,12 @@ fn summarize_tool_call(name: &str, args: &Value, diffs: &[FileDiff]) -> String {
             }
         }
         "folio_tags_manage" => crate::i18n::ai::tool_manage_tag(args["tag"].as_str().unwrap_or_default()),
+        "folio_kb_search" => {
+            let query: String = args["query"].as_str().unwrap_or("").chars().take(48).collect();
+            format!("检索知识库 {query}")
+        }
+        "folio_kb_status" => "查看知识库索引状态".into(),
+        "folio_kb_reindex" => "重建知识库索引".into(),
         "folio_tex_compile" => {
             if let Some(folder) = args["under_directory"].as_str() {
                 crate::i18n::ai::tool_compile_tex_folder(folder)

@@ -11,10 +11,7 @@ use gpui_kit::{
     prelude::FluentBuilder,
     *,
 };
-use std::{
-    ffi::c_void,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::form_urlencoded;
 
 const POPOVER_WIDTH: f32 = 368.0;
@@ -728,31 +725,6 @@ fn parse_baidu_response(raw: &str) -> Result<TranslateResult, String> {
     })
 }
 
-#[cfg(windows)]
-fn env_proxy() -> Option<String> {
-    for key in [
-        "HTTPS_PROXY",
-        "https_proxy",
-        "ALL_PROXY",
-        "all_proxy",
-        "HTTP_PROXY",
-        "http_proxy",
-    ] {
-        if let Ok(val) = std::env::var(key) {
-            let trimmed = val.trim();
-            if !trimmed.is_empty() {
-                let stripped = trimmed
-                    .strip_prefix("http://")
-                    .or_else(|| trimmed.strip_prefix("https://"))
-                    .unwrap_or(trimmed);
-                return Some(stripped.trim_end_matches('/').to_owned());
-            }
-        }
-    }
-    None
-}
-
-#[cfg(windows)]
 fn post_form_https(
     host: &str,
     path: &str,
@@ -761,184 +733,31 @@ fn post_form_https(
     use_env_proxy: bool,
     provider_label: &str,
 ) -> Result<String, String> {
-    use windows::{
-        Win32::Networking::WinHttp::{
-            WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
-            WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest,
-            WinHttpSetTimeouts, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-            WINHTTP_ACCESS_TYPE_NAMED_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER,
-            WINHTTP_QUERY_STATUS_CODE,
-        },
-        core::{HSTRING, PCWSTR},
-    };
-
-    struct Handle(*mut c_void);
-    impl Drop for Handle {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                unsafe {
-                    let _ = WinHttpCloseHandle(self.0);
-                }
-            }
-        }
-    }
-
-    let ua = HSTRING::from("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Folio/1.0");
-    let proxy = if use_env_proxy { env_proxy() } else { None };
-    let proxy_h = proxy.as_deref().map(HSTRING::from);
-    let session = unsafe {
-        if let Some(ref p) = proxy_h {
-            WinHttpOpen(
-                &ua,
-                WINHTTP_ACCESS_TYPE_NAMED_PROXY,
-                p,
-                PCWSTR::null(),
-                0,
-            )
-        } else {
-            WinHttpOpen(
-                &ua,
-                WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-                PCWSTR::null(),
-                PCWSTR::null(),
-                0,
-            )
-        }
-    };
-    if session.is_null() {
-        return Err(crate::i18n::media::http_init_session(provider_label));
-    }
-    let session = Handle(session);
-
-    unsafe {
-        let _ = WinHttpSetTimeouts(
-            session.0,
-            connect_timeout_ms,
-            connect_timeout_ms,
-            5_000,
-            8_000,
-        );
-    }
-
-    let host_h = HSTRING::from(host);
-    let connect = unsafe { WinHttpConnect(session.0, &host_h, 443, 0) };
-    if connect.is_null() {
-        return Err(crate::i18n::media::http_connect(provider_label));
-    }
-    let connect = Handle(connect);
-
-    let verb = HSTRING::from("POST");
-    let path_h = HSTRING::from(path);
-    let request = unsafe {
-        WinHttpOpenRequest(
-            connect.0,
-            &verb,
-            &path_h,
-            PCWSTR::null(),
-            PCWSTR::null(),
-            std::ptr::null(),
-            WINHTTP_FLAG_SECURE,
-        )
-    };
-    if request.is_null() {
-        return Err(crate::i18n::media::http_open_req(provider_label));
-    }
-    let request = Handle(request);
-
-    let headers = HSTRING::from("Content-Type: application/x-www-form-urlencoded; charset=utf-8");
-    let body_bytes = form_body.as_bytes();
-    let sent = unsafe {
-        WinHttpSendRequest(
-            request.0,
-            Some(&*headers),
-            Some(body_bytes.as_ptr() as *const c_void),
-            body_bytes.len() as u32,
-            body_bytes.len() as u32,
-            0,
-        )
-    };
-    if sent.is_err() {
-        return Err(crate::i18n::media::http_send_req(provider_label));
-    }
-
-    if unsafe { WinHttpReceiveResponse(request.0, std::ptr::null_mut()) }.is_err() {
-        return Err(crate::i18n::media::http_recv_timeout(provider_label));
-    }
-
-    let mut status: u32 = 0;
-    let mut status_len: u32 = std::mem::size_of::<u32>() as u32;
-    let _ = unsafe {
-        WinHttpQueryHeaders(
-            request.0,
-            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            PCWSTR::null(),
-            Some((&mut status as *mut u32).cast::<c_void>()),
-            &mut status_len,
-            std::ptr::null_mut(),
-        )
-    };
-    if status == 429 {
+    let response = crate::http::send(crate::http::RequestOptions {
+        https: true,
+        host,
+        port: 443,
+        method: "POST",
+        path,
+        headers: &[("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")],
+        body: form_body.as_bytes(),
+        connect_timeout_ms,
+        receive_timeout_ms: 8_000,
+        use_system_proxy: true,
+        use_env_proxy,
+        max_response_bytes: 1_048_576,
+        label: provider_label,
+    })?;
+    if response.status == 429 {
         return Err(crate::i18n::media::http_rate_limit(provider_label));
     }
-    if !(200..300).contains(&status) {
-        return Err(crate::i18n::media::http_status(provider_label, status));
+    if !(200..300).contains(&response.status) {
+        return Err(crate::i18n::media::http_status(
+            provider_label,
+            u32::from(response.status),
+        ));
     }
-
-    let mut out = Vec::new();
-    let mut buf = [0u8; 8192];
-    loop {
-        let mut read = 0u32;
-        if unsafe {
-            WinHttpReadData(
-                request.0,
-                buf.as_mut_ptr().cast::<c_void>(),
-                buf.len() as u32,
-                &mut read,
-            )
-        }
-        .is_err()
-        {
-            return Err(crate::i18n::media::http_read_err(provider_label));
-        }
-        if read == 0 {
-            break;
-        }
-        out.extend_from_slice(&buf[..read as usize]);
-        if out.len() > 1_048_576 {
-            return Err(crate::i18n::media::http_too_large(provider_label));
-        }
-    }
-
-    String::from_utf8(out).map_err(|_| crate::i18n::media::http_invalid_utf8(provider_label))
-}
-
-#[cfg(not(windows))]
-fn post_form_https(
-    host: &str,
-    path: &str,
-    form_body: &str,
-    _connect_timeout_ms: i32,
-    _use_env_proxy: bool,
-    provider_label: &str,
-) -> Result<String, String> {
-    let url = format!("https://{host}{path}");
-    let output = std::process::Command::new("curl")
-        .args([
-            "-sS",
-            "--max-time",
-            "10",
-            "-H",
-            "Content-Type: application/x-www-form-urlencoded; charset=utf-8",
-            "--data",
-            form_body,
-            &url,
-        ])
-        .output()
-        .map_err(|e| crate::i18n::media::curl_invoke_failed(provider_label, &e))?;
-    if !output.status.success() {
-        return Err(crate::i18n::media::curl_req_failed(provider_label));
-    }
-    String::from_utf8(output.stdout)
+    String::from_utf8(response.body)
         .map_err(|_| crate::i18n::media::http_invalid_utf8(provider_label))
 }
 
