@@ -295,6 +295,11 @@ impl Session {
                     _ => {}
                 }
             }
+            RpcInbound::Event(ev) if ev["type"].as_str() == Some("message_update") => {
+                if let Some(event) = ev.get("assistantMessageEvent") {
+                    self.handle_assistant_delta(event);
+                }
+            }
             RpcInbound::Event(ev) => match serde_json::from_value::<SessionEvent>(ev) {
                 Ok(event) => {
                     let event = serde_json::to_value(event).expect("typed session event is serializable");
@@ -924,8 +929,7 @@ impl Session {
             }
             "toolcall_start" | "toolcall_delta" | "toolcall_end" => {
                 // The host forwards the active tool call separately from Pi's cumulative snapshot.
-                let tool_call = if ty == "toolcall_end" { ame.get("toolCall") }
-                    else { ame.get("toolCall") };
+                let tool_call = ame.get("toolCall");
                 if let Some(tc) = tool_call {
                     let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_owned();
                     let name = tc

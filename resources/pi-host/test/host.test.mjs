@@ -419,6 +419,7 @@ test('tool argument deltas reach the conversation before generation ends', { tim
   assert.match(delta.assistantMessageEvent.toolCall.arguments.path, /README/);
   assert.equal('partial' in delta.assistantMessageEvent, false);
   assert.equal('message' in delta, false);
+  assert.equal('usage' in delta, false);
   const snapshot = await client.request({ ...project, sessionId, type: 'snapshot' });
   assert.equal(snapshot.data.isStreaming, true);
   assert.equal(snapshot.data.messages.at(-1).content[1].name, 'read');

@@ -236,7 +236,7 @@ async function createRecord(cwd, manager) {
       if (assistantMessageEvent.type.startsWith('toolcall_')) {
         assistantMessageEvent.toolCall ??= partial.content[assistantMessageEvent.contentIndex];
       }
-      event = { type: event.type, usage: event.message.usage, assistantMessageEvent };
+      event = { type: event.type, assistantMessageEvent };
     }
     if (event.type === 'message_end') record.partial = undefined;
     if (event.type === 'agent_start') record.running = true;
