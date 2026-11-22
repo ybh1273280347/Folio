@@ -775,6 +775,7 @@ impl Workspace {
                 document.buffer.dirty = false;
                 document.buffer.revision = saved.revision;
                 document.buffer.conflict = None;
+                self.schedule_rag_sync();
                 cx.notify();
                 Ok(true)
             }
@@ -809,6 +810,7 @@ impl Workspace {
                 pane.update(cx, |pane, cx| pane.sync(text, window, cx));
             }
         }
+        self.schedule_rag_sync();
         Ok(true)
     }
 
@@ -1010,6 +1012,9 @@ impl Workspace {
             self.refresh_tags(cx);
         }
         let changed = std::mem::take(&mut self.documents.document_watch.paths);
+        if refresh_tree || !changed.is_empty() {
+            self.schedule_rag_sync();
+        }
         self.queue_math_preload(
             self.tree.files()
                 .iter()

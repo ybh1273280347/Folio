@@ -947,4 +947,122 @@ mod tests {
         assert!(resp.results[0].dirty_buffer);
         assert!(resp.results[0].snippet.contains("Fresh unsaved"));
     }
+
+    #[test]
+    #[ignore = "requires local llama-server binary and GGUF models"]
+    fn live_llama_server_end_to_end() {
+        let embed_path = std::env::var("FOLIO_LIVE_EMBED_MODEL")
+            .unwrap_or_else(|_| "D:/Models/folio-rag/Qwen3-Embedding-0.6B-Q8_0.gguf".into());
+        let rerank_path = std::env::var("FOLIO_LIVE_RERANK_MODEL")
+            .unwrap_or_else(|_| "D:/Models/folio-rag/qwen3-reranker-0.6b-q8_0.gguf".into());
+        let pdf_src = std::env::var("FOLIO_LIVE_PDF").ok();
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("opt.md"),
+            "# 凸优化笔记\n\n## KKT 互补松弛\n\n在强对偶成立时，最优解满足互补松弛条件 $\\lambda_i^* g_i(x^*) = 0$。\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("cooking.md"),
+            "# 家常菜谱\n\n番茄炒蛋需要先将鸡蛋打散，热锅冷油滑炒后盛出。\n",
+        )
+        .unwrap();
+
+        let mut files = vec!["opt.md".to_owned(), "cooking.md".to_owned()];
+        if let Some(pdf) = pdf_src.as_deref().filter(|p| Path::new(p).exists()) {
+            fs::copy(pdf, root.join("adam.pdf")).unwrap();
+            files.push("adam.pdf".to_owned());
+        }
+
+        let cfg = RagConfig {
+            embed_url: "http://127.0.0.1:18111".into(),
+            rerank_url: "http://127.0.0.1:18112".into(),
+            embed_model_path: embed_path,
+            rerank_model_path: rerank_path,
+            auto_manage_server: true,
+            ..RagConfig::default()
+        };
+
+        let embed_client = EmbeddingClient::from_config(&cfg).unwrap();
+        let rerank_client = RerankClient::from_config(&cfg).unwrap();
+        let db = root.join(".folio/rag.sqlite3");
+        let mut store = RagStore::open(&db, &cfg.embed_model, cfg.embed_dim).unwrap();
+        let cancel = AtomicBool::new(false);
+
+        let report = sync_project(
+            root,
+            &files,
+            &mut store,
+            SyncOptions {
+                config: &cfg,
+                embed_client: Some(&embed_client),
+                force_rebuild: false,
+                upgrade_pdfs: false,
+            },
+            &cancel,
+        )
+        .unwrap();
+        assert!(report.embed_server_ready);
+        assert!(report.embedded_chunks >= 2);
+        assert_eq!(report.pending_vectors, 0);
+
+        let resp = search_project(
+            &mut store,
+            &SearchRequest {
+                query: "什么时候满足互补松弛？".into(),
+                lex_queries: vec!["KKT".into()],
+                vec_queries: vec!["complementary slackness condition".into()],
+                mode: SearchMode::Hybrid,
+                rerank: Some(true),
+                extensions: vec![],
+                under_directory: None,
+                limit: 3,
+            },
+            &[],
+            None,
+            SearchServices {
+                embed_client: Some(&embed_client),
+                rerank_client: Some(&rerank_client),
+                rerank_model: &cfg.rerank_model,
+            },
+            &cancel,
+        )
+        .unwrap();
+        println!("live_resp: {resp:#?}");
+        assert_eq!(resp.mode_used, "hybrid+rerank");
+        assert_eq!(resp.results[0].path, "opt.md");
+
+        if files.iter().any(|f| f == "adam.pdf") {
+            let pdf_resp = search_project(
+                &mut store,
+                &SearchRequest {
+                    query: "Adam bias-corrected first and second moment estimates".into(),
+                    lex_queries: vec!["Adam".into(), "moment".into()],
+                    vec_queries: vec![],
+                    mode: SearchMode::Hybrid,
+                    rerank: Some(true),
+                    extensions: vec![],
+                    under_directory: None,
+                    limit: 3,
+                },
+                &[],
+                None,
+                SearchServices {
+                    embed_client: Some(&embed_client),
+                    rerank_client: Some(&rerank_client),
+                    rerank_model: &cfg.rerank_model,
+                },
+                &cancel,
+            )
+            .unwrap();
+            println!("pdf_resp: {pdf_resp:#?}");
+            assert_eq!(pdf_resp.mode_used, "hybrid+rerank");
+            assert_eq!(pdf_resp.results[0].path, "adam.pdf");
+            assert!(pdf_resp.results[0].page.is_some());
+        }
+
+        crate::rag::client::shutdown_managed_servers();
+    }
 }

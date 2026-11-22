@@ -1,14 +1,14 @@
-//! Bridges `rag` workspace tool requests to `crate::rag` with cancellation and live dirty-buffer context.
+//! Bridges `rag` workspace tool requests and debounced background sync to `crate::rag`.
 
 use super::super::Workspace;
 use crate::{
     ai::{WorkspaceToolAction, WorkspaceToolRequest},
     rag::{
         DirtyDocument, RagError, SearchRequest,
-        client::{EmbeddingClient, RerankClient},
+        client::{EmbeddingClient, RerankClient, reap_idle_servers},
         collect_eligible_paths, mineru,
         pipeline::{SearchServices, SyncOptions, search_project, sync_project},
-        store::RagStore,
+        store::{RagStore, StoreStats},
     },
     tags::Snapshot,
 };
@@ -17,11 +17,32 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::HashSet,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
+
+const SYNC_DEBOUNCE: Duration = Duration::from_millis(2500);
+const REAP_INTERVAL: Duration = Duration::from_secs(15);
+
+pub(in crate::workspace) struct RagSyncState {
+    pending_deadline: Option<Instant>,
+    in_flight: Option<(String, Arc<AtomicBool>)>,
+    last_reap: Instant,
+}
+
+impl Default for RagSyncState {
+    fn default() -> Self {
+        Self {
+            pending_deadline: None,
+            in_flight: None,
+            last_reap: Instant::now(),
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
@@ -78,6 +99,132 @@ fn default_limit() -> usize {
 }
 
 impl Workspace {
+    fn active_rag_root(&self) -> Option<(String, PathBuf)> {
+        let project = self.projects.directory()?;
+        let root = dunce::canonicalize(&project.folder).ok()?;
+        let key = crate::ai::project_key(&root);
+        Some((key, root))
+    }
+
+    pub(in crate::workspace) fn schedule_rag_sync(&mut self) {
+        let Some((_, root)) = self.active_rag_root() else {
+            return;
+        };
+        if !root.join(".folio").join("rag.sqlite3").exists() {
+            return;
+        }
+        self.rag_sync.pending_deadline = Some(Instant::now() + SYNC_DEBOUNCE);
+    }
+
+    pub(in crate::workspace) fn cancel_rag_sync(&mut self) {
+        self.rag_sync.pending_deadline = None;
+        if let Some((_, cancelled)) = self.rag_sync.in_flight.take() {
+            cancelled.store(true, Ordering::Relaxed);
+        }
+    }
+
+    pub(in crate::workspace) fn reset_rag_sync_on_project_switch(&mut self, cx: &mut Context<Self>) {
+        self.cancel_rag_sync();
+        let Some((_, root)) = self.active_rag_root() else {
+            self.ai.update(cx, |pane, cx| pane.set_rag_status(None, cx));
+            return;
+        };
+        if !root.join(".folio").join("rag.sqlite3").exists() {
+            self.ai.update(cx, |pane, cx| pane.set_rag_status(None, cx));
+            return;
+        }
+        self.ai.update(cx, |pane, cx| {
+            pane.set_rag_status(
+                Some(("KB".to_owned(), "正在同步当前项目知识库…".to_owned())),
+                cx,
+            );
+        });
+        self.rag_sync.pending_deadline = Some(Instant::now() + Duration::from_millis(500));
+    }
+
+    pub(in crate::workspace) fn trigger_rag_sync_now(&mut self, cx: &mut Context<Self>) {
+        let Some((project_key, root)) = self.active_rag_root() else {
+            return;
+        };
+        self.rag_sync.pending_deadline = None;
+        if let Some((_, old_cancel)) = self.rag_sync.in_flight.take() {
+            old_cancel.store(true, Ordering::Relaxed);
+        }
+
+        let db_path = root.join(".folio").join("rag.sqlite3");
+        let config = self.settings.rag.clone();
+        let eligible_paths =
+            collect_eligible_paths(self.tree.files().iter().map(|file| file.path.clone()));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.rag_sync.in_flight = Some((project_key.clone(), cancelled.clone()));
+        self.ai.update(cx, |pane, cx| {
+            pane.set_rag_status(
+                Some(("KB…".to_owned(), "正在后台增量同步知识库索引…".to_owned())),
+                cx,
+            );
+        });
+
+        let task = cx.background_spawn(async move {
+            let embed_client = EmbeddingClient::from_config(&config).ok();
+            let mut store = RagStore::open(&db_path, &config.embed_model, config.embed_dim)
+                .map_err(|e| RagError::new("store_error", e))?;
+            let _ = sync_project(
+                &root,
+                &eligible_paths,
+                &mut store,
+                SyncOptions {
+                    config: &config,
+                    embed_client: embed_client.as_ref(),
+                    force_rebuild: false,
+                    upgrade_pdfs: false,
+                },
+                &cancelled,
+            )?;
+            store.stats().map_err(|e| RagError::new("store_error", e))
+        });
+
+        cx.spawn(async move |this, cx| {
+            let outcome = task.await;
+            let _ = this.update(cx, |app, cx| {
+                let is_current = app
+                    .rag_sync
+                    .in_flight
+                    .as_ref()
+                    .is_some_and(|(k, _)| *k == project_key);
+                if is_current {
+                    app.rag_sync.in_flight = None;
+                }
+                if app
+                    .active_rag_root()
+                    .is_some_and(|(active_key, _)| active_key == project_key)
+                {
+                    if let Ok(stats) = outcome {
+                        app.publish_rag_pill(&stats, cx);
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub(in crate::workspace) fn poll_rag(&mut self, cx: &mut Context<Self>) {
+        if self.rag_sync.last_reap.elapsed() >= REAP_INTERVAL {
+            self.rag_sync.last_reap = Instant::now();
+            cx.background_spawn(async { reap_idle_servers() }).detach();
+        }
+        if let Some(deadline) = self.rag_sync.pending_deadline
+            && Instant::now() >= deadline
+            && self.rag_sync.in_flight.is_none()
+        {
+            self.trigger_rag_sync_now(cx);
+        }
+    }
+
+    fn publish_rag_pill(&self, stats: &StoreStats, cx: &mut Context<Self>) {
+        let status = format_rag_pill(stats);
+        self.ai.update(cx, |pane, cx| pane.set_rag_status(Some(status), cx));
+    }
+
     pub(super) fn rag_request(&mut self, request: &WorkspaceToolRequest, cx: &mut Context<Self>) {
         if request.action == WorkspaceToolAction::Cancel {
             if let Some(cancelled) = self.tool_requests.rag_requests.remove(&request.id) {
@@ -106,7 +253,8 @@ impl Workspace {
         })?;
         let root = dunce::canonicalize(&project.folder)
             .map_err(|e| RagError::new("project_unavailable", e.to_string()))?;
-        if request.project_key != crate::ai::project_key(&root) {
+        let project_key = crate::ai::project_key(&root);
+        if request.project_key != project_key {
             return Err(RagError::new(
                 "project_not_active",
                 crate::i18n::tags::ERR_AGENT_SWITCH_PROJECT_RETRY.get(),
@@ -167,9 +315,9 @@ impl Workspace {
                         total_chunks: stats.total_chunks,
                         vector_chunks: stats.vector_chunks,
                         pending_vectors: stats.pending_vectors,
-                        needs_ocr_files: stats.needs_ocr_files,
+                        needs_ocr_files: stats.needs_ocr_files.clone(),
                     };
-                    Ok(json!({ "status": "ok", "report": report }))
+                    Ok((json!({ "status": "ok", "report": report }), Some(stats)))
                 }
                 RagOperation::Reindex { params } => {
                     let report = sync_project(
@@ -184,7 +332,8 @@ impl Workspace {
                         },
                         &cancelled,
                     )?;
-                    Ok(json!({ "status": "ok", "report": report }))
+                    let stats = store.stats().ok();
+                    Ok((json!({ "status": "ok", "report": report }), stats))
                 }
                 RagOperation::Search { params } => {
                     let allowed_paths = resolve_tag_filter(
@@ -234,14 +383,18 @@ impl Workspace {
                         },
                         &cancelled,
                     )?;
-                    Ok(json!({
-                        "status": "ok",
-                        "mode_used": response.mode_used,
-                        "degraded_reason": response.degraded_reason,
-                        "indexed_files": response.indexed_files,
-                        "pending_vectors": response.pending_vectors,
-                        "results": response.results,
-                    }))
+                    let latest_stats = store.stats().ok();
+                    Ok((
+                        json!({
+                            "status": "ok",
+                            "mode_used": response.mode_used,
+                            "degraded_reason": response.degraded_reason,
+                            "indexed_files": response.indexed_files,
+                            "pending_vectors": response.pending_vectors,
+                            "results": response.results,
+                        }),
+                        latest_stats,
+                    ))
                 }
             }
         });
@@ -251,7 +404,19 @@ impl Workspace {
             let outcome = task.await;
             let _ = this.update(cx, |app, cx| {
                 app.tool_requests.rag_requests.remove(&request.id);
-                let payload = outcome.unwrap_or_else(|err| error_json(&err));
+                let payload = match outcome {
+                    Ok((payload, stats)) => {
+                        if let Some(stats) = stats
+                            && app
+                                .active_rag_root()
+                                .is_some_and(|(active_key, _)| active_key == project_key)
+                        {
+                            app.publish_rag_pill(&stats, cx);
+                        }
+                        payload
+                    }
+                    Err(err) => error_json(&err),
+                };
                 app.ai.read(cx).respond_workspace_tool(&request, payload);
             });
         })
@@ -259,6 +424,15 @@ impl Workspace {
 
         Ok(())
     }
+}
+
+fn format_rag_pill(stats: &StoreStats) -> (String, String) {
+    let label = format!("KB {}", stats.indexed_files);
+    let tooltip = format!(
+        "本地知识库：已索引 {} 篇 · {} 切片 · 待向量 {}（点击增量同步）",
+        stats.indexed_files, stats.total_chunks, stats.pending_vectors
+    );
+    (label, tooltip)
 }
 
 fn resolve_tag_filter(

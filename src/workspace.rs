@@ -211,6 +211,7 @@ struct ZenSnapshot {
 
 pub struct Workspace {
     tool_requests: tools::ToolRequests,
+    rag_sync: tools::RagSyncState,
     projects: Projects,
     settings: AppSettings,
     backdrop: appearance::Backdrop,
@@ -267,6 +268,7 @@ impl Workspace {
             AiPaneEvent::OpenFile(path) => {
                 app.open_path_from_ai(path, window, cx);
             }
+            AiPaneEvent::SyncRag => app.trigger_rag_sync_now(cx),
             AiPaneEvent::BackToHub => {
                 app.open_right_panel(RightPanelView::Hub, window, cx);
             }
@@ -320,8 +322,14 @@ impl Workspace {
                 }
             }
         });
+        cx.on_app_quit(|_, _| {
+            crate::rag::client::shutdown_managed_servers();
+            async {}
+        })
+        .detach();
         let mut app = Self {
             tool_requests: tools::ToolRequests::default(),
+            rag_sync: tools::RagSyncState::default(),
             projects,
             settings,
             backdrop: appearance::Backdrop::default(),
@@ -548,6 +556,8 @@ impl Workspace {
             self.close_requested = true;
             return false;
         }
+        self.cancel_rag_sync();
+        crate::rag::client::shutdown_managed_servers();
         self.release_all_html_panes(window, cx);
         self.release_all_drawio_panes(window, cx);
         true
@@ -555,6 +565,7 @@ impl Workspace {
 
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.poll_trash(cx);
+        self.poll_rag(cx);
         if self
             .notice_until
             .is_some_and(|deadline| Instant::now() >= deadline)

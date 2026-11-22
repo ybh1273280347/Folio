@@ -90,6 +90,14 @@ pub fn reap_idle_servers() {
     });
 }
 
+pub fn shutdown_managed_servers() {
+    let mut map = server_registry().lock().expect("server registry poisoned");
+    for (_, mut entry) in map.drain() {
+        let _ = entry.child.kill();
+        let _ = entry.child.wait();
+    }
+}
+
 fn check_health(endpoint: &Endpoint) -> bool {
     let path = endpoint.join("/health");
     let resp = http::send(RequestOptions {
