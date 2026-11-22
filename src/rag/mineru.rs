@@ -74,7 +74,7 @@ pub fn load_cached_pdf(
         for chunk in &mut extracted.chunks {
             chunk.line_start = None;
             chunk.line_end = None;
-            if let Some(page) = match_chunk_page(&chunk.chunk_text, &anchors) {
+            if let Some(page) = match_chunk_page(&chunk.chunk_text, &anchors, last_page) {
                 last_page = page;
                 chunk.page_num = Some(page);
             } else {
@@ -457,6 +457,13 @@ fn parse_page_anchors(val: &Value) -> Vec<PageAnchor> {
     let mut out = Vec::new();
     if let Some(items) = val.as_array() {
         for item in items {
+            if item
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|t| matches!(t, "header" | "footer" | "page_number" | "aside_text" | "page_footnote"))
+            {
+                continue;
+            }
             let Some(page_idx) = item.get("page_idx").and_then(Value::as_u64) else {
                 continue;
             };
@@ -524,18 +531,18 @@ fn normalize_anchor(s: &str) -> String {
     s.split_whitespace().take(12).collect::<Vec<_>>().join(" ")
 }
 
-fn match_chunk_page(chunk_text: &str, anchors: &[PageAnchor]) -> Option<usize> {
+fn match_chunk_page(chunk_text: &str, anchors: &[PageAnchor], min_page: usize) -> Option<usize> {
     let body = chunk_text
         .strip_prefix('[')
         .and_then(|rest| rest.split_once("]\n").map(|(_, after)| after))
         .unwrap_or(chunk_text);
     let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
-    for anchor in anchors {
-        if compact.contains(&anchor.snippet) {
-            return Some(anchor.page_num);
-        }
-    }
-    None
+    anchors
+        .iter()
+        .filter(|a| a.page_num >= min_page)
+        .find(|a| compact.contains(&a.snippet))
+        .or_else(|| anchors.iter().find(|a| compact.contains(&a.snippet)))
+        .map(|a| a.page_num)
 }
 
 fn sleep_cancellable(total: Duration, cancelled: &AtomicBool) -> Result<(), RagError> {

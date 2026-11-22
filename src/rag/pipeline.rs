@@ -1065,4 +1065,84 @@ mod tests {
 
         crate::rag::client::shutdown_managed_servers();
     }
+
+    #[test]
+    #[ignore = "requires MINERU_API_KEY and local llama-server GGUFs"]
+    fn live_mineru_pdf_upgrade_and_search() {
+        let embed_path = std::env::var("FOLIO_LIVE_EMBED_MODEL")
+            .unwrap_or_else(|_| "D:/Models/folio-rag/Qwen3-Embedding-0.6B-Q8_0.gguf".into());
+        let rerank_path = std::env::var("FOLIO_LIVE_RERANK_MODEL")
+            .unwrap_or_else(|_| "D:/Models/folio-rag/qwen3-reranker-0.6b-q8_0.gguf".into());
+        let pdf_src = std::env::var("FOLIO_LIVE_PDF").expect("set FOLIO_LIVE_PDF");
+        let mineru_key = std::env::var("MINERU_API_KEY").expect("set MINERU_API_KEY");
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::copy(&pdf_src, root.join("adam.pdf")).unwrap();
+
+        let cfg = RagConfig {
+            embed_url: "http://127.0.0.1:18121".into(),
+            rerank_url: "http://127.0.0.1:18122".into(),
+            embed_model_path: embed_path,
+            rerank_model_path: rerank_path,
+            auto_manage_server: true,
+            mineru_api_key: mineru_key,
+            ..RagConfig::default()
+        };
+        let embed_client = EmbeddingClient::from_config(&cfg).unwrap();
+        let rerank_client = RerankClient::from_config(&cfg).unwrap();
+        let db = root.join(".folio/rag.sqlite3");
+        let mut store = RagStore::open(&db, &cfg.embed_model, cfg.embed_dim).unwrap();
+        let cancel = AtomicBool::new(false);
+
+        let report = sync_project(
+            root,
+            &["adam.pdf".to_owned()],
+            &mut store,
+            SyncOptions {
+                config: &cfg,
+                embed_client: Some(&embed_client),
+                force_rebuild: false,
+                upgrade_pdfs: true,
+            },
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(report.mineru_upgraded_pdfs, 1);
+        assert!(report.mineru_failed_pdfs.is_empty());
+        assert_eq!(report.pending_vectors, 0);
+
+        let pdf_hash = sha256_hex(&fs::read(root.join("adam.pdf")).unwrap());
+        assert!(mineru::cache_dir(root, &pdf_hash).join("full.md").exists());
+        assert!(mineru::cache_dir(root, &pdf_hash).join("pages.json").exists());
+
+        let resp = search_project(
+            &mut store,
+            &SearchRequest {
+                query: "Adam convergence regret bound beta1 beta2".into(),
+                lex_queries: vec!["AdaMax".into(), "bias correction".into()],
+                vec_queries: vec![],
+                mode: SearchMode::Hybrid,
+                rerank: Some(true),
+                extensions: vec![],
+                under_directory: None,
+                limit: 3,
+            },
+            &[],
+            None,
+            SearchServices {
+                embed_client: Some(&embed_client),
+                rerank_client: Some(&rerank_client),
+                rerank_model: &cfg.rerank_model,
+            },
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(resp.mode_used, "hybrid+rerank");
+        assert!(!resp.results.is_empty());
+        assert_eq!(resp.results[0].parse_tier, "mineru");
+        assert!(resp.results[0].page.is_some());
+
+        crate::rag::client::shutdown_managed_servers();
+    }
 }
