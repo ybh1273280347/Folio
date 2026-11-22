@@ -49,6 +49,8 @@ Draw.io 工具提供文件级 `folio_drawio_read`、`folio_drawio_create`、`fol
    - 在 `AiPaneEvent::WorkspaceTool` 按 `channel` 分派。工具接入代码取得当前项目或文档、维护当前用例的取消状态，再直接调用功能模块。
    - 如需友好工具卡片标题，在 [../../src/ai/mod.rs](../../src/ai/mod.rs) 的 `summarize_tool_call` 与 [../../src/i18n/ai.rs](../../src/i18n/ai.rs) 中补充文案。
 
+Pi `message_update` 的 live JSONL 事件只传 usage 与当前 assistant delta；工具调用增量附带当前完整工具调用参数。累计消息仍由宿主持有，并只通过显式 snapshot 返回，用于会话恢复。
+
 ---
 
 ## 3. 常见踩坑与约束
@@ -79,3 +81,11 @@ cargo test --bin folio-gpui-prototype
 # 全量编译与静态检查（含测试目标）
 cargo check --bin folio-gpui-prototype --tests
 ```
+
+用可控本地 SSE 模型重复测量宿主流式事件的协议字节数、事件数、首文本时间和 settle 时间：
+
+```pwsh
+node scripts/pi-host-stream-benchmark.mjs
+```
+
+可通过 `FOLIO_BENCH_ROUNDS`、`FOLIO_BENCH_CHUNKS` 和 `FOLIO_BENCH_CHUNK_BYTES` 调整轮数与响应尺寸。该基准包含 SDK 初始化开销的首轮结果；比较首文本与 settle 时间时，应将首轮和后续稳定轮次分别观察。
