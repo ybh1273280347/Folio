@@ -90,6 +90,7 @@ pub struct StoreStats {
 pub struct RagStore {
     conn: Connection,
     embed_dim: usize,
+    project_root: std::path::PathBuf,
 }
 
 impl RagStore {
@@ -108,7 +109,12 @@ impl RagStore {
         )
         .map_err(|e| format!("配置 SQLite PRAGMA 失败: {e}"))?;
 
-        let mut store = Self { conn, embed_dim };
+        let project_root = db_path
+            .parent()
+            .and_then(Path::parent)
+            .expect("RAG database path has a project root")
+            .to_path_buf();
+        let mut store = Self { conn, embed_dim, project_root };
         store.ensure_schema(embed_model, embed_dim, false)?;
         Ok(store)
     }
@@ -134,10 +140,19 @@ impl RagStore {
                 == Some(dim_str.as_str())
             && Self::get_meta(&conn, "embed_model").ok().flatten().as_deref() == Some(embed_model);
         if schema_ok {
-            return Ok(Self { conn, embed_dim });
+            let project_root = db_path
+                .parent()
+                .and_then(Path::parent)
+                .expect("RAG database path has a project root")
+                .to_path_buf();
+            return Ok(Self { conn, embed_dim, project_root });
         }
         drop(conn);
         Self::open(db_path, embed_model, embed_dim)
+    }
+
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
     }
 
     pub fn with_read_snapshot<T>(
@@ -807,6 +822,28 @@ impl RagStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     }
 
+    pub fn candidate_vectors(&self, chunk_ids: &[i64]) -> Result<HashMap<i64, Vec<f32>>, String> {
+        if chunk_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let ids = serde_json::to_string(chunk_ids).map_err(|err| err.to_string())?;
+        let mut stmt = self.conn.prepare(
+            "SELECT v.chunk_id, v.embedding FROM chunks_vec v\n\
+             JOIN chunks c ON c.id = v.chunk_id\n\
+             JOIN documents d ON d.content_hash = c.content_hash AND d.active = 1\n\
+             WHERE v.chunk_id IN (SELECT value FROM json_each(?1))",
+        ).map_err(|err| err.to_string())?;
+        let rows = stmt.query_map([ids], |row| {
+            let bytes: Vec<u8> = row.get(1)?;
+            let embedding = bytes
+                .chunks_exact(4)
+                .map(|value| f32::from_le_bytes(value.try_into().expect("4-byte embedding value")))
+                .collect();
+            Ok((row.get(0)?, embedding))
+        }).map_err(|err| err.to_string())?;
+        rows.collect::<Result<HashMap<_, _>, _>>().map_err(|err| err.to_string())
+    }
+
     pub fn get_rerank_scores(&self, keys: &[String]) -> Result<HashMap<String, f64>, String> {
         let mut out = HashMap::new();
         if keys.is_empty() {
@@ -1120,6 +1157,34 @@ pub fn is_pdf_path(rel_path: &str) -> bool {
     base_path.to_ascii_lowercase().ends_with(".pdf")
 }
 
+pub fn is_near_duplicate(candidate: &str, selected: &[String]) -> bool {
+    const N: usize = 3;
+    let grams: HashSet<Vec<char>> = candidate
+        .to_lowercase()
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<Vec<_>>()
+        .windows(N)
+        .map(<[char]>::to_vec)
+        .collect();
+    if grams.is_empty() {
+        return false;
+    }
+    selected.iter().any(|text| {
+        let other: HashSet<Vec<char>> = text
+            .to_lowercase()
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<Vec<_>>()
+            .windows(N)
+            .map(<[char]>::to_vec)
+            .collect();
+        let intersection = grams.intersection(&other).count();
+        let union = grams.union(&other).count();
+        intersection * 100 > union * 65
+    })
+}
+
 pub fn path_matches_filters(
     rel_path: &str,
     allowed_paths: Option<&HashSet<String>>,
@@ -1325,6 +1390,16 @@ mod tests {
             .unwrap();
         assert_eq!(vec_hits.len(), 1);
         assert_eq!(vec_hits[0].rel_path, "notes/opt.md");
+    }
+
+    #[test]
+    fn character_trigram_similarity_collapses_whitespace_and_case() {
+        assert!(is_near_duplicate(
+            "The quick brown fox jumps over the lazy dog.",
+            &["the QUICK brown fox jumps over the lazy dog".into()],
+        ));
+        assert!(!is_near_duplicate("gradient descent", &["gradient ascend".into()]));
+        assert!(!is_near_duplicate("栈", &["栈".into()]));
     }
 
     #[test]
