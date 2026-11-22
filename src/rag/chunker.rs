@@ -62,93 +62,135 @@ pub fn chunk_text_document(rel_path: &str, kind: &str, text: &str) -> ExtractedD
     }
 }
 
-pub fn extract_and_chunk_pdf(rel_path: &str, bytes: Vec<u8>) -> Result<ExtractedDocument, String> {
-    if let Ok(inspected) = pdf_inspector::extract_pages_markdown_mem(&bytes, None) {
-        return Ok(chunk_inspected_pdf(rel_path, inspected));
-    }
-    extract_and_chunk_pdf_gpui(rel_path, bytes)
+/// Extract per-page markdown (with page-level OCR flags) and build search chunks.
+pub fn extract_and_chunk_pdf_with_pages(
+    rel_path: &str,
+    bytes: &[u8],
+) -> Result<(ExtractedDocument, Vec<crate::rag::PdfPageMarkdown>), String> {
+    let pages = extract_pdf_pages(rel_path, bytes)?;
+    let doc = chunk_pdf_pages(rel_path, &pages, "fast_pdf");
+    Ok((doc, pages))
 }
 
-fn chunk_inspected_pdf(
+/// Extract per-page markdown from raw PDF bytes using `pdf_inspector`, falling back to `gpui_pdf`.
+pub fn extract_pdf_pages(
     rel_path: &str,
-    inspected: pdf_inspector::PagesExtractionResult,
+    bytes: &[u8],
+) -> Result<Vec<crate::rag::PdfPageMarkdown>, String> {
+    if let Ok(inspected) = pdf_inspector::extract_pages_markdown_mem(bytes, None) {
+        return Ok(pages_from_inspected(inspected));
+    }
+    extract_pdf_pages_gpui(rel_path, bytes)
+}
+
+/// Build an `ExtractedDocument` directly from cached per-page markdown entries.
+pub fn chunk_pdf_pages(
+    rel_path: &str,
+    pages: &[crate::rag::PdfPageMarkdown],
+    parse_tier: &'static str,
 ) -> ExtractedDocument {
-    let page_count = inspected.pages.len();
-    let mut non_ws_chars = 0usize;
     let mut full_raw = String::new();
     let mut chunks = Vec::new();
+    let mut needs_ocr = false;
 
-    for page in &inspected.pages {
-        let page_num = (page.page as usize) + 1;
+    for page in pages {
+        if page.needs_ocr {
+            needs_ocr = true;
+            continue;
+        }
         let trimmed = page.markdown.trim();
-        non_ws_chars += trimmed.chars().filter(|c| !c.is_whitespace()).count();
         if trimmed.is_empty() {
             continue;
         }
         if !full_raw.is_empty() {
             full_raw.push_str("\n\n");
         }
-        full_raw.push_str(&format!("<!-- page {page_num} -->\n{trimmed}"));
-
-        append_page_chunks(rel_path, page_num, trimmed, &mut chunks);
+        full_raw.push_str(&format!("<!-- page {} -->\n{trimmed}", page.page));
+        append_page_chunks(rel_path, page.page, trimmed, &mut chunks);
     }
-
-    let has_content_ocr_reason = inspected.ocr_reasons_by_page.iter().any(|entry| {
-        entry
-            .reasons
-            .iter()
-            .any(|reason| reason != pdf_inspector::OCR_REASON_NO_TEXT)
-    });
-    let needs_ocr = has_content_ocr_reason || (page_count > 0 && non_ws_chars < 40);
 
     ExtractedDocument {
         raw_text: full_raw,
-        parse_tier: "fast_pdf",
+        parse_tier,
         needs_ocr,
         chunks,
     }
 }
 
-fn extract_and_chunk_pdf_gpui(rel_path: &str, bytes: Vec<u8>) -> Result<ExtractedDocument, String> {
-    let document = gpui_pdf::parse(Arc::new(bytes))
+fn pages_from_inspected(
+    inspected: pdf_inspector::PagesExtractionResult,
+) -> Vec<crate::rag::PdfPageMarkdown> {
+    let page_count = inspected.pages.len();
+    let non_ws_chars: usize = inspected
+        .pages
+        .iter()
+        .map(|p| p.markdown.chars().filter(|c| !c.is_whitespace()).count())
+        .sum();
+    let whole_needs_ocr = page_count > 0 && non_ws_chars < 40;
+    let content_ocr_pages: std::collections::HashSet<usize> = inspected
+        .ocr_reasons_by_page
+        .iter()
+        .filter(|entry| {
+            entry
+                .reasons
+                .iter()
+                .any(|reason| reason != pdf_inspector::OCR_REASON_NO_TEXT)
+        })
+        .map(|entry| entry.page as usize)
+        .collect();
+
+    inspected
+        .pages
+        .into_iter()
+        .map(|page| {
+            let page_num = (page.page as usize) + 1;
+            let page_needs_ocr = whole_needs_ocr || content_ocr_pages.contains(&page_num);
+            crate::rag::PdfPageMarkdown {
+                page: page_num,
+                markdown: if page_needs_ocr {
+                    String::new()
+                } else {
+                    page.markdown.trim().to_owned()
+                },
+                source: (!page_needs_ocr).then(|| "fast".to_owned()),
+                needs_ocr: page_needs_ocr,
+            }
+        })
+        .collect()
+}
+
+fn extract_pdf_pages_gpui(
+    rel_path: &str,
+    bytes: &[u8],
+) -> Result<Vec<crate::rag::PdfPageMarkdown>, String> {
+    let document = gpui_pdf::parse(Arc::new(bytes.to_vec()))
         .map_err(|err| format!("PDF 解析失败 ({rel_path}): {err:?}"))?;
     let page_count = document.pages().len();
-    let mut pages = Vec::with_capacity(page_count);
     let mut non_ws_chars = 0usize;
-    let mut full_raw = String::new();
+    let mut raw_pages = Vec::with_capacity(page_count);
 
     for idx in 0..page_count {
         let text = gpui_pdf::extract_page_text(&document, idx)
             .map(|page| page.text())
             .unwrap_or_default();
-        non_ws_chars += text.chars().filter(|c| !c.is_whitespace()).count();
-        if !text.trim().is_empty() {
-            if !full_raw.is_empty() {
-                full_raw.push_str("\n\n");
-            }
-            full_raw.push_str(&format!("<!-- page {} -->\n{}", idx + 1, text.trim()));
-        }
-        pages.push((idx + 1, text));
+        let trimmed = text.trim().to_owned();
+        non_ws_chars += trimmed.chars().filter(|c| !c.is_whitespace()).count();
+        raw_pages.push((idx + 1, trimmed));
     }
 
     let needs_ocr = page_count > 0 && non_ws_chars < 40;
-    let mut chunks = Vec::new();
-    for (page_num, page_text) in pages {
-        if page_text.trim().is_empty() {
-            continue;
-        }
-        append_page_chunks(rel_path, page_num, page_text.trim(), &mut chunks);
-    }
-
-    Ok(ExtractedDocument {
-        raw_text: full_raw,
-        parse_tier: "fast_pdf",
-        needs_ocr,
-        chunks,
-    })
+    Ok(raw_pages
+        .into_iter()
+        .map(|(page, trimmed)| crate::rag::PdfPageMarkdown {
+            page,
+            markdown: if needs_ocr { String::new() } else { trimmed },
+            source: (!needs_ocr).then(|| "fast".to_owned()),
+            needs_ocr,
+        })
+        .collect())
 }
 
-fn append_page_chunks(rel_path: &str, page: usize, body: &str, out: &mut Vec<ChunkDraft>) {
+pub fn append_page_chunks(rel_path: &str, page: usize, body: &str, out: &mut Vec<ChunkDraft>) {
     let heading_path = format!("{rel_path} > p.{page}");
     let paragraphs: Vec<_> = body
         .match_indices("\n\n")

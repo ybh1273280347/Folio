@@ -42,20 +42,28 @@ pub const KB_MENU_DISABLE: BiText = BiText::new("停用知识库", "Disable Know
 pub const KB_FILTER_ALL: BiText = BiText::new("全部", "All");
 pub const KB_FILTER_NOTES: BiText = BiText::new("笔记", "Notes");
 pub const KB_FILTER_PDF: BiText = BiText::new("PDF", "PDF");
-pub const KB_PDF_FILTER_NEEDS_OCR: BiText = BiText::new("待OCR", "OCR");
-pub const KB_PDF_FILTER_FAST: BiText = BiText::new("Fast", "Fast");
+pub const KB_PDF_FILTER_NEEDS_OCR: BiText = BiText::new("待补全", "Needs OCR");
+pub const KB_PDF_FILTER_COMPLETE: BiText = BiText::new("已完整", "Ready");
 pub const KB_PDF_FILTER_ACCURATE: BiText = BiText::new("精确", "Accurate");
 pub const KB_SELECT_ALL: BiText = BiText::new("全选", "All");
 pub const KB_PDF_EMPTY: BiText = BiText::new("暂无可管理的 PDF", "No PDFs in index");
-pub const KB_ONLY_OCR_BTN: BiText = BiText::new("仅待OCR", "Scan only");
+pub const KB_ONLY_OCR_BTN: BiText = BiText::new("补全缺页", "Fill missing");
 pub const KB_EXPORT_MD_BTN: BiText = BiText::new("导出 .md", "Export .md");
+pub const KB_EXPORT_UNAVAILABLE_TIP: BiText = BiText::new(
+    "所选文档尚有缺页未补全，暂不可导出",
+    "Selected PDFs still have missing pages",
+);
 pub const KB_CANCEL_BTN: BiText = BiText::new("取消", "Cancel");
+pub const KB_RETRY_BTN: BiText = BiText::new("重试", "Retry");
 pub const KB_COLLAPSE_HITS: BiText = BiText::new("收起", "Collapse");
 pub const KB_DRAFT_BADGE: BiText = BiText::new("草稿", "Draft");
 pub const KB_ANNOT_BADGE: BiText = BiText::new("批注", "Note");
-pub const KB_ACCURATE_BADGE: BiText = BiText::new("精修", "Accurate");
-pub const KB_FAST_BADGE: BiText = BiText::new("Fast", "Fast");
-pub const KB_NEEDS_OCR_BADGE: BiText = BiText::new("待OCR", "Needs OCR");
+pub const KB_ACCURATE_BADGE: BiText = BiText::new("精确", "Accurate");
+pub const KB_HYBRID_BADGE: BiText = BiText::new("混合", "Hybrid");
+pub const KB_FAST_BADGE: BiText = BiText::new("快速", "Fast");
+pub const KB_NEEDS_OCR_BADGE: BiText = BiText::new("待补全", "Needs OCR");
+pub const KB_FAILED_BADGE: BiText = BiText::new("失败", "Failed");
+pub const KB_QUEUED_OCR: BiText = BiText::new("排队等待 OCR…", "Queued for OCR…");
 pub const KB_OPEN_SETTINGS: BiText = BiText::new("打开设置", "Open settings");
 
 pub fn kb_search_summary(hits: usize, docs: usize, truncated: bool) -> String {
@@ -68,8 +76,56 @@ pub fn kb_search_summary(hits: usize, docs: usize, truncated: bool) -> String {
 
 pub fn kb_more_hits(count: usize) -> String {
     match locale() {
-        Locale::ZhCn => format!("还有 {count} 处匹配"),
-        Locale::En => format!("+{count} more"),
+        Locale::ZhCn => format!("展开其余 {count} 条命中"),
+        Locale::En => format!("Show {count} more"),
+    }
+}
+
+pub fn kb_hits_pill(count: usize) -> String {
+    match locale() {
+        Locale::ZhCn => format!("{count} 处"),
+        Locale::En => {
+            if count == 1 {
+                "1 hit".to_owned()
+            } else {
+                format!("{count} hits")
+            }
+        }
+    }
+}
+
+pub fn kb_pages_count(pages: usize) -> String {
+    match locale() {
+        Locale::ZhCn => format!("{pages} 页"),
+        Locale::En => format!("{pages}p"),
+    }
+}
+
+pub fn kb_missing_pages_badge(missing: usize) -> String {
+    match locale() {
+        Locale::ZhCn => format!("缺 {missing} 页"),
+        Locale::En => format!("{missing}p OCR"),
+    }
+}
+
+pub fn kb_ocr_running_label(label: &str) -> String {
+    match locale() {
+        Locale::ZhCn => format!("OCR 识别中 · {label}"),
+        Locale::En => format!("OCR running · {label}"),
+    }
+}
+
+pub fn kb_export_selected_label(count: usize) -> String {
+    match locale() {
+        Locale::ZhCn => format!("导出 ({count})"),
+        Locale::En => format!("Export ({count})"),
+    }
+}
+
+pub fn kb_fill_missing_label(count: usize) -> String {
+    match locale() {
+        Locale::ZhCn => format!("补全缺页 ({count})"),
+        Locale::En => format!("Fill ({count})"),
     }
 }
 

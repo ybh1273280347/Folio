@@ -3,7 +3,7 @@
 use super::{
     AccuratePdfMode, DirtyDocument, RagConfig, RagError, ReindexReport, SearchHit, SearchRequest,
     SearchResponse, SubSearchType,
-    chunker::{chunk_annotations, chunk_text_document, extract_and_chunk_pdf},
+    chunker::{chunk_annotations, chunk_text_document},
     client::{EmbeddingClient, RerankClient},
     doc_kind, has_folio_pdf_fingerprint, load_derived_pdf_hashes, ocr, sha256_hex,
     store::{RagStore, ScoredChunk, path_matches_filters},
@@ -136,6 +136,11 @@ pub fn sync_project(
 
         if kind == "pdf" {
             if let Some(cached) = ocr::load_cached_pdf(root, rel_path, &content_hash) {
+                let status = if cached.needs_ocr {
+                    "needs_ocr"
+                } else {
+                    "indexed"
+                };
                 store
                     .upsert_document(
                         rel_path,
@@ -143,7 +148,7 @@ pub fn sync_project(
                         &content_hash,
                         mtime_ns,
                         file_size,
-                        "indexed",
+                        status,
                         Some(&cached.raw_text),
                         Some(cached.parse_tier),
                         Some(&cached.chunks),
@@ -151,8 +156,10 @@ pub fn sync_project(
                     .map_err(|e| RagError::new("store_error", e))?;
                 updated_files += 1;
             } else {
-                match extract_and_chunk_pdf(rel_path, bytes) {
-                    Ok(extracted) => {
+                match super::chunker::extract_and_chunk_pdf_with_pages(rel_path, &bytes) {
+                    Ok((extracted, pages)) => {
+                        ocr::write_pages_cache(&ocr::cache_dir(root, &content_hash), &pages, None)
+                            .map_err(|e| RagError::new("io_error", e))?;
                         let status = if extracted.needs_ocr {
                             "needs_ocr"
                         } else {
@@ -719,7 +726,7 @@ fn collapse_and_format(
         *count += 1;
 
         let markdown_cache = if cand.kind == "pdf"
-            && matches!(cand.parse_tier.as_str(), "accurate" | "mineru")
+            && matches!(cand.parse_tier.as_str(), "accurate" | "mineru" | "hybrid")
         {
             cand.content_hash
                 .as_ref()
@@ -820,11 +827,20 @@ pub fn clean_heading_text(raw: &str) -> String {
 }
 
 pub fn clean_markdown_snippet(chunk_text: &str) -> String {
-    let body = chunk_text
+    let (header_tail, body) = match chunk_text
         .strip_prefix('[')
-        .and_then(|rest| rest.split_once("]\n").map(|(_, after)| after))
-        .unwrap_or(chunk_text)
-        .trim();
+        .and_then(|rest| rest.split_once("]\n"))
+    {
+        Some((hdr, after)) => {
+            let tail = hdr
+                .rsplit(" > ")
+                .next()
+                .map(clean_heading_text)
+                .unwrap_or_default();
+            (Some(tail), after.trim())
+        }
+        None => (None, chunk_text.trim()),
+    };
 
     let mut cleaned_lines: Vec<String> = Vec::new();
     let mut in_block_math = false;
@@ -859,6 +875,14 @@ pub fn clean_markdown_snippet(chunk_text: &str) -> String {
         }
     }
 
+    if let Some(tail) = header_tail
+        && !tail.is_empty()
+        && cleaned_lines.len() > 1
+        && collapse_spaces(&cleaned_lines[0]) == collapse_spaces(&tail)
+    {
+        cleaned_lines.remove(0);
+    }
+
     collapse_spaces(&cleaned_lines.join(" "))
 }
 
@@ -873,12 +897,110 @@ fn clean_inline_markdown_line(line: &str) -> String {
             break;
         }
     }
-    let with_math = replace_inline_math(s);
+    if s.starts_with('|') || s.contains(" | ") {
+        let cells: Vec<&str> = s
+            .trim_matches('|')
+            .split('|')
+            .map(str::trim)
+            .filter(|c| !c.is_empty() && !c.chars().all(|ch| ch == '-' || ch == ':' || ch == ' '))
+            .collect();
+        if cells.is_empty() {
+            return String::new();
+        }
+        let joined = cells.join(" · ");
+        let without_html = strip_simple_html_tags(&joined);
+        let without_tex = unwrap_latex_inline(&without_html);
+        let with_math = replace_inline_math(&without_tex);
+        return unescape_markdown_punct(&with_math)
+            .replace("**", "")
+            .replace("__", "")
+            .replace('`', "");
+    }
+    let without_html = strip_simple_html_tags(s);
+    let without_tex = unwrap_latex_inline(&without_html);
+    let with_math = replace_inline_math(&without_tex);
     let unescaped = unescape_markdown_punct(&with_math);
     unescaped
         .replace("**", "")
         .replace("__", "")
         .replace('`', "")
+}
+
+fn strip_simple_html_tags(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find('<') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        if let Some(end) = after.find('>') {
+            let tag = after[..end].trim();
+            let tag_name = tag.trim_start_matches('/').split_whitespace().next().unwrap_or("");
+            if !tag_name.is_empty()
+                && tag_name.len() <= 16
+                && tag_name.chars().all(|c| c.is_ascii_alphanumeric())
+            {
+                rest = &after[end + 1..];
+                continue;
+            }
+        }
+        out.push('<');
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+fn unwrap_latex_inline(input: &str) -> String {
+    let mut s = input.to_owned();
+    for boilerplate in [
+        "\\begin{document}",
+        "\\end{document}",
+        "\\maketitle",
+        "\\author{}",
+        "\\date{}",
+    ] {
+        s = s.replace(boilerplate, "");
+    }
+    for cmd in [
+        "\\textbf{",
+        "\\textit{",
+        "\\texttt{",
+        "\\emph{",
+        "\\title{",
+        "\\section*{",
+        "\\section{",
+        "\\subsection*{",
+        "\\subsection{",
+        "\\subsubsection{",
+    ] {
+        while let Some(pos) = s.find(cmd) {
+            let arg_start = pos + cmd.len();
+            if let Some(rel_end) = find_matching_brace(&s[arg_start..]) {
+                let inner = s[arg_start..arg_start + rel_end].to_owned();
+                s.replace_range(pos..arg_start + rel_end + 1, &inner);
+            } else {
+                break;
+            }
+        }
+    }
+    s
+}
+
+fn find_matching_brace(input: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    for (idx, ch) in input.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn replace_inline_math(input: &str) -> String {
