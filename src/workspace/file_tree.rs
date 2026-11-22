@@ -501,9 +501,9 @@ impl Workspace {
         let hover = self.tree.drop_hover.clone();
         let path = path.to_owned();
         let style_target = move |style: StyleRefinement, window: &mut Window, cx: &mut App| {
-            let accent = gpui_kit::rgb(palette.accent);
+            let neutral = gpui_kit::rgb(palette.text);
             if path.is_empty() {
-                return style.bg(accent.opacity(0.12));
+                return style.bg(neutral.opacity(0.06));
             }
 
             let mut hover = hover.borrow_mut();
@@ -519,12 +519,16 @@ impl Workspace {
             if strength < 1. {
                 window.request_animation_frame();
             }
-            style.rounded(px(5.)).bg(accent.opacity(0.08 + 0.10 * strength))
-                .shadow(vec![BoxShadow::new(
-                    px(0.),
-                    px(2. * strength),
-                    hsla(0., 0., 0., 0.22 * strength),
-                ).blur_radius(px(6.))])
+            // A wide, faint shadow separates the target from adjacent rows.
+            // The tighter inset edge makes the receiving surface read as recessed.
+            style.rounded(px(7.)).bg(neutral.opacity(0.06 + 0.05 * strength))
+                .shadow(vec![
+                    BoxShadow::new(px(0.), px(2.), hsla(0., 0., 0., 0.06 * strength))
+                        .blur_radius(px(9.)),
+                    BoxShadow::new(px(0.), px(1.), hsla(0., 0., 0., 0.14 * strength))
+                        .blur_radius(px(3.))
+                        .inset(),
+                ])
         };
         let folder_style = style_target.clone();
         row.drag_over::<DraggedPaths>(move |style, dragged, window, cx| {
