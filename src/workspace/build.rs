@@ -573,10 +573,12 @@ impl Workspace {
         self.build.panels.preview = true;
         self.notice = None;
         if let Some((file, pane)) = markdown.zip(capture) {
+            let root = PathBuf::from(&project.folder);
+            let source = root.join(&file);
             let request = crate::markdown::pdf::ExportRequest {
-                destination: PathBuf::from(&project.folder)
-                    .join(&file)
-                    .with_extension("pdf"),
+                destination: source.with_extension("pdf"),
+                root,
+                source,
                 preview: build_root.join(&project.id).join("preview.pdf"),
                 cancelled,
                 complete: Box::new(move |result| {
@@ -586,12 +588,14 @@ impl Workspace {
             };
             pane.update(cx, |pane, cx| pane.export_pdf(request, cx));
         } else if is_image {
-            let source = PathBuf::from(&project.folder).join(&target);
+            let root = PathBuf::from(&project.folder);
+            let source = root.join(&target);
             let destination = source.with_extension("pdf");
             let preview = build_root.join(&project.id).join("preview.pdf");
             let started = Instant::now();
             thread::spawn(move || {
                 let result = crate::image::export_image_to_pdf(
+                    Some(&root),
                     &source,
                     &destination,
                     &preview,
