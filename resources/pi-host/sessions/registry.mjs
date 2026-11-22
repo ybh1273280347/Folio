@@ -26,7 +26,7 @@ export class SessionRegistry {
 
   release(record) {
     record.retained = false;
-    return !record.running && !record.titleController;
+    return !record.running && !record.titleController && !record.rewind;
   }
 
   retain(record) {

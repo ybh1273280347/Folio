@@ -28,6 +28,16 @@ pub const COPY_CODE: BiText = BiText::new("复制代码", "Copy code");
 pub const COPY_TABLE: BiText = BiText::new("复制表格", "Copy table");
 pub const COPY_ANSWER: BiText = BiText::new("复制回答", "Copy response");
 pub const COPY_MESSAGE: BiText = BiText::new("复制消息", "Copy message");
+pub const EDIT_MESSAGE: BiText = BiText::new("重新编辑", "Edit message");
+pub const REWIND_MESSAGE: BiText = BiText::new("回退到此处", "Rewind here");
+pub const REWIND_DETAIL: BiText = BiText::new(
+    "将移除本条及之后的对话。工具已写入的数据会保留。",
+    "This turn and later messages will be removed. Changes already made by tools will remain.",
+);
+pub const EDIT_REWIND_DETAIL: BiText = BiText::new(
+    "将移除本条及之后的对话，并替换输入框草稿。工具已写入的数据会保留。",
+    "This turn and later messages will be removed, and the composer draft will be replaced. Changes already made by tools will remain.",
+);
 pub const EXPORT_AS_NOTE: BiText = BiText::new("导出为笔记", "Export as note");
 pub const THINKING_ELLIPSIS: BiText = BiText::new("思考中…", "Thinking…");
 pub const STILL_THINKING: BiText = BiText::new("正在思考…", "Thinking…");

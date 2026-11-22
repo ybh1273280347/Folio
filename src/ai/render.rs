@@ -2127,9 +2127,10 @@ impl ChatPane {
         let slash_items = self.current_slash_items(cx);
         let has_slash_items = !slash_items.is_empty();
         let input_empty = self.input.read(cx).value().is_empty();
-        let can_send = !self.input.read(cx).value().trim().is_empty()
-            || !self.quoted_selections.is_empty()
-            || !self.pasted_images.is_empty();
+        let can_send = !self.session.borrow().is_rewinding
+            && (!self.input.read(cx).value().trim().is_empty()
+                || !self.quoted_selections.is_empty()
+                || !self.pasted_images.is_empty());
         let pane_paste = cx.entity();
 
         let subtle_btn = |cx: &App| {

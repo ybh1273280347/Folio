@@ -14,6 +14,7 @@ pub use quote::SelectionQuote;
 use quote::{append_quotes, split_injected_prompt};
 
 use crate::math::{MathDisplaySize, MathReady, MathRenderer};
+use base64::Engine as _;
 use gpui_kit::component::Sizable;
 use crate::mermaid::{MermaidReady, MermaidRenderer};
 use crate::model::{AppSettings, ToolExecutionView};
@@ -138,6 +139,7 @@ enum AssistantPart {
 #[derive(Clone)]
 enum ChatMessage {
     User {
+        entry_id: Option<String>,
         display_text: String,
         // Pi stores user-message timestamps as Unix milliseconds.
         timestamp_ms: Option<i64>,
@@ -453,6 +455,20 @@ impl ChatPane {
         }
         if let Some(text) = changes.composer_text {
             self.pending_composer_text = Some(text);
+        }
+        if let Some(content) = changes.rewind_draft {
+            // Restore Pi's original prompt text, including reference paths and quoted context.
+            self.pending_composer_text = Some(extract_text_content(Some(&content)));
+            self.attach_active_file = false;
+            self.quoted_selections.clear();
+            self.pasted_images.clear();
+            for block in content.as_array().into_iter().flatten() {
+                if let Some(image) = PastedImage::from_pi(self.next_image_id, block) {
+                    self.next_image_id += 1;
+                    self.pasted_images.push(image);
+                }
+            }
+            self.stick_to_bottom = true;
         }
         cx.notify();
     }
@@ -961,9 +977,11 @@ impl ChatPane {
     }
 
     fn send_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.session.borrow().is_streaming {
+        let session = self.session.borrow();
+        if session.is_streaming || session.is_rewinding {
             return;
         }
+        drop(session);
         let content = self.input.read(cx).content();
         let raw_text = content.text().as_ref();
         let trimmed = raw_text.trim();
@@ -1034,6 +1052,7 @@ impl ChatPane {
         payload.push_str(body_trimmed);
 
         let message = ChatMessage::User {
+            entry_id: None,
             display_text: body_trimmed.to_owned(),
             timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
             attached_file: attached.map(|f| f.display),
@@ -1062,6 +1081,30 @@ impl ChatPane {
         self.stick_to_bottom = true;
         self.scroll_to_bottom();
         cx.notify();
+    }
+
+    fn confirm_rewind(&mut self, entry_id: String, edit: bool, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::i18n::ai;
+        let (label, detail) = if edit {
+            (ai::EDIT_MESSAGE, ai::EDIT_REWIND_DETAIL)
+        } else {
+            (ai::REWIND_MESSAGE, ai::REWIND_DETAIL)
+        };
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning, label.get(), Some(detail.get()),
+            &[label.get(), crate::i18n::common::CANCEL.get()], cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await == Ok(0) {
+                let _ = this.update(cx, |pane, cx| {
+                    let result = pane.session.borrow_mut().rewind(&entry_id, edit);
+                    if let Err(error) = result {
+                        pane.show_toast(ai::command_failed(ai::REWIND_MESSAGE.get(), &error), true, cx);
+                    }
+                    cx.notify();
+                });
+            }
+        }).detach();
     }
 
     fn abort(&mut self, cx: &mut Context<Self>) {
@@ -1116,6 +1159,7 @@ impl Render for ChatPane {
             && self.session.borrow().ext_widgets.is_empty();
         let md_style = self.md_style(typo.body, cx);
         let total_msgs = self.session.borrow().messages.len();
+        let can_rewind = self.session.borrow().can_rewind();
 
         let user_bubble_bg = mix_color(
             palette.surface,
@@ -1279,6 +1323,7 @@ impl Render for ChatPane {
                             let item = rendered_messages.len() + usize::from(self.session.borrow().startup_error.is_some());
                             match &self.session.borrow().messages[msg_idx] {
                                 ChatMessage::User {
+                                    entry_id,
                                     display_text,
                                     timestamp_ms,
                                     attached_file,
@@ -1447,21 +1492,36 @@ impl Render for ChatPane {
                                             )
                                         }),
                                 )
-                                .when(!display_text.is_empty(), |col| {
+                                .when(!display_text.is_empty() || (can_rewind && entry_id.is_some()), |col| {
                                     col.child(
                                         div()
                                             .flex()
                                             .items_center()
                                             .justify_end()
                                             .pt_0p5()
-                                            .child(ai_copy_button(
+                                            .gap_1()
+                                            .when(!display_text.is_empty(), |row| row.child(ai_copy_button(
                                                 SharedString::from(format!(
                                                     "ai-copy-user-{msg_idx}"
                                                 )),
                                                 crate::i18n::ai::COPY_MESSAGE.get(),
                                                 crate::i18n::common::COPIED.get(),
                                                 display_text.clone(),
-                                            )),
+                                            )))
+                                            .children(entry_id.as_ref().filter(|_| can_rewind).into_iter().flat_map(|entry_id| {
+                                                [
+                                                    (true, IconName::PencilLine, crate::i18n::ai::EDIT_MESSAGE.get()),
+                                                    (false, IconName::RotateCcw, crate::i18n::ai::REWIND_MESSAGE.get()),
+                                                ].map(|(edit, icon, label)| {
+                                                    let entry_id = entry_id.clone();
+                                                    Button::new(SharedString::from(format!("ai-rewind-{edit}-{msg_idx}")))
+                                                        .ghost().compact().with_size(px(16.)).w(px(22.)).h(px(22.))
+                                                        .icon(crate::ui::icon(icon)).tooltip(label)
+                                                        .on_click(cx.listener(move |pane, _, window, cx| {
+                                                            pane.confirm_rewind(entry_id.clone(), edit, window, cx);
+                                                        }))
+                                                })
+                                            })),
                                     )
                                 })
                                             .into_any_element(),
@@ -2586,6 +2646,31 @@ fn clipboard_image_to_pasted(id: u64, img: &gpui::Image) -> Result<PastedImage, 
         data_b64,
         label: crate::i18n::ai::image_label(id),
     })
+}
+
+impl PastedImage {
+    fn from_pi(id: u64, block: &Value) -> Option<Self> {
+        if block["type"].as_str()? != "image" {
+            return None;
+        }
+        let mime_type = block["mimeType"].as_str()?;
+        let format = match mime_type {
+            "image/png" => ImageFormat::Png,
+            "image/jpeg" => ImageFormat::Jpeg,
+            "image/webp" => ImageFormat::Webp,
+            "image/gif" => ImageFormat::Gif,
+            _ => return None,
+        };
+        let data = block["data"].as_str()?;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
+        Some(Self {
+            id,
+            image: Arc::new(gpui::Image::from_bytes(format, bytes)),
+            mime_type: mime_type.to_owned(),
+            data_b64: data.to_owned(),
+            label: crate::i18n::ai::image_label(id),
+        })
+    }
 }
 
 fn file_path_to_pasted_image(id: u64, path: &Path) -> Result<PastedImage, String> {

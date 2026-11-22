@@ -428,7 +428,7 @@ test('tool argument deltas reach the conversation before generation ends', { tim
   assert.equal((await run).success, true);
 });
 
-test('writes retain original content and runtime clock snapshots preserve the request prefix', { timeout: 45000 }, async t => {
+test('writes retain original content and rewinding a conversation preserves tool side effects', { timeout: 45000 }, async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'folio-write-diff-'));
   const agentDir = path.join(directory, 'agent');
   const cwd = path.join(directory, 'project');
@@ -495,6 +495,34 @@ test('writes retain original content and runtime clock snapshots preserve the re
   assert.deepEqual(requests[1].messages.slice(0, requests[0].messages.length), requests[0].messages);
   assert.deepEqual(requests[2].messages.slice(0, requests[1].messages.length), requests[1].messages);
   assert.match(JSON.stringify(requests[2].messages.at(-1)), /folio_runtime_context/);
+
+  const owner = { ...project, sessionId };
+  const [first, second] = history.data.messages.filter(message => message.role === 'user');
+  const live = await client.event(sessionId, 'user_entry');
+  assert.equal(live.entryId, first.entryId);
+  const edit = await client.request({ ...owner, type: 'rewind', entryId: second.entryId, edit: true });
+  assert.equal(edit.success, true, edit.error);
+  assert.deepEqual(edit.data.draft, second.content);
+  assert.deepEqual(edit.data.messages.filter(message => message.role === 'user'), [first]);
+  assert.equal(edit.data.sessionFile, history.data.sessionFile);
+  assert.equal(fs.readFileSync(path.join(cwd, '新建文件.md'), 'utf8'), '# 覆盖\n修改后\n');
+
+  assert.equal((await client.request({ ...owner, type: 'release' })).success, true);
+  const reopened = await client.request({ ...owner, type: 'snapshot' });
+  assert.deepEqual(reopened.data.messages, edit.data.messages);
+  const resend = await client.request({ ...owner, type: 'prompt', message: '# 覆盖\n修改后\n' });
+  assert.equal(resend.success, true, resend.error);
+  assert.deepEqual(requests[4].messages.slice(0, requests[1].messages.length), requests[1].messages);
+  assert.equal(requests[4].messages.filter(message => message.role === 'tool').length, 1);
+
+  const rewind = await client.request({ ...owner, type: 'rewind', entryId: first.entryId });
+  assert.equal(rewind.success, true, rewind.error);
+  assert.deepEqual(rewind.data.messages.filter(message => message.role !== 'system'), []);
+  assert.equal(rewind.data.draft, undefined);
+  assert.equal((await client.request({ ...owner, type: 'release' })).success, true);
+  const empty = await client.request({ ...owner, type: 'snapshot' });
+  assert.deepEqual(empty.data.messages.filter(message => message.role !== 'system'), []);
+  assert.equal(fs.readFileSync(path.join(cwd, '新建文件.md'), 'utf8'), '# 覆盖\n修改后\n');
 });
 
 test('Exa supports academic scope, focused evidence, domain filters and provider metadata', async () => {
