@@ -10,7 +10,7 @@ pub use crate::model::RagConfig;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -231,6 +231,13 @@ pub struct DerivedPdfEntry {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct DerivedMarkdownEntry {
+    pub source_pdf_path: String,
+    pub source_pdf_hash: String,
+    pub markdown_hash: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct DerivedPdfManifest {
     #[serde(default)]
     entries: Vec<DerivedPdfEntry>,
@@ -293,6 +300,51 @@ pub fn load_derived_pdf_hashes(project_root: &Path) -> HashSet<String> {
         return HashSet::new();
     };
     manifest.entries.into_iter().map(|e| e.pdf_hash).collect()
+}
+
+fn derived_markdown_manifest_path(project_root: &Path) -> PathBuf {
+    project_root.join(".folio").join("derived-markdowns.json")
+}
+
+/// Record the PDF source and exact exported text so later indexing can distinguish
+/// an untouched convenience export from a Markdown file the user edited.
+pub fn record_derived_markdown(
+    project_root: &Path,
+    markdown_path: &Path,
+    source_pdf_path: &Path,
+    source_pdf_hash: &str,
+    markdown: &str,
+) -> std::io::Result<()> {
+    let Some(path) = project_rel_slash(project_root, markdown_path) else {
+        return Ok(());
+    };
+    let manifest_path = derived_markdown_manifest_path(project_root);
+    let mut entries: HashMap<String, DerivedMarkdownEntry> = fs::read(&manifest_path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+        .unwrap_or_default();
+    entries.insert(
+        path,
+        DerivedMarkdownEntry {
+            source_pdf_path: project_rel_slash(project_root, source_pdf_path).unwrap_or_default(),
+            source_pdf_hash: source_pdf_hash.to_owned(),
+            markdown_hash: sha256_hex(markdown.as_bytes()),
+        },
+    );
+    if let Some(parent) = manifest_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_vec_pretty(&entries).map_err(std::io::Error::other)?;
+    fs::write(manifest_path, json)
+}
+
+pub fn load_derived_markdown_entries(
+    project_root: &Path,
+) -> HashMap<String, DerivedMarkdownEntry> {
+    fs::read(derived_markdown_manifest_path(project_root))
+        .ok()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+        .unwrap_or_default()
 }
 
 pub fn has_folio_pdf_fingerprint(bytes: &[u8]) -> bool {
