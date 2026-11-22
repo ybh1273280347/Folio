@@ -32,6 +32,12 @@ struct TreeSelectionDrag {
     moved: bool,
 }
 
+struct TreeDropHover {
+    row: String,
+    directory: String,
+    started: Instant,
+}
+
 impl TreeSelectionDrag {
     fn bounds(&self) -> Bounds<Pixels> {
         Bounds::from_corners(
@@ -60,7 +66,7 @@ pub(super) struct FileTree {
     collapsed_folders: BTreeSet<String>,
     folder_folds: BTreeMap<String, FolderFold>,
     dragged_folder: Rc<RefCell<Option<String>>>,
-    drop_hover: Rc<RefCell<Option<(String, Instant)>>>,
+    drop_hover: Rc<RefCell<Option<TreeDropHover>>>,
     folder_landing: Option<(String, Instant)>,
     focused_folder: Option<String>,
     focused_file: Option<String>,
@@ -496,6 +502,7 @@ impl Workspace {
         let drop_files = destination.to_owned();
         let drop_folder = drop_files.clone();
         let folder_hover = drop_files.clone();
+        let scope = drop_files.clone();
         let project = self.projects.directory().expect("drop row has project").id.clone();
         let folder_project = project.clone();
         let hover = self.tree.drop_hover.clone();
@@ -510,10 +517,14 @@ impl Workspace {
             // Both layout and paint can query GPUI's drag-over style in one frame.
             // Keep the transition keyed to the hovered row across those calls.
             let now = Instant::now();
-            if hover.as_ref().is_none_or(|(row, _)| row != &path) {
-                *hover = Some((path.clone(), now));
+            if hover.as_ref().is_none_or(|target| target.row != path) {
+                *hover = Some(TreeDropHover {
+                    row: path.clone(),
+                    directory: scope.clone(),
+                    started: now,
+                });
             }
-            let started = hover.as_ref().expect("hover started").1;
+            let started = hover.as_ref().expect("hover started").started;
             let progress = (now.duration_since(started).as_secs_f32() / 0.10).min(1.);
             let strength = if cx.reduce_motion() { 1. } else { 1. - (1. - progress).powi(2) };
             if strength < 1. {
@@ -521,7 +532,7 @@ impl Workspace {
             }
             // A wide, faint shadow separates the target from adjacent rows.
             // The tighter inset edge makes the receiving surface read as recessed.
-            style.rounded(px(7.)).bg(neutral.opacity(0.06 + 0.05 * strength))
+            style.rounded(px(7.)).bg(neutral.opacity(0.08 + 0.035 * strength))
                 .shadow(vec![
                     BoxShadow::new(px(0.), px(2.), hsla(0., 0., 0., 0.06 * strength))
                         .blur_radius(px(9.)),
@@ -1253,9 +1264,9 @@ impl Workspace {
             self.tree.dragging_tree_item.store(false, Ordering::Relaxed);
             self.tree.dragged_folder.borrow_mut().take();
         }
-        self.tree.drop_hover.borrow_mut().take_if(|(row, _)| {
+        self.tree.drop_hover.borrow_mut().take_if(|target| {
             !cx.has_active_drag() || !self.tree.tree_row_bounds.lock().expect("tree bounds")
-                .get(row).is_some_and(|(_, bounds)| bounds.contains(&window.mouse_position()))
+                .get(&target.row).is_some_and(|(_, bounds)| bounds.contains(&window.mouse_position()))
         });
         let lifted_folder = self.tree.dragged_folder.borrow().clone();
         let now = Instant::now();
@@ -2294,6 +2305,28 @@ impl Workspace {
                     }))
                     .when(no_tag_results, |tree| tree.child(div().px_3().py_2().text_xs().text_color(rgb(MUTED)).child(crate::i18n::workspace::NO_MATCHING_FILES.get())))
                     .children(tree_rows)
+                    .when(dragging_tree_item, |tree| {
+                        let hover = self.tree.drop_hover.clone();
+                        let rows = self.tree.tree_row_bounds.clone();
+                        tree.child(canvas(|_, _, _| (), move |_, _, window, _| {
+                            let hover = hover.borrow();
+                            // Paint after the rows resolve the active drop target. The
+                            // existing clipped bounds keep the mask inside the visible subtree.
+                            let Some(target) = hover.as_ref().filter(|target| !target.directory.is_empty()) else {
+                                return;
+                            };
+                            let rows = rows.lock().expect("tree bounds");
+                            let directory = Path::new(&target.directory);
+                            let scope = rows.iter()
+                                .filter(|(path, _)| Path::new(path.as_str()).starts_with(directory))
+                                .map(|(_, (_, bounds))| *bounds)
+                                .reduce(|scope, row| scope.union(&row));
+                            if let Some(scope) = scope {
+                                let tint = gpui_kit::rgb(drag_palette.text).opacity(0.055);
+                                window.paint_quad(fill(scope, tint).corner_radii(Corners::all(px(8.))));
+                            }
+                        }).absolute().inset_0())
+                    })
                     .when(self.projects.directory().is_some(), |tree| {
                         let bounds = self.tree.tree_row_bounds.clone();
                         let paste_root_app = cx.entity();
