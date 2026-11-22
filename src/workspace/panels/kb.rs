@@ -63,6 +63,8 @@ pub(in crate::workspace) struct KbPanelState {
     pub(in crate::workspace) results: Vec<SearchHit>,
     pub(in crate::workspace) filter: KbFilter,
     pub(in crate::workspace) expanded_files: HashSet<String>,
+    pub(in crate::workspace) collapsing_files: HashMap<String, u64>,
+    pub(in crate::workspace) card_anim_gen: HashMap<String, u64>,
     pub(in crate::workspace) search_error: Option<String>,
     pub(in crate::workspace) sync_error: Option<String>,
     pub(in crate::workspace) stats: Option<StoreStats>,
@@ -112,6 +114,8 @@ impl KbPanelState {
             results: Vec::new(),
             filter: KbFilter::All,
             expanded_files: HashSet::new(),
+            collapsing_files: HashMap::new(),
+            card_anim_gen: HashMap::new(),
             search_error: None,
             sync_error: None,
             stats: None,
@@ -144,6 +148,8 @@ impl KbPanelState {
         self.searching = false;
         self.results.clear();
         self.expanded_files.clear();
+        self.collapsing_files.clear();
+        self.card_anim_gen.clear();
         self.search_error = None;
     }
 
@@ -383,6 +389,11 @@ fn mix_color(base: u32, tint: u32, weight: f32) -> Rgba {
         b: mix(0),
         a: 1.0,
     }
+}
+
+fn ease_out_cubic(t: f32) -> f32 {
+    let inv = 1.0 - t.clamp(0.0, 1.0);
+    1.0 - inv * inv * inv
 }
 
 fn kb_desk_bg(palette: crate::theme::Palette) -> Rgba {
@@ -1224,9 +1235,12 @@ impl Workspace {
             .map(|(group_idx, group)| {
                 let clean_path_owned = group.clean_path.to_owned();
                 let expanded = kb.expanded_files.contains(group.clean_path);
+                let collapsing = kb.collapsing_files.contains_key(group.clean_path);
+                let anim_gen = kb.card_anim_gen.get(group.clean_path).copied().unwrap_or(0);
                 let total_hits = group.hits.len();
-                let visible_limit = if expanded { total_hits } else { 2 };
-                let extra_count = total_hits.saturating_sub(visible_limit);
+                let base_count = total_hits.min(2);
+                let extra_count = total_hits.saturating_sub(base_count);
+                let show_extra = (expanded || collapsing) && extra_count > 0;
                 let first_hit = group.hits[0];
                 let is_tex = group.clean_path.to_ascii_lowercase().ends_with(".tex");
                 let file_icon = if group.is_pdf {
@@ -1351,138 +1365,205 @@ impl Workspace {
                                     ),
                             ),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .children(group.hits.iter().take(visible_limit).enumerate().map(
-                                |(hit_idx, hit)| {
-                                    let open_path = hit.path.clone();
-                                    let open_line = hit.line_start;
-                                    let open_page = hit.page;
-                                    let open_heading = hit.heading.clone();
-                                    let open_snippet = hit.snippet.clone();
-                                    let subtitle = section_subtitle(hit, &group.file_name);
-                                    let loc = match (hit.page, hit.line_start) {
-                                        (Some(page), _) => Some(format!("p.{page}")),
-                                        (None, Some(line)) => Some(format!("L{line}")),
-                                        _ => None,
-                                    };
-                                    let extra_tag = if hit.dirty_buffer {
-                                        Some(rp::KB_DRAFT_BADGE.get())
-                                    } else if hit.kind == "annotation" {
-                                        Some(rp::KB_ANNOT_BADGE.get())
-                                    } else {
-                                        None
-                                    };
-                                    let styled_snippet = build_highlighted_text(
-                                        &hit.snippet,
-                                        &kb.last_query,
-                                        snippet_style.clone(),
-                                        hi_bg,
-                                        hi_fg,
-                                    );
+                    .child({
+                        let render_hit_row = |hit_idx: usize, hit: &SearchHit| {
+                            let open_path = hit.path.clone();
+                            let open_line = hit.line_start;
+                            let open_page = hit.page;
+                            let open_heading = hit.heading.clone();
+                            let open_snippet = hit.snippet.clone();
+                            let subtitle = section_subtitle(hit, &group.file_name);
+                            let loc = match (hit.page, hit.line_start) {
+                                (Some(page), _) => Some(format!("p.{page}")),
+                                (None, Some(line)) => Some(format!("L{line}")),
+                                _ => None,
+                            };
+                            let extra_tag = if hit.dirty_buffer {
+                                Some(rp::KB_DRAFT_BADGE.get())
+                            } else if hit.kind == "annotation" {
+                                Some(rp::KB_ANNOT_BADGE.get())
+                            } else {
+                                None
+                            };
+                            let styled_snippet = build_highlighted_text(
+                                &hit.snippet,
+                                &kb.last_query,
+                                snippet_style.clone(),
+                                hi_bg,
+                                hi_fg,
+                            );
 
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "kb-hit-{group_idx}-{hit_idx}"
-                                        )))
-                                        .px_3()
-                                        .py_2()
-                                        .when(hit_idx > 0, |row| {
-                                            row.border_t_1().border_color(divider_color)
-                                        })
-                                        .cursor_pointer()
-                                        .hover(move |s| s.bg(card_hover))
-                                        .on_click(cx.listener(move |app, _, window, cx| {
-                                            app.open_kb_result(
-                                                &open_path,
-                                                open_line,
-                                                open_page,
-                                                Some(&open_heading),
-                                                Some(&open_snippet),
-                                                window,
-                                                cx,
-                                            );
-                                        }))
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .when(
-                                            subtitle.is_some()
-                                                || loc.is_some()
-                                                || extra_tag.is_some(),
-                                            |row| {
-                                                row.child(
+                            div()
+                                .id(SharedString::from(format!(
+                                    "kb-hit-{group_idx}-{hit_idx}"
+                                )))
+                                .px_3()
+                                .py_2()
+                                .when(hit_idx > 0, |row| {
+                                    row.border_t_1().border_color(divider_color)
+                                })
+                                .cursor_pointer()
+                                .hover(move |s| s.bg(card_hover))
+                                .on_click(cx.listener(move |app, _, window, cx| {
+                                    app.open_kb_result(
+                                        &open_path,
+                                        open_line,
+                                        open_page,
+                                        Some(&open_heading),
+                                        Some(&open_snippet),
+                                        window,
+                                        cx,
+                                    );
+                                }))
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .when(
+                                    subtitle.is_some()
+                                        || loc.is_some()
+                                        || extra_tag.is_some(),
+                                    |row| {
+                                        row.child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .text_size(px(t.meta))
+                                                        .font_medium()
+                                                        .text_color(fg_alpha(
+                                                            palette.text,
+                                                            0.72,
+                                                        ))
+                                                        .text_ellipsis()
+                                                        .children(subtitle),
+                                                )
+                                                .child(
                                                     div()
                                                         .flex()
                                                         .items_center()
-                                                        .justify_between()
-                                                        .gap_2()
-                                                        .child(
-                                                            div()
-                                                                .flex_1()
-                                                                .min_w_0()
-                                                                .text_size(px(t.meta))
-                                                                .font_medium()
-                                                                .text_color(fg_alpha(
-                                                                    palette.text,
-                                                                    0.72,
-                                                                ))
-                                                                .text_ellipsis()
-                                                                .children(subtitle),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .flex()
-                                                                .items_center()
-                                                                .gap_1p5()
-                                                                .flex_shrink_0()
-                                                                .when_some(extra_tag, |r, tag| {
-                                                                    r.child(
-                                                                        div()
-                                                                            .px_1()
-                                                                            .rounded(px(3.))
-                                                                            .bg(badge_bg)
-                                                                            .text_size(px(t.micro))
-                                                                            .text_color(gpui_kit::rgb(palette.muted))
-                                                                            .child(tag),
-                                                                    )
-                                                                })
-                                                                .when_some(loc, |r, loc| {
-                                                                    r.child(
-                                                                        div()
-                                                                            .text_size(px(t.micro))
-                                                                            .text_color(fg_alpha(
-                                                                                palette.muted,
-                                                                                0.82,
-                                                                            ))
-                                                                            .child(loc),
-                                                                    )
-                                                                }),
-                                                        ),
-                                                )
-                                            },
+                                                        .gap_1p5()
+                                                        .flex_shrink_0()
+                                                        .when_some(extra_tag, |r, tag| {
+                                                            r.child(
+                                                                div()
+                                                                    .px_1()
+                                                                    .rounded(px(3.))
+                                                                    .bg(badge_bg)
+                                                                    .text_size(px(t.micro))
+                                                                    .text_color(gpui_kit::rgb(palette.muted))
+                                                                    .child(tag),
+                                                            )
+                                                        })
+                                                        .when_some(loc, |r, loc| {
+                                                            r.child(
+                                                                div()
+                                                                    .text_size(px(t.micro))
+                                                                    .text_color(fg_alpha(
+                                                                        palette.muted,
+                                                                        0.82,
+                                                                    ))
+                                                                    .child(loc),
+                                                            )
+                                                        }),
+                                                ),
                                         )
-                                        .child(
-                                            div()
-                                                .max_h(px(snippet_max_h))
-                                                .overflow_hidden()
-                                                .text_size(px(t.body))
-                                                .line_height(relative(1.5))
-                                                .child(styled_snippet),
-                                        )
-                                },
-                            )),
-                    );
+                                    },
+                                )
+                                .child(
+                                    div()
+                                        .max_h(px(snippet_max_h))
+                                        .overflow_hidden()
+                                        .text_size(px(t.body))
+                                        .line_height(relative(1.5))
+                                        .child(styled_snippet),
+                                )
+                        };
 
-                if extra_count > 0 || expanded {
+                        let base_rows: Vec<_> = group.hits[..base_count]
+                            .iter()
+                            .enumerate()
+                            .map(|(hit_idx, hit)| render_hit_row(hit_idx, hit))
+                            .collect();
+
+                        let mut col = div().flex_1().flex().flex_col().children(base_rows);
+                        if show_extra {
+                            let extra_rows: Vec<_> = group.hits[base_count..]
+                                .iter()
+                                .enumerate()
+                                .map(|(offset, hit)| render_hit_row(base_count + offset, hit))
+                                .collect();
+                            let est_extra_h = (extra_rows.len() as f32) * 116.0;
+                            let extra_box = div()
+                                .overflow_hidden()
+                                .flex()
+                                .flex_col()
+                                .children(extra_rows);
+                            let animated_extra = if anim_gen > 0 {
+                                extra_box
+                                    .with_animation(
+                                        SharedString::from(format!(
+                                            "kb-book-extra-{group_idx}-{anim_gen}"
+                                        )),
+                                        Animation::new(Duration::from_millis(180))
+                                            .with_easing(ease_out_cubic),
+                                        move |el, p| {
+                                            let progress = if collapsing { 1.0 - p } else { p };
+                                            el.max_h(px(est_extra_h * progress))
+                                                .opacity(0.2 + 0.8 * progress)
+                                        },
+                                    )
+                                    .into_any_element()
+                            } else {
+                                extra_box.into_any_element()
+                            };
+                            col = col.child(animated_extra);
+                        }
+                        col
+                    });
+
+                if extra_count > 0 {
                     let toggle_path = clean_path_owned;
                     let footer_label = if expanded {
                         rp::KB_COLLAPSE_HITS.get().to_owned()
                     } else {
                         rp::kb_more_hits(extra_count)
+                    };
+                    let chevron = if anim_gen > 0 {
+                        crate::ui::icon(IconName::ChevronDown)
+                            .w(px(11.))
+                            .h(px(11.))
+                            .with_animation(
+                                SharedString::from(format!(
+                                    "kb-book-chev-{group_idx}-{anim_gen}"
+                                )),
+                                Animation::new(Duration::from_millis(180))
+                                    .with_easing(ease_out_cubic),
+                                move |el, p| {
+                                    let progress = if collapsing {
+                                        1.0 - p
+                                    } else if expanded {
+                                        p
+                                    } else {
+                                        0.0
+                                    };
+                                    el.rotate(gpui::radians(progress * std::f32::consts::PI))
+                                },
+                            )
+                            .into_any_element()
+                    } else {
+                        crate::ui::icon(if expanded {
+                            IconName::ChevronUp
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .w(px(11.))
+                        .h(px(11.))
+                        .into_any_element()
                     };
                     body_col = body_col.child(
                         div()
@@ -1503,7 +1584,49 @@ impl Workspace {
                             .cursor_pointer()
                             .hover(move |s| s.bg(card_hover))
                             .on_click(cx.listener(move |app, _, _, cx| {
-                                if !app.right_panel.kb.expanded_files.remove(&toggle_path) {
+                                let next_gen = app
+                                    .right_panel
+                                    .kb
+                                    .card_anim_gen
+                                    .get(&toggle_path)
+                                    .copied()
+                                    .unwrap_or(0)
+                                    .wrapping_add(1)
+                                    .max(1);
+                                app.right_panel
+                                    .kb
+                                    .card_anim_gen
+                                    .insert(toggle_path.clone(), next_gen);
+                                if app.right_panel.kb.expanded_files.remove(&toggle_path) {
+                                    app.right_panel
+                                        .kb
+                                        .collapsing_files
+                                        .insert(toggle_path.clone(), next_gen);
+                                    let clear_path = toggle_path.clone();
+                                    cx.spawn(async move |this, cx| {
+                                        cx.background_executor()
+                                            .timer(Duration::from_millis(185))
+                                            .await;
+                                        let _ = this.update(cx, |app, cx| {
+                                            if app
+                                                .right_panel
+                                                .kb
+                                                .collapsing_files
+                                                .get(&clear_path)
+                                                .copied()
+                                                == Some(next_gen)
+                                            {
+                                                app.right_panel
+                                                    .kb
+                                                    .collapsing_files
+                                                    .remove(&clear_path);
+                                                cx.notify();
+                                            }
+                                        });
+                                    })
+                                    .detach();
+                                } else {
+                                    app.right_panel.kb.collapsing_files.remove(&toggle_path);
                                     app.right_panel
                                         .kb
                                         .expanded_files
@@ -1512,15 +1635,7 @@ impl Workspace {
                                 cx.notify();
                             }))
                             .child(footer_label)
-                            .child(
-                                crate::ui::icon(if expanded {
-                                    IconName::ChevronUp
-                                } else {
-                                    IconName::ChevronDown
-                                })
-                                .w(px(11.))
-                                .h(px(11.)),
-                            ),
+                            .child(chevron),
                     );
                 }
 
@@ -1528,7 +1643,7 @@ impl Workspace {
                     .id(SharedString::from(format!("kb-book-{group_idx}")))
                     .flex_1()
                     .min_w_0()
-                    .when(cols > 1 && !expanded, |el| el.h(px(284.)))
+                    .when(cols > 1 && !expanded && !collapsing, |el| el.h(px(284.)))
                     .rounded(px(9.))
                     .border_1()
                     .border_color(gpui_kit::rgb(palette.border))
@@ -1562,11 +1677,11 @@ impl Workspace {
         let panel_w = self.kb_panel_width(window);
         let use_book_tiles = panel_w >= 340.0;
         let card_w = if panel_w >= 640.0 {
-            148.0_f32
+            144.0_f32
         } else {
-            134.0_f32
+            132.0_f32
         };
-        let thumb_h = (card_w * 1.38).round();
+        let thumb_h = (card_w * 1.28).round();
         let chrome_bg = if palette.is_dark() {
             mix_color(palette.background, palette.surface, 0.35)
         } else {
@@ -2463,14 +2578,15 @@ impl Workspace {
                             })
                             .child(
                                 div()
-                                    .px_2()
-                                    .py_1p5()
+                                    .px_1p5()
+                                    .py_1()
                                     .flex()
                                     .flex_col()
-                                    .gap(px(1.5))
+                                    .gap(px(0.5))
                                     .child(
                                         div()
                                             .text_size(px(t.meta))
+                                            .line_height(relative(1.18))
                                             .font_medium()
                                             .text_color(gpui_kit::rgb(palette.text))
                                             .text_ellipsis()
@@ -2479,7 +2595,8 @@ impl Workspace {
                                     .when(!subtitle_text.is_empty(), |col| {
                                         col.child(
                                             div()
-                                                .text_size(px(t.micro))
+                                                .text_size(px((t.micro - 0.5).max(9.0)))
+                                                .line_height(relative(1.12))
                                                 .text_color(if has_error {
                                                     gpui_kit::rgb(palette.danger)
                                                 } else if phase.is_some() {
