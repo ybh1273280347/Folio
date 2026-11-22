@@ -22,8 +22,28 @@ pub(in crate::workspace) enum PdfManagerFilter {
     #[default]
     All,
     NeedsOcr,
-    Fast,
+    Complete,
     Accurate,
+}
+
+#[derive(Clone, Copy)]
+struct KbType {
+    title: f32,
+    body: f32,
+    meta: f32,
+    micro: f32,
+}
+
+impl KbType {
+    fn from_ui_font(base: u8) -> Self {
+        let s = f32::from(base);
+        Self {
+            title: (s - 1.0).max(11.0),
+            body: (s - 2.0).max(10.0),
+            meta: (s - 3.0).max(9.5),
+            micro: (s - 3.5).max(9.0),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,7 +178,7 @@ impl KbPanelState {
         if !self.pdf_items.is_empty() {
             self.pdf_items
                 .iter()
-                .filter(|item| item.status == "needs_ocr" || item.last_error.is_some())
+                .filter(|item| !item.is_complete || item.last_error.is_some())
                 .count()
         } else {
             self.stats.as_ref().map_or(0, |s| s.needs_ocr_files.len())
@@ -366,10 +386,11 @@ impl Workspace {
             return self.render_pdf_manager_panel(cx);
         }
         let palette = self.settings.theme.palette;
-        let header_bg = if palette.is_dark() {
-            palette.background
+        let t = KbType::from_ui_font(self.settings.interface_font_size);
+        let chrome_bg = if palette.is_dark() {
+            mix_color(palette.background, palette.surface, 0.35)
         } else {
-            palette.hover
+            mix_color(palette.surface, palette.hover, 0.55)
         };
         let is_project = self.projects.directory().is_some();
         let enabled = self.kb_enabled();
@@ -380,7 +401,7 @@ impl Workspace {
 
         let menu_app = cx.entity();
         let header = div()
-            .h(px(32.))
+            .h(px(34.))
             .px_2()
             .flex_shrink_0()
             .overflow_hidden()
@@ -388,14 +409,14 @@ impl Workspace {
             .items_center()
             .justify_between()
             .gap_1()
-            .bg(gpui_kit::rgb(header_bg))
+            .bg(chrome_bg)
             .border_b_1()
             .border_color(gpui_kit::rgb(palette.border))
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_1()
+                    .gap_1p5()
                     .min_w_0()
                     .child(
                         Button::new("kb-back-to-hub")
@@ -412,14 +433,14 @@ impl Workspace {
                     )
                     .child(
                         crate::ui::icon(IconName::Library)
-                            .w(px(14.))
-                            .h(px(14.))
+                            .w(px(15.))
+                            .h(px(15.))
                             .flex_shrink_0()
-                            .text_color(gpui_kit::rgb(palette.muted)),
+                            .text_color(gpui_kit::rgb(palette.accent)),
                     )
                     .child(
                         div()
-                            .text_size(px(12.5))
+                            .text_size(px(t.title))
                             .font_medium()
                             .text_color(gpui_kit::rgb(palette.text))
                             .text_ellipsis()
@@ -633,6 +654,12 @@ impl Workspace {
         spin: bool,
     ) -> AnyElement {
         let palette = self.settings.theme.palette;
+        let t = KbType::from_ui_font(self.settings.interface_font_size);
+        let canvas_bg = if palette.is_dark() {
+            gpui_kit::rgb(palette.background)
+        } else {
+            mix_color(palette.surface, palette.hover, 0.35)
+        };
         let icon_el = if spin {
             crate::ui::icon(icon)
                 .w(px(18.))
@@ -656,6 +683,7 @@ impl Workspace {
             .flex_1()
             .min_h_0()
             .px_6()
+            .bg(canvas_bg)
             .flex()
             .flex_col()
             .items_center()
@@ -663,9 +691,11 @@ impl Workspace {
             .gap_3()
             .child(
                 div()
-                    .size(px(40.))
+                    .size(px(42.))
                     .rounded_full()
-                    .bg(fg_alpha(palette.text, 0.05))
+                    .bg(gpui_kit::rgb(palette.surface))
+                    .border_1()
+                    .border_color(gpui_kit::rgb(palette.border))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -673,7 +703,7 @@ impl Workspace {
             )
             .child(
                 div()
-                    .text_size(px(13.5))
+                    .text_size(px(t.title))
                     .font_medium()
                     .text_color(gpui_kit::rgb(palette.text))
                     .text_center()
@@ -682,7 +712,7 @@ impl Workspace {
             .when_some(subtitle, |col, subtitle| {
                 col.child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(px(t.body))
                         .text_color(gpui_kit::rgb(palette.muted))
                         .text_center()
                         .child(subtitle),
@@ -694,6 +724,7 @@ impl Workspace {
 
     fn render_kb_active_body(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let palette = self.settings.theme.palette;
+        let t = KbType::from_ui_font(self.settings.interface_font_size);
         let kb = &self.right_panel.kb;
         let syncing = self.kb_syncing();
         let search_focused = kb.search.read(cx).focus_handle(cx).is_focused(window);
@@ -708,6 +739,7 @@ impl Workspace {
         };
         let outer_halo = fg_alpha(palette.accent, 0.14);
         let hover_bg = gpui_kit::rgb(palette.hover);
+        let seg_bg = fg_alpha(palette.text, 0.045);
 
         let search_prefix = if kb.searching {
             crate::ui::icon(IconName::LoaderCircle)
@@ -732,14 +764,14 @@ impl Workspace {
 
         let search_bar = div()
             .w_full()
-            .rounded_full()
+            .rounded(px(9.))
             .when(search_focused, |el| el.p(px(2.)).bg(outer_halo))
             .child(
                 div()
                     .w_full()
-                    .h(px(34.))
-                    .px(px(12.))
-                    .rounded_full()
+                    .h(px(32.))
+                    .px(px(10.))
+                    .rounded(px(8.))
                     .bg(gpui_kit::rgb(palette.surface))
                     .border_1()
                     .border_color(ring_color)
@@ -755,7 +787,7 @@ impl Workspace {
                             .min_w_0()
                             .px_0()
                             .py_0()
-                            .text_size(px(13.))
+                            .text_size(px(t.body))
                             .text_color(gpui_kit::rgb(palette.text)),
                     )
                     .when(input_non_empty, |bar| {
@@ -789,20 +821,22 @@ impl Workspace {
                 .id(id)
                 .h(px(22.))
                 .px_2()
-                .rounded_full()
+                .rounded(px(5.))
                 .flex()
                 .items_center()
                 .gap_1()
-                .text_size(px(11.))
+                .text_size(px(t.meta))
                 .cursor_pointer()
                 .when(active, |el| {
-                    el.bg(fg_alpha(palette.accent, 0.14))
+                    el.bg(gpui_kit::rgb(palette.surface))
+                        .border_1()
+                        .border_color(gpui_kit::rgb(palette.border))
                         .text_color(gpui_kit::rgb(palette.accent))
                         .font_medium()
                 })
                 .when(!active, |el| {
                     el.text_color(gpui_kit::rgb(palette.muted))
-                        .hover(move |s| s.bg(hover_bg).text_color(gpui_kit::rgb(palette.text)))
+                        .hover(move |s| s.text_color(gpui_kit::rgb(palette.text)))
                 })
                 .on_click(cx.listener(move |app, _, _, cx| {
                     app.right_panel.kb.filter = filter_val;
@@ -829,14 +863,16 @@ impl Workspace {
             .items_center()
             .justify_between()
             .gap_2()
-            .px_0p5()
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_1()
                     .when(has_submitted_search, |row| {
-                        row.child(chip("kb-filter-all", KbFilter::All, None, rp::KB_FILTER_ALL.get()))
+                        row.p(px(2.))
+                            .rounded(px(7.))
+                            .bg(seg_bg)
+                            .gap_0p5()
+                            .child(chip("kb-filter-all", KbFilter::All, None, rp::KB_FILTER_ALL.get()))
                             .child(chip(
                                 "kb-filter-notes",
                                 KbFilter::Notes,
@@ -846,7 +882,7 @@ impl Workspace {
                             .child(chip(
                                 "kb-filter-pdf",
                                 KbFilter::Pdf,
-                                Some(IconName::Library),
+                                Some(IconName::BookOpenText),
                                 rp::KB_FILTER_PDF.get(),
                             ))
                     }),
@@ -856,7 +892,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .text_size(px(11.))
+                    .text_size(px(t.meta))
                     .text_color(gpui_kit::rgb(if syncing && !has_submitted_search {
                         palette.accent
                     } else {
@@ -898,10 +934,13 @@ impl Workspace {
             .flex_col()
             .child(
                 div()
-                    .px_3p5()
-                    .pt_3()
-                    .pb_2()
+                    .px_3()
+                    .pt_2p5()
+                    .pb_2p5()
                     .flex_shrink_0()
+                    .bg(gpui_kit::rgb(palette.surface))
+                    .border_b_1()
+                    .border_color(gpui_kit::rgb(palette.border))
                     .flex()
                     .flex_col()
                     .gap_2()
@@ -935,7 +974,7 @@ impl Workspace {
                                         )
                                         .child(
                                             div()
-                                                .text_size(px(11.5))
+                                                .text_size(px(t.meta))
                                                 .text_color(gpui_kit::rgb(palette.danger))
                                                 .min_w_0()
                                                 .child(msg),
@@ -949,16 +988,20 @@ impl Workspace {
                                         .flex_shrink_0()
                                         .when(!kb.accurate_configured, |actions| {
                                             actions.child(
-                                                Button::new("kb-err-settings")
-                                                    .ghost()
-                                                    .compact()
-                                                    .h(px(20.))
+                                                div()
+                                                    .id("kb-err-settings")
                                                     .px_1p5()
-                                                    .text_size(px(11.))
-                                                    .label(rp::KB_OPEN_SETTINGS.get())
+                                                    .py_0p5()
+                                                    .rounded(px(4.))
+                                                    .text_size(px(t.meta))
+                                                    .font_medium()
+                                                    .text_color(gpui_kit::rgb(palette.accent))
+                                                    .cursor_pointer()
+                                                    .hover(move |s| s.bg(hover_bg))
                                                     .on_click(cx.listener(|app, _, window, cx| {
                                                         app.open_kb_api_settings(window, cx);
-                                                    })),
+                                                    }))
+                                                    .child(rp::KB_OPEN_SETTINGS.get()),
                                             )
                                         })
                                         .child(
@@ -984,6 +1027,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let kb = &self.right_panel.kb;
+        let t = KbType::from_ui_font(self.settings.interface_font_size);
         if kb.searching && groups.is_empty() {
             return self.render_kb_centered_state(
                 IconName::LoaderCircle,
@@ -1003,20 +1047,25 @@ impl Workspace {
             );
         }
 
-        let two_col = self.right_panel.maximized || self.settings.terminal.panel_width >= 440.0;
+        let two_col = self.right_panel.maximized || self.settings.terminal.panel_width >= 700.0;
         let palette = self.settings.theme.palette;
-        let card_hover = gpui_kit::rgb(palette.hover);
+        let canvas_bg = if palette.is_dark() {
+            gpui_kit::rgb(palette.background)
+        } else {
+            mix_color(palette.surface, palette.hover, 0.35)
+        };
+        let card_hover = mix_color(palette.surface, palette.hover, 0.65);
+        let divider_color = fg_alpha(palette.border, 0.72);
         let badge_bg = fg_alpha(palette.text, 0.06);
-        let hi_bg = fg_alpha(palette.accent, 0.20).into();
+        let hi_bg = fg_alpha(palette.accent, 0.18).into();
         let hi_fg = gpui_kit::rgb(palette.text).into();
 
-        let body_size = (self.settings.interface_font_size as f32 - 2.0).max(10.0);
-        let snippet_max_h = (body_size * 1.45 * 3.0).ceil();
+        let snippet_max_h = (t.body * 1.5 * 3.0).ceil();
 
         let mut snippet_style = window.text_style();
         snippet_style.font_family = crate::ui::sans_font(&self.settings.interface_font).into();
-        snippet_style.font_size = px(body_size).into();
-        snippet_style.color = fg_alpha(palette.text, 0.85).into();
+        snippet_style.font_size = px(t.body).into();
+        snippet_style.color = fg_alpha(palette.text, 0.88).into();
 
         let cards: Vec<AnyElement> = groups
             .into_iter()
@@ -1024,16 +1073,12 @@ impl Workspace {
             .map(|(group_idx, group)| {
                 let clean_path_owned = group.clean_path.to_owned();
                 let expanded = kb.expanded_files.contains(group.clean_path);
-                let visible_limit = if expanded { group.hits.len() } else { 2 };
-                let extra_count = group.hits.len().saturating_sub(visible_limit);
+                let total_hits = group.hits.len();
+                let visible_limit = if expanded { total_hits } else { 2 };
+                let extra_count = total_hits.saturating_sub(visible_limit);
                 let first_hit = group.hits[0];
-                let spine_color = if group.is_pdf {
-                    gpui_kit::rgb(palette.accent)
-                } else {
-                    fg_alpha(palette.text, 0.24)
-                };
                 let file_icon = if group.is_pdf {
-                    IconName::Library
+                    IconName::BookOpenText
                 } else if first_hit.kind == "annotation" {
                     IconName::NotebookPen
                 } else {
@@ -1050,238 +1095,257 @@ impl Workspace {
                     .id(SharedString::from(format!("kb-book-{group_idx}")))
                     .flex_1()
                     .min_w_0()
-                    .min_h(px(142.))
-                    .rounded(px(8.))
+                    .rounded(px(9.))
                     .border_1()
                     .border_color(gpui_kit::rgb(palette.border))
                     .bg(gpui_kit::rgb(palette.surface))
                     .overflow_hidden()
                     .flex()
-                    .child(div().w(px(3.)).flex_shrink_0().bg(spine_color))
+                    .flex_col()
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .p_2p5()
+                            .id(SharedString::from(format!("kb-book-head-{group_idx}")))
+                            .cursor_pointer()
+                            .px_3()
+                            .py_2()
+                            .hover(move |s| s.bg(card_hover))
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.open_kb_result(
+                                    &header_open_path,
+                                    header_line,
+                                    header_page,
+                                    Some(&header_heading),
+                                    Some(&header_snippet),
+                                    window,
+                                    cx,
+                                );
+                            }))
                             .flex()
-                            .flex_col()
-                            .gap_1p5()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
                             .child(
                                 div()
-                                    .id(SharedString::from(format!("kb-book-head-{group_idx}")))
-                                    .cursor_pointer()
-                                    .rounded(px(4.))
-                                    .px_1()
-                                    .py_0p5()
-                                    .hover(move |s| s.bg(card_hover))
-                                    .on_click(cx.listener(move |app, _, window, cx| {
-                                        app.open_kb_result(
-                                            &header_open_path,
-                                            header_line,
-                                            header_page,
-                                            Some(&header_heading),
-                                            Some(&header_snippet),
-                                            window,
-                                            cx,
-                                        );
-                                    }))
                                     .flex()
-                                    .flex_col()
-                                    .gap_0p5()
+                                    .items_center()
+                                    .gap_2()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .child(
+                                        div()
+                                            .size(px(26.))
+                                            .rounded(px(6.))
+                                            .flex_shrink_0()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .bg(if group.is_pdf {
+                                                fg_alpha(palette.accent, 0.11)
+                                            } else {
+                                                fg_alpha(palette.text, 0.05)
+                                            })
+                                            .text_color(if group.is_pdf {
+                                                gpui_kit::rgb(palette.accent)
+                                            } else {
+                                                gpui_kit::rgb(palette.muted)
+                                            })
+                                            .child(crate::ui::icon(file_icon).w(px(13.)).h(px(13.))),
+                                    )
                                     .child(
                                         div()
                                             .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .gap_1p5()
+                                            .flex_col()
+                                            .min_w_0()
+                                            .flex_1()
                                             .child(
                                                 div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_1p5()
-                                                    .min_w_0()
-                                                    .child(
-                                                        crate::ui::icon(file_icon)
-                                                            .w(px(13.))
-                                                            .h(px(13.))
-                                                            .flex_shrink_0()
-                                                            .text_color(if group.is_pdf {
-                                                                gpui_kit::rgb(palette.accent)
-                                                            } else {
-                                                                gpui_kit::rgb(palette.muted)
-                                                            }),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_size(px(12.5))
-                                                            .font_medium()
-                                                            .text_color(gpui_kit::rgb(palette.text))
-                                                            .text_ellipsis()
-                                                            .child(group.file_name.clone()),
-                                                    ),
+                                                    .text_size(px(t.body))
+                                                    .font_medium()
+                                                    .text_color(gpui_kit::rgb(palette.text))
+                                                    .text_ellipsis()
+                                                    .child(group.file_name.clone()),
                                             )
-                                            .when(group.is_accurate, |row| {
-                                                row.child(
+                                            .when_some(group.dir_hint.clone(), |head, dir| {
+                                                head.child(
                                                     div()
-                                                        .id(SharedString::from(format!("kb-acc-{group_idx}")))
-                                                        .flex_shrink_0()
-                                                        .text_color(gpui_kit::rgb(palette.accent))
-                                                        .tooltip(|window, cx| {
-                                                            gpui_kit::component::tooltip::Tooltip::new(
-                                                                rp::KB_ACCURATE_BADGE.get(),
-                                                            )
-                                                            .build(window, cx)
-                                                        })
-                                                        .child(
-                                                            crate::ui::icon(IconName::Sparkles)
-                                                                .w(px(11.))
-                                                                .h(px(11.)),
-                                                        ),
+                                                        .text_size(px(t.micro))
+                                                        .text_color(gpui_kit::rgb(palette.muted))
+                                                        .text_ellipsis()
+                                                        .child(dir),
                                                 )
                                             }),
-                                    )
-                                    .when_some(group.dir_hint.clone(), |head, dir| {
-                                        head.child(
-                                            div()
-                                                .text_size(px(10.5))
-                                                .text_color(fg_alpha(palette.muted, 0.85))
-                                                .text_ellipsis()
-                                                .child(dir),
-                                        )
-                                    }),
+                                    ),
                             )
                             .child(
                                 div()
                                     .flex()
-                                    .flex_col()
+                                    .items_center()
                                     .gap_1()
-                                    .children(group.hits.iter().take(visible_limit).enumerate().map(
-                                        |(hit_idx, hit)| {
-                                            let open_path = hit.path.clone();
-                                            let open_line = hit.line_start;
-                                            let open_page = hit.page;
-                                            let open_heading = hit.heading.clone();
-                                            let open_snippet = hit.snippet.clone();
-                                            let subtitle = section_subtitle(hit, &group.file_name);
-                                            let loc = match (hit.page, hit.line_start) {
-                                                (Some(page), _) => Some(format!("p.{page}")),
-                                                (None, Some(line)) => Some(format!("L{line}")),
-                                                _ => None,
-                                            };
-                                            let extra_tag = if hit.dirty_buffer {
-                                                Some(rp::KB_DRAFT_BADGE.get())
-                                            } else if hit.kind == "annotation" {
-                                                Some(rp::KB_ANNOT_BADGE.get())
-                                            } else {
-                                                None
-                                            };
-                                            let styled_snippet = build_highlighted_text(
-                                                &hit.snippet,
-                                                &kb.last_query,
-                                                snippet_style.clone(),
-                                                hi_bg,
-                                                hi_fg,
-                                            );
-
+                                    .flex_shrink_0()
+                                    .when(group.is_accurate, |row| {
+                                        row.child(
                                             div()
-                                                .id(SharedString::from(format!(
-                                                    "kb-hit-{group_idx}-{hit_idx}"
-                                                )))
+                                                .id(SharedString::from(format!("kb-acc-{group_idx}")))
+                                                .h(px(18.))
                                                 .px_1p5()
-                                                .py_1()
-                                                .rounded(px(6.))
-                                                .bg(fg_alpha(palette.text, 0.025))
-                                                .cursor_pointer()
-                                                .hover(move |s| s.bg(card_hover))
-                                                .on_click(cx.listener(move |app, _, window, cx| {
-                                                    app.open_kb_result(
-                                                        &open_path,
-                                                        open_line,
-                                                        open_page,
-                                                        Some(&open_heading),
-                                                        Some(&open_snippet),
-                                                        window,
-                                                        cx,
-                                                    );
-                                                }))
+                                                .rounded(px(4.))
+                                                .bg(fg_alpha(palette.accent, 0.12))
                                                 .flex()
-                                                .flex_col()
+                                                .items_center()
                                                 .gap_0p5()
-                                                .when(
-                                                    subtitle.is_some()
-                                                        || loc.is_some()
-                                                        || extra_tag.is_some(),
-                                                    |row| {
-                                                        row.child(
+                                                .text_size(px(t.micro))
+                                                .text_color(gpui_kit::rgb(palette.accent))
+                                                .tooltip(|window, cx| {
+                                                    gpui_kit::component::tooltip::Tooltip::new(
+                                                        rp::KB_ACCURATE_BADGE.get(),
+                                                    )
+                                                    .build(window, cx)
+                                                })
+                                                .child(
+                                                    crate::ui::icon(IconName::Sparkles)
+                                                        .w(px(10.))
+                                                        .h(px(10.)),
+                                                ),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .h(px(18.))
+                                            .px_1p5()
+                                            .rounded(px(4.))
+                                            .bg(badge_bg)
+                                            .flex()
+                                            .items_center()
+                                            .text_size(px(t.micro))
+                                            .text_color(gpui_kit::rgb(palette.muted))
+                                            .child(rp::kb_hits_pill(total_hits)),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .children(group.hits.iter().take(visible_limit).enumerate().map(
+                                |(hit_idx, hit)| {
+                                    let open_path = hit.path.clone();
+                                    let open_line = hit.line_start;
+                                    let open_page = hit.page;
+                                    let open_heading = hit.heading.clone();
+                                    let open_snippet = hit.snippet.clone();
+                                    let subtitle = section_subtitle(hit, &group.file_name);
+                                    let loc = match (hit.page, hit.line_start) {
+                                        (Some(page), _) => Some(format!("p.{page}")),
+                                        (None, Some(line)) => Some(format!("L{line}")),
+                                        _ => None,
+                                    };
+                                    let extra_tag = if hit.dirty_buffer {
+                                        Some(rp::KB_DRAFT_BADGE.get())
+                                    } else if hit.kind == "annotation" {
+                                        Some(rp::KB_ANNOT_BADGE.get())
+                                    } else {
+                                        None
+                                    };
+                                    let styled_snippet = build_highlighted_text(
+                                        &hit.snippet,
+                                        &kb.last_query,
+                                        snippet_style.clone(),
+                                        hi_bg,
+                                        hi_fg,
+                                    );
+
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "kb-hit-{group_idx}-{hit_idx}"
+                                        )))
+                                        .px_3()
+                                        .py_2()
+                                        .border_t_1()
+                                        .border_color(divider_color)
+                                        .cursor_pointer()
+                                        .hover(move |s| s.bg(card_hover))
+                                        .on_click(cx.listener(move |app, _, window, cx| {
+                                            app.open_kb_result(
+                                                &open_path,
+                                                open_line,
+                                                open_page,
+                                                Some(&open_heading),
+                                                Some(&open_snippet),
+                                                window,
+                                                cx,
+                                            );
+                                        }))
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .when(
+                                            subtitle.is_some()
+                                                || loc.is_some()
+                                                || extra_tag.is_some(),
+                                            |row| {
+                                                row.child(
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_between()
+                                                        .gap_2()
+                                                        .child(
+                                                            div()
+                                                                .flex_1()
+                                                                .min_w_0()
+                                                                .text_size(px(t.meta))
+                                                                .font_medium()
+                                                                .text_color(gpui_kit::rgb(palette.muted))
+                                                                .text_ellipsis()
+                                                                .children(subtitle),
+                                                        )
+                                                        .child(
                                                             div()
                                                                 .flex()
                                                                 .items_center()
-                                                                .justify_between()
-                                                                .gap_1p5()
-                                                                .child(
-                                                                    div()
-                                                                        .flex_1()
-                                                                        .min_w_0()
-                                                                        .text_size(px(11.))
-                                                                        .text_color(fg_alpha(
-                                                                            palette.text,
-                                                                            0.68,
-                                                                        ))
-                                                                        .text_ellipsis()
-                                                                        .children(subtitle),
-                                                                )
-                                                                .child(
-                                                                    div()
-                                                                        .flex()
-                                                                        .items_center()
-                                                                        .gap_1()
-                                                                        .flex_shrink_0()
-                                                                        .when_some(
-                                                                            extra_tag,
-                                                                            |r, tag| {
-                                                                                r.child(
-                                                                                    div()
-                                                                                        .px_1()
-                                                                                        .rounded(px(
-                                                                                            3.,
-                                                                                        ))
-                                                                                        .bg(badge_bg)
-                                                                                        .text_size(px(
-                                                                                            10.,
-                                                                                        ))
-                                                                                        .text_color(gpui_kit::rgb(palette.muted))
-                                                                                        .child(tag),
-                                                                                )
-                                                                            },
-                                                                        )
-                                                                        .when_some(loc, |r, loc| {
-                                                                            r.child(
-                                                                                div()
-                                                                                    .text_size(px(
-                                                                                        10.5,
-                                                                                    ))
-                                                                                    .text_color(fg_alpha(
-                                                                                        palette.muted,
-                                                                                        0.85,
-                                                                                    ))
-                                                                                    .child(loc),
-                                                                            )
-                                                                        }),
-                                                                ),
-                                                        )
-                                                    },
+                                                                .gap_1()
+                                                                .flex_shrink_0()
+                                                                .when_some(extra_tag, |r, tag| {
+                                                                    r.child(
+                                                                        div()
+                                                                            .px_1p5()
+                                                                            .py(px(1.))
+                                                                            .rounded(px(4.))
+                                                                            .bg(badge_bg)
+                                                                            .text_size(px(t.micro))
+                                                                            .text_color(gpui_kit::rgb(palette.muted))
+                                                                            .child(tag),
+                                                                    )
+                                                                })
+                                                                .when_some(loc, |r, loc| {
+                                                                    r.child(
+                                                                        div()
+                                                                            .px_1p5()
+                                                                            .py(px(1.))
+                                                                            .rounded(px(4.))
+                                                                            .bg(badge_bg)
+                                                                            .text_size(px(t.micro))
+                                                                            .text_color(fg_alpha(
+                                                                                palette.text,
+                                                                                0.72,
+                                                                            ))
+                                                                            .child(loc),
+                                                                    )
+                                                                }),
+                                                        ),
                                                 )
-                                                .child(
-                                                    div()
-                                                        .max_h(px(snippet_max_h))
-                                                        .overflow_hidden()
-                                                        .text_size(px(body_size))
-                                                        .line_height(relative(1.45))
-                                                        .child(styled_snippet),
-                                                )
-                                        },
-                                    )),
-                            ),
+                                            },
+                                        )
+                                        .child(
+                                            div()
+                                                .max_h(px(snippet_max_h))
+                                                .overflow_hidden()
+                                                .text_size(px(t.body))
+                                                .line_height(relative(1.5))
+                                                .child(styled_snippet),
+                                        )
+                                },
+                            )),
                     );
 
                 if extra_count > 0 || expanded {
@@ -1291,33 +1355,43 @@ impl Workspace {
                     } else {
                         rp::kb_more_hits(extra_count)
                     };
-                    card = div()
-                        .id(SharedString::from(format!("kb-book-wrap-{group_idx}")))
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(card)
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("kb-book-more-{group_idx}")))
-                                .px_2()
-                                .py_0p5()
-                                .text_size(px(11.))
-                                .text_color(gpui_kit::rgb(palette.accent))
-                                .cursor_pointer()
-                                .hover(move |s| s.bg(card_hover))
-                                .on_click(cx.listener(move |app, _, _, cx| {
-                                    if !app.right_panel.kb.expanded_files.remove(&toggle_path) {
-                                        app.right_panel
-                                            .kb
-                                            .expanded_files
-                                            .insert(toggle_path.clone());
-                                    }
-                                    cx.notify();
-                                }))
-                                .child(footer_label),
-                        );
+                    card = card.child(
+                        div()
+                            .id(SharedString::from(format!("kb-book-more-{group_idx}")))
+                            .px_3()
+                            .py_1p5()
+                            .border_t_1()
+                            .border_color(divider_color)
+                            .bg(fg_alpha(palette.text, 0.02))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap_1()
+                            .text_size(px(t.meta))
+                            .font_medium()
+                            .text_color(gpui_kit::rgb(palette.accent))
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(card_hover))
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                if !app.right_panel.kb.expanded_files.remove(&toggle_path) {
+                                    app.right_panel
+                                        .kb
+                                        .expanded_files
+                                        .insert(toggle_path.clone());
+                                }
+                                cx.notify();
+                            }))
+                            .child(footer_label)
+                            .child(
+                                crate::ui::icon(if expanded {
+                                    IconName::ChevronUp
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .w(px(11.))
+                                .h(px(11.)),
+                            ),
+                    );
                 }
 
                 card.into_any_element()
@@ -1335,15 +1409,15 @@ impl Workspace {
                     div()
                         .flex()
                         .items_stretch()
-                        .gap_2()
+                        .gap_2p5()
                         .child(first)
                         .child(second)
                         .into_any_element(),
                 );
             }
-            div().flex().flex_col().gap_2().children(row_els).into_any_element()
+            div().flex().flex_col().gap_2p5().children(row_els).into_any_element()
         } else {
-            div().flex().flex_col().gap_2().children(cards).into_any_element()
+            div().flex().flex_col().gap_2p5().children(cards).into_any_element()
         };
 
         div()
@@ -1351,7 +1425,8 @@ impl Workspace {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .px_3()
+            .bg(canvas_bg)
+            .p_3()
             .pb_4()
             .child(rows)
             .into_any_element()
@@ -1359,27 +1434,32 @@ impl Workspace {
 
     fn render_pdf_manager_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let palette = self.settings.theme.palette;
-        let header_bg = if palette.is_dark() {
-            palette.background
+        let t = KbType::from_ui_font(self.settings.interface_font_size);
+        let chrome_bg = if palette.is_dark() {
+            mix_color(palette.background, palette.surface, 0.35)
         } else {
-            palette.hover
+            mix_color(palette.surface, palette.hover, 0.55)
+        };
+        let canvas_bg = if palette.is_dark() {
+            gpui_kit::rgb(palette.background)
+        } else {
+            mix_color(palette.surface, palette.hover, 0.35)
         };
         let hover_bg = gpui_kit::rgb(palette.hover);
+        let row_hover = mix_color(palette.surface, palette.hover, 0.65);
+        let seg_bg = fg_alpha(palette.text, 0.045);
         let kb = &self.right_panel.kb;
         let syncing = self.kb_syncing();
         let ocr_active = !kb.ocr_progress.is_empty();
 
         let is_blocked = |item: &PdfLibraryItem| !item.is_complete || item.last_error.is_some();
         let is_accurate = |item: &PdfLibraryItem| matches!(item.parse_tier.as_str(), "accurate" | "mineru");
+        let is_complete_clean = |item: &PdfLibraryItem| item.is_complete && item.last_error.is_none();
 
         let total_count = kb.pdf_items.len();
         let red_count = kb.pdf_items.iter().filter(|i| is_blocked(i)).count();
+        let complete_count = kb.pdf_items.iter().filter(|i| is_complete_clean(i)).count();
         let acc_count = kb.pdf_items.iter().filter(|i| is_accurate(i)).count();
-        let fast_count = kb
-            .pdf_items
-            .iter()
-            .filter(|i| !is_blocked(i) && !is_accurate(i))
-            .count();
 
         let filtered: Vec<&PdfLibraryItem> = kb
             .pdf_items
@@ -1387,7 +1467,7 @@ impl Workspace {
             .filter(|item| match kb.pdf_filter {
                 PdfManagerFilter::All => true,
                 PdfManagerFilter::NeedsOcr => is_blocked(item),
-                PdfManagerFilter::Fast => !is_blocked(item) && !is_accurate(item),
+                PdfManagerFilter::Complete => is_complete_clean(item),
                 PdfManagerFilter::Accurate => is_accurate(item),
             })
             .collect();
@@ -1436,7 +1516,7 @@ impl Workspace {
         };
 
         let header = div()
-            .h(px(32.))
+            .h(px(34.))
             .px_2()
             .flex_shrink_0()
             .overflow_hidden()
@@ -1444,14 +1524,14 @@ impl Workspace {
             .items_center()
             .justify_between()
             .gap_1()
-            .bg(gpui_kit::rgb(header_bg))
+            .bg(chrome_bg)
             .border_b_1()
             .border_color(gpui_kit::rgb(palette.border))
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_1()
+                    .gap_1p5()
                     .min_w_0()
                     .child(
                         Button::new("kb-pdf-mgr-back")
@@ -1469,14 +1549,14 @@ impl Workspace {
                     )
                     .child(
                         crate::ui::icon(IconName::BookOpenText)
-                            .w(px(14.))
-                            .h(px(14.))
+                            .w(px(15.))
+                            .h(px(15.))
                             .flex_shrink_0()
-                            .text_color(gpui_kit::rgb(palette.muted)),
+                            .text_color(gpui_kit::rgb(palette.accent)),
                     )
                     .child(
                         div()
-                            .text_size(px(12.5))
+                            .text_size(px(t.title))
                             .font_medium()
                             .text_color(gpui_kit::rgb(palette.text))
                             .text_ellipsis()
@@ -1532,7 +1612,7 @@ impl Workspace {
 
         let filter_chip = |id: &'static str,
                            val: PdfManagerFilter,
-                           prefix: AnyElement,
+                           prefix: Option<AnyElement>,
                            label: &'static str,
                            count: usize| {
             let active = kb.pdf_filter == val;
@@ -1540,78 +1620,102 @@ impl Workspace {
                 .id(id)
                 .h(px(22.))
                 .px_2()
-                .rounded_full()
+                .rounded(px(5.))
                 .flex()
                 .items_center()
                 .gap_1()
-                .text_size(px(11.))
+                .text_size(px(t.meta))
                 .cursor_pointer()
                 .when(active, |el| {
-                    el.bg(fg_alpha(palette.accent, 0.14))
+                    el.bg(gpui_kit::rgb(palette.surface))
+                        .border_1()
+                        .border_color(gpui_kit::rgb(palette.border))
                         .text_color(gpui_kit::rgb(palette.accent))
                         .font_medium()
                 })
                 .when(!active, |el| {
                     el.text_color(gpui_kit::rgb(palette.muted))
-                        .hover(move |s| s.bg(hover_bg).text_color(gpui_kit::rgb(palette.text)))
+                        .hover(move |s| s.text_color(gpui_kit::rgb(palette.text)))
                 })
                 .on_click(cx.listener(move |app, _, _, cx| {
                     app.right_panel.kb.pdf_filter = val;
                     cx.notify();
                 }))
-                .child(prefix)
-                .child(format!("{label} {count}"))
+                .when_some(prefix, |el, p| el.child(p))
+                .child(label)
+                .child(
+                    div()
+                        .text_size(px(t.micro))
+                        .text_color(if active {
+                            fg_alpha(palette.accent, 0.85)
+                        } else {
+                            fg_alpha(palette.muted, 0.75)
+                        })
+                        .child(count.to_string()),
+                )
         };
 
         let controls = div()
-            .px_3p5()
+            .px_3()
             .pt_2p5()
-            .pb_1p5()
+            .pb_2()
             .flex_shrink_0()
+            .bg(gpui_kit::rgb(palette.surface))
+            .border_b_1()
+            .border_color(gpui_kit::rgb(palette.border))
             .flex()
             .flex_col()
             .gap_2()
             .child(
                 div()
+                    .p(px(2.))
+                    .rounded(px(7.))
+                    .bg(seg_bg)
                     .flex()
                     .items_center()
                     .flex_wrap()
-                    .gap_1()
+                    .gap_0p5()
                     .child(filter_chip(
                         "pdf-f-all",
                         PdfManagerFilter::All,
-                        div().into_any_element(),
+                        None,
                         rp::KB_FILTER_ALL.get(),
                         total_count,
                     ))
                     .child(filter_chip(
                         "pdf-f-ocr",
                         PdfManagerFilter::NeedsOcr,
-                        div()
-                            .size(px(6.))
-                            .rounded_full()
-                            .bg(gpui_kit::rgb(0xef4444))
-                            .into_any_element(),
+                        Some(
+                            div()
+                                .size(px(6.))
+                                .rounded_full()
+                                .bg(gpui_kit::rgb(if red_count > 0 { 0xd97706 } else { palette.muted }))
+                                .into_any_element(),
+                        ),
                         rp::KB_PDF_FILTER_NEEDS_OCR.get(),
                         red_count,
                     ))
                     .child(filter_chip(
-                        "pdf-f-fast",
-                        PdfManagerFilter::Fast,
-                        crate::ui::icon(IconName::Zap)
-                            .w(px(10.))
-                            .h(px(10.))
-                            .into_any_element(),
-                        rp::KB_PDF_FILTER_FAST.get(),
-                        fast_count,
+                        "pdf-f-complete",
+                        PdfManagerFilter::Complete,
+                        Some(
+                            crate::ui::icon(IconName::Check)
+                                .w(px(10.))
+                                .h(px(10.))
+                                .into_any_element(),
+                        ),
+                        rp::KB_PDF_FILTER_COMPLETE.get(),
+                        complete_count,
                     ))
                     .child(filter_chip(
                         "pdf-f-acc",
                         PdfManagerFilter::Accurate,
-                        crate::ui::icon(IconName::Sparkles)
-                            .w(px(10.))
-                            .h(px(10.))
-                            .into_any_element(),
+                        Some(
+                            crate::ui::icon(IconName::Sparkles)
+                                .w(px(10.))
+                                .h(px(10.))
+                                .into_any_element(),
+                        ),
                         rp::KB_PDF_FILTER_ACCURATE.get(),
                         acc_count,
                     )),
@@ -1621,7 +1725,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .px_1()
+                    .px_0p5()
                     .child(
                         div()
                             .id("pdf-select-all")
@@ -1629,7 +1733,7 @@ impl Workspace {
                             .items_center()
                             .gap_1p5()
                             .cursor_pointer()
-                            .text_size(px(11.5))
+                            .text_size(px(t.meta))
                             .text_color(gpui_kit::rgb(palette.muted))
                             .hover(move |s| s.text_color(gpui_kit::rgb(palette.text)))
                             .on_click(cx.listener(move |app, _, _, cx| {
@@ -1672,7 +1776,7 @@ impl Workspace {
                     )
                     .child(
                         div()
-                            .text_size(px(11.))
+                            .text_size(px(t.meta))
                             .text_color(gpui_kit::rgb(palette.muted))
                             .child(rp::kb_selected_count(selected_count)),
                     ),
@@ -1707,7 +1811,7 @@ impl Workspace {
                                     div()
                                         .flex_1()
                                         .min_w_0()
-                                        .text_size(px(11.5))
+                                        .text_size(px(t.meta))
                                         .text_color(gpui_kit::rgb(palette.danger))
                                         .child(msg),
                                 ),
@@ -1725,7 +1829,7 @@ impl Workspace {
                                             .px_1p5()
                                             .py_0p5()
                                             .rounded(px(4.))
-                                            .text_size(px(11.))
+                                            .text_size(px(t.meta))
                                             .font_medium()
                                             .text_color(gpui_kit::rgb(palette.accent))
                                             .cursor_pointer()
@@ -1762,16 +1866,19 @@ impl Workspace {
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
-                .px_3()
-                .pb_3()
+                .bg(canvas_bg)
+                .p_3()
+                .pb_4()
                 .flex()
                 .flex_col()
-                .gap_1()
+                .gap_1p5()
                 .children(filtered.into_iter().enumerate().map(|(idx, item)| {
                     let rel_path = item.rel_path.clone();
                     let content_hash = item.content_hash.clone();
                     let checked = kb.selected_pdfs.contains(&rel_path);
                     let accurate = is_accurate(item);
+                    let hybrid = item.parse_tier == "hybrid";
+                    let has_error = item.last_error.is_some();
                     let stem = display_pdf_stem(&rel_path);
                     let dir_hint = middle_ellipsis_dir(&rel_path);
                     let tooltip_path = rel_path.clone();
@@ -1786,79 +1893,233 @@ impl Workspace {
                     let cancel_path = rel_path.clone();
                     let export_path = rel_path.clone();
                     let export_hash = content_hash.clone();
+                    let retry_path = rel_path.clone();
 
-                    let status_slot: AnyElement = if let Some(phase) = phase {
-                        let (fill_w, label) = match phase {
-                            PdfOcrPhase::Queued => (14.0_f32, "…".to_owned()),
-                            PdfOcrPhase::Running {
-                                extracted_pages,
-                                total_pages: Some(total),
-                            } if total > 0 => {
-                                let ratio = (extracted_pages as f32 / total as f32).clamp(0.08, 1.0);
-                                (44.0 * ratio, format!("{extracted_pages}/{total}"))
-                            }
-                            PdfOcrPhase::Running { extracted_pages, .. } => {
-                                (18.0_f32, format!("{extracted_pages}/…"))
-                            }
-                        };
+                    let (progress_ratio, progress_label) = match &phase {
+                        Some(PdfOcrPhase::Queued) => (0.08_f32, rp::KB_QUEUED_OCR.get().to_owned()),
+                        Some(PdfOcrPhase::Running {
+                            extracted_pages,
+                            total_pages: Some(total),
+                        }) if *total > 0 => {
+                            let ratio = (*extracted_pages as f32 / *total as f32).clamp(0.06, 1.0);
+                            (ratio, rp::kb_ocr_running_label(&format!("{extracted_pages}/{total}")))
+                        }
+                        Some(PdfOcrPhase::Running { extracted_pages, .. }) => {
+                            (0.25_f32, rp::kb_ocr_running_label(&format!("{extracted_pages}/…")))
+                        }
+                        None => (0.0_f32, String::new()),
+                    };
+
+                    let mut meta_parts: Vec<String> = Vec::new();
+                    if let Some(dir) = dir_hint {
+                        meta_parts.push(dir);
+                    }
+                    if let Some(pages) = item.total_pages {
+                        meta_parts.push(rp::kb_pages_count(pages));
+                    }
+                    let subtitle_text = if phase.is_some() {
+                        progress_label
+                    } else if has_error {
+                        err_tip.clone()
+                    } else {
+                        meta_parts.join(" · ")
+                    };
+
+                    let (badge_bg_color, badge_fg_color, badge_icon): (Rgba, Rgba, AnyElement) =
+                        if phase.is_some() {
+                        (
+                            fg_alpha(palette.accent, 0.14),
+                            gpui_kit::rgb(palette.accent).into(),
+                            crate::ui::icon(IconName::LoaderCircle)
+                                .w(px(14.))
+                                .h(px(14.))
+                                .with_animation(
+                                    SharedString::from(format!("pdf-badge-spin-{idx}")),
+                                    Animation::new(Duration::from_millis(850)).repeat(),
+                                    |el, t| el.rotate(gpui::radians(t * std::f32::consts::TAU)),
+                                )
+                                .into_any_element(),
+                        )
+                    } else if has_error {
+                        (
+                            fg_alpha(palette.danger, 0.12),
+                            gpui_kit::rgb(palette.danger).into(),
+                            crate::ui::icon(IconName::ShieldAlert)
+                                .w(px(14.))
+                                .h(px(14.))
+                                .into_any_element(),
+                        )
+                    } else if !item.is_complete {
+                        (
+                            fg_alpha(0xd97706, 0.12),
+                            gpui_kit::rgb(0xd97706).into(),
+                            crate::ui::icon(IconName::BookOpenText)
+                                .w(px(14.))
+                                .h(px(14.))
+                                .into_any_element(),
+                        )
+                    } else if accurate || hybrid {
+                        (
+                            fg_alpha(palette.accent, 0.12),
+                            gpui_kit::rgb(palette.accent).into(),
+                            crate::ui::icon(IconName::Sparkles)
+                                .w(px(14.))
+                                .h(px(14.))
+                                .into_any_element(),
+                        )
+                    } else {
+                        (
+                            fg_alpha(palette.text, 0.06),
+                            gpui_kit::rgb(palette.muted).into(),
+                            crate::ui::icon(IconName::Zap)
+                                .w(px(14.))
+                                .h(px(14.))
+                                .into_any_element(),
+                        )
+                    };
+
+                    let status_slot: AnyElement = if phase.is_some() {
+                        div()
+                            .id(SharedString::from(format!("pdf-row-cancel-{idx}")))
+                            .size(px(22.))
+                            .rounded(px(5.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .flex_shrink_0()
+                            .cursor_pointer()
+                            .text_color(gpui_kit::rgb(palette.muted))
+                            .hover(move |s| {
+                                s.bg(mix_color(palette.surface, palette.danger, 0.12))
+                                    .text_color(gpui_kit::rgb(palette.danger))
+                            })
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(rp::KB_CANCEL_BTN.get())
+                                    .build(window, cx)
+                            })
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                cx.stop_propagation();
+                                app.cancel_pdf_ocr_item(&cancel_path, cx);
+                            }))
+                            .child(crate::ui::icon(IconName::Close).w(px(12.)).h(px(12.)))
+                            .into_any_element()
+                    } else if has_error {
                         div()
                             .flex()
                             .items_center()
-                            .gap_1p5()
+                            .gap_1()
                             .flex_shrink_0()
                             .child(
-                                crate::ui::icon(IconName::LoaderCircle)
-                                    .w(px(11.))
-                                    .h(px(11.))
-                                    .text_color(gpui_kit::rgb(palette.accent))
-                                    .with_animation(
-                                        SharedString::from(format!("pdf-row-spin-{idx}")),
-                                        Animation::new(Duration::from_millis(850)).repeat(),
-                                        |el, t| el.rotate(gpui::radians(t * std::f32::consts::TAU)),
-                                    ),
-                            )
-                            .child(
                                 div()
-                                    .w(px(44.))
-                                    .h(px(4.))
-                                    .rounded_full()
-                                    .bg(fg_alpha(palette.text, 0.10))
-                                    .overflow_hidden()
-                                    .child(
-                                        div()
-                                            .h_full()
-                                            .w(px(fill_w))
-                                            .rounded_full()
-                                            .bg(gpui_kit::rgb(palette.accent)),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.5))
-                                    .text_color(gpui_kit::rgb(palette.muted))
-                                    .child(label),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("pdf-row-cancel-{idx}")))
-                                    .size(px(18.))
+                                    .id(SharedString::from(format!("pdf-row-err-{idx}")))
+                                    .h(px(20.))
+                                    .px_1p5()
                                     .rounded(px(4.))
+                                    .bg(fg_alpha(palette.danger, 0.10))
+                                    .flex()
+                                    .items_center()
+                                    .text_size(px(t.micro))
+                                    .font_medium()
+                                    .text_color(gpui_kit::rgb(palette.danger))
+                                    .tooltip(move |window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(err_tip.clone())
+                                            .build(window, cx)
+                                    })
+                                    .child(rp::KB_FAILED_BADGE.get()),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("pdf-row-retry-{idx}")))
+                                    .size(px(22.))
+                                    .rounded(px(5.))
                                     .flex()
                                     .items_center()
                                     .justify_center()
                                     .cursor_pointer()
                                     .text_color(gpui_kit::rgb(palette.muted))
                                     .hover(move |s| {
-                                        s.bg(hover_bg).text_color(gpui_kit::rgb(0xdc2626))
+                                        s.bg(hover_bg).text_color(gpui_kit::rgb(palette.accent))
+                                    })
+                                    .tooltip(|window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(rp::KB_RETRY_BTN.get())
+                                            .build(window, cx)
                                     })
                                     .on_click(cx.listener(move |app, _, _, cx| {
                                         cx.stop_propagation();
-                                        app.cancel_pdf_ocr_item(&cancel_path, cx);
+                                        app.run_pdf_ocr_batch(vec![retry_path.clone()], true, cx);
                                     }))
-                                    .child(crate::ui::icon(IconName::Close).w(px(10.)).h(px(10.))),
+                                    .child(crate::ui::icon(IconName::RotateCcw).w(px(12.)).h(px(12.))),
                             )
                             .into_any_element()
-                    } else if item.is_complete {
+                    } else if !item.is_complete {
+                        let missing_label = if item.missing_pages > 0 {
+                            rp::kb_missing_pages_badge(item.missing_pages)
+                        } else {
+                            rp::KB_NEEDS_OCR_BADGE.get().to_owned()
+                        };
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .flex_shrink_0()
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("pdf-row-missing-{idx}")))
+                                    .h(px(20.))
+                                    .px_1p5()
+                                    .rounded(px(4.))
+                                    .bg(fg_alpha(0xd97706, 0.12))
+                                    .flex()
+                                    .items_center()
+                                    .text_size(px(t.micro))
+                                    .font_medium()
+                                    .text_color(gpui_kit::rgb(0xd97706))
+                                    .child(missing_label),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("pdf-row-fill-{idx}")))
+                                    .size(px(22.))
+                                    .rounded(px(5.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .text_color(gpui_kit::rgb(palette.muted))
+                                    .hover(move |s| {
+                                        s.bg(hover_bg).text_color(gpui_kit::rgb(palette.accent))
+                                    })
+                                    .tooltip(|window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(rp::KB_ONLY_OCR_BTN.get())
+                                            .build(window, cx)
+                                    })
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        cx.stop_propagation();
+                                        app.run_pdf_ocr_batch(vec![retry_path.clone()], true, cx);
+                                    }))
+                                    .child(crate::ui::icon(IconName::Sparkles).w(px(12.)).h(px(12.))),
+                            )
+                            .into_any_element()
+                    } else {
+                        let (tier_label, tier_bg, tier_fg): (&str, Rgba, Rgba) = if accurate {
+                            (
+                                rp::KB_ACCURATE_BADGE.get(),
+                                fg_alpha(palette.accent, 0.12),
+                                gpui_kit::rgb(palette.accent).into(),
+                            )
+                        } else if hybrid {
+                            (
+                                rp::KB_HYBRID_BADGE.get(),
+                                fg_alpha(palette.accent, 0.10),
+                                gpui_kit::rgb(palette.accent).into(),
+                            )
+                        } else {
+                            (
+                                rp::KB_FAST_BADGE.get(),
+                                fg_alpha(palette.text, 0.06),
+                                gpui_kit::rgb(palette.muted).into(),
+                            )
+                        };
                         div()
                             .flex()
                             .items_center()
@@ -1867,8 +2128,8 @@ impl Workspace {
                             .child(
                                 div()
                                     .id(SharedString::from(format!("pdf-row-export-{idx}")))
-                                    .size(px(20.))
-                                    .rounded(px(4.))
+                                    .size(px(22.))
+                                    .rounded(px(5.))
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -1895,141 +2156,163 @@ impl Workspace {
                             )
                             .child(
                                 div()
-                                    .id(SharedString::from(format!("pdf-row-tier-{idx}")))
-                                    .size(px(18.))
+                                    .h(px(20.))
+                                    .px_1p5()
+                                    .rounded(px(4.))
+                                    .bg(tier_bg)
                                     .flex()
                                     .items_center()
-                                    .justify_center()
-                                    .text_color(gpui_kit::rgb(if accurate {
-                                        palette.accent
-                                    } else {
-                                        palette.muted
-                                    }))
-                                    .tooltip(move |window, cx| {
-                                        gpui_kit::component::tooltip::Tooltip::new(if accurate {
-                                            rp::KB_ACCURATE_BADGE.get()
-                                        } else {
-                                            rp::KB_FAST_BADGE.get()
-                                        })
-                                        .build(window, cx)
-                                    })
-                                    .child(
-                                        crate::ui::icon(if accurate {
-                                            IconName::Sparkles
-                                        } else {
-                                            IconName::Zap
-                                        })
-                                        .w(px(12.))
-                                        .h(px(12.)),
-                                    ),
-                            )
-                            .into_any_element()
-                    } else {
-                        div()
-                            .id(SharedString::from(format!("pdf-row-red-{idx}")))
-                            .size(px(18.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .flex_shrink_0()
-                            .tooltip(move |window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(err_tip.clone())
-                                    .build(window, cx)
-                            })
-                            .child(
-                                div()
-                                    .size(px(7.))
-                                    .rounded_full()
-                                    .bg(gpui_kit::rgb(0xef4444)),
+                                    .text_size(px(t.micro))
+                                    .font_medium()
+                                    .text_color(tier_fg)
+                                    .child(tier_label.to_owned()),
                             )
                             .into_any_element()
                     };
 
+                    let row_bg = if checked {
+                        mix_color(palette.surface, palette.accent, 0.08)
+                    } else {
+                        gpui_kit::rgb(palette.surface).into()
+                    };
+                    let row_border = if checked {
+                        fg_alpha(palette.accent, 0.45)
+                    } else {
+                        gpui_kit::rgb(palette.border).into()
+                    };
+
                     div()
                         .id(SharedString::from(format!("pdf-mgr-row-{idx}")))
-                        .min_h(px(32.))
-                        .px_2()
-                        .py_1()
-                        .rounded(px(6.))
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(row_border)
+                        .bg(row_bg)
+                        .overflow_hidden()
                         .flex()
-                        .items_center()
-                        .gap_2()
-                        .hover(move |s| s.bg(hover_bg))
+                        .flex_col()
+                        .hover(move |s| {
+                            if checked {
+                                s.bg(mix_color(palette.surface, palette.accent, 0.13))
+                            } else {
+                                s.bg(row_hover)
+                            }
+                        })
                         .child(
                             div()
-                                .id(SharedString::from(format!("pdf-row-check-{idx}")))
-                                .size(px(14.))
-                                .rounded(px(3.5))
-                                .border_1()
-                                .border_color(gpui_kit::rgb(if checked {
-                                    palette.accent
-                                } else {
-                                    palette.border
-                                }))
-                                .when(checked, |b| b.bg(gpui_kit::rgb(palette.accent)))
+                                .px_2p5()
+                                .py_2()
                                 .flex()
                                 .items_center()
-                                .justify_center()
-                                .flex_shrink_0()
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |app, _, _, cx| {
-                                    cx.stop_propagation();
-                                    if !app.right_panel.kb.selected_pdfs.remove(&toggle_path) {
-                                        app.right_panel.kb.selected_pdfs.insert(toggle_path.clone());
-                                    }
-                                    cx.notify();
-                                }))
-                                .when(checked, |b| {
-                                    b.child(
-                                        crate::ui::icon(IconName::Check)
-                                            .w(px(9.))
-                                            .h(px(9.))
-                                            .text_color(gpui_kit::rgb(palette.surface)),
-                                    )
-                                }),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("pdf-row-open-{idx}")))
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .cursor_pointer()
-                                .tooltip(move |window, cx| {
-                                    gpui_kit::component::tooltip::Tooltip::new(tooltip_path.clone())
-                                        .build(window, cx)
-                                })
-                                .on_click(cx.listener(move |app, _, window, cx| {
-                                    app.open_kb_result(
-                                        &open_path,
-                                        None,
-                                        Some(1),
-                                        None,
-                                        None,
-                                        window,
-                                        cx,
-                                    );
-                                }))
+                                .gap_2()
                                 .child(
                                     div()
-                                        .text_size(px(12.))
-                                        .font_medium()
-                                        .text_color(gpui_kit::rgb(palette.text))
-                                        .text_ellipsis()
-                                        .child(stem),
+                                        .id(SharedString::from(format!("pdf-row-check-{idx}")))
+                                        .size(px(14.))
+                                        .rounded(px(3.5))
+                                        .border_1()
+                                        .border_color(gpui_kit::rgb(if checked {
+                                            palette.accent
+                                        } else {
+                                            palette.border
+                                        }))
+                                        .when(checked, |b| b.bg(gpui_kit::rgb(palette.accent)))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .flex_shrink_0()
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |app, _, _, cx| {
+                                            cx.stop_propagation();
+                                            if !app.right_panel.kb.selected_pdfs.remove(&toggle_path) {
+                                                app.right_panel.kb.selected_pdfs.insert(toggle_path.clone());
+                                            }
+                                            cx.notify();
+                                        }))
+                                        .when(checked, |b| {
+                                            b.child(
+                                                crate::ui::icon(IconName::Check)
+                                                    .w(px(9.))
+                                                    .h(px(9.))
+                                                    .text_color(gpui_kit::rgb(palette.surface)),
+                                            )
+                                        }),
                                 )
-                                .when_some(dir_hint, |col, dir| {
-                                    col.child(
-                                        div()
-                                            .text_size(px(10.))
-                                            .text_color(gpui_kit::rgb(palette.muted))
-                                            .text_ellipsis()
-                                            .child(dir),
-                                    )
-                                }),
+                                .child(
+                                    div()
+                                        .size(px(28.))
+                                        .rounded(px(6.))
+                                        .flex_shrink_0()
+                                        .bg(badge_bg_color)
+                                        .text_color(badge_fg_color)
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(badge_icon),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("pdf-row-open-{idx}")))
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(1.))
+                                        .cursor_pointer()
+                                        .tooltip(move |window, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new(tooltip_path.clone())
+                                                .build(window, cx)
+                                        })
+                                        .on_click(cx.listener(move |app, _, window, cx| {
+                                            app.open_kb_result(
+                                                &open_path,
+                                                None,
+                                                Some(1),
+                                                None,
+                                                None,
+                                                window,
+                                                cx,
+                                            );
+                                        }))
+                                        .child(
+                                            div()
+                                                .text_size(px(t.body))
+                                                .font_medium()
+                                                .text_color(gpui_kit::rgb(palette.text))
+                                                .text_ellipsis()
+                                                .child(stem),
+                                        )
+                                        .when(!subtitle_text.is_empty(), |col| {
+                                            col.child(
+                                                div()
+                                                    .text_size(px(t.micro))
+                                                    .text_color(if has_error {
+                                                        gpui_kit::rgb(palette.danger)
+                                                    } else if phase.is_some() {
+                                                        gpui_kit::rgb(palette.accent)
+                                                    } else {
+                                                        gpui_kit::rgb(palette.muted)
+                                                    })
+                                                    .text_ellipsis()
+                                                    .child(subtitle_text),
+                                            )
+                                        }),
+                                )
+                                .child(status_slot),
                         )
-                        .child(status_slot)
+                        .when(phase.is_some(), |card| {
+                            card.child(
+                                div()
+                                    .w_full()
+                                    .h(px(2.5))
+                                    .bg(fg_alpha(palette.text, 0.08))
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(relative(progress_ratio))
+                                            .bg(gpui_kit::rgb(palette.accent)),
+                                    ),
+                            )
+                        })
                 }))
                 .into_any_element()
         };
@@ -2042,23 +2325,67 @@ impl Workspace {
             .collect();
         let only_ocr_count = only_ocr_targets.len();
 
-        let btn_font_size = (self.settings.interface_font_size as f32 - 2.5).max(10.0);
-        let run_disabled = selected_count == 0 || ocr_active;
-        let only_ocr_disabled = only_ocr_count == 0 || ocr_active;
+        let fill_disabled = only_ocr_count == 0 || ocr_active;
+        let accurate_disabled = selected_count == 0 || ocr_active;
         let export_disabled = selected_exportable_count == 0;
+        let fill_is_primary = only_ocr_count > 0 && !ocr_active;
+
+        let footer_left: AnyElement = if ocr_active {
+            div()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .child(
+                    crate::ui::icon(IconName::LoaderCircle)
+                        .w(px(12.))
+                        .h(px(12.))
+                        .text_color(gpui_kit::rgb(palette.accent))
+                        .with_animation(
+                            "pdf-footer-spin",
+                            Animation::new(Duration::from_millis(850)).repeat(),
+                            |el, t| el.rotate(gpui::radians(t * std::f32::consts::TAU)),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(t.meta))
+                        .font_medium()
+                        .text_color(gpui_kit::rgb(palette.accent))
+                        .child(rp::kb_ocr_running_label(&kb.ocr_progress.len().to_string())),
+                )
+                .into_any_element()
+        } else if selected_count == 0 {
+            div()
+                .text_size(px(t.meta))
+                .text_color(gpui_kit::rgb(palette.muted))
+                .child(if red_count > 0 {
+                    format!("{total_count} PDF · {}", rp::kb_missing_pages_badge(red_count))
+                } else {
+                    rp::kb_doc_count(total_count)
+                })
+                .into_any_element()
+        } else {
+            div()
+                .text_size(px(t.meta))
+                .font_medium()
+                .text_color(gpui_kit::rgb(palette.text))
+                .child(rp::kb_selected_count(selected_count))
+                .into_any_element()
+        };
 
         let footer = div()
             .px_2p5()
-            .py_1p5()
+            .py_2()
             .flex_shrink_0()
             .border_t_1()
             .border_color(gpui_kit::rgb(palette.border))
-            .bg(gpui_kit::rgb(header_bg))
+            .bg(chrome_bg)
             .flex()
             .items_center()
             .justify_between()
             .flex_wrap()
-            .gap_1()
+            .gap_1p5()
+            .child(footer_left)
             .child(
                 div()
                     .flex()
@@ -2066,121 +2393,149 @@ impl Workspace {
                     .flex_wrap()
                     .gap_1()
                     .min_w_0()
-                    .child(
-                        div()
-                            .id("pdf-mgr-run-selected")
-                            .h(px(24.))
-                            .px_2()
-                            .rounded(px(5.))
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .text_size(px(btn_font_size))
-                            .font_medium()
-                            .bg(if run_disabled {
-                                fg_alpha(palette.text, 0.06)
-                            } else {
-                                gpui_kit::rgb(palette.accent).into()
-                            })
-                            .text_color(if run_disabled {
-                                fg_alpha(palette.muted, 0.7)
-                            } else {
-                                gpui_kit::rgb(palette.on_accent).into()
-                            })
-                            .when(!run_disabled, |el| {
-                                el.cursor_pointer()
-                                    .hover(move |s| s.opacity(0.9))
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.run_pdf_ocr_batch(selected_paths_for_run.clone(), false, cx);
-                                    }))
-                            })
-                            .child(
-                                crate::ui::icon(IconName::Sparkles)
-                                    .w(px(11.))
-                                    .h(px(11.)),
-                            )
-                            .child(rp::kb_refine_selected(selected_count)),
-                    )
-                    .child(
-                        div()
-                            .id("pdf-mgr-run-only-ocr")
-                            .h(px(24.))
-                            .px_2()
-                            .rounded(px(5.))
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .text_size(px(btn_font_size))
-                            .text_color(if only_ocr_disabled {
-                                fg_alpha(palette.muted, 0.6)
-                            } else {
-                                gpui_kit::rgb(palette.text).into()
-                            })
-                            .when(!only_ocr_disabled, |el| {
-                                el.cursor_pointer()
-                                    .hover(move |s| s.bg(hover_bg))
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.run_pdf_ocr_batch(only_ocr_targets.clone(), true, cx);
-                                    }))
-                            })
-                            .child(if only_ocr_count > 0 {
-                                format!("{} ({only_ocr_count})", rp::KB_ONLY_OCR_BTN.get())
-                            } else {
-                                rp::KB_ONLY_OCR_BTN.get().to_owned()
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("pdf-mgr-export-selected")
-                            .h(px(24.))
-                            .px_2()
-                            .rounded(px(5.))
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .text_size(px(btn_font_size))
-                            .text_color(if export_disabled {
-                                fg_alpha(palette.muted, 0.6)
-                            } else {
-                                gpui_kit::rgb(palette.text).into()
-                            })
-                            .when(!export_disabled, |el| {
-                                el.cursor_pointer()
-                                    .hover(move |s| s.bg(hover_bg))
-                                    .on_click(cx.listener(|app, _, _, cx| {
-                                        app.export_selected_pdf_markdowns(cx);
-                                    }))
-                            })
-                            .child(
-                                crate::ui::icon(IconName::FileDown)
-                                    .w(px(11.))
-                                    .h(px(11.)),
-                            )
-                            .child(rp::KB_EXPORT_MD_BTN.get()),
-                    ),
-            )
-            .when(ocr_active, |bar| {
-                bar.child(
-                    div()
-                        .id("pdf-mgr-cancel-all")
-                        .h(px(24.))
-                        .px_2()
-                        .rounded(px(5.))
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .text_size(px(btn_font_size))
-                        .font_medium()
-                        .text_color(gpui_kit::rgb(palette.danger))
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(mix_color(palette.surface, palette.danger, 0.1)))
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.cancel_all_pdf_ocr(cx);
-                        }))
-                        .child(crate::ui::icon(IconName::Close).w(px(11.)).h(px(11.)))
-                        .child(rp::KB_CANCEL_BTN.get()),
-                )
-            });
+                    .when(only_ocr_count > 0 && !ocr_active, |bar| {
+                        bar.child(
+                            div()
+                                .id("pdf-mgr-run-only-ocr")
+                                .h(px(26.))
+                                .px_2p5()
+                                .rounded(px(6.))
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_size(px(t.body))
+                                .font_medium()
+                                .bg(if fill_disabled {
+                                    fg_alpha(palette.text, 0.06)
+                                } else if fill_is_primary {
+                                    gpui_kit::rgb(palette.accent).into()
+                                } else {
+                                    gpui_kit::rgb(palette.surface).into()
+                                })
+                                .border_1()
+                                .border_color(if fill_is_primary {
+                                    gpui_kit::rgb(palette.accent)
+                                } else {
+                                    gpui_kit::rgb(palette.border)
+                                })
+                                .text_color(if fill_disabled {
+                                    fg_alpha(palette.muted, 0.6)
+                                } else if fill_is_primary {
+                                    gpui_kit::rgb(palette.on_accent).into()
+                                } else {
+                                    gpui_kit::rgb(palette.text).into()
+                                })
+                                .when(!fill_disabled, |el| {
+                                    el.cursor_pointer()
+                                        .hover(move |s| s.opacity(0.9))
+                                        .on_click(cx.listener(move |app, _, _, cx| {
+                                            app.run_pdf_ocr_batch(only_ocr_targets.clone(), true, cx);
+                                        }))
+                                })
+                                .child(crate::ui::icon(IconName::Sparkles).w(px(12.)).h(px(12.)))
+                                .child(rp::kb_fill_missing_label(only_ocr_count)),
+                        )
+                    })
+                    .when(selected_count > 0 && !ocr_active, |bar| {
+                        bar.child(
+                            div()
+                                .id("pdf-mgr-run-selected")
+                                .h(px(26.))
+                                .px_2()
+                                .rounded(px(6.))
+                                .border_1()
+                                .border_color(gpui_kit::rgb(palette.border))
+                                .bg(gpui_kit::rgb(palette.surface))
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_size(px(t.body))
+                                .font_medium()
+                                .text_color(if accurate_disabled {
+                                    fg_alpha(palette.muted, 0.6)
+                                } else {
+                                    gpui_kit::rgb(palette.text).into()
+                                })
+                                .when(!accurate_disabled, |el| {
+                                    el.cursor_pointer()
+                                        .hover(move |s| s.bg(hover_bg))
+                                        .on_click(cx.listener(move |app, _, _, cx| {
+                                            app.run_pdf_ocr_batch(
+                                                selected_paths_for_run.clone(),
+                                                false,
+                                                cx,
+                                            );
+                                        }))
+                                })
+                                .child(crate::ui::icon(IconName::Sparkles).w(px(12.)).h(px(12.)))
+                                .child(rp::kb_refine_selected(selected_count)),
+                        )
+                    })
+                    .when(selected_count > 0, |bar| {
+                        bar.child(
+                            div()
+                                .id("pdf-mgr-export-selected")
+                                .h(px(26.))
+                                .px_2()
+                                .rounded(px(6.))
+                                .border_1()
+                                .border_color(gpui_kit::rgb(palette.border))
+                                .bg(gpui_kit::rgb(palette.surface))
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_size(px(t.body))
+                                .font_medium()
+                                .text_color(if export_disabled {
+                                    fg_alpha(palette.muted, 0.55)
+                                } else {
+                                    gpui_kit::rgb(palette.text).into()
+                                })
+                                .when(export_disabled, |el| {
+                                    el.tooltip(|window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(
+                                            rp::KB_EXPORT_UNAVAILABLE_TIP.get(),
+                                        )
+                                        .build(window, cx)
+                                    })
+                                })
+                                .when(!export_disabled, |el| {
+                                    el.cursor_pointer()
+                                        .hover(move |s| s.bg(hover_bg))
+                                        .on_click(cx.listener(|app, _, _, cx| {
+                                            app.export_selected_pdf_markdowns(cx);
+                                        }))
+                                })
+                                .child(crate::ui::icon(IconName::FileDown).w(px(12.)).h(px(12.)))
+                                .child(rp::kb_export_selected_label(selected_exportable_count)),
+                        )
+                    })
+                    .when(ocr_active, |bar| {
+                        bar.child(
+                            div()
+                                .id("pdf-mgr-cancel-all")
+                                .h(px(26.))
+                                .px_2()
+                                .rounded(px(6.))
+                                .border_1()
+                                .border_color(mix_color(palette.border, palette.danger, 0.35))
+                                .bg(mix_color(palette.surface, palette.danger, 0.08))
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_size(px(t.body))
+                                .font_medium()
+                                .text_color(gpui_kit::rgb(palette.danger))
+                                .cursor_pointer()
+                                .hover(move |s| s.bg(mix_color(palette.surface, palette.danger, 0.16)))
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.cancel_all_pdf_ocr(cx);
+                                }))
+                                .child(crate::ui::icon(IconName::Close).w(px(12.)).h(px(12.)))
+                                .child(rp::KB_CANCEL_BTN.get()),
+                        )
+                    }),
+            );
 
         div()
             .id("right-panel-pdf-manager")
