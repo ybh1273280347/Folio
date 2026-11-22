@@ -32,6 +32,7 @@ pub fn register_sqlite_vec() {
 #[derive(Clone, Debug)]
 pub struct DocumentMeta {
     pub rel_path: String,
+    pub content_hash: String,
     pub mtime_ns: i64,
     pub file_size: i64,
 }
@@ -237,6 +238,7 @@ impl RagStore {
                 status       TEXT NOT NULL DEFAULT 'indexed',
                 active       INTEGER NOT NULL DEFAULT 1
             );
+            CREATE INDEX IF NOT EXISTS idx_documents_content ON documents(content_hash, active);
             CREATE TABLE IF NOT EXISTS chunks (
                 id           INTEGER PRIMARY KEY,
                 content_hash TEXT NOT NULL,
@@ -322,7 +324,7 @@ impl RagStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT rel_path, mtime_ns, file_size
+                "SELECT rel_path, content_hash, mtime_ns, file_size
                  FROM documents
                  WHERE active = 1",
             )
@@ -331,8 +333,9 @@ impl RagStore {
             .query_map([], |row| {
                 Ok(DocumentMeta {
                     rel_path: row.get(0)?,
-                    mtime_ns: row.get(1)?,
-                    file_size: row.get(2)?,
+                    content_hash: row.get(1)?,
+                    mtime_ns: row.get(2)?,
+                    file_size: row.get(3)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -345,17 +348,17 @@ impl RagStore {
         Ok(map)
     }
 
-    pub fn has_content(&self, content_hash: &str) -> Result<bool, String> {
-        let exists: Option<i64> = self
-            .conn
+    pub fn indexed_content_status(&self, content_hash: &str) -> Result<Option<String>, String> {
+        self.conn
             .query_row(
-                "SELECT 1 FROM contents WHERE content_hash = ?1",
+                // Older copies can have been marked indexed even when the original needed OCR.
+                "SELECT status FROM documents WHERE content_hash = ?1 AND active = 1
+                 ORDER BY (status = 'needs_ocr') DESC LIMIT 1",
                 [content_hash],
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|e| e.to_string())?;
-        Ok(exists.is_some())
+            .map_err(|e| e.to_string())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -429,8 +432,11 @@ impl RagStore {
     }
 
     pub fn deactivate_missing(&mut self, live_paths: &HashSet<String>) -> Result<usize, String> {
-        let mut stmt = self
+        let tx = self
             .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let mut stmt = tx
             .prepare("SELECT rel_path FROM documents WHERE active = 1")
             .map_err(|e| e.to_string())?;
         let rows = stmt
@@ -445,34 +451,32 @@ impl RagStore {
         }
         drop(stmt);
 
-        if missing.is_empty() {
-            return Ok(0);
-        }
-
-        let tx = self.conn.transaction().map_err(|e| e.to_string())?;
         for path in &missing {
             tx.execute("DELETE FROM documents WHERE rel_path = ?1", [path])
                 .map_err(|e| e.to_string())?;
         }
+        // A save can orphan the previous hash without removing a path. Sweep after every
+        // document has been linked so a rename or another copy can still reuse its chunks.
         prune_orphans(&tx)?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(missing.len())
     }
 
-    pub fn pending_vector_chunks(&self, limit: usize) -> Result<Vec<PendingChunk>, String> {
+    pub fn pending_vector_chunks(&self, after_chunk_id: i64, limit: usize) -> Result<Vec<PendingChunk>, String> {
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT c.id, c.chunk_text
                  FROM chunks c
-                 WHERE EXISTS (SELECT 1 FROM documents d WHERE d.content_hash = c.content_hash AND d.active = 1)
+                 WHERE c.id > ?1
+                   AND EXISTS (SELECT 1 FROM documents d WHERE d.content_hash = c.content_hash AND d.active = 1)
                    AND NOT EXISTS (SELECT 1 FROM chunks_vec v WHERE v.chunk_id = c.id)
                  ORDER BY c.id
-                 LIMIT ?1",
+                 LIMIT ?2",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map([limit as i64], |row| {
+            .query_map(params![after_chunk_id, limit as i64], |row| {
                 Ok(PendingChunk {
                     chunk_id: row.get(0)?,
                     chunk_text: row.get(1)?,
@@ -506,6 +510,14 @@ impl RagStore {
         tx.commit().map_err(|e| e.to_string())
     }
 
+    pub fn has_indexed_documents(&self) -> Result<bool, String> {
+        self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM documents WHERE active = 1 AND status != 'derived')",
+            [],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())
+    }
+
     pub fn stats(&self) -> Result<StoreStats, String> {
         let indexed_files: usize = self
             .conn
@@ -515,29 +527,18 @@ impl RagStore {
                 |r| r.get::<_, i64>(0),
             )
             .map_err(|e| e.to_string())? as usize;
-        let total_chunks: usize = self
+        // Count only live chunks and their vectors, including while a sync still has old
+        // versions awaiting its final prune. Both counts come from the same snapshot.
+        let (total_chunks, vector_chunks): (i64, i64) = self
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM chunks c
+                "SELECT COUNT(*), COUNT(v.chunk_id) FROM chunks c
+                 LEFT JOIN chunks_vec v ON v.chunk_id = c.id
                  WHERE EXISTS (SELECT 1 FROM documents d WHERE d.content_hash = c.content_hash AND d.active = 1)",
                 [],
-                |r| r.get::<_, i64>(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
-            .map_err(|e| e.to_string())? as usize;
-        let vector_chunks: usize = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM chunks_vec", [], |r| r.get::<_, i64>(0))
-            .map_err(|e| e.to_string())? as usize;
-        let pending_vectors: usize = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM chunks c
-                 WHERE EXISTS (SELECT 1 FROM documents d WHERE d.content_hash = c.content_hash AND d.active = 1)
-                   AND NOT EXISTS (SELECT 1 FROM chunks_vec v WHERE v.chunk_id = c.id)",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map_err(|e| e.to_string())? as usize;
+            .map_err(|e| e.to_string())?;
 
         let mut stmt = self
             .conn
@@ -551,9 +552,9 @@ impl RagStore {
 
         Ok(StoreStats {
             indexed_files,
-            total_chunks,
-            vector_chunks,
-            pending_vectors,
+            total_chunks: total_chunks as usize,
+            vector_chunks: vector_chunks as usize,
+            pending_vectors: (total_chunks - vector_chunks) as usize,
             needs_ocr_files,
         })
     }
@@ -568,19 +569,13 @@ impl RagStore {
     ) -> Result<Vec<ScoredChunk>, String> {
         let terms = split_query_terms(query);
         let (long_terms, short_terms) = partition_query_terms(&terms);
-        let long_limit = if allowed_paths.is_some() || under_dir.is_some() || !extensions.is_empty() {
-            (limit * 20).clamp(200, 2000)
-        } else {
-            limit
-        };
+        let matching_paths = self.matching_paths_json(allowed_paths, under_dir, extensions)?;
         let (merged, _) = self.collect_fts_matches(
             &long_terms,
             &short_terms,
-            long_limit,
+            limit,
             "",
-            allowed_paths,
-            under_dir,
-            extensions,
+            matching_paths.as_deref(),
         )?;
         Ok(finalize_fts_hits(merged.into_values().collect(), !short_terms.is_empty(), limit))
     }
@@ -590,7 +585,7 @@ impl RagStore {
         let (long_terms, short_terms) = partition_query_terms(&terms);
         let long_limit = (limit * 20).clamp(200, 2000);
         let (merged, long_raw_count) =
-            self.collect_fts_matches(&long_terms, &short_terms, long_limit, "", None, None, &[])?;
+            self.collect_fts_matches(&long_terms, &short_terms, long_limit, "", None)?;
 
         let mut all_raw: Vec<ScoredChunk> = Vec::with_capacity(merged.len());
         let mut notes_map: HashMap<i64, ScoredChunk> = HashMap::new();
@@ -612,8 +607,6 @@ impl RagStore {
                     long_limit,
                     " AND lower(replace(d.rel_path, '#annotations', '')) NOT LIKE '%.pdf'",
                     None,
-                    None,
-                    &[],
                 )?;
                 for (id, hit) in extra_notes {
                     notes_map.entry(id).or_insert(hit);
@@ -626,8 +619,6 @@ impl RagStore {
                     long_limit,
                     " AND lower(replace(d.rel_path, '#annotations', '')) LIKE '%.pdf'",
                     None,
-                    None,
-                    &[],
                 )?;
                 for (id, hit) in extra_pdf {
                     pdf_map.entry(id).or_insert(hit);
@@ -643,16 +634,37 @@ impl RagStore {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Resolve path rules once per retrieval, then bind matching paths as one SQLite value.
+    fn matching_paths_json(
+        &self,
+        allowed_paths: Option<&HashSet<String>>,
+        under_dir: Option<&str>,
+        extensions: &[String],
+    ) -> Result<Option<String>, String> {
+        if allowed_paths.is_none() && under_dir.is_none() && extensions.is_empty() {
+            return Ok(None);
+        }
+        let mut stmt = self.conn.prepare("SELECT rel_path FROM documents WHERE active = 1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut paths = Vec::new();
+        for row in rows {
+            let path = row.map_err(|e| e.to_string())?;
+            if path_matches_filters(&path, allowed_paths, under_dir, extensions) {
+                paths.push(path);
+            }
+        }
+        Ok(Some(serde_json::to_string(&paths).map_err(|e| e.to_string())?))
+    }
+
     fn collect_fts_matches(
         &self,
         long_terms: &[&str],
         short_terms: &[&str],
         long_limit: usize,
         extra_long_sql: &str,
-        allowed_paths: Option<&HashSet<String>>,
-        under_dir: Option<&str>,
-        extensions: &[String],
+        matching_paths: Option<&str>,
     ) -> Result<(HashMap<i64, ScoredChunk>, usize), String> {
         let mut merged: HashMap<i64, ScoredChunk> = HashMap::new();
         let mut long_raw_count = 0usize;
@@ -672,19 +684,18 @@ impl RagStore {
                  JOIN documents d ON d.content_hash = c.content_hash AND d.active = 1
                  JOIN contents ct ON ct.content_hash = c.content_hash
                  WHERE chunks_fts MATCH ?1{extra_long_sql}
-                 ORDER BY bm25(chunks_fts) ASC
+                   AND (?3 IS NULL OR d.rel_path IN (SELECT value FROM json_each(?3)))
+                 ORDER BY bm25(chunks_fts) ASC, c.id ASC, d.id ASC
                  LIMIT ?2"
             );
             let mut stmt = self.conn.prepare(&sql).map_err(|e| e.to_string())?;
             let rows = stmt
-                .query_map(params![match_expr, long_limit as i64], map_scored_row)
+                .query_map(params![match_expr, long_limit as i64, matching_paths], map_scored_row)
                 .map_err(|e| e.to_string())?;
             for row in rows {
                 let hit = row.map_err(|e| e.to_string())?;
                 long_raw_count += 1;
-                if path_matches_filters(&hit.rel_path, allowed_paths, under_dir, extensions) {
-                    merged.insert(hit.chunk_id, hit);
-                }
+                merged.insert(hit.chunk_id, hit);
             }
         }
 
@@ -703,13 +714,13 @@ impl RagStore {
                          c.chunk_text LIKE ?1 ESCAPE '\\'
                          OR d.rel_path LIKE ?1 ESCAPE '\\'
                          OR c.heading_path LIKE ?1 ESCAPE '\\'
-                     )",
+                     ) AND (?2 IS NULL OR d.rel_path IN (SELECT value FROM json_each(?2)))",
                 )
                 .map_err(|e| e.to_string())?;
             for term in short_terms {
                 let pattern = format!("%{}%", escape_like(term));
                 let rows = stmt
-                    .query_map(params![pattern], |row| {
+                    .query_map(params![pattern, matching_paths], |row| {
                         Ok(ScoredChunk {
                             chunk_id: row.get(0)?,
                             docid: row.get(1)?,
@@ -728,19 +739,17 @@ impl RagStore {
                     .map_err(|e| e.to_string())?;
                 for row in rows {
                     let mut hit = row.map_err(|e| e.to_string())?;
-                    if path_matches_filters(&hit.rel_path, allowed_paths, under_dir, extensions) {
-                        let term_score = score_short_term_hit(
-                            term,
-                            &hit.rel_path,
-                            &hit.heading_path,
-                            &hit.chunk_text,
-                        );
-                        hit.raw_score = term_score;
-                        merged
-                            .entry(hit.chunk_id)
-                            .and_modify(|existing| existing.raw_score += term_score)
-                            .or_insert(hit);
-                    }
+                    let term_score = score_short_term_hit(
+                        term,
+                        &hit.rel_path,
+                        &hit.heading_path,
+                        &hit.chunk_text,
+                    );
+                    hit.raw_score = term_score;
+                    merged
+                        .entry(hit.chunk_id)
+                        .and_modify(|existing| existing.raw_score += term_score)
+                        .or_insert(hit);
                 }
             }
         }
@@ -763,41 +772,39 @@ impl RagStore {
                 embedding.len()
             ));
         }
-        let k = if allowed_paths.is_some() || under_dir.is_some() || !extensions.is_empty() {
-            (limit * 4).clamp(30, 200)
+        let matching_paths = self.matching_paths_json(allowed_paths, under_dir, extensions)?;
+        // sqlite-vec applies this row-ID constraint inside KNN, before picking the nearest k.
+        let knn_filter = if matching_paths.is_some() {
+            "AND chunk_id IN (
+                SELECT c.id FROM chunks c JOIN documents d ON d.content_hash = c.content_hash
+                WHERE d.active = 1 AND d.rel_path IN (SELECT value FROM json_each(?3))
+            )"
         } else {
-            limit
+            ""
         };
         let bytes = f32_slice_to_le_bytes(embedding);
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT v.chunk_id, d.docid, d.rel_path, d.kind, ct.parse_tier, c.heading_path,
+        let sql = format!(
+            "WITH nearest AS MATERIALIZED (
+                 SELECT chunk_id, distance FROM chunks_vec
+                 WHERE embedding MATCH ?1 AND k = ?2 {knn_filter}
+             )
+             SELECT v.chunk_id, d.docid, d.rel_path, d.kind, ct.parse_tier, c.heading_path,
                         c.line_start, c.line_end, c.page_num, c.chunk_text,
                         (1.0 - v.distance) AS score, d.content_hash
-                 FROM chunks_vec v
+                 FROM nearest v
                  JOIN chunks c ON c.id = v.chunk_id
                  JOIN documents d ON d.content_hash = c.content_hash AND d.active = 1
                  JOIN contents ct ON ct.content_hash = c.content_hash
-                 WHERE v.embedding MATCH ?1 AND k = ?2
-                 ORDER BY v.distance ASC",
-            )
-            .map_err(|e| e.to_string())?;
+                 WHERE (?3 IS NULL OR d.rel_path IN (SELECT value FROM json_each(?3)))
+                 ORDER BY v.distance ASC, v.chunk_id ASC, d.id ASC
+                 LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(|e| e.to_string())?;
 
         let rows = stmt
-            .query_map(params![bytes, k as i64], map_scored_row)
+            .query_map(params![bytes, limit as i64, matching_paths], map_scored_row)
             .map_err(|e| e.to_string())?;
-        let mut results = Vec::new();
-        for row in rows {
-            let hit = row.map_err(|e| e.to_string())?;
-            if path_matches_filters(&hit.rel_path, allowed_paths, under_dir, extensions) {
-                results.push(hit);
-                if results.len() >= limit {
-                    break;
-                }
-            }
-        }
-        Ok(results)
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     }
 
     pub fn get_rerank_scores(&self, keys: &[String]) -> Result<HashMap<String, f64>, String> {
@@ -1082,28 +1089,29 @@ fn allocate_docid(tx: &Transaction<'_>, rel_path: &str, content_hash: &str) -> R
 }
 
 fn prune_orphans(tx: &Transaction<'_>) -> Result<(), String> {
-    tx.execute(
-        "DELETE FROM chunks_vec WHERE chunk_id IN (
-            SELECT c.id FROM chunks c
-            WHERE NOT EXISTS (SELECT 1 FROM documents d WHERE d.content_hash = c.content_hash AND d.active = 1)
-        )",
-        [],
-    )
-    .map_err(|e| e.to_string())?;
-    tx.execute(
-        "DELETE FROM chunks WHERE NOT EXISTS (
-            SELECT 1 FROM documents d WHERE d.content_hash = chunks.content_hash AND d.active = 1
-        )",
-        [],
-    )
-    .map_err(|e| e.to_string())?;
-    tx.execute(
-        "DELETE FROM contents WHERE NOT EXISTS (
-            SELECT 1 FROM documents d WHERE d.content_hash = contents.content_hash AND d.active = 1
-        )",
-        [],
-    )
-    .map_err(|e| e.to_string())?;
+    let mut stmt = tx.prepare(
+        "SELECT content_hash FROM contents c
+         WHERE NOT EXISTS (SELECT 1 FROM documents d WHERE d.content_hash = c.content_hash)",
+    ).map_err(|e| e.to_string())?;
+    let orphan_hashes = stmt.query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    if orphan_hashes.is_empty() {
+        return Ok(());
+    }
+    let mut delete_vectors = tx.prepare_cached(
+        "DELETE FROM chunks_vec WHERE chunk_id IN (SELECT id FROM chunks WHERE content_hash = ?1)",
+    ).map_err(|e| e.to_string())?;
+    let mut delete_chunks = tx.prepare_cached("DELETE FROM chunks WHERE content_hash = ?1")
+        .map_err(|e| e.to_string())?;
+    let mut delete_content = tx.prepare_cached("DELETE FROM contents WHERE content_hash = ?1")
+        .map_err(|e| e.to_string())?;
+    for hash in orphan_hashes {
+        delete_vectors.execute([&hash]).map_err(|e| e.to_string())?;
+        delete_chunks.execute([&hash]).map_err(|e| e.to_string())?;
+        delete_content.execute([&hash]).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -1193,14 +1201,11 @@ fn finalize_fts_hits(
         let mut diverse = Vec::with_capacity(limit);
         let mut overflow = Vec::new();
         for hit in results {
-            let base_path = hit.rel_path.strip_suffix("#annotations").unwrap_or(&hit.rel_path);
-            let count = per_file.get(base_path).copied().unwrap_or(0);
-            if count < MAX_SHORT_HITS_PER_FILE {
-                if let Some(slot) = per_file.get_mut(base_path) {
-                    *slot = count + 1;
-                } else {
-                    per_file.insert(base_path.to_owned(), 1);
-                }
+            // Keep annotation hits in the candidate pool even when their PDF body fills
+            // its quota. The response formatter still controls the final per-file limit.
+            let count = per_file.entry(hit.rel_path.clone()).or_insert(0);
+            if *count < MAX_SHORT_HITS_PER_FILE {
+                *count += 1;
                 diverse.push(hit);
                 if diverse.len() >= limit {
                     break;
@@ -1300,7 +1305,7 @@ mod tests {
                 Some(&chunks),
             )
             .unwrap();
-        let pending = store.pending_vector_chunks(10).unwrap();
+        let pending = store.pending_vector_chunks(0, 10).unwrap();
         assert_eq!(pending.len(), 1);
         store
             .insert_chunk_vectors(&[(pending[0].chunk_id, vec![1.0, 0.0, 0.0, 0.0])])
@@ -1320,6 +1325,69 @@ mod tests {
             .unwrap();
         assert_eq!(vec_hits.len(), 1);
         assert_eq!(vec_hits[0].rel_path, "notes/opt.md");
+    }
+
+    #[test]
+    fn filtered_retrieval_finds_matches_outside_global_top_k() {
+        let dir = tempdir().unwrap();
+        let mut store = RagStore::open(&dir.path().join("rag.sqlite3"), "test-embed", 2).unwrap();
+        let outside_chunks: Vec<_> = (0..201)
+            .map(|seq| ChunkDraft {
+                seq,
+                heading_path: "outside.md".into(),
+                line_start: None,
+                line_end: None,
+                page_num: None,
+                chunk_text: "gradient".into(),
+            })
+            .collect();
+        let target = ChunkDraft {
+            seq: 0,
+            heading_path: "notes/target.md".into(),
+            line_start: None,
+            line_end: None,
+            page_num: None,
+            chunk_text: "gradient alpha beta gamma delta epsilon zeta".into(),
+        };
+        store.upsert_document("outside.md", "md", "hash-outside", 1, 8, "indexed", Some("gradient"), Some("source"), Some(&outside_chunks)).unwrap();
+        store.upsert_document("notes/target.md", "md", "hash-inside", 1, 43, "indexed", Some(&target.chunk_text), Some("source"), Some(std::slice::from_ref(&target))).unwrap();
+        let vectors: Vec<_> = store.pending_vector_chunks(0, 202).unwrap().into_iter()
+            .zip(vec![vec![1.0, 0.0]; 201].into_iter().chain([vec![0.0, 1.0]]))
+            .map(|(chunk, vector)| (chunk.chunk_id, vector))
+            .collect();
+        store.insert_chunk_vectors(&vectors).unwrap();
+
+        let lex = store.search_fts("gradient", None, Some("notes"), &[], 1).unwrap();
+        assert_eq!(lex.first().map(|hit| hit.rel_path.as_str()), Some("notes/target.md"));
+        let allowed = HashSet::from(["notes/target.md".into()]);
+        let semantic = store.search_vec(&[1.0, 0.0], Some(&allowed), None, &[".md".into()], 1).unwrap();
+        assert_eq!(semantic.first().map(|hit| hit.rel_path.as_str()), Some("notes/target.md"));
+    }
+
+    #[test]
+    fn changed_document_releases_old_vectors_without_removing_its_path() {
+        let dir = tempdir().unwrap();
+        let mut store = RagStore::open(&dir.path().join("rag.sqlite3"), "test-embed", 2).unwrap();
+        let mut draft = ChunkDraft {
+            seq: 0,
+            heading_path: "note.md".into(),
+            line_start: None,
+            line_end: None,
+            page_num: None,
+            chunk_text: "old content".into(),
+        };
+        store.upsert_document("note.md", "md", "hash-old", 1, 11, "indexed", Some("old content"), Some("source"), Some(std::slice::from_ref(&draft))).unwrap();
+        let old_chunk_id = store.pending_vector_chunks(0, 1).unwrap()[0].chunk_id;
+        store.insert_chunk_vectors(&[(old_chunk_id, vec![1.0, 0.0])]).unwrap();
+
+        draft.chunk_text = "replacement content".into();
+        store.upsert_document("note.md", "md", "hash-new", 2, 19, "indexed", Some("replacement content"), Some("source"), Some(&[draft])).unwrap();
+        assert_eq!(store.deactivate_missing(&HashSet::from(["note.md".into()])).unwrap(), 0);
+        let new_chunk_id = store.pending_vector_chunks(0, 1).unwrap()[0].chunk_id;
+        store.insert_chunk_vectors(&[(new_chunk_id, vec![0.0, 1.0])]).unwrap();
+
+        let nearest = store.search_vec(&[1.0, 0.0], None, None, &[], 1).unwrap();
+        assert_eq!(nearest.first().map(|hit| hit.chunk_text.as_str()), Some("replacement content"));
     }
 
     #[test]
@@ -1349,7 +1417,7 @@ mod tests {
                 Some(&[draft]),
             )
             .unwrap();
-        let pending = store.pending_vector_chunks(1).unwrap();
+        let pending = store.pending_vector_chunks(0, 1).unwrap();
         store
             .insert_chunk_vectors(&[(pending[0].chunk_id, vec![1.0, 0.0, 0.0, 0.0])])
             .unwrap();
@@ -1365,7 +1433,7 @@ mod tests {
             (stats.indexed_files, stats.total_chunks, stats.vector_chunks),
             (0, 0, 0)
         );
-        assert!(!store.has_content("character-index-hash").unwrap());
+        assert!(store.indexed_content_status("character-index-hash").unwrap().is_none());
     }
 
     #[test]

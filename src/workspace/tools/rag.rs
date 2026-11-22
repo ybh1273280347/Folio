@@ -1104,10 +1104,9 @@ impl Workspace {
                         &params.r#match,
                     )?;
 
-                    let stats = store
-                        .stats()
-                        .map_err(|e| RagError::new("store_error", e))?;
-                    if stats.indexed_files == 0 && !eligible_paths.is_empty() {
+                    if !eligible_paths.is_empty()
+                        && !store.has_indexed_documents().map_err(|e| RagError::new("store_error", e))?
+                    {
                         sync_project(
                             &root,
                             &eligible_paths,
