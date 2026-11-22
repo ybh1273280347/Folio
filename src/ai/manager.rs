@@ -136,15 +136,15 @@ impl AiPane {
         }
         let restoring = store.projects.keys().cloned().collect();
         let poll = cx.spawn(async move |this, cx| {
+            let mut interval = Duration::from_millis(35);
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(35))
-                    .await;
-                if this
-                    .update(cx, |pane: &mut Self, cx| pane.poll(cx))
-                    .is_err()
-                {
-                    break;
+                cx.background_executor().timer(interval).await;
+                match this.update(cx, |pane: &mut Self, cx| {
+                    pane.poll(cx);
+                    interval = pane.poll_interval();
+                }) {
+                    Ok(()) => {}
+                    Err(_) => break,
                 }
             }
         });
@@ -506,6 +506,17 @@ impl AiPane {
         if let Some(client) = self.controls.get(&request.project_key) {
             let _ = client.send(json!({ "type": "workspace_tool_response", "channel": request.channel,
                 "id": request.id, "sessionId": request.session_id, "result": result }));
+        }
+    }
+
+    fn poll_interval(&self) -> Duration {
+        if self.sessions.values().any(|tab| {
+            let session = tab.state.borrow();
+            session.is_streaming || session.pending_ui.is_some()
+        }) {
+            Duration::from_millis(35)
+        } else {
+            Duration::from_millis(70)
         }
     }
     pub fn dismiss_history(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
