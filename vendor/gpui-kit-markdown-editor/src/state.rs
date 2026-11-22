@@ -992,20 +992,19 @@ impl BlockEditorState {
         let vis_top = cull.visible.map(|(top, _)| top);
         let mut active = None;
         let mut any_heading = false;
-        for (ix, block) in self
-            .model
-            .document()
-            .leaves()
-            .filter(|block| matches!(block.kind(), BlockKind::Heading { .. }))
-            .enumerate()
-        {
+        let mut heading_index = 0;
+        for block in self.model.doc.leaves().iter().filter(|id| {
+            matches!(self.model.doc.kind(**id), Some(super::kind::BlockKindData::Heading { .. }))
+        }) {
+            let ix = heading_index;
+            heading_index += 1;
             any_heading = true;
             let passed = if let (Some(&leaf_ix), Some(vp_top)) =
-                (frame.index.get(&block.id()), viewport_top)
+                (frame.index.get(block), viewport_top)
             {
                 frame.leaves[leaf_ix].bounds().top() <= vp_top + trigger_offset
             } else if let (Some(&unit_ix), Some(local_top)) =
-                (cull.index.unit_of.get(&block.id()), vis_top)
+                (cull.index.unit_of.get(block), vis_top)
             {
                 cull.index.prefix(unit_ix) <= local_top + trigger_offset
             } else {
@@ -1399,13 +1398,17 @@ impl BlockEditorState {
     ) -> Option<(BlockId, BlockKind, Bounds<Pixels>)> {
         use gpui::px;
         let blocks = self.top_level_bounds();
-        let chosen = if let Some(at) = mouse
-            && let Some((_, id, b)) = blocks.iter().find(|(_, _, b)| {
+        let hovered = mouse.and_then(|at| {
+            let ix = blocks.partition_point(|(_, _, bounds)| bounds.bottom() + px(4.) < at.y);
+            blocks.get(ix).filter(|(_, _, b)| {
                 at.y >= b.top() - px(4.)
                     && at.y <= b.bottom() + px(4.)
                     && at.x >= b.left() - px(88.)
                     && at.x <= b.right() + px(16.)
             })
+        });
+        let chosen = if mouse.is_some()
+            && let Some((_, id, b)) = hovered
         {
             Some((*id, *b))
         } else if let Some(caret) = self.model.caret() {
@@ -2800,21 +2803,27 @@ impl BlockEditorState {
         let frame = self.frame.borrow();
         let children = doc.children(doc.root);
         let mut out: Vec<(usize, BlockId, Bounds<Pixels>)> = Vec::new();
+        let mut child_ix = 0;
         for leaf in &frame.leaves {
-            let path = doc.path(leaf.info.block);
-            let Some(top) = path.get(1).copied() else {
-                continue;
-            };
-            let Some(ix) = children.iter().position(|c| *c == top) else {
+            let mut top = leaf.info.block;
+            while let Some(parent) = doc.parent(top) {
+                if parent == doc.root {
+                    break;
+                }
+                top = parent;
+            }
+            while child_ix < children.len() && children[child_ix] != top {
+                child_ix += 1;
+            }
+            let Some(&top) = children.get(child_ix) else {
                 continue;
             };
             let b = leaf.bounds();
-            match out.iter_mut().find(|(_, id, _)| *id == top) {
-                Some(entry) => entry.2 = entry.2.union(&b),
-                None => out.push((ix, top, b)),
+            match out.last_mut() {
+                Some((last_ix, _, bounds)) if *last_ix == child_ix => *bounds = bounds.union(&b),
+                _ => out.push((child_ix, top, b)),
             }
         }
-        out.sort_by_key(|(ix, _, _)| *ix);
         out
     }
 
