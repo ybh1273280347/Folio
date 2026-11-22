@@ -271,6 +271,9 @@ features = [
     "Win32_UI_WindowsAndMessaging",
 ]
 
+[lints.rust]
+warnings = "allow"
+
 [lints.clippy]
 almost_complete_range = "allow"
 arc_with_non_send_sync = "allow"
