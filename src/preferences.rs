@@ -588,6 +588,11 @@ impl Preferences {
             error: None,
         }
     }
+    pub fn select_api_tab(&mut self, cx: &mut Context<Self>) {
+        self.tab = PreferencesTab::Api;
+        cx.notify();
+    }
+
     pub fn sync(&mut self, settings: &AppSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.published_settings.clone_from(settings);
         self.settings = settings.clone();
