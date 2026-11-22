@@ -927,7 +927,7 @@ impl PdfView {
         // A note→PDF jump that arrived before the document loaded: apply it now.
         #[cfg(feature = "markup")]
         if let Some(p) = self.pending_reveal.take() {
-            self.reveal_highlight(p, cx);
+            self.flash_to_page(p, cx);
         }
     }
 
@@ -1757,6 +1757,31 @@ impl PdfView {
         cx.notify();
     }
 
+    pub fn flash_to_page(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.dims.is_empty() {
+            self.pending_reveal = Some(index);
+            return;
+        }
+        let i = index.min(self.dims.len() - 1);
+        self.scroll.scroll_to_top_of_item(i);
+        self.flash = Some(i);
+        self.flash_gen = self.flash_gen.wrapping_add(1);
+        let token = self.flash_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1400))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.flash_gen == token {
+                    this.flash = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// Toggle the table-of-contents (outline) panel.
     pub fn toggle_toc(&mut self, cx: &mut Context<Self>) {
         self.toc_open = !self.toc_open;
@@ -2485,6 +2510,19 @@ impl Render for PdfView {
                     );
                 }
             }
+            #[cfg(feature = "markup")]
+            let slot = if self.flash == Some(i) {
+                slot.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .border_2()
+                        .border_color(hsla(0.14, 0.92, 0.50, 0.78))
+                        .bg(hsla(0.14, 0.92, 0.55, 0.05)),
+                )
+            } else {
+                slot
+            };
             slots.push(slot.into_any_element());
         }
 

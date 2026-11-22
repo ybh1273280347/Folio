@@ -170,7 +170,6 @@ impl Workspace {
     pub(in crate::workspace) fn refresh_kb_snapshot(&mut self, cx: &mut Context<Self>) {
         let Some((project_key, root)) = self.active_rag_root() else {
             self.right_panel.kb.stats = None;
-            self.right_panel.kb.embed_ready = None;
             cx.notify();
             return;
         };
@@ -180,34 +179,25 @@ impl Workspace {
         self.right_panel.kb.accurate_configured = accurate_configured;
         if !db_path.exists() {
             self.right_panel.kb.stats = None;
-            self.right_panel.kb.embed_ready = None;
             cx.notify();
             return;
         }
 
         let task = cx.background_spawn(async move {
-            let live = EmbeddingClient::from_config(&config)
-                .ok()
-                .is_some_and(|client| client.health_check());
-            let auto_ready = config.auto_manage_server
-                && !config.embed_model_path.trim().is_empty()
-                && std::path::Path::new(config.embed_model_path.trim()).is_file();
-            let embed_ready = live || auto_ready;
             let stats = RagStore::open(&db_path, &config.embed_model, config.embed_dim)
                 .and_then(|store| store.stats())
                 .ok();
-            (stats, embed_ready, accurate_configured)
+            (stats, accurate_configured)
         });
 
         cx.spawn(async move |this, cx| {
-            let (stats, embed_ready, accurate_configured) = task.await;
+            let (stats, accurate_configured) = task.await;
             let _ = this.update(cx, |app, cx| {
                 if app
                     .active_rag_root()
                     .is_some_and(|(active_key, _)| active_key == project_key)
                 {
                     app.right_panel.kb.accurate_configured = accurate_configured;
-                    app.right_panel.kb.embed_ready = Some(embed_ready);
                     if let Some(stats) = stats {
                         app.right_panel.kb.apply_stats(stats);
                     }
@@ -248,7 +238,7 @@ impl Workspace {
             let embed_client = EmbeddingClient::from_config(&config).ok();
             let mut store = RagStore::open(&db_path, &config.embed_model, config.embed_dim)
                 .map_err(|e| RagError::new("store_error", e))?;
-            let report = sync_project(
+            let _report = sync_project(
                 &root,
                 &eligible_paths,
                 &mut store,
@@ -262,7 +252,7 @@ impl Workspace {
                 &cancelled,
             )?;
             let stats = store.stats().map_err(|e| RagError::new("store_error", e))?;
-            Ok::<_, RagError>((stats, report.embed_server_ready))
+            Ok::<_, RagError>(stats)
         });
 
         cx.spawn(async move |this, cx| {
@@ -281,8 +271,7 @@ impl Workspace {
                     .is_some_and(|(active_key, _)| active_key == project_key)
                 {
                     match outcome {
-                        Ok((stats, embed_ready)) => {
-                            app.right_panel.kb.embed_ready = Some(embed_ready);
+                        Ok(stats) => {
                             app.right_panel.kb.apply_stats(stats);
                             app.right_panel.kb.sync_error = None;
                         }
@@ -345,26 +334,18 @@ impl Workspace {
             .collect();
         let cancel = Arc::new(AtomicBool::new(false));
         let req = SearchRequest {
-            searches: vec![
-                crate::rag::SubSearch {
-                    kind: crate::rag::SubSearchType::Vec,
-                    query: query.clone(),
-                },
-                crate::rag::SubSearch {
-                    kind: crate::rag::SubSearchType::Lex,
-                    query: query.clone(),
-                },
-            ],
-            intent: Some(query),
-            rerank: None,
+            searches: vec![crate::rag::SubSearch {
+                kind: crate::rag::SubSearchType::Lex,
+                query: query.clone(),
+            }],
+            intent: None,
+            rerank: Some(false),
             extensions: Vec::new(),
             under_directory: None,
-            limit: 12,
+            limit: 20,
         };
 
         let task = cx.background_spawn(async move {
-            let embed_client = EmbeddingClient::from_config(&config).ok();
-            let rerank_client = RerankClient::from_config(&config).ok();
             let mut store = RagStore::open(&db_path, &config.embed_model, config.embed_dim)
                 .map_err(|e| RagError::new("store_error", e))?;
             let response = search_project(
@@ -373,9 +354,9 @@ impl Workspace {
                 &dirty_docs,
                 None,
                 SearchServices {
-                    embed_client: embed_client.as_ref(),
-                    rerank_client: rerank_client.as_ref(),
-                    rerank_model: &config.rerank_model,
+                    embed_client: None,
+                    rerank_client: None,
+                    rerank_model: "",
                 },
                 &cancel,
             )?;
@@ -396,12 +377,7 @@ impl Workspace {
                 app.right_panel.kb.searching = false;
                 match outcome {
                     Ok((resp, stats)) => {
-                        let used_vec = resp.degraded_reason.is_none()
-                            && (resp.mode_used.starts_with("hybrid")
-                                || resp.mode_used.starts_with("semantic"));
-                        app.right_panel.kb.embed_ready = Some(used_vec);
                         app.right_panel.kb.results = resp.results;
-                        app.right_panel.kb.degraded_reason = resp.degraded_reason;
                         app.right_panel.kb.search_error = None;
                         if let Some(stats) = stats {
                             app.right_panel.kb.apply_stats(stats);
@@ -433,18 +409,22 @@ impl Workspace {
     pub(in crate::workspace) fn open_kb_result(
         &mut self,
         rel_path: &str,
+        line_1based: Option<usize>,
+        page_1based: Option<usize>,
+        heading: Option<&str>,
+        snippet: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((_, root)) = self.active_rag_root() else {
-            return;
-        };
-        if self.right_panel.maximized {
-            self.right_panel.maximized = false;
-        }
-        let clean = rel_path.strip_suffix("#annotations").unwrap_or(rel_path);
-        let abs = root.join(clean.replace('/', "\\"));
-        self.open_path_from_ai(&abs, window, cx);
+        self.open_kb_location(
+            rel_path,
+            line_1based,
+            page_1based,
+            heading,
+            snippet,
+            window,
+            cx,
+        );
     }
 
     pub(in crate::workspace) fn open_kb_api_settings(

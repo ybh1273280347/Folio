@@ -28,7 +28,7 @@ pub const KB_OPEN_PROJECT_HINT: BiText = BiText::new(
 pub const KB_ENABLE_TITLE: BiText = BiText::new("项目知识库", "Project Knowledge Base");
 pub const KB_ENABLE_DESC: BiText = BiText::new("本地检索笔记与 PDF", "Search notes & PDFs locally");
 pub const KB_ENABLE_BTN: BiText = BiText::new("开启知识库", "Enable");
-pub const KB_SEARCH_PLACEHOLDER: BiText = BiText::new("搜索笔记、公式或 PDF…", "Search notes, formulas, PDFs…");
+pub const KB_SEARCH_PLACEHOLDER: BiText = BiText::new("搜索笔记或 PDF…", "Search notes or PDFs…");
 pub const KB_SEARCHING: BiText = BiText::new("检索中…", "Searching…");
 pub const KB_NO_RESULTS: BiText = BiText::new("未找到相关内容", "No matching results");
 pub const KB_EMPTY_HINT: BiText = BiText::new("回车检索项目文档", "Press Enter to search");
@@ -38,15 +38,29 @@ pub const KB_MENU_REBUILD: BiText = BiText::new("重新整理索引", "Rebuild i
 pub const KB_MENU_ACCURATE_OCR: BiText = BiText::new("深度解析：仅扫描件", "Accurate: Scan only");
 pub const KB_MENU_ACCURATE_ALL: BiText = BiText::new("深度解析：全部 PDF", "Accurate: All PDFs");
 pub const KB_MENU_DISABLE: BiText = BiText::new("停用知识库", "Disable Knowledge Base");
-pub const KB_KEYWORD_ONLY: BiText = BiText::new("仅关键词", "Keyword only");
-pub const KB_KEYWORD_ONLY_TIP: BiText = BiText::new(
-    "语义服务未连接，点击前往设置检查",
-    "Semantic service unavailable, click to check settings",
-);
+pub const KB_FILTER_ALL: BiText = BiText::new("全部", "All");
+pub const KB_FILTER_NOTES: BiText = BiText::new("笔记", "Notes");
+pub const KB_FILTER_PDF: BiText = BiText::new("PDF", "PDF");
+pub const KB_COLLAPSE_HITS: BiText = BiText::new("收起", "Collapse");
 pub const KB_DRAFT_BADGE: BiText = BiText::new("草稿", "Draft");
 pub const KB_ANNOT_BADGE: BiText = BiText::new("批注", "Note");
 pub const KB_ACCURATE_BADGE: BiText = BiText::new("精修", "Accurate");
 pub const KB_OPEN_SETTINGS: BiText = BiText::new("打开设置", "Open settings");
+
+pub fn kb_search_summary(hits: usize, docs: usize, truncated: bool) -> String {
+    let suffix = if truncated { "+" } else { "" };
+    match locale() {
+        Locale::ZhCn => format!("{hits}{suffix} 条 · {docs} 篇"),
+        Locale::En => format!("{hits}{suffix} hits · {docs} docs"),
+    }
+}
+
+pub fn kb_more_hits(count: usize) -> String {
+    match locale() {
+        Locale::ZhCn => format!("还有 {count} 处匹配"),
+        Locale::En => format!("+{count} more"),
+    }
+}
 
 pub fn kb_doc_count(count: usize) -> String {
     match locale() {

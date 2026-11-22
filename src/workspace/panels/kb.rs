@@ -1,22 +1,32 @@
-//! Right-panel Knowledge Base view: human search, light status, and explicit Accurate PDF refinement.
+//! Right-panel Knowledge Base view: fast keyword search, book-style result cards,
+//! jump-to-location with temporary highlight, and explicit PaddleOCR refinement.
 
 use super::*;
 use crate::i18n::right_panel as rp;
-use crate::rag::AccuratePdfMode;
 use crate::rag::store::StoreStats;
+use crate::rag::{AccuratePdfMode, SearchHit, pipeline::clean_heading_text};
 use gpui_kit::base::Disableable;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::time::Duration;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::workspace) enum KbFilter {
+    #[default]
+    All,
+    Notes,
+    Pdf,
+}
 
 pub(in crate::workspace) struct KbPanelState {
     pub(in crate::workspace) search: Entity<InputState>,
     pub(in crate::workspace) last_query: String,
     pub(in crate::workspace) searching: bool,
-    pub(in crate::workspace) results: Vec<crate::rag::SearchHit>,
-    pub(in crate::workspace) degraded_reason: Option<String>,
+    pub(in crate::workspace) results: Vec<SearchHit>,
+    pub(in crate::workspace) filter: KbFilter,
+    pub(in crate::workspace) expanded_files: HashSet<String>,
     pub(in crate::workspace) search_error: Option<String>,
     pub(in crate::workspace) sync_error: Option<String>,
     pub(in crate::workspace) stats: Option<StoreStats>,
-    pub(in crate::workspace) embed_ready: Option<bool>,
     pub(in crate::workspace) accurate_configured: bool,
     pub(in crate::workspace) selected_ocr: BTreeSet<String>,
     known_ocr: HashSet<String>,
@@ -55,11 +65,11 @@ impl KbPanelState {
             last_query: String::new(),
             searching: false,
             results: Vec::new(),
-            degraded_reason: None,
+            filter: KbFilter::All,
+            expanded_files: HashSet::new(),
             search_error: None,
             sync_error: None,
             stats: None,
-            embed_ready: None,
             accurate_configured: false,
             selected_ocr: BTreeSet::new(),
             known_ocr: HashSet::new(),
@@ -82,16 +92,16 @@ impl KbPanelState {
         self.last_query.clear();
         self.searching = false;
         self.results.clear();
-        self.degraded_reason = None;
+        self.expanded_files.clear();
         self.search_error = None;
     }
 
     pub(in crate::workspace) fn reset_for_project(&mut self) {
         self.pending_search_clear = true;
         self.clear_search_results();
+        self.filter = KbFilter::All;
         self.sync_error = None;
         self.stats = None;
-        self.embed_ready = None;
         self.selected_ocr.clear();
         self.known_ocr.clear();
     }
@@ -120,6 +130,165 @@ impl KbPanelState {
             input.set_placeholder(rp::KB_SEARCH_PLACEHOLDER.get(), window, cx);
         });
     }
+}
+
+struct FileHitGroup<'a> {
+    clean_path: &'a str,
+    file_name: String,
+    dir_hint: Option<String>,
+    is_pdf: bool,
+    is_accurate: bool,
+    hits: Vec<&'a SearchHit>,
+}
+
+fn group_hits_by_file<'a>(hits: &'a [SearchHit], filter: KbFilter) -> Vec<FileHitGroup<'a>> {
+    let mut order: Vec<String> = Vec::new();
+    let mut by_file: BTreeMap<String, Vec<&'a SearchHit>> = BTreeMap::new();
+    for hit in hits {
+        let clean = hit.path.strip_suffix("#annotations").unwrap_or(&hit.path);
+        let is_pdf = clean.to_ascii_lowercase().ends_with(".pdf");
+        let keep = match filter {
+            KbFilter::All => true,
+            KbFilter::Notes => !is_pdf,
+            KbFilter::Pdf => is_pdf,
+        };
+        if !keep {
+            continue;
+        }
+        if !by_file.contains_key(clean) {
+            order.push(clean.to_owned());
+        }
+        by_file.entry(clean.to_owned()).or_default().push(hit);
+    }
+
+    order
+        .into_iter()
+        .filter_map(|clean_key| {
+            let file_hits = by_file.remove(&clean_key)?;
+            let first = file_hits[0];
+            let clean_path = first.path.strip_suffix("#annotations").unwrap_or(&first.path);
+            let file_name = clean_path.rsplit('/').next().unwrap_or(clean_path).to_owned();
+            let dir_hint = middle_ellipsis_dir(clean_path);
+            let is_pdf = clean_path.to_ascii_lowercase().ends_with(".pdf");
+            let is_accurate = file_hits
+                .iter()
+                .any(|h| matches!(h.parse_tier.as_str(), "accurate" | "mineru"));
+            Some(FileHitGroup {
+                clean_path,
+                file_name,
+                dir_hint,
+                is_pdf,
+                is_accurate,
+                hits: file_hits,
+            })
+        })
+        .collect()
+}
+
+fn middle_ellipsis_dir(rel_path: &str) -> Option<String> {
+    let (dir, _) = rel_path.rsplit_once('/')?;
+    if dir.is_empty() {
+        return None;
+    }
+    if dir.chars().count() <= 24 {
+        return Some(dir.to_owned());
+    }
+    let parts: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.len() >= 3 {
+        return Some(format!("{}/…/{}", parts[0], parts[parts.len() - 1]));
+    }
+    let head: String = dir.chars().take(10).collect();
+    let tail: String = dir
+        .chars()
+        .rev()
+        .take(10)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    Some(format!("{head}…{tail}"))
+}
+
+fn section_subtitle(hit: &SearchHit, file_name: &str) -> Option<String> {
+    let raw = hit.heading.rsplit(" > ").next()?.trim();
+    let cleaned = clean_heading_text(raw);
+    if cleaned.is_empty() || cleaned == file_name || cleaned == hit.path {
+        return None;
+    }
+    if let Some(page) = hit.page
+        && cleaned == format!("p.{page}")
+    {
+        return None;
+    }
+    Some(cleaned)
+}
+
+fn build_highlighted_text(
+    text: &str,
+    query: &str,
+    base_style: TextStyle,
+    highlight_bg: Hsla,
+    highlight_fg: Hsla,
+) -> StyledText {
+    let tokens: Vec<String> = query
+        .split_whitespace()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if tokens.is_empty() || text.is_empty() {
+        return StyledText::new(SharedString::from(text.to_owned()))
+            .with_runs(vec![base_style.to_run(text.len())]);
+    }
+
+    let lower = text.to_ascii_lowercase();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for tok in &tokens {
+        let mut cursor = 0usize;
+        while let Some(pos) = lower[cursor..].find(tok.as_str()) {
+            let start = cursor + pos;
+            let end = start + tok.len();
+            if text.is_char_boundary(start) && text.is_char_boundary(end) {
+                ranges.push((start, end));
+            }
+            cursor = end.max(cursor + 1);
+        }
+    }
+    if ranges.is_empty() {
+        return StyledText::new(SharedString::from(text.to_owned()))
+            .with_runs(vec![base_style.to_run(text.len())]);
+    }
+
+    ranges.sort_by_key(|r| r.0);
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (s, e) in ranges {
+        if let Some(last) = merged.last_mut()
+            && s <= last.1
+        {
+            last.1 = last.1.max(e);
+        } else {
+            merged.push((s, e));
+        }
+    }
+
+    let hi_style = HighlightStyle {
+        background_color: Some(highlight_bg),
+        color: Some(highlight_fg),
+        ..Default::default()
+    };
+    let mut runs = Vec::with_capacity(merged.len() * 2 + 1);
+    let mut pos = 0usize;
+    for (s, e) in merged {
+        if s > pos {
+            runs.push(base_style.clone().to_run(s - pos));
+        }
+        runs.push(base_style.clone().highlight(hi_style).to_run(e - s));
+        pos = e;
+    }
+    if pos < text.len() {
+        runs.push(base_style.to_run(text.len() - pos));
+    }
+
+    StyledText::new(SharedString::from(text.to_owned())).with_runs(runs)
 }
 
 fn fg_alpha(hex: u32, alpha: f32) -> Rgba {
@@ -214,23 +383,44 @@ impl Workspace {
                     .flex_shrink_0()
                     .when(is_project && enabled, |bar| {
                         let app_menu = menu_app.clone();
+                        let sync_icon = if syncing {
+                            crate::ui::icon(IconName::RefreshCw)
+                                .text_color(gpui_kit::rgb(palette.accent))
+                                .with_animation(
+                                    "kb-header-sync-spin",
+                                    Animation::new(Duration::from_millis(900)).repeat(),
+                                    |icon, t| {
+                                        icon.rotate(gpui::radians(t * std::f32::consts::TAU))
+                                    },
+                                )
+                                .into_any_element()
+                        } else {
+                            crate::ui::icon(IconName::RefreshCw).into_any_element()
+                        };
                         bar.child(
-                            Button::new("kb-sync-now")
-                                .ghost()
-                                .compact()
-                                .with_size(px(16.))
-                                .w(px(22.))
-                                .h(px(22.))
-                                .disabled(syncing)
-                                .icon(crate::ui::icon(IconName::RefreshCw))
-                                .tooltip(if syncing {
-                                    rp::BADGE_SYNCING.get()
-                                } else {
-                                    rp::KB_SYNC_TOOLTIP.get()
+                            div()
+                                .id("kb-sync-now")
+                                .size(px(22.))
+                                .rounded(px(6.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .when(!syncing, |el| {
+                                    el.cursor_pointer()
+                                        .hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
+                                        .on_click(cx.listener(|app, _, _, cx| {
+                                            app.run_kb_sync(false, None, Vec::new(), cx);
+                                        }))
                                 })
-                                .on_click(cx.listener(|app, _, _, cx| {
-                                    app.run_kb_sync(false, None, Vec::new(), cx);
-                                })),
+                                .tooltip(move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(if syncing {
+                                        rp::BADGE_SYNCING.get()
+                                    } else {
+                                        rp::KB_SYNC_TOOLTIP.get()
+                                    })
+                                    .build(window, cx)
+                                })
+                                .child(sync_icon),
                         )
                         .child(
                             Button::new("kb-more-menu")
@@ -327,6 +517,7 @@ impl Workspace {
                 rp::KB_OPEN_PROJECT_HINT.get(),
                 None,
                 None,
+                false,
             )
         } else if !enabled && !syncing {
             self.render_kb_centered_state(
@@ -346,6 +537,7 @@ impl Workspace {
                         }))
                         .into_any_element(),
                 ),
+                false,
             )
         } else {
             self.render_kb_active_body(window, cx)
@@ -372,8 +564,28 @@ impl Workspace {
         title: &'static str,
         subtitle: Option<&'static str>,
         action: Option<AnyElement>,
+        spin: bool,
     ) -> AnyElement {
         let palette = self.settings.theme.palette;
+        let icon_el = if spin {
+            crate::ui::icon(icon)
+                .w(px(18.))
+                .h(px(18.))
+                .text_color(gpui_kit::rgb(palette.accent))
+                .with_animation(
+                    "kb-center-spin",
+                    Animation::new(Duration::from_millis(900)).repeat(),
+                    |el, t| el.rotate(gpui::radians(t * std::f32::consts::TAU)),
+                )
+                .into_any_element()
+        } else {
+            crate::ui::icon(icon)
+                .w(px(18.))
+                .h(px(18.))
+                .text_color(gpui_kit::rgb(palette.muted))
+                .into_any_element()
+        };
+
         div()
             .flex_1()
             .min_h_0()
@@ -391,12 +603,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        crate::ui::icon(icon)
-                            .w(px(18.))
-                            .h(px(18.))
-                            .text_color(gpui_kit::rgb(palette.muted)),
-                    ),
+                    .child(icon_el),
             )
             .child(
                 div()
@@ -436,6 +643,27 @@ impl Workspace {
         let outer_halo = fg_alpha(palette.accent, 0.14);
         let hover_bg = gpui_kit::rgb(palette.hover);
 
+        let search_prefix = if kb.searching {
+            crate::ui::icon(IconName::RefreshCw)
+                .w(px(14.))
+                .h(px(14.))
+                .flex_shrink_0()
+                .text_color(gpui_kit::rgb(palette.accent))
+                .with_animation(
+                    "kb-search-spin",
+                    Animation::new(Duration::from_millis(850)).repeat(),
+                    |el, t| el.rotate(gpui::radians(t * std::f32::consts::TAU)),
+                )
+                .into_any_element()
+        } else {
+            crate::ui::icon(IconName::Search)
+                .w(px(14.))
+                .h(px(14.))
+                .flex_shrink_0()
+                .text_color(gpui_kit::rgb(palette.muted))
+                .into_any_element()
+        };
+
         let search_bar = div()
             .w_full()
             .rounded_full()
@@ -452,13 +680,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(
-                        crate::ui::icon(IconName::Search)
-                            .w(px(14.))
-                            .h(px(14.))
-                            .flex_shrink_0()
-                            .text_color(gpui_kit::rgb(palette.muted)),
-                    )
+                    .child(search_prefix)
                     .child(
                         Input::new(&kb.search)
                             .appearance(false)
@@ -490,69 +712,101 @@ impl Workspace {
                     }),
             );
 
-        let doc_count = kb.stats.as_ref().map_or(0, |s| s.indexed_files);
-        let keyword_only = kb.embed_ready == Some(false)
-            || (kb.degraded_reason.is_some() && !kb.results.is_empty());
+        let groups = group_hits_by_file(&kb.results, kb.filter);
+        let filtered_hit_count: usize = groups.iter().map(|g| g.hits.len()).sum();
+        let filtered_doc_count = groups.len();
+        let total_doc_count = kb.stats.as_ref().map_or(0, |s| s.indexed_files);
+
+        let chip = |id: &'static str, filter_val: KbFilter, icon: Option<IconName>, label: &'static str| {
+            let active = kb.filter == filter_val;
+            div()
+                .id(id)
+                .h(px(22.))
+                .px_2()
+                .rounded_full()
+                .flex()
+                .items_center()
+                .gap_1()
+                .text_size(px(11.))
+                .cursor_pointer()
+                .when(active, |el| {
+                    el.bg(fg_alpha(palette.accent, 0.14))
+                        .text_color(gpui_kit::rgb(palette.accent))
+                        .font_medium()
+                })
+                .when(!active, |el| {
+                    el.text_color(gpui_kit::rgb(palette.muted))
+                        .hover(move |s| s.bg(hover_bg).text_color(gpui_kit::rgb(palette.text)))
+                })
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    app.right_panel.kb.filter = filter_val;
+                    cx.notify();
+                }))
+                .when_some(icon, |el, ic| {
+                    el.child(crate::ui::icon(ic).w(px(11.)).h(px(11.)))
+                })
+                .child(label)
+        };
+
+        let status_text = if kb.searching {
+            rp::KB_SEARCHING.get().to_owned()
+        } else if has_submitted_search {
+            rp::kb_search_summary(filtered_hit_count, filtered_doc_count, kb.results.len() >= 20)
+        } else if syncing {
+            rp::BADGE_SYNCING.get().to_owned()
+        } else {
+            rp::kb_doc_count(total_doc_count)
+        };
 
         let status_strip = div()
             .flex()
             .items_center()
             .justify_between()
             .gap_2()
-            .px_1()
-            .text_size(px(11.5))
-            .text_color(gpui_kit::rgb(palette.muted))
+            .px_0p5()
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(
-                                crate::ui::icon(if syncing {
-                                    IconName::RefreshCw
-                                } else {
-                                    IconName::FileText
-                                })
-                                .w(px(12.))
-                                .h(px(12.))
-                                .text_color(gpui_kit::rgb(if syncing {
-                                    palette.accent
-                                } else {
-                                    palette.muted
-                                })),
-                            )
-                            .child(if syncing {
-                                rp::BADGE_SYNCING.get().to_owned()
-                            } else {
-                                rp::kb_doc_count(doc_count)
-                            }),
-                    ),
+                    .gap_1()
+                    .when(has_submitted_search, |row| {
+                        row.child(chip("kb-filter-all", KbFilter::All, None, rp::KB_FILTER_ALL.get()))
+                            .child(chip(
+                                "kb-filter-notes",
+                                KbFilter::Notes,
+                                Some(IconName::FileText),
+                                rp::KB_FILTER_NOTES.get(),
+                            ))
+                            .child(chip(
+                                "kb-filter-pdf",
+                                KbFilter::Pdf,
+                                Some(IconName::Library),
+                                rp::KB_FILTER_PDF.get(),
+                            ))
+                    }),
             )
-            .when(keyword_only, |row| {
-                let tip = kb
-                    .degraded_reason
-                    .clone()
-                    .unwrap_or_else(|| rp::KB_KEYWORD_ONLY_TIP.get().to_owned());
-                row.child(
-                    Button::new("kb-semantic-settings")
-                        .ghost()
-                        .compact()
-                        .h(px(20.))
-                        .px_1p5()
-                        .text_size(px(11.))
-                        .icon(crate::ui::icon(IconName::ShieldAlert).w(px(11.)).h(px(11.)))
-                        .label(rp::KB_KEYWORD_ONLY.get())
-                        .tooltip(tip)
-                        .on_click(cx.listener(|app, _, window, cx| {
-                            app.open_kb_api_settings(window, cx);
-                        })),
-                )
-            });
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_size(px(11.))
+                    .text_color(gpui_kit::rgb(if syncing && !has_submitted_search {
+                        palette.accent
+                    } else {
+                        palette.muted
+                    }))
+                    .child(
+                        crate::ui::icon(if syncing && !has_submitted_search {
+                            IconName::RefreshCw
+                        } else {
+                            IconName::FileText
+                        })
+                        .w(px(11.))
+                        .h(px(11.)),
+                    )
+                    .child(status_text),
+            );
 
         let error_banner = kb
             .sync_error
@@ -560,7 +814,7 @@ impl Workspace {
             .or_else(|| kb.search_error.clone());
 
         let content: AnyElement = if has_submitted_search {
-            self.render_kb_search_results(cx)
+            self.render_kb_search_results(groups, window, cx)
         } else if let Some(stats) = &kb.stats
             && !stats.needs_ocr_files.is_empty()
         {
@@ -571,6 +825,7 @@ impl Workspace {
                 rp::KB_EMPTY_HINT.get(),
                 None,
                 None,
+                false,
             )
         };
 
@@ -660,28 +915,370 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_kb_search_results(&self, cx: &mut Context<Self>) -> AnyElement {
-        let palette = self.settings.theme.palette;
+    fn render_kb_search_results(
+        &self,
+        groups: Vec<FileHitGroup<'_>>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let kb = &self.right_panel.kb;
-        let card_hover = gpui_kit::rgb(palette.hover);
-        let badge_bg = fg_alpha(palette.text, 0.06);
-
-        if kb.searching && kb.results.is_empty() {
+        if kb.searching && groups.is_empty() {
             return self.render_kb_centered_state(
                 IconName::RefreshCw,
                 rp::KB_SEARCHING.get(),
                 None,
                 None,
+                true,
             );
         }
-        if kb.results.is_empty() {
+        if groups.is_empty() {
             return self.render_kb_centered_state(
                 IconName::Search,
                 rp::KB_NO_RESULTS.get(),
                 None,
                 None,
+                false,
             );
         }
+
+        let two_col = self.right_panel.maximized || self.settings.terminal.panel_width >= 440.0;
+        let palette = self.settings.theme.palette;
+        let card_hover = gpui_kit::rgb(palette.hover);
+        let badge_bg = fg_alpha(palette.text, 0.06);
+        let hi_bg = fg_alpha(palette.accent, 0.20).into();
+        let hi_fg = gpui_kit::rgb(palette.text).into();
+
+        let mut snippet_style = window.text_style();
+        snippet_style.font_family = crate::ui::sans_font(&self.settings.interface_font).into();
+        snippet_style.font_size = px(11.5).into();
+        snippet_style.color = fg_alpha(palette.text, 0.85).into();
+
+        let cards: Vec<AnyElement> = groups
+            .into_iter()
+            .enumerate()
+            .map(|(group_idx, group)| {
+                let clean_path_owned = group.clean_path.to_owned();
+                let expanded = kb.expanded_files.contains(group.clean_path);
+                let visible_limit = if expanded { group.hits.len() } else { 2 };
+                let extra_count = group.hits.len().saturating_sub(visible_limit);
+                let first_hit = group.hits[0];
+                let spine_color = if group.is_pdf {
+                    gpui_kit::rgb(palette.accent)
+                } else {
+                    fg_alpha(palette.text, 0.24)
+                };
+                let file_icon = if group.is_pdf {
+                    IconName::Library
+                } else if first_hit.kind == "annotation" {
+                    IconName::NotebookPen
+                } else {
+                    IconName::FileText
+                };
+
+                let header_open_path = first_hit.path.clone();
+                let header_line = first_hit.line_start;
+                let header_page = first_hit.page;
+                let header_heading = first_hit.heading.clone();
+                let header_snippet = first_hit.snippet.clone();
+
+                let mut card = div()
+                    .id(SharedString::from(format!("kb-book-{group_idx}")))
+                    .flex_1()
+                    .min_w_0()
+                    .min_h(px(142.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(gpui_kit::rgb(palette.border))
+                    .bg(gpui_kit::rgb(palette.surface))
+                    .overflow_hidden()
+                    .flex()
+                    .child(div().w(px(3.)).flex_shrink_0().bg(spine_color))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .p_2p5()
+                            .flex()
+                            .flex_col()
+                            .gap_1p5()
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("kb-book-head-{group_idx}")))
+                                    .cursor_pointer()
+                                    .rounded(px(4.))
+                                    .px_1()
+                                    .py_0p5()
+                                    .hover(move |s| s.bg(card_hover))
+                                    .on_click(cx.listener(move |app, _, window, cx| {
+                                        app.open_kb_result(
+                                            &header_open_path,
+                                            header_line,
+                                            header_page,
+                                            Some(&header_heading),
+                                            Some(&header_snippet),
+                                            window,
+                                            cx,
+                                        );
+                                    }))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0p5()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap_1p5()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1p5()
+                                                    .min_w_0()
+                                                    .child(
+                                                        crate::ui::icon(file_icon)
+                                                            .w(px(13.))
+                                                            .h(px(13.))
+                                                            .flex_shrink_0()
+                                                            .text_color(if group.is_pdf {
+                                                                gpui_kit::rgb(palette.accent)
+                                                            } else {
+                                                                gpui_kit::rgb(palette.muted)
+                                                            }),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(12.5))
+                                                            .font_medium()
+                                                            .text_color(gpui_kit::rgb(palette.text))
+                                                            .text_ellipsis()
+                                                            .child(group.file_name.clone()),
+                                                    ),
+                                            )
+                                            .when(group.is_accurate, |row| {
+                                                row.child(
+                                                    div()
+                                                        .id(SharedString::from(format!("kb-acc-{group_idx}")))
+                                                        .flex_shrink_0()
+                                                        .text_color(gpui_kit::rgb(palette.accent))
+                                                        .tooltip(|window, cx| {
+                                                            gpui_kit::component::tooltip::Tooltip::new(
+                                                                rp::KB_ACCURATE_BADGE.get(),
+                                                            )
+                                                            .build(window, cx)
+                                                        })
+                                                        .child(
+                                                            crate::ui::icon(IconName::Sparkles)
+                                                                .w(px(11.))
+                                                                .h(px(11.)),
+                                                        ),
+                                                )
+                                            }),
+                                    )
+                                    .when_some(group.dir_hint.clone(), |head, dir| {
+                                        head.child(
+                                            div()
+                                                .text_size(px(10.5))
+                                                .text_color(fg_alpha(palette.muted, 0.85))
+                                                .text_ellipsis()
+                                                .child(dir),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .children(group.hits.iter().take(visible_limit).enumerate().map(
+                                        |(hit_idx, hit)| {
+                                            let open_path = hit.path.clone();
+                                            let open_line = hit.line_start;
+                                            let open_page = hit.page;
+                                            let open_heading = hit.heading.clone();
+                                            let open_snippet = hit.snippet.clone();
+                                            let subtitle = section_subtitle(hit, &group.file_name);
+                                            let loc = match (hit.page, hit.line_start) {
+                                                (Some(page), _) => Some(format!("p.{page}")),
+                                                (None, Some(line)) => Some(format!("L{line}")),
+                                                _ => None,
+                                            };
+                                            let extra_tag = if hit.dirty_buffer {
+                                                Some(rp::KB_DRAFT_BADGE.get())
+                                            } else if hit.kind == "annotation" {
+                                                Some(rp::KB_ANNOT_BADGE.get())
+                                            } else {
+                                                None
+                                            };
+                                            let styled_snippet = build_highlighted_text(
+                                                &hit.snippet,
+                                                &kb.last_query,
+                                                snippet_style.clone(),
+                                                hi_bg,
+                                                hi_fg,
+                                            );
+
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "kb-hit-{group_idx}-{hit_idx}"
+                                                )))
+                                                .px_1p5()
+                                                .py_1()
+                                                .rounded(px(6.))
+                                                .bg(fg_alpha(palette.text, 0.025))
+                                                .cursor_pointer()
+                                                .hover(move |s| s.bg(card_hover))
+                                                .on_click(cx.listener(move |app, _, window, cx| {
+                                                    app.open_kb_result(
+                                                        &open_path,
+                                                        open_line,
+                                                        open_page,
+                                                        Some(&open_heading),
+                                                        Some(&open_snippet),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                }))
+                                                .flex()
+                                                .flex_col()
+                                                .gap_0p5()
+                                                .when(
+                                                    subtitle.is_some()
+                                                        || loc.is_some()
+                                                        || extra_tag.is_some(),
+                                                    |row| {
+                                                        row.child(
+                                                            div()
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_between()
+                                                                .gap_1p5()
+                                                                .child(
+                                                                    div()
+                                                                        .flex_1()
+                                                                        .min_w_0()
+                                                                        .text_size(px(11.))
+                                                                        .text_color(fg_alpha(
+                                                                            palette.text,
+                                                                            0.68,
+                                                                        ))
+                                                                        .text_ellipsis()
+                                                                        .children(subtitle),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .flex()
+                                                                        .items_center()
+                                                                        .gap_1()
+                                                                        .flex_shrink_0()
+                                                                        .when_some(
+                                                                            extra_tag,
+                                                                            |r, tag| {
+                                                                                r.child(
+                                                                                    div()
+                                                                                        .px_1()
+                                                                                        .rounded(px(
+                                                                                            3.,
+                                                                                        ))
+                                                                                        .bg(badge_bg)
+                                                                                        .text_size(px(
+                                                                                            10.,
+                                                                                        ))
+                                                                                        .text_color(gpui_kit::rgb(palette.muted))
+                                                                                        .child(tag),
+                                                                                )
+                                                                            },
+                                                                        )
+                                                                        .when_some(loc, |r, loc| {
+                                                                            r.child(
+                                                                                div()
+                                                                                    .text_size(px(
+                                                                                        10.5,
+                                                                                    ))
+                                                                                    .text_color(fg_alpha(
+                                                                                        palette.muted,
+                                                                                        0.85,
+                                                                                    ))
+                                                                                    .child(loc),
+                                                                            )
+                                                                        }),
+                                                                ),
+                                                        )
+                                                    },
+                                                )
+                                                .child(
+                                                    div()
+                                                        .max_h(px(52.))
+                                                        .overflow_hidden()
+                                                        .line_height(relative(1.42))
+                                                        .child(styled_snippet),
+                                                )
+                                        },
+                                    )),
+                            ),
+                    );
+
+                if extra_count > 0 || expanded {
+                    let toggle_path = clean_path_owned;
+                    let footer_label = if expanded {
+                        rp::KB_COLLAPSE_HITS.get().to_owned()
+                    } else {
+                        rp::kb_more_hits(extra_count)
+                    };
+                    card = div()
+                        .id(SharedString::from(format!("kb-book-wrap-{group_idx}")))
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(card)
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("kb-book-more-{group_idx}")))
+                                .px_2()
+                                .py_0p5()
+                                .text_size(px(11.))
+                                .text_color(gpui_kit::rgb(palette.accent))
+                                .cursor_pointer()
+                                .hover(move |s| s.bg(card_hover))
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    if !app.right_panel.kb.expanded_files.remove(&toggle_path) {
+                                        app.right_panel
+                                            .kb
+                                            .expanded_files
+                                            .insert(toggle_path.clone());
+                                    }
+                                    cx.notify();
+                                }))
+                                .child(footer_label),
+                        );
+                }
+
+                card.into_any_element()
+            })
+            .collect();
+
+        let rows: AnyElement = if two_col {
+            let mut row_els: Vec<AnyElement> = Vec::new();
+            let mut iter = cards.into_iter();
+            while let Some(first) = iter.next() {
+                let second = iter
+                    .next()
+                    .unwrap_or_else(|| div().flex_1().min_w_0().into_any_element());
+                row_els.push(
+                    div()
+                        .flex()
+                        .items_stretch()
+                        .gap_2()
+                        .child(first)
+                        .child(second)
+                        .into_any_element(),
+                );
+            }
+            div().flex().flex_col().gap_2().children(row_els).into_any_element()
+        } else {
+            div().flex().flex_col().gap_2().children(cards).into_any_element()
+        };
 
         div()
             .id("kb-results-scroll")
@@ -690,140 +1287,7 @@ impl Workspace {
             .overflow_y_scroll()
             .px_3()
             .pb_4()
-            .flex()
-            .flex_col()
-            .gap_1p5()
-            .children(kb.results.iter().enumerate().map(|(idx, hit)| {
-                let open_path = hit.path.clone();
-                let clean_path = hit.path.strip_suffix("#annotations").unwrap_or(&hit.path);
-                let file_name = clean_path.rsplit('/').next().unwrap_or(clean_path).to_owned();
-                let file_icon = match hit.kind.as_str() {
-                    "pdf" => IconName::Library,
-                    "annotation" => IconName::NotebookPen,
-                    _ => IconName::FileText,
-                };
-                let loc = match (hit.page, hit.line_start) {
-                    (Some(page), _) => Some(format!("p.{page}")),
-                    (None, Some(line)) => Some(format!("L{line}")),
-                    _ => None,
-                };
-                let extra_tag = if hit.dirty_buffer {
-                    Some(rp::KB_DRAFT_BADGE.get())
-                } else if hit.kind == "annotation" {
-                    Some(rp::KB_ANNOT_BADGE.get())
-                } else {
-                    None
-                };
-                let is_accurate = matches!(hit.parse_tier.as_str(), "accurate" | "mineru");
-
-                div()
-                    .id(SharedString::from(format!("kb-hit-{idx}")))
-                    .p_2p5()
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(gpui_kit::rgb(palette.border))
-                    .bg(gpui_kit::rgb(palette.surface))
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(card_hover))
-                    .on_click(cx.listener(move |app, _, window, cx| {
-                        app.open_kb_result(&open_path, window, cx);
-                    }))
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .min_w_0()
-                                    .child(
-                                        crate::ui::icon(file_icon)
-                                            .w(px(13.))
-                                            .h(px(13.))
-                                            .flex_shrink_0()
-                                            .text_color(gpui_kit::rgb(palette.muted)),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(12.5))
-                                            .font_medium()
-                                            .text_color(gpui_kit::rgb(palette.text))
-                                            .text_ellipsis()
-                                            .child(file_name),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .flex_shrink_0()
-                                    .when(is_accurate, |row| {
-                                        row.child(
-                                            div()
-                                                .px_1p5()
-                                                .py(px(1.))
-                                                .rounded(px(4.))
-                                                .bg(fg_alpha(palette.accent, 0.12))
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(3.))
-                                                .text_size(px(10.5))
-                                                .text_color(gpui_kit::rgb(palette.accent))
-                                                .child(
-                                                    crate::ui::icon(IconName::Sparkles)
-                                                        .w(px(10.))
-                                                        .h(px(10.)),
-                                                )
-                                                .child(rp::KB_ACCURATE_BADGE.get()),
-                                        )
-                                    })
-                                    .when_some(extra_tag, |row, tag| {
-                                        row.child(
-                                            div()
-                                                .px_1p5()
-                                                .py(px(1.))
-                                                .rounded(px(4.))
-                                                .bg(badge_bg)
-                                                .text_size(px(10.5))
-                                                .text_color(gpui_kit::rgb(palette.muted))
-                                                .child(tag),
-                                        )
-                                    })
-                                    .when_some(loc, |row, loc| {
-                                        row.child(
-                                            div()
-                                                .text_size(px(11.))
-                                                .text_color(gpui_kit::rgb(palette.muted))
-                                                .child(loc),
-                                        )
-                                    }),
-                            ),
-                    )
-                    .when(hit.heading != clean_path, |card| {
-                        card.child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(gpui_kit::rgb(palette.muted))
-                                .text_ellipsis()
-                                .child(hit.heading.clone()),
-                        )
-                    })
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .line_height(relative(1.45))
-                            .text_color(fg_alpha(palette.text, 0.84))
-                            .child(hit.snippet.clone()),
-                    )
-            }))
+            .child(rows)
             .into_any_element()
     }
 
@@ -984,7 +1448,15 @@ impl Workspace {
                                             .on_click(cx.listener({
                                                 let rel_path = rel_path.clone();
                                                 move |app, _, window, cx| {
-                                                    app.open_kb_result(&rel_path, window, cx);
+                                                    app.open_kb_result(
+                                                        &rel_path,
+                                                        None,
+                                                        None,
+                                                        None,
+                                                        None,
+                                                        window,
+                                                        cx,
+                                                    );
                                                 }
                                             }))
                                             .child(file_name),

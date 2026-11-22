@@ -1302,6 +1302,81 @@ impl MarkdownPane {
         self.reveal_anchor(anchor, Some(window), cx);
     }
 
+    pub fn jump_to_search_hit(
+        &mut self,
+        line_1based: Option<usize>,
+        heading_title: Option<&str>,
+        snippet_phrase: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.source {
+            if let Some(line_num) = line_1based
+                && !self.source_editor.read(cx).is_loading_wrapped_value()
+            {
+                let line0 = line_num.saturating_sub(1);
+                let mut highlight_range = None;
+                self.source_editor.update(cx, |editor, cx| {
+                    let text = editor.value().to_string();
+                    highlight_range = crate::workspace::line_byte_range(&text, line0);
+                    editor.set_cursor_position(Position::new(line0 as u32, 0), window, cx);
+                    if let Some(line_height) = editor.line_height() {
+                        let row = editor.display_map().buffer_line_to_display_row(line0);
+                        let mut offset = editor.scroll_offset();
+                        offset.y = editor.input_bounds().size.height * 0.25 - line_height * row;
+                        editor.set_scroll_offset(offset, cx);
+                    }
+                    editor.focus(window, cx);
+                });
+                if let Some(range) = highlight_range {
+                    self.source_heading_highlight.set(
+                        vec![RangeDecoration::new(range)
+                            .with_style(RangeDecorationStyle::Fill)
+                            .with_color(gpui_kit::base::Theme::global(cx).tokens.colors.selection)],
+                        cx,
+                    );
+                    self.source_heading_highlight_timer = cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(1400))
+                            .await;
+                        let _ = this.update(cx, |pane, cx| pane.source_heading_highlight.clear(cx));
+                    });
+                }
+                cx.notify();
+                return;
+            }
+            if let Some(heading) = heading_title
+                && let Some(idx) = self.find_heading_index(heading)
+            {
+                self.navigate_heading(idx, window, cx);
+            }
+            return;
+        }
+
+        if self.loading.is_none()
+            && let Some(phrase) = snippet_phrase
+                .map(|s| s.trim_matches('…').trim())
+                .filter(|s| !s.is_empty())
+        {
+            let probe: String = phrase.chars().take(24).collect();
+            let matched = self.visual_editor.update(cx, |editor, cx| {
+                if editor.select_quote_occurrence(&probe, 0, cx) {
+                    editor.focus(window, cx);
+                    true
+                } else {
+                    false
+                }
+            });
+            if matched {
+                cx.notify();
+                return;
+            }
+        }
+        if let Some(heading) = heading_title {
+            self.navigate_to_anchor(heading, window, cx);
+        }
+    }
+
     fn reveal_anchor(&mut self, anchor: &str, window: Option<&mut Window>, cx: &mut Context<Self>) {
         let Some(index) = self.find_heading_index(anchor) else {
             return;
