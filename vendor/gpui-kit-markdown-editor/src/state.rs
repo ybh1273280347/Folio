@@ -378,6 +378,7 @@ pub struct BlockEditorState {
     block_code_style: gpui::StyleRefinement,
     pub(crate) callout_styles: std::collections::HashMap<SharedString, super::style::CalloutStyle>,
     pub(crate) projection: ProjectionCache,
+    heading_blocks: RefCell<Option<(u64, Vec<BlockId>)>>,
     pub(crate) code_preview: Option<Registration>,
     pub(crate) code_preview_source: Option<BlockId>,
     /// Last complete frame, written by the element after prepaint.
@@ -471,6 +472,7 @@ impl BlockEditorState {
             code_preview: None,
             code_preview_source: None,
             projection: ProjectionCache::default(),
+            heading_blocks: RefCell::default(),
             frame: Rc::default(),
             cull: Rc::default(),
             fold_open: Default::default(),
@@ -978,6 +980,33 @@ impl BlockEditorState {
         Ok(())
     }
 
+    fn refresh_heading_blocks(&self) {
+        let revision = self.model.revision();
+        if self
+            .heading_blocks
+            .borrow()
+            .as_ref()
+            .is_none_or(|(cached_revision, _)| *cached_revision != revision)
+        {
+            let blocks = self
+                .model
+                .document()
+                .leaves()
+                .filter(|block| matches!(block.kind(), BlockKind::Heading { .. }))
+                .map(|block| block.id())
+                .collect();
+            *self.heading_blocks.borrow_mut() = Some((revision, blocks));
+        }
+    }
+
+    pub fn heading_block_at(&self, index: usize) -> Option<BlockId> {
+        self.refresh_heading_blocks();
+        self.heading_blocks
+            .borrow()
+            .as_ref()
+            .and_then(|(_, blocks)| blocks.get(index).copied())
+    }
+
     /// 0-based index among all heading blocks of the section currently at or above
     /// `viewport_top + trigger_offset`.
     pub fn active_heading_index(&self, trigger_offset: Pixels) -> Option<usize> {
@@ -992,12 +1021,10 @@ impl BlockEditorState {
         let vis_top = cull.visible.map(|(top, _)| top);
         let mut active = None;
         let mut any_heading = false;
-        let mut heading_index = 0;
-        for block in self.model.doc.leaves().iter().filter(|id| {
-            matches!(self.model.doc.kind(**id), Some(super::kind::BlockKindData::Heading { .. }))
-        }) {
-            let ix = heading_index;
-            heading_index += 1;
+        self.refresh_heading_blocks();
+        let headings = self.heading_blocks.borrow();
+        let blocks = &headings.as_ref().expect("heading cache refreshed").1;
+        for (ix, block) in blocks.iter().enumerate() {
             any_heading = true;
             let passed = if let (Some(&leaf_ix), Some(vp_top)) =
                 (frame.index.get(block), viewport_top)

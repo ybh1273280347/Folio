@@ -1342,15 +1342,7 @@ impl MarkdownPane {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
-        let heading = self
-            .visual_editor
-            .read(cx)
-            .model()
-            .document()
-            .leaves()
-            .filter(|block| matches!(block.kind(), BlockKind::Heading { .. }))
-            .nth(index);
-        let Some(block) = heading.map(|block| block.id()) else {
+        let Some(block) = self.visual_editor.read(cx).heading_block_at(index) else {
             return;
         };
         let visual_editor = self.visual_editor.clone();
