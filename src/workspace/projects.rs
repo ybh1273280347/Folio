@@ -2,10 +2,55 @@
 
 use super::*;
 use super::documents::DocumentWatch;
+use crate::model::{ProjectConfig, WorkspaceSession};
 
-impl Workspace {
-    pub(super) fn directory_workspace(&self) -> Option<&Project> {
-        if self.config.active_workspace == Some(WorkspaceLocation::Default) {
+/// Project registration and saved navigation. The session key is set only after
+/// selection preflight succeeds, so startup never saves an empty window into a session.
+pub(super) struct Projects {
+    default_workspace: Project,
+    config: ProjectConfig,
+    workspace_sessions: BTreeMap<String, WorkspaceSession>,
+    active_session: Option<String>,
+}
+
+impl Projects {
+    pub(super) fn load() -> (Self, WorkspaceLocation) {
+        let config = storage::load_projects().expect(crate::i18n::workspace::ERR_LOAD_PROJECTS.get());
+        let mut workspace_sessions =
+            storage::load_workspace_sessions().expect(crate::i18n::workspace::ERR_LOAD_SESSIONS.get());
+        // The old default session contained external paths, never default-space files.
+        if let Some(session) = workspace_sessions.remove("default") {
+            workspace_sessions.insert("loose".into(), session);
+        }
+        // On cold start, keep only the last active tab per workspace instead of inheriting all old tabs.
+        for session in workspace_sessions.values_mut() {
+            let keep = if !session.active.is_empty() && session.tabs.contains(&session.active) {
+                Some(session.active.clone())
+            } else {
+                session.tabs.last().cloned()
+            };
+            session.tabs = keep.iter().cloned().collect();
+            session.active = keep.unwrap_or_default();
+        }
+        let initial_location = config.active_workspace.clone().unwrap_or_else(|| {
+            config.active_id.clone().map(WorkspaceLocation::Project).unwrap_or(
+                if workspace_sessions.contains_key("loose") {
+                    WorkspaceLocation::LooseFiles
+                } else { WorkspaceLocation::Default }
+            )
+        });
+        let default_workspace = Project {
+            id: "__folio_default".into(),
+            name: "默认空间".into(),
+            folder: dirs::home_dir().expect("用户主目录存在").join(".Folio").to_string_lossy().into_owned(),
+            main_file: String::new(),
+            engine: Engine::Xelatex,
+        };
+        (Self { default_workspace, config, workspace_sessions, active_session: None }, initial_location)
+    }
+
+    pub(super) fn directory(&self) -> Option<&Project> {
+        if self.is_default() {
             return Some(&self.default_workspace);
         }
         self.config
@@ -14,24 +59,116 @@ impl Workspace {
             .find(|project| Some(&project.id) == self.config.active_id.as_ref())
     }
 
+    pub(super) fn active_id(&self) -> Option<&str> {
+        self.config.active_id.as_deref()
+    }
+
+    pub(super) fn is_default(&self) -> bool {
+        self.config.active_workspace == Some(WorkspaceLocation::Default)
+    }
+
+    pub(super) fn registered(&self) -> &[Project] {
+        &self.config.projects
+    }
+
+    pub(super) fn loose_tab_count(&self) -> usize {
+        self.workspace_sessions.get("loose").map_or(0, |session| session.tabs.len())
+    }
+
+    pub(super) fn save(&self) -> io::Result<()> {
+        storage::save_projects(&self.config)
+    }
+
+    fn active_project_mut(&mut self) -> Option<&mut Project> {
+        self.config.projects.iter_mut()
+            .find(|project| Some(&project.id) == self.config.active_id.as_ref())
+    }
+
+    pub(super) fn rename(&mut self, id: &str, name: String) -> io::Result<()> {
+        if name.is_empty() {
+            return Err(io::Error::other(crate::i18n::workspace::ERR_PROJECT_NAME_EMPTY.get()));
+        }
+        self.config.projects.iter_mut().find(|project| project.id == id)
+            .expect("menu project exists").name = name;
+        self.save()
+    }
+
+    pub(super) fn relocate_main_file(&mut self, old: &str, new: &str) {
+        if self.default_workspace.main_file == old
+            && self.directory().is_some_and(|p| p.id == self.default_workspace.id)
+        {
+            self.default_workspace.main_file = new.to_owned();
+        }
+        if let Some(project) = self.active_project_mut()
+            && project.main_file == old
+        {
+            project.main_file = if new.to_ascii_lowercase().ends_with(".tex") { new.to_owned() } else { String::new() };
+        }
+    }
+
+    pub(super) fn remove_main_file(&mut self, id: &str) -> io::Result<()> {
+        if id == self.default_workspace.id {
+            self.default_workspace.main_file.clear();
+        } else if let Some(project) = self.config.projects.iter_mut().find(|project| project.id == id) {
+            project.main_file.clear();
+        }
+        self.save()
+    }
+
+    pub(super) fn restore_main_file(&mut self, id: &str, path: &str) -> io::Result<()> {
+        if id == self.default_workspace.id && self.default_workspace.main_file.is_empty() {
+            self.default_workspace.main_file = path.to_owned();
+        } else if let Some(project) = self.config.projects.iter_mut().find(|project| project.id == id && project.main_file.is_empty()) {
+            project.main_file = path.to_owned();
+            self.save()?;
+        }
+        Ok(())
+    }
+}
+
+impl Workspace {
+    pub(super) fn set_engine(&mut self, engine: Engine, cx: &mut Context<Self>) {
+        if self.build.is_running() {
+            return;
+        }
+        if let Some(project) = self.projects.active_project_mut() {
+            project.engine = engine;
+            if let Err(error) = self.projects.save() {
+                self.report(error, cx);
+            }
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_main_file(&mut self, file: &str, cx: &mut Context<Self>) {
+        if self.build.is_running() {
+            return;
+        }
+        self.projects.active_project_mut().expect("main file belongs to project").main_file = file.to_owned();
+        if let Err(error) = self.projects.save() {
+            self.report(error, cx);
+        }
+        cx.notify();
+    }
+
     pub(super) fn active_project_name(&self) -> Option<String> {
-        self.directory_workspace()
+        self.projects.directory()
             .filter(|project| project.id != "__folio_default")
             .map(|project| project.name.clone())
     }
 
     pub(super) fn terminal_directory(&self) -> PathBuf {
-        self.directory_workspace().map(|project| PathBuf::from(&project.folder))
+        self.projects.directory().map(|project| PathBuf::from(&project.folder))
             .or_else(|| (!self.documents.active().is_empty()).then(|| self.document_path(self.documents.active())).and_then(|path| path.parent().map(Path::to_path_buf)))
             .unwrap_or_else(|| dirs::home_dir().expect("user home"))
     }
 
     // Save only navigation state; documents themselves remain authoritative on disk.
     pub(super) fn remember_session(&mut self) -> io::Result<()> {
-        let Some(key) = self.active_session.clone() else {
+        let Some(key) = self.projects.active_session.clone() else {
             return Ok(());
         };
-        self.workspace_sessions.insert(
+        self.projects.workspace_sessions.insert(
             key,
             WorkspaceSession {
                 tabs: self.documents.tabs().to_vec(),
@@ -40,7 +177,7 @@ impl Workspace {
                 collapsed_folders: Some(self.tree.collapsed_folders().clone()),
             },
         );
-        storage::save_workspace_sessions(&self.workspace_sessions)
+        storage::save_workspace_sessions(&self.projects.workspace_sessions)
     }
 
     pub(super) fn select_loose_files(
@@ -57,15 +194,14 @@ impl Workspace {
         self.tags.reset();
         self.tag_proposals.clear();
         self.documents.replace_watch(watcher);
-        self.config.active_id = None;
-        self.config.active_workspace = Some(WorkspaceLocation::LooseFiles);
-        self.active_session = Some("loose".into());
+        self.projects.config.active_id = None;
+        self.projects.config.active_workspace = Some(WorkspaceLocation::LooseFiles);
+        self.projects.active_session = Some("loose".into());
         self.tree.clear_directory();
         self.build.clear_result();
         self.clear_open_documents(window, cx);
 
-        let session = self
-            .workspace_sessions
+        let session = self.projects.workspace_sessions
             .get("loose")
             .cloned()
             .unwrap_or_default();
@@ -84,7 +220,7 @@ impl Workspace {
         }
         self.documents.restore_active_tab(&active);
         self.refresh_tags(cx);
-        storage::save_projects(&self.config)?;
+        self.projects.save()?;
         self.remember_session()?;
         cx.notify();
         Ok(())
@@ -102,10 +238,10 @@ impl Workspace {
         self.remember_session()?;
         let default_space = id == "__folio_default";
         let project = if default_space {
-            std::fs::create_dir_all(&self.default_workspace.folder)?;
-            self.default_workspace.clone()
+            std::fs::create_dir_all(&self.projects.default_workspace.folder)?;
+            self.projects.default_workspace.clone()
         } else {
-            self.config.projects.iter().find(|project| project.id == id)
+            self.projects.config.projects.iter().find(|project| project.id == id)
                 .expect("selected project exists").clone()
         };
         let root = Path::new(&project.folder);
@@ -122,13 +258,13 @@ impl Workspace {
         self.tree.dismiss_trash();
         self.tags.reset();
         self.tag_proposals.clear();
-        self.active_session = Some(id.to_owned());
+        self.projects.active_session = Some(id.to_owned());
         if default_space {
-            self.config.active_id = None;
-            self.config.active_workspace = Some(WorkspaceLocation::Default);
+            self.projects.config.active_id = None;
+            self.projects.config.active_workspace = Some(WorkspaceLocation::Default);
         } else {
-            self.config.active_id = Some(id.to_owned());
-            self.config.active_workspace = Some(WorkspaceLocation::Project(id.to_owned()));
+            self.projects.config.active_id = Some(id.to_owned());
+            self.projects.config.active_workspace = Some(WorkspaceLocation::Project(id.to_owned()));
         }
         self.documents.replace_watch(watcher);
         self.tree.replace_listing(files, folders);
@@ -142,7 +278,7 @@ impl Workspace {
             self.build_pdf = Some(self.new_pdf_pane(previous_pdf.clone(), window, cx));
             self.preview = Some(previous_pdf);
         }
-        let session = self.workspace_sessions.get(id).cloned().unwrap_or_default();
+        let session = self.projects.workspace_sessions.get(id).cloned().unwrap_or_default();
         self.tree.restore_collapsed_folders(session.collapsed_folders);
         for path in &session.tabs {
             if let Some(file) = self.tree.files().iter().find(|file| &file.path == path).cloned() {
@@ -174,7 +310,7 @@ impl Workspace {
                 .collect(),
             cx,
         );
-        storage::save_projects(&self.config)?;
+        self.projects.save()?;
         self.remember_session()?;
         cx.notify();
         Ok(())
@@ -193,7 +329,7 @@ impl Workspace {
         }
     }
     pub(super) fn switch_to_default(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.config.active_workspace == Some(WorkspaceLocation::Default) {
+        if self.projects.is_default() {
             return;
         }
         if self.build.is_busy()
@@ -208,14 +344,14 @@ impl Workspace {
         }
     }
     pub(super) fn add_folder(&mut self, folder: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        let previous_id = self.config.active_id.clone();
+        let previous_id = self.projects.config.active_id.clone();
         if let Err(error) = self.remember_session() {
             self.report(error, cx);
             return;
         }
-        match storage::add_project(&mut self.config, folder) {
+        match storage::add_project(&mut self.projects.config, folder) {
             Ok(project) => {
-                self.config.active_id = previous_id;
+                self.projects.config.active_id = previous_id;
                 if let Err(error) = self.select_project(&project.id, window, cx) {
                     self.report(error, cx);
                 }
@@ -303,8 +439,7 @@ impl Workspace {
         let mut project_files = Vec::new();
         let mut default_space_files = Vec::new();
         let mut default_files = Vec::new();
-        let project_root = self
-            .directory_workspace()
+        let project_root = self.projects.directory()
             .map(|project| dunce::canonicalize(&project.folder));
         for path in paths {
             if !files::is_relevant(&path) {
@@ -322,7 +457,7 @@ impl Workspace {
                     kind: Self::file_kind(&path),
                     path: relative,
                 });
-            } else if path.starts_with(&self.default_workspace.folder) {
+            } else if path.starts_with(&self.projects.default_workspace.folder) {
                 default_space_files.push(path);
             } else {
                 default_files.push(path);
@@ -344,7 +479,7 @@ impl Workspace {
                 return;
             }
             for path in default_space_files {
-                let relative = path.strip_prefix(&self.default_workspace.folder).unwrap().to_string_lossy().replace('\\', "/");
+                let relative = path.strip_prefix(&self.projects.default_workspace.folder).unwrap().to_string_lossy().replace('\\', "/");
                 let file = ProjectFile { kind: Self::file_kind(&path), path: relative };
                 if let Err(error) = self.open_file(&file, window, cx) { self.report(error, cx); return; }
             }
@@ -352,7 +487,7 @@ impl Workspace {
         if default_files.is_empty() {
             return;
         }
-        if self.directory_workspace().is_some() {
+        if self.projects.directory().is_some() {
             let retry_paths = default_files.clone();
             if !self.confirm_drafts(window, cx, move |app, window, cx| {
                 app.open_paths(retry_paths.clone(), window, cx);
@@ -414,12 +549,12 @@ impl Workspace {
             self.report(error, cx);
             return;
         }
-        self.config.projects.retain(|project| project.id != id);
-        self.workspace_sessions.remove(id);
-        if self.config.active_id.as_deref() == Some(id) {
-            self.config.active_id = None;
-            self.active_session = None;
-            if let Some(project) = self.config.projects.first() {
+        self.projects.config.projects.retain(|project| project.id != id);
+        self.projects.workspace_sessions.remove(id);
+        if self.projects.config.active_id.as_deref() == Some(id) {
+            self.projects.config.active_id = None;
+            self.projects.active_session = None;
+            if let Some(project) = self.projects.config.projects.first() {
                 let id = project.id.clone();
                 if let Err(error) = self.select_project(&id, window, cx) {
                     self.report(error, cx);
@@ -428,7 +563,7 @@ impl Workspace {
                 self.report(error, cx);
             }
         }
-        if let Err(error) = storage::save_projects(&self.config) {
+        if let Err(error) = self.projects.save() {
             self.report(error, cx);
         }
         cx.notify();

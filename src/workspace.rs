@@ -10,6 +10,7 @@ mod tools;
 use build::Build;
 use documents::Documents;
 use file_tree::FileTree;
+use projects::Projects;
 use crate::ai::{AiPane, AiPaneEvent, AttachedFile, WorkspaceToolAction, WorkspaceToolRequest};
 use gpui_kit::component::Sizable;
 use crate::theme::color as rgb;
@@ -22,7 +23,7 @@ use crate::{
     files,
     model::{
         AppSettings, Engine, FileKind,
-        Project, ProjectConfig, ProjectFile, WorkspaceLocation, WorkspaceSession,
+        Project, ProjectFile, WorkspaceLocation,
     },
     storage,
 };
@@ -43,10 +44,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io,
     path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -248,10 +246,7 @@ pub struct Workspace {
     compile_requests: tools::CompileRequests,
     drawio_requests: std::collections::HashMap<String, WorkspaceToolRequest>,
     tag_proposals: tools::TagProposals,
-    default_workspace: Project,
-    config: ProjectConfig,
-    workspace_sessions: BTreeMap<String, WorkspaceSession>,
-    active_session: Option<String>,
+    projects: Projects,
     settings: AppSettings,
     background_image: Option<Arc<RenderImage>>,
     background_image_load: Option<Task<()>>,
@@ -293,37 +288,7 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(settings: AppSettings, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let config = storage::load_projects().expect(crate::i18n::workspace::ERR_LOAD_PROJECTS.get());
-        let mut workspace_sessions =
-            storage::load_workspace_sessions().expect(crate::i18n::workspace::ERR_LOAD_SESSIONS.get());
-        // The old default session contained external paths, never default-space files.
-        if let Some(session) = workspace_sessions.remove("default") {
-            workspace_sessions.insert("loose".into(), session);
-        }
-        // On cold start, keep only the last active tab per workspace instead of inheriting all old tabs.
-        for session in workspace_sessions.values_mut() {
-            let keep = if !session.active.is_empty() && session.tabs.contains(&session.active) {
-                Some(session.active.clone())
-            } else {
-                session.tabs.last().cloned()
-            };
-            session.tabs = keep.iter().cloned().collect();
-            session.active = keep.unwrap_or_default();
-        }
-        let initial_location = config.active_workspace.clone().unwrap_or_else(|| {
-            config.active_id.clone().map(WorkspaceLocation::Project).unwrap_or(
-                if workspace_sessions.contains_key("loose") {
-                    WorkspaceLocation::LooseFiles
-                } else { WorkspaceLocation::Default }
-            )
-        });
-        let default_workspace = Project {
-            id: "__folio_default".into(),
-            name: "默认空间".into(),
-            folder: dirs::home_dir().expect("用户主目录存在").join(".Folio").to_string_lossy().into_owned(),
-            main_file: String::new(),
-            engine: Engine::Xelatex,
-        };
+        let (projects, initial_location) = Projects::load();
         let math = cx.new(MathRenderer::new);
         math.update(cx, |renderer, cx| renderer.set_appearance(&settings, cx));
         let preferences = cx.new(|cx| Preferences::new(settings.clone(), window, cx));
@@ -519,10 +484,7 @@ impl Workspace {
             compile_requests: Default::default(),
             drawio_requests: Default::default(),
             tag_proposals: Default::default(),
-            default_workspace,
-            config,
-            workspace_sessions,
-            active_session: None,
+            projects,
             settings,
             background_image: None,
             background_image_load: None,
@@ -886,7 +848,7 @@ impl Workspace {
             self.report(crate::i18n::workspace::err_unsupported_open(&resolved), cx);
             return;
         }
-        if let Some(project) = self.directory_workspace()
+        if let Some(project) = self.projects.directory()
             && let Ok(canonical_root) = dunce::canonicalize(&project.folder)
             && let Ok(relative) = resolved.strip_prefix(&canonical_root)
         {
@@ -1055,24 +1017,6 @@ impl Workspace {
         self.documents.poll_web_panes(window, cx);
     }
 
-    fn set_engine(&mut self, engine: Engine, cx: &mut Context<Self>) {
-        if self.build.is_running() {
-            return;
-        }
-        if let Some(project) = self
-            .config
-            .projects
-            .iter_mut()
-            .find(|project| Some(&project.id) == self.config.active_id.as_ref())
-        {
-            project.engine = engine;
-            if let Err(error) = storage::save_projects(&self.config) {
-                self.report(error, cx);
-            }
-            cx.notify();
-        }
-    }
-
     fn render_preview(&self, cx: &mut Context<Self>) -> AnyElement {
         if let Some(pane) = &self.build_pdf {
             return div()
@@ -1220,11 +1164,10 @@ impl Render for Workspace {
                 )
             });
         }
-        let engine = self.directory_workspace().map(|project| project.engine);
+        let engine = self.projects.directory().map(|project| project.engine);
         let engine_app = cx.entity();
         let main_app = cx.entity();
-        let main_label = self
-            .directory_workspace()
+        let main_label = self.projects.directory()
             .map(|project| project.main_file.clone())
             .filter(|path| !path.is_empty())
             .unwrap_or_else(|| crate::i18n::workspace::SELECT_MAIN_FILE.get().into());
@@ -1648,7 +1591,7 @@ impl Render for Workspace {
                                 })),
                         )
                     })
-                    .when(self.config.active_id.is_some(), |header| {
+                    .when(self.projects.active_id().is_some(), |header| {
                         header.child(
                             Button::new("compile-settings")
                                 .icon(crate::ui::icon(IconName::SlidersHorizontal))
@@ -1686,29 +1629,7 @@ impl Render for Workspace {
                                                     .checked(file == main_label)
                                                     .on_click(move |_, _, cx| {
                                                         app.update(cx, |app, cx| {
-                                                            if app.build.is_running() {
-                                                                return;
-                                                            }
-                                                            app.config
-                                                                .projects
-                                                                .iter_mut()
-                                                                .find(|project| {
-                                                                    Some(&project.id)
-                                                                        == app
-                                                                            .config
-                                                                            .active_id
-                                                                            .as_ref()
-                                                                })
-                                                                .expect(
-                                                                    "main file belongs to project",
-                                                                )
-                                                                .main_file = file.clone();
-                                                            if let Err(error) =
-                                                                storage::save_projects(&app.config)
-                                                            {
-                                                                app.report(error, cx);
-                                                            }
-                                                            cx.notify();
+                                                            app.set_main_file(&file, cx);
                                                         })
                                                     }),
                                             )

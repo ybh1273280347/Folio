@@ -370,15 +370,15 @@ impl Workspace {
                     .gap_3()
                     .text_color(rgb(MUTED))
                     .child(div().text_xl().child("Folio"))
-                    .child(if self.directory_workspace().is_none() {
+                    .child(if self.projects.directory().is_none() {
                         crate::i18n::workspace::EMPTY_LOOSE_HINT.get()
                     } else {
                         crate::i18n::workspace::EMPTY_PROJECT_HINT.get()
                     })
-                    .when(self.directory_workspace().is_none(), |area| area.child(button("welcome-open-file", crate::i18n::workspace::OPEN_FILE.get()).on_click(
+                    .when(self.projects.directory().is_none(), |area| area.child(button("welcome-open-file", crate::i18n::workspace::OPEN_FILE.get()).on_click(
                         cx.listener(|app, _, window, cx| app.open_file_dialog(window, cx)),
                     )))
-                    .child(if self.directory_workspace().is_none() {
+                    .child(if self.projects.directory().is_none() {
                         crate::i18n::workspace::SHORTCUTS_BAR_LOOSE.get()
                     } else {
                         crate::i18n::workspace::SHORTCUTS_BAR_PROJECT.get()

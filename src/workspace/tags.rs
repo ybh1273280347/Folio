@@ -74,7 +74,7 @@ fn tag_control(id: impl Into<ElementId>, icon: IconName, title: &'static str) ->
 
 impl Workspace {
     fn tag_store(&self) -> io::Result<Store> {
-        match self.directory_workspace() {
+        match self.projects.directory() {
             Some(project) => Ok(Store::project(Path::new(&project.folder))),
             None => Store::loose(),
         }
@@ -90,7 +90,7 @@ impl Workspace {
                 return;
             }
         };
-        let visible = if self.directory_workspace().is_some() {
+        let visible = if self.projects.directory().is_some() {
             self.tree.files()
                 .iter()
                 .map(|file| file.path.clone())
@@ -140,7 +140,7 @@ impl Workspace {
 
     pub(super) fn use_tag_snapshot(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
         self.tags.snapshot = snapshot;
-        if self.directory_workspace().is_none() {
+        if self.projects.directory().is_none() {
             // Tagged loose files remain discoverable after closing their tabs.
             let paths: Vec<_> = self
                 .tags
@@ -222,7 +222,7 @@ impl Workspace {
             input.set_value(value.to_owned(), window, cx)
         });
         if !self.tags.is_editing() {
-            self.tree.scroll_to_tags(self.config.projects.len());
+            self.tree.scroll_to_tags(self.projects.registered().len());
         }
         if focus {
             let input = self.tags.input.clone();
@@ -679,7 +679,7 @@ impl Workspace {
             Mode::Recover(id) => {
                 let id = id.clone();
                 let mut paths: Vec<_> = self.tree.files().iter().map(|file| &file.path).collect();
-                if self.directory_workspace().is_none() {
+                if self.projects.directory().is_none() {
                     paths.extend(self.documents.tabs().iter().chain(self.tags.snapshot.assigned.keys()));
                     paths.sort_unstable();
                     paths.dedup();
@@ -693,7 +693,7 @@ impl Workspace {
                             .flex_1()
                             .min_w_0(),
                     )
-                    .when(self.directory_workspace().is_none(), |panel| {
+                    .when(self.projects.directory().is_none(), |panel| {
                         panel.child(button("tag-open-target", crate::i18n::tags::OPEN_TARGET_FILE.get()).on_click(
                             cx.listener(|app, _, window, cx| app.open_file_dialog(window, cx)),
                         ))

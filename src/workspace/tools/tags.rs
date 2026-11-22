@@ -36,7 +36,7 @@ impl Workspace {
     }
 
     fn tag_tool_store(&self, request: &WorkspaceToolRequest) -> ToolResult<Store> {
-        let project = self.directory_workspace().ok_or_else(|| {
+        let project = self.projects.directory().ok_or_else(|| {
             Failure::new(
                 "directory_workspace_required",
                 crate::i18n::tags::ERR_AGENT_TAGS_PROJECT_OR_DEFAULT.get(),

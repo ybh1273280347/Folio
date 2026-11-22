@@ -322,11 +322,11 @@ impl Workspace {
         if lower.ends_with(".md")
             || (self.documents.focused_markdown().is_none()
                 && Self::is_image_path(self.documents.active()))
-            || (self.config.active_id.is_none() && lower.ends_with(".tex"))
+            || (self.projects.active_id().is_none() && lower.ends_with(".tex"))
         {
             Some(focused)
         } else {
-            self.directory_workspace()
+            self.projects.directory()
                 .map(|project| project.main_file.as_str())
                 .filter(|file| !file.is_empty())
         }
@@ -348,7 +348,7 @@ impl Workspace {
     }
 
     fn start_build(&mut self, target: String, cx: &mut Context<Self>) {
-        let mut project = self.directory_workspace().cloned().unwrap_or_else(|| {
+        let mut project = self.projects.directory().cloned().unwrap_or_else(|| {
             let source = PathBuf::from(&target);
             let root = source.parent().expect("standalone document has a parent");
             // The synthetic compile context only supplies latexmk's working directory;
@@ -401,7 +401,7 @@ impl Workspace {
             .ends_with(".md")
             .then(|| target.clone());
         let is_image = Self::is_image_path(&target);
-        if markdown.is_none() && !is_image && self.directory_workspace().is_some() {
+        if markdown.is_none() && !is_image && self.projects.directory().is_some() {
             project.main_file = target.clone();
         }
         let capture = markdown.as_ref().map(|file| {

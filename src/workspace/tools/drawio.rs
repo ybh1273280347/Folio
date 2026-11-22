@@ -31,7 +31,7 @@ impl Workspace {
                 return;
             }
         };
-        let Some(project) = self.directory_workspace() else {
+        let Some(project) = self.projects.directory() else {
             self.ai.read(cx).respond_workspace_tool(
                 request,
                 Failure::new("project_not_active", "Draw.io 工具需要当前项目或默认空间。").result(),
