@@ -12,6 +12,7 @@ use crate::{annotations::AnnotationItem, storage};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
+    io::ErrorKind,
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
     time::UNIX_EPOCH,
@@ -67,9 +68,16 @@ pub fn sync_project(
         let Some(kind) = doc_kind(rel_path) else {
             continue;
         };
-        let abs_path = root.join(rel_path.replace('/', "\\"));
-        let Ok(meta) = fs::metadata(&abs_path) else {
-            continue;
+        let abs_path = root.join(rel_path);
+        let meta = match fs::metadata(&abs_path) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(RagError::new(
+                    "io_error",
+                    format!("读取文件属性失败 ({rel_path}): {err}"),
+                ));
+            }
         };
         let file_size = meta.len() as i64;
         let mtime_ns = meta
@@ -87,8 +95,13 @@ pub fn sync_project(
             continue;
         }
 
-        let Ok(bytes) = fs::read(&abs_path) else {
-            continue;
+        // Deactivate only confirmed missing paths, including a removal between stat and read.
+        let bytes = match fs::read(&abs_path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(RagError::new("io_error", format!("读取文件失败 ({rel_path}): {err}")));
+            }
         };
         live_set.insert(rel_path.clone());
         let content_hash = sha256_hex(&bytes);
@@ -113,11 +126,10 @@ pub fn sync_project(
             continue;
         }
 
-        let already_parsed = store
-            .has_content(&content_hash)
-            .map_err(|e| RagError::new("store_error", e))?;
-
-        if already_parsed {
+        if let Some(status) = store
+            .indexed_content_status(&content_hash)
+            .map_err(|e| RagError::new("store_error", e))?
+        {
             store
                 .upsert_document(
                     rel_path,
@@ -125,7 +137,7 @@ pub fn sync_project(
                     &content_hash,
                     mtime_ns,
                     file_size,
-                    "indexed",
+                    &status,
                     None,
                     None,
                     None,
@@ -221,6 +233,7 @@ pub fn sync_project(
 
     updated_files += sync_annotations(root, eligible_paths, store, &mut live_set, &existing)?;
 
+    check_cancelled(cancelled)?;
     let removed_files = store
         .deactivate_missing(&live_set)
         .map_err(|e| RagError::new("store_error", e))?;
@@ -240,27 +253,32 @@ pub fn sync_project(
     let mut embedded_chunks = 0usize;
     let embed_server_ready = opts.embed_client.is_some_and(EmbeddingClient::ensure_ready);
     if embed_server_ready && let Some(client) = opts.embed_client {
+        // Each successful batch advances this sync's cursor. A fresh sync starts at the
+        // beginning and can retry any chunks left pending after an interruption.
+        let mut last_embedded_chunk_id = 0;
         loop {
             check_cancelled(cancelled)?;
             let pending = store
-                .pending_vector_chunks(EMBED_SYNC_PAGE)
+                .pending_vector_chunks(last_embedded_chunk_id, EMBED_SYNC_PAGE)
                 .map_err(|e| RagError::new("store_error", e))?;
-            if pending.is_empty() {
+            let Some(last_chunk) = pending.last() else {
                 break;
-            }
+            };
             let texts: Vec<&str> = pending.iter().map(|c| c.chunk_text.as_str()).collect();
             let vectors = client
                 .embed_documents(&texts)
                 .map_err(|e| RagError::new("embed_error", e))?;
+            check_cancelled(cancelled)?;
             let pairs: Vec<(i64, Vec<f32>)> = pending
                 .iter()
                 .zip(vectors)
                 .map(|(chunk, vec)| (chunk.chunk_id, vec))
                 .collect();
-            embedded_chunks += pairs.len();
             store
                 .insert_chunk_vectors(&pairs)
                 .map_err(|e| RagError::new("store_error", e))?;
+            last_embedded_chunk_id = last_chunk.chunk_id;
+            embedded_chunks += pairs.len();
         }
     }
 
@@ -297,19 +315,19 @@ fn sync_annotations(
 
     let mut updated = 0usize;
     for dir in dirs {
-        let sidecar = if dir.is_empty() {
-            root.join(".folio").join("annotations.json")
-        } else {
-            root.join(dir.replace('/', "\\"))
-                .join(".folio")
-                .join("annotations.json")
+        let sidecar = root.join(&dir).join(".folio").join("annotations.json");
+        let meta = match fs::metadata(&sidecar) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(RagError::new(
+                    "io_error",
+                    format!("读取批注文件属性失败 ({}): {err}", sidecar.display()),
+                ));
+            }
         };
-        let Ok(meta) = fs::metadata(&sidecar) else {
-            continue;
-        };
-        let Ok(items) = storage::read_json::<Vec<AnnotationItem>>(&sidecar) else {
-            continue;
-        };
+        let items = storage::read_json::<Vec<AnnotationItem>>(&sidecar)
+            .map_err(|err| RagError::new("io_error", format!("读取批注失败 ({}): {err}", sidecar.display())))?;
         if items.is_empty() {
             continue;
         }
@@ -333,26 +351,27 @@ fn sync_annotations(
 
         for (target_rel, group) in grouped {
             let syn_path = format!("{target_rel}#annotations");
+            // The index depends on anchors as well as text. Compare the source group before
+            // tokenizing so an edit to a neighboring document does not rechunk this one.
+            let source = serde_json::to_vec(&(&target_rel, &group))
+                .map_err(|err| RagError::new("io_error", format!("序列化批注失败 ({target_rel}): {err}")))?;
+            let hash = format!("{}:annotation", sha256_hex(&source));
+            if existing.get(&syn_path).is_some_and(|prev| prev.content_hash == hash) {
+                live_set.insert(syn_path);
+                continue;
+            }
             let extracted = chunk_annotations(&target_rel, &group);
             if extracted.chunks.is_empty() {
                 continue;
             }
             live_set.insert(syn_path.clone());
-            let hash = sha256_hex(extracted.raw_text.as_bytes());
-            let byte_len = extracted.raw_text.len() as i64;
-            if let Some(prev) = existing.get(&syn_path)
-                && prev.mtime_ns == mtime_ns
-                && prev.file_size == byte_len
-            {
-                continue;
-            }
             store
                 .upsert_document(
                     &syn_path,
                     "annotation",
                     &hash,
                     mtime_ns,
-                    byte_len,
+                    source.len() as i64,
                     "indexed",
                     Some(&extracted.raw_text),
                     Some(extracted.parse_tier),
@@ -1264,10 +1283,10 @@ mod tests {
         let cfg = RagConfig::default();
         let mut store = RagStore::open(&db, &cfg.embed_model, cfg.embed_dim).unwrap();
         let cancel = AtomicBool::new(false);
-        let report = sync_project(
+        let sync = |store: &mut RagStore| sync_project(
             root,
             &["papers/sample.pdf".to_owned()],
-            &mut store,
+            store,
             SyncOptions {
                 config: &cfg,
                 embed_client: None,
@@ -1276,8 +1295,8 @@ mod tests {
                 accurate_paths: &[],
             },
             &cancel,
-        )
-        .unwrap();
+        );
+        let report = sync(&mut store).unwrap();
 
         assert_eq!(report.updated_files, 2); // pdf + annotation
         let ann_hits = store
@@ -1286,6 +1305,16 @@ mod tests {
         assert_eq!(ann_hits.len(), 1);
         assert_eq!(ann_hits[0].kind, "annotation");
         assert_eq!(ann_hits[0].page_num, Some(3));
+
+        fs::write(
+            root.join("papers/.folio/annotations.json"),
+            r#"[{"id":1,"file":"sample.pdf","page":3,"quote":"Proximal gradient","occurrence":0,"color":"yellow","comment":"Key step in proof"}]"#,
+        )
+        .unwrap();
+        sync(&mut store).unwrap();
+        let moved_hits = store.search_fts("Key step in proof", None, None, &[], 5).unwrap();
+        assert_eq!(moved_hits.len(), 1);
+        assert_eq!(moved_hits[0].page_num, Some(4));
     }
 
     #[test]

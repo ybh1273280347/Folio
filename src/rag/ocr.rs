@@ -234,10 +234,11 @@ fn read_cached_pages_file(dir: &Path) -> Option<Vec<PdfPageMarkdown>> {
     (!pages.is_empty()).then_some(pages)
 }
 
-pub fn ensure_fast_pages_cached(
+fn ensure_fast_pages_cached(
     root: &Path,
     rel_path: &str,
     content_hash: &str,
+    snapshot: Option<&[u8]>,
 ) -> Result<Vec<PdfPageMarkdown>, String> {
     let dir = cache_dir(root, content_hash);
     if let Some(pages) = read_cached_pages_file(&dir) {
@@ -254,9 +255,20 @@ pub fn ensure_fast_pages_cached(
             needs_ocr: false,
         }]);
     }
-    let abs = root.join(rel_path.replace('/', "\\"));
-    let bytes = fs::read(&abs).map_err(|e| format!("读取 PDF 失败 ({rel_path}): {e}"))?;
-    let pages = extract_pdf_pages(rel_path, &bytes)?;
+    // Callers with a verified snapshot can parse those exact bytes on a cache miss.
+    let from_disk;
+    let bytes = match snapshot {
+        Some(bytes) => bytes,
+        None => {
+            let path = crate::files::project_path(root, rel_path).map_err(|e| e.to_string())?;
+            from_disk = fs::read(path).map_err(|e| format!("读取 PDF 失败 ({rel_path}): {e}"))?;
+            if sha256_hex(&from_disk) != content_hash {
+                return Err(format!("PDF 已更改，请同步知识库后重试 ({rel_path})"));
+            }
+            &from_disk
+        }
+    };
+    let pages = extract_pdf_pages(rel_path, bytes)?;
     write_pages_cache(&dir, &pages, None)?;
     Ok(pages)
 }
@@ -282,7 +294,9 @@ pub fn hydrate_pdf_library_items(root: &Path, items: &mut [PdfLibraryItem]) {
             item.missing_pages = 0;
             item.is_complete = true;
             item.status = "indexed".to_owned();
-        } else if let Ok(pages) = ensure_fast_pages_cached(root, &item.rel_path, &item.content_hash) {
+        } else if let Ok(pages) =
+            ensure_fast_pages_cached(root, &item.rel_path, &item.content_hash, None)
+        {
             let summary = summarize_pages(&pages);
             item.total_pages = Some(summary.total_pages);
             item.missing_pages = summary.missing_pages.len();
@@ -400,6 +414,9 @@ pub fn upgrade_pdfs(
             Ok(()) => stats.upgraded_pdfs += 1,
             Err(err) if err.code == "cancelled" => return Err(err),
             Err(err) if err.code == "file_not_found" => {}
+            Err(err) if err.code == "stale_pdf" => {
+                stats.failed_pdfs.push(format!("{rel_path}: {}", err.message));
+            }
             Err(err) => {
                 let _ = store.upsert_ocr_job(&hash, &rel_path, None, "failed", Some(&err.message));
                 stats.failed_pdfs.push(format!("{rel_path}: {}", err.message));
@@ -438,7 +455,7 @@ pub fn process_single_pdf_with_progress(
         on_progress,
     ) {
         Ok(()) => Ok(()),
-        Err(err) if matches!(err.code, "cancelled" | "file_not_found") => Err(err),
+        Err(err) if matches!(err.code, "cancelled" | "file_not_found" | "stale_pdf") => Err(err),
         Err(err) => {
             let _ = store.upsert_ocr_job(hash, rel_path, None, "failed", Some(&err.message));
             Err(err)
@@ -462,22 +479,34 @@ fn process_single_pdf(
     cancelled: &AtomicBool,
     on_progress: &mut dyn FnMut(OcrProgressEvent),
 ) -> Result<(), RagError> {
-    let abs = root.join(rel_path.replace('/', "\\"));
-    let bytes = fs::read(&abs).map_err(|e| {
-        let code = if e.kind() == std::io::ErrorKind::NotFound {
-            "file_not_found"
-        } else {
-            "io_error"
-        };
-        RagError::new(code, format!("读取 PDF 失败 ({rel_path}): {e}"))
-    })?;
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(RagError::cancelled());
+    }
+    let bytes = crate::files::project_path(root, rel_path)
+        .and_then(fs::read)
+        .map_err(|e| {
+            let code = if e.kind() == std::io::ErrorKind::NotFound {
+                "file_not_found"
+            } else {
+                "io_error"
+            };
+            RagError::new(code, format!("读取 PDF 失败 ({rel_path}): {e}"))
+        })?;
+    // The hash owns both the per-page cache and the indexed chunks. A queued job may start
+    // after the source file has been replaced at the same path.
+    if sha256_hex(&bytes) != hash {
+        return Err(RagError::new(
+            "stale_pdf",
+            format!("PDF 已更改，请同步知识库后重试 ({rel_path})"),
+        ));
+    }
 
     let mut base_pages: Option<Vec<PdfPageMarkdown>> = None;
     let mut target_pages: Option<Vec<usize>> = None;
     let mut page_ranges_arg: Option<String> = None;
 
     if fill_missing_only {
-        if let Ok(existing_pages) = ensure_fast_pages_cached(root, rel_path, hash) {
+        if let Ok(existing_pages) = ensure_fast_pages_cached(root, rel_path, hash, Some(&bytes)) {
             let summary = summarize_pages(&existing_pages);
             if summary.is_complete {
                 let extracted = chunk_pdf_pages(rel_path, &existing_pages, summary.parse_tier);
@@ -807,11 +836,10 @@ pub fn parse_paddleocr_jsonl_to_cache_checked(
     let page_idx = raw_pages.len();
 
     if let Some(expected) = expected_total_pages
-        && expected > 0
-        && page_idx < expected
+        && page_idx != expected
     {
         return Err(format!(
-            "OCR 返回页数不完整 ({page_idx}/{expected})，保留原快速索引状态"
+            "OCR 返回页数与原文不一致 ({page_idx}/{expected})，保留原快速索引状态"
         ));
     }
 
@@ -841,9 +869,10 @@ pub fn merge_paddleocr_jsonl_into_cache(
     out_dir: &Path,
 ) -> Result<(), String> {
     let ocr_pages = extract_jsonl_page_markdowns(jsonl_text)?;
-    if ocr_pages.len() < target_pages.len() {
+    // OCR rows are positional. Extra rows are as ambiguous as missing rows.
+    if ocr_pages.len() != target_pages.len() {
         return Err(format!(
-            "OCR 返回缺页数量不完整 ({}/{})，保留当前索引状态",
+            "OCR 返回页数与请求范围不一致 ({}/{})，保留当前索引状态",
             ocr_pages.len(),
             target_pages.len()
         ));
@@ -880,7 +909,7 @@ pub fn export_pdf_markdown_to_sibling(
     content_hash: &str,
 ) -> Result<String, String> {
     let dir = cache_dir(root, content_hash);
-    let pages = ensure_fast_pages_cached(root, rel_path, content_hash)?;
+    let pages = ensure_fast_pages_cached(root, rel_path, content_hash, None)?;
     let summary = summarize_pages(&pages);
     if !summary.is_complete {
         return Err(format!(
@@ -965,7 +994,7 @@ pub fn read_pdf_markdown(
         });
     }
 
-    let cached_pages = ensure_fast_pages_cached(root, &norm_rel, &content_hash)
+    let cached_pages = ensure_fast_pages_cached(root, &norm_rel, &content_hash, Some(&bytes))
         .map_err(|e| RagError::new("pdf_parse", e))?;
     let summary = summarize_pages(&cached_pages);
     let total_pages = summary.total_pages.max(1);
@@ -1228,6 +1257,13 @@ mod tests {
                 }]
             }
         });
+        assert!(
+            merge_paddleocr_jsonl_into_cache(&format!("{p2}\n{p2}"), &partial, &[2], &out_dir)
+                .is_err()
+        );
+        assert!(
+            read_pdf_markdown(root, "papers/notes.pdf", Some(2), Some(2)).unwrap().needs_ocr
+        );
         merge_paddleocr_jsonl_into_cache(&p2.to_string(), &partial, &[2], &out_dir).unwrap();
         let read_hybrid = read_pdf_markdown(root, "papers/notes.pdf", Some(1), Some(2)).unwrap();
         assert_eq!(read_hybrid.parse_tier, "hybrid");

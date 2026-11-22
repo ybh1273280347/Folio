@@ -4,7 +4,7 @@ use super::RagConfig;
 use crate::http::{self, RequestOptions};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     process::{Child, Command, Stdio},
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
@@ -171,19 +171,20 @@ fn probe_or_spawn(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let Ok(child) = cmd.spawn() else {
-        return false;
-    };
     {
         let mut map = server_registry().lock().expect("server registry poisoned");
-        map.insert(
-            endpoint.port,
-            ManagedChild {
+        // Sync and search may probe the same loading server. Keep a single owned child
+        // per port so a later probe cannot overwrite the process handle needed at shutdown.
+        if let Entry::Vacant(slot) = map.entry(endpoint.port) {
+            let Ok(child) = cmd.spawn() else {
+                return false;
+            };
+            slot.insert(ManagedChild {
                 child,
                 last_used: Instant::now(),
                 idle_release_secs,
-            },
-        );
+            });
+        }
     }
 
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -200,6 +201,7 @@ fn probe_or_spawn(
 pub struct EmbeddingClient {
     endpoint: Endpoint,
     model: String,
+    dim: usize,
     server_bin: String,
     model_path: String,
     auto_manage: bool,
@@ -211,6 +213,7 @@ impl EmbeddingClient {
         Ok(Self {
             endpoint: Endpoint::parse(&config.embed_url)?,
             model: config.embed_model.clone(),
+            dim: config.embed_dim,
             server_bin: config.server_bin.trim().to_owned(),
             model_path: config.embed_model_path.trim().to_owned(),
             auto_manage: config.auto_manage_server,
@@ -294,7 +297,23 @@ impl EmbeddingClient {
                     items.len()
                 ));
             }
-            for item in items {
+            // The caller zips vectors with chunk IDs. A duplicate or missing index would
+            // otherwise attach an embedding to the wrong document despite matching counts.
+            for (expected, item) in items.into_iter().enumerate() {
+                if item.index != expected {
+                    return Err(format!(
+                        "Embedding 返回的索引无效: 期望 {expected}，实际 {}",
+                        item.index
+                    ));
+                }
+                if item.embedding.len() != self.dim
+                    || item.embedding.iter().any(|value| !value.is_finite())
+                {
+                    return Err(format!(
+                        "Embedding 返回无效向量: 索引 {expected}，期望 {} 维有限数值",
+                        self.dim
+                    ));
+                }
                 all.push(item.embedding);
             }
         }
@@ -373,13 +392,27 @@ impl RerankClient {
             }
             let parsed: RerankResponse = serde_json::from_slice(&resp.body)
                 .map_err(|e| format!("解析 Rerank 响应失败: {e}"))?;
-            let mut ordered = vec![0.0f64; batch.len()];
-            for item in parsed.results {
-                if item.index < ordered.len() {
-                    ordered[item.index] = item.relevance_score.or(item.score).unwrap_or(0.0);
-                }
+            let mut items = parsed.results;
+            items.sort_by_key(|item| item.index);
+            if items.len() != batch.len() {
+                return Err(format!(
+                    "Rerank 返回条数不匹配: 期望 {}，实际 {}",
+                    batch.len(), items.len()
+                ));
             }
-            scores.extend(ordered);
+            for (expected, item) in items.into_iter().enumerate() {
+                if item.index != expected {
+                    return Err(format!(
+                        "Rerank 返回的索引无效: 期望 {expected}，实际 {}",
+                        item.index
+                    ));
+                }
+                let score = item.relevance_score
+                    .or(item.score)
+                    .filter(|score| score.is_finite())
+                    .ok_or_else(|| format!("Rerank 返回无效分数: 索引 {expected}"))?;
+                scores.push(score);
+            }
         }
         touch_managed(self.endpoint.port);
         Ok(scores)
