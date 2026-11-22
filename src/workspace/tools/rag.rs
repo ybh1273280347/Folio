@@ -6,7 +6,7 @@ use crate::{
     rag::{
         DirtyDocument, RagError, SearchRequest,
         client::{EmbeddingClient, RerankClient, reap_idle_servers},
-        collect_eligible_paths, mineru,
+        collect_eligible_paths, ocr,
         pipeline::{SearchServices, SyncOptions, search_project, sync_project},
         store::RagStore,
     },
@@ -176,7 +176,7 @@ impl Workspace {
         };
         let config = self.settings.rag.clone();
         let db_path = root.join(".folio").join("rag.sqlite3");
-        let accurate_configured = !mineru::resolve_api_key(&config).is_empty();
+        let accurate_configured = !ocr::resolve_ocr_token(&config).is_empty();
         self.right_panel.kb.accurate_configured = accurate_configured;
         if !db_path.exists() {
             self.right_panel.kb.stats = None;
@@ -235,7 +235,7 @@ impl Workspace {
 
         let db_path = root.join(".folio").join("rag.sqlite3");
         let config = self.settings.rag.clone();
-        let accurate_configured = !mineru::resolve_api_key(&config).is_empty();
+        let accurate_configured = !ocr::resolve_ocr_token(&config).is_empty();
         self.right_panel.kb.accurate_configured = accurate_configured;
         self.right_panel.kb.sync_error = None;
         let eligible_paths =
@@ -547,9 +547,9 @@ impl Workspace {
                         .stats()
                         .map_err(|e| RagError::new("store_error", e))?;
                     let (accurate_upgraded_pdfs, accurate_pending_pdfs) = store
-                        .mineru_counts()
+                        .ocr_counts()
                         .map_err(|e| RagError::new("store_error", e))?;
-                    let accurate_configured = !mineru::resolve_api_key(&config).is_empty();
+                    let accurate_configured = !ocr::resolve_ocr_token(&config).is_empty();
                     let report = crate::rag::StatusReport {
                         db_path: db_path.to_string_lossy().into_owned(),
                         embed_model: config.embed_model,

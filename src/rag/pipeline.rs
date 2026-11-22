@@ -5,7 +5,7 @@ use super::{
     SearchResponse, SubSearchType,
     chunker::{chunk_annotations, chunk_text_document, extract_and_chunk_pdf},
     client::{EmbeddingClient, RerankClient},
-    doc_kind, mineru, sha256_hex,
+    doc_kind, ocr, sha256_hex,
     store::{RagStore, ScoredChunk, path_matches_filters},
 };
 use crate::{annotations::AnnotationItem, storage};
@@ -113,7 +113,7 @@ pub fn sync_project(
         }
 
         if kind == "pdf" {
-            if let Some(cached) = mineru::load_cached_pdf(root, rel_path, &content_hash) {
+            if let Some(cached) = ocr::load_cached_pdf(root, rel_path, &content_hash) {
                 store
                     .upsert_document(
                         rel_path,
@@ -195,9 +195,9 @@ pub fn sync_project(
         .deactivate_missing(&live_set)
         .map_err(|e| RagError::new("store_error", e))?;
 
-    let mut mineru_stats = mineru::MinerUUpgradeStats::default();
+    let mut accurate_stats = ocr::AccurateUpgradeStats::default();
     if let Some(accurate_mode) = opts.accurate_mode {
-        mineru_stats = mineru::upgrade_pdfs(
+        accurate_stats = ocr::upgrade_pdfs(
             root,
             store,
             opts.config,
@@ -243,8 +243,8 @@ pub fn sync_project(
         embedded_chunks,
         pending_vectors: stats.pending_vectors,
         embed_server_ready,
-        accurate_upgraded_pdfs: mineru_stats.upgraded_pdfs,
-        accurate_failed_pdfs: mineru_stats.failed_pdfs,
+        accurate_upgraded_pdfs: accurate_stats.upgraded_pdfs,
+        accurate_failed_pdfs: accurate_stats.failed_pdfs,
         needs_ocr_files: stats.needs_ocr_files,
     })
 }
@@ -882,14 +882,14 @@ mod tests {
     }
 
     #[test]
-    fn sync_project_indexes_annotations_and_cached_mineru_pdfs() {
+    fn sync_project_indexes_annotations_and_cached_accurate_pdfs() {
         let dir = tempdir().unwrap();
         let root = dir.path();
         fs::create_dir_all(root.join("papers")).unwrap();
         fs::create_dir_all(root.join("papers/.folio")).unwrap();
         fs::write(root.join("papers/sample.pdf"), b"%PDF-1.4 dummy").unwrap();
         let pdf_hash = sha256_hex(b"%PDF-1.4 dummy");
-        let cache = mineru::cache_dir(root, &pdf_hash);
+        let cache = ocr::cache_dir(root, &pdf_hash);
         fs::create_dir_all(&cache).unwrap();
         fs::write(
             cache.join("full.md"),
@@ -1155,14 +1155,18 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires MINERU_API_KEY and local llama-server GGUFs"]
-    fn live_mineru_pdf_upgrade_and_search() {
+    #[ignore = "requires PaddleOCR token and local llama-server GGUFs"]
+    fn live_accurate_pdf_upgrade_and_search() {
         let embed_path = std::env::var("FOLIO_LIVE_EMBED_MODEL")
             .unwrap_or_else(|_| "D:/Models/folio-rag/Qwen3-Embedding-0.6B-Q8_0.gguf".into());
         let rerank_path = std::env::var("FOLIO_LIVE_RERANK_MODEL")
             .unwrap_or_else(|_| "D:/Models/folio-rag/qwen3-reranker-0.6b-q8_0.gguf".into());
         let pdf_src = std::env::var("FOLIO_LIVE_PDF").expect("set FOLIO_LIVE_PDF");
-        let mineru_key = std::env::var("MINERU_API_KEY").expect("set MINERU_API_KEY");
+        let paddleocr_token = ocr::resolve_ocr_token(&RagConfig::default());
+        assert!(
+            !paddleocr_token.is_empty(),
+            "set PADDLEOCR_ACCESS_TOKEN or configure ~/.pi/agent/mcp.json"
+        );
 
         let dir = tempdir().unwrap();
         let root = dir.path();
@@ -1174,7 +1178,7 @@ mod tests {
             embed_model_path: embed_path,
             rerank_model_path: rerank_path,
             auto_manage_server: true,
-            mineru_api_key: mineru_key,
+            paddleocr_token,
             ..RagConfig::default()
         };
         let embed_client = EmbeddingClient::from_config(&cfg).unwrap();
@@ -1202,8 +1206,8 @@ mod tests {
         assert_eq!(report.pending_vectors, 0);
 
         let pdf_hash = sha256_hex(&fs::read(root.join("adam.pdf")).unwrap());
-        assert!(mineru::cache_dir(root, &pdf_hash).join("full.md").exists());
-        assert!(mineru::cache_dir(root, &pdf_hash).join("pages.json").exists());
+        assert!(ocr::cache_dir(root, &pdf_hash).join("full.md").exists());
+        assert!(ocr::cache_dir(root, &pdf_hash).join("pages.json").exists());
 
         let resp = search_project(
             &mut store,
@@ -1236,7 +1240,7 @@ mod tests {
         .unwrap();
         assert_eq!(resp.mode_used, "hybrid+rerank");
         assert!(!resp.results.is_empty());
-        assert_eq!(resp.results[0].parse_tier, "mineru");
+        assert_eq!(resp.results[0].parse_tier, "accurate");
         assert!(resp.results[0].page.is_some());
 
         crate::rag::client::shutdown_managed_servers();

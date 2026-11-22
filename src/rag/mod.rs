@@ -2,7 +2,7 @@
 
 pub mod chunker;
 pub mod client;
-pub mod mineru;
+pub mod ocr;
 pub mod pipeline;
 pub mod store;
 

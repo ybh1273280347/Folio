@@ -209,7 +209,7 @@ impl RagStore {
                 score     REAL NOT NULL,
                 ts        INTEGER NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS mineru_jobs (
+            CREATE TABLE IF NOT EXISTS ocr_jobs (
                 content_hash TEXT PRIMARY KEY,
                 rel_path     TEXT NOT NULL,
                 batch_id     TEXT,
@@ -697,14 +697,16 @@ impl RagStore {
                 "SELECT d.rel_path, d.content_hash
                  FROM documents d
                  JOIN contents c ON c.content_hash = d.content_hash
-                 WHERE d.active = 1 AND d.kind = 'pdf' AND d.status = 'needs_ocr' AND c.parse_tier != 'mineru'
+                 WHERE d.active = 1 AND d.kind = 'pdf' AND d.status = 'needs_ocr'
+                   AND c.parse_tier NOT IN ('accurate', 'mineru')
                  ORDER BY d.rel_path"
             }
             super::AccuratePdfMode::All => {
                 "SELECT d.rel_path, d.content_hash
                  FROM documents d
                  JOIN contents c ON c.content_hash = d.content_hash
-                 WHERE d.active = 1 AND d.kind = 'pdf' AND c.parse_tier != 'mineru'
+                 WHERE d.active = 1 AND d.kind = 'pdf'
+                   AND c.parse_tier NOT IN ('accurate', 'mineru')
                  ORDER BY d.rel_path"
             }
         };
@@ -724,13 +726,13 @@ impl RagStore {
         Ok(out)
     }
 
-    pub fn mineru_counts(&self) -> Result<(usize, usize), String> {
+    pub fn ocr_counts(&self) -> Result<(usize, usize), String> {
         let upgraded: i64 = self
             .conn
             .query_row(
                 "SELECT COUNT(*) FROM documents d
                  JOIN contents c ON c.content_hash = d.content_hash
-                 WHERE d.active = 1 AND d.kind = 'pdf' AND c.parse_tier = 'mineru'",
+                 WHERE d.active = 1 AND d.kind = 'pdf' AND c.parse_tier IN ('accurate', 'mineru')",
                 [],
                 |r| r.get(0),
             )
@@ -740,7 +742,7 @@ impl RagStore {
             .query_row(
                 "SELECT COUNT(*) FROM documents d
                  JOIN contents c ON c.content_hash = d.content_hash
-                 WHERE d.active = 1 AND d.kind = 'pdf' AND c.parse_tier != 'mineru'",
+                 WHERE d.active = 1 AND d.kind = 'pdf' AND c.parse_tier NOT IN ('accurate', 'mineru')",
                 [],
                 |r| r.get(0),
             )
@@ -748,7 +750,7 @@ impl RagStore {
         Ok((upgraded as usize, pending as usize))
     }
 
-    pub fn upsert_mineru_job(
+    pub fn upsert_ocr_job(
         &mut self,
         content_hash: &str,
         rel_path: &str,
@@ -759,11 +761,11 @@ impl RagStore {
         let now = unix_secs();
         self.conn
             .execute(
-                "INSERT INTO mineru_jobs(content_hash, rel_path, batch_id, state, err_msg, updated_at)
+                "INSERT INTO ocr_jobs(content_hash, rel_path, batch_id, state, err_msg, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(content_hash) DO UPDATE SET
                     rel_path = excluded.rel_path,
-                    batch_id = COALESCE(excluded.batch_id, mineru_jobs.batch_id),
+                    batch_id = COALESCE(excluded.batch_id, ocr_jobs.batch_id),
                     state = excluded.state,
                     err_msg = excluded.err_msg,
                     updated_at = excluded.updated_at",
@@ -788,7 +790,7 @@ impl RagStore {
         tx.execute("DELETE FROM chunks WHERE content_hash = ?1", [content_hash])
             .map_err(|e| e.to_string())?;
         tx.execute(
-            "UPDATE contents SET raw_text = ?2, parse_tier = 'mineru', byte_len = ?3 WHERE content_hash = ?1",
+            "UPDATE contents SET raw_text = ?2, parse_tier = 'accurate', byte_len = ?3 WHERE content_hash = ?1",
             params![content_hash, raw_text, raw_text.len() as i64],
         )
         .map_err(|e| e.to_string())?;
