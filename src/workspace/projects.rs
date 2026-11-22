@@ -55,7 +55,7 @@ impl Workspace {
         self.show_trash = false;
         self.tags.reset();
         self.tag_proposals.clear();
-        self.documents.document_watch = watcher;
+        self.documents.replace_watch(watcher);
         self.config.active_id = None;
         self.config.active_workspace = Some(WorkspaceLocation::LooseFiles);
         self.active_session = Some("loose".into());
@@ -85,7 +85,7 @@ impl Workspace {
         for path in &session.reading_panes {
             self.open_reading_key(path, window, cx)?;
         }
-        self.documents.active = active;
+        self.documents.restore_active_tab(&active);
         self.refresh_tags(cx);
         storage::save_projects(&self.config)?;
         self.remember_session()?;
@@ -133,7 +133,7 @@ impl Workspace {
             self.config.active_id = Some(id.to_owned());
             self.config.active_workspace = Some(WorkspaceLocation::Project(id.to_owned()));
         }
-        self.documents.document_watch = watcher;
+        self.documents.replace_watch(watcher);
         self.files = files;
         self.folders = folders;
         self.refresh_tags(cx);
@@ -173,9 +173,7 @@ impl Workspace {
                 self.open_reading_pane(&file, window, cx);
             }
         }
-        if self.documents.tabs.contains(&session.active) {
-            self.documents.active = session.active;
-        }
+        self.documents.restore_active_tab(&session.active);
         self.queue_math_preload(
             self.files
                 .iter()

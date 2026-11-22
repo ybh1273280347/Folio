@@ -796,11 +796,7 @@ impl Workspace {
     }
 
     fn focus_active_or_workspace(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(pane) = self.documents.markdown_panes.get(&PaneKey::tab(&self.documents.active)) {
-            pane.update(cx, |pane, cx| pane.focus(window, cx));
-        } else if let Some(document) = self.documents.open.get(&self.documents.active) {
-            document.editor.update(cx, |editor, cx| editor.focus(window, cx));
-        } else {
+        if !self.focus_document_tab(&self.documents.active, window, cx) {
             self.focus.focus(window, cx);
         }
     }
@@ -1037,6 +1033,7 @@ impl Workspace {
             })
             .detach();
     }
+    /// The prompt re-enters the original operation with the selected response.
     fn ask(
         &mut self,
         kind: Dialog,

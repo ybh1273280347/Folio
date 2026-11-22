@@ -54,10 +54,36 @@ pub(super) struct Documents {
     pub(super) image_panes: BTreeMap<PaneKey, Entity<crate::image::ImagePane>>,
     markdown_changed: BTreeSet<String>,
     source_version: u64,
-    pub(super) document_watch: DocumentWatch,
+    document_watch: DocumentWatch,
 }
 
 impl Documents {
+    pub(super) fn replace_watch(&mut self, watch: DocumentWatch) {
+        self.document_watch = watch;
+    }
+
+    pub(super) fn restore_active_tab(&mut self, saved: &str) {
+        if self.tabs.iter().any(|tab| tab == saved) {
+            self.active = saved.to_owned();
+        }
+    }
+
+    pub(super) fn select_last_tab_if_closed(&mut self) {
+        if !self.tabs.contains(&self.active) {
+            self.active = self.tabs.last().cloned().unwrap_or_default();
+        }
+    }
+
+    pub(super) fn tracked_paths(&self) -> impl Iterator<Item = &String> {
+        self.tabs.iter().chain(&self.reading_panes).chain(self.open.keys())
+    }
+
+    pub(super) fn needs_save_before_removal(&self, path: &str) -> bool {
+        self.open.get(path).is_some_and(|document| {
+            document.buffer.is_dirty() || document.buffer.conflict.is_some()
+        })
+    }
+
     pub(super) fn open_buffer_at(&self, path: &Path) -> Option<(&str, &DocumentBuffer)> {
         self.open.iter().find_map(|(key, document)| {
             (dunce::canonicalize(&document.path).ok().as_deref() == Some(path))
@@ -97,15 +123,11 @@ impl DocumentWatch {
         Ok(Self { transport: Some((watcher, receiver)), ..Self::default() })
     }
 
-    pub(super) fn invalidate_tree(&mut self) {
+    fn invalidate_tree(&mut self) {
         self.paths.clear();
         self.tree = true;
     }
 
-    pub(super) fn refresh_now(&mut self) {
-        self.invalidate_tree();
-        self.changed_at = None;
-    }
 }
 
 impl Workspace {
@@ -203,7 +225,7 @@ impl Workspace {
         self.documents.html_panes.insert(key, pane);
     }
 
-    pub(super) fn release_html_pane(&mut self, key: &PaneKey, window: &mut Window, cx: &mut Context<Self>) {
+    fn release_html_pane(&mut self, key: &PaneKey, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(pane) = self.documents.html_panes.remove(key) {
             pane.update(cx, |pane, cx| pane.release(window, cx));
         }
@@ -248,7 +270,7 @@ impl Workspace {
         self.documents.drawio_panes.insert(key, pane);
     }
 
-    pub(super) fn release_drawio_pane(&mut self, key: &PaneKey, window: &mut Window, cx: &mut Context<Self>) {
+    fn release_drawio_pane(&mut self, key: &PaneKey, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(pane) = self.documents.drawio_panes.remove(key) {
             pane.update(cx, |pane, cx| pane.release(window, cx));
         }
@@ -260,7 +282,7 @@ impl Workspace {
         }
     }
 
-    pub(super) fn release_pdf_pane(&mut self, key: &PaneKey, window: &mut Window, cx: &mut Context<Self>) {
+    fn release_pdf_pane(&mut self, key: &PaneKey, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(pane) = self.documents.pdf_panes.remove(key) {
             pane.update(cx, |pane, cx| pane.release(window, cx));
         }
@@ -295,6 +317,38 @@ impl Workspace {
         self.directory_workspace()
             .map(|project| PathBuf::from(&project.folder).join(key))
             .unwrap_or_else(|| PathBuf::from(key))
+    }
+
+    fn release_document_pane(&mut self, key: &PaneKey, window: &mut Window, cx: &mut Context<Self>) {
+        self.release_pdf_pane(key, window, cx);
+        self.release_html_pane(key, window, cx);
+        self.release_drawio_pane(key, window, cx);
+        self.documents.image_panes.remove(key);
+        self.documents.markdown_panes.remove(key);
+    }
+
+    /// The file tree calls this only after moving the file to trash succeeds.
+    pub(super) fn detach_removed_document(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.documents.open.remove(path);
+        for role in [PaneRole::Tab, PaneRole::Reading] {
+            self.release_document_pane(&PaneKey::new(path, role), window, cx);
+        }
+        self.documents.reading_panes.retain(|pane| pane != path);
+        self.documents.tabs.retain(|tab| tab != path);
+        if self.documents.focused_markdown.as_deref() == Some(path) {
+            self.documents.focused_markdown = None;
+        }
+    }
+
+    pub(super) fn invalidate_document_tree(&mut self) {
+        self.documents.document_watch.invalidate_tree();
+    }
+
+    pub(super) fn refresh_all_files(&mut self, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
+        // Manual refresh reconciles all drafts, regardless of watcher event filtering.
+        self.documents.document_watch.invalidate_tree();
+        self.documents.document_watch.changed_at = None;
+        self.refresh_files(window, cx)
     }
 
     pub(super) fn clear_open_documents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -814,8 +868,29 @@ impl Workspace {
         }
         true
     }
-    /// Store the retry action while the in-window prompt is open; selecting a
-    /// button re-enters the same operation with its original response.
+    pub(super) fn focus_document_tab(&self, path: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if let Some(pane) = self.documents.markdown_panes.get(&PaneKey::tab(path)) {
+            pane.update(cx, |pane, cx| pane.focus(window, cx));
+        } else if let Some(document) = self.documents.open.get(path) {
+            document.editor.update(cx, |editor, cx| editor.focus(window, cx));
+        } else {
+            return false;
+        }
+        true
+    }
+
+    pub(super) fn select_tab_from_tree(&mut self, path: &str, focus_editor: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.documents.active = path.to_owned();
+        if focus_editor {
+            self.focus_document_tab(path, window, cx);
+        } else {
+            self.file_tree_focus.focus(window, cx);
+        }
+        if let Err(error) = self.remember_session() {
+            self.report(error, cx);
+        }
+        cx.notify();
+    }
 
     pub(super) fn activate_tab(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.documents.active == path {
@@ -823,13 +898,7 @@ impl Workspace {
         }
         self.documents.focused_markdown = None;
         self.documents.active = path.to_owned();
-        if let Some(pane) = self.documents.markdown_panes.get(&PaneKey::tab(path)) {
-            pane.update(cx, |pane, cx| pane.focus(window, cx));
-        } else if let Some(document) = self.documents.open.get(path) {
-            document
-                .editor
-                .update(cx, |editor, cx| editor.focus(window, cx));
-        }
+        self.focus_document_tab(path, window, cx);
         if let Err(error) = self.remember_session() {
             self.report(error, cx);
         }
@@ -875,12 +944,7 @@ impl Workspace {
             }
         }
         self.documents.tabs.retain(|tab| tab != path);
-        let tab = PaneKey::tab(path);
-        self.release_pdf_pane(&tab, window, cx);
-        self.release_html_pane(&tab, window, cx);
-        self.release_drawio_pane(&tab, window, cx);
-        self.documents.image_panes.remove(&tab);
-        self.documents.markdown_panes.remove(&tab);
+        self.release_document_pane(&PaneKey::tab(path), window, cx);
         if !self.documents.reading_panes.iter().any(|pane| pane == path) {
             self.documents.open.remove(path);
         }
@@ -1292,12 +1356,7 @@ impl Workspace {
                 return;
             }
         }
-        let key = PaneKey::reading(path);
-        self.documents.markdown_panes.remove(&key);
-        self.release_pdf_pane(&key, window, cx);
-        self.release_html_pane(&key, window, cx);
-        self.release_drawio_pane(&key, window, cx);
-        self.documents.image_panes.remove(&key);
+        self.release_document_pane(&PaneKey::reading(path), window, cx);
         if self.documents.focused_markdown.as_deref() == Some(path) {
             self.documents.focused_markdown = None;
         }
