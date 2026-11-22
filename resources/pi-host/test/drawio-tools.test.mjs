@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { drawioTools } from '../drawio-tools.mjs';
+import { drawioTools } from '../tools/workspace/drawio-tools.mjs';
 
 test('Draw.io tools expose read, create, and update operations through the workspace bridge', async () => {
   const calls = [];

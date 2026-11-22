@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { annotationTools } from '../annotation-tools.mjs';
-import { WorkspaceToolBridge } from '../workspace-tool-bridge.mjs';
+import { annotationTools } from '../tools/workspace/annotation-tools.mjs';
+import { WorkspaceToolBridge } from '../tools/workspace/bridge.mjs';
 
 test('annotation replies stay with their originating session', async () => {
   const sent = [];

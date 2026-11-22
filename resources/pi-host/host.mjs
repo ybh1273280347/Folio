@@ -8,13 +8,13 @@ import { format } from 'node:util';
 import OpenAI from 'openai';
 import { createAgentSession, SessionManager, DefaultResourceLoader, ModelRuntime, getAgentDir, initTheme,
   createMcpExtension, createCodemodeExtension, createToolSearchExtension } from '@earendil-works/pi-coding-agent';
-import { webTools } from './web-tools.mjs';
-import { annotationTools } from './annotation-tools.mjs';
-import { compileTools } from './compile-tools.mjs';
-import { drawioTools } from './drawio-tools.mjs';
-import { tagTools } from './tag-tools.mjs';
-import { pythonTool } from './python-tool.mjs';
-import { WorkspaceToolBridge } from './workspace-tool-bridge.mjs';
+import { webTools } from './tools/web/tools.mjs';
+import { annotationTools } from './tools/workspace/annotation-tools.mjs';
+import { compileTools } from './tools/workspace/compile-tools.mjs';
+import { drawioTools } from './tools/workspace/drawio-tools.mjs';
+import { tagTools } from './tools/workspace/tag-tools.mjs';
+import { pythonTool } from './tools/local/python.mjs';
+import { WorkspaceToolBridge } from './tools/workspace/bridge.mjs';
 
 // stdout is a protocol channel, including while third-party extensions initialize.
 console.log = (...args) => console.error(format(...args));

@@ -7,13 +7,11 @@
 ## 1. 目录结构与打包规则
 
 - 运行时入口：[host.mjs](host.mjs)
-- 通道桥接：[workspace-tool-bridge.mjs](workspace-tool-bridge.mjs)
-- 内置自定义工具：
-  - [annotation-tools.mjs](annotation-tools.mjs)（`annotation` 通道）
-  - [compile-tools.mjs](compile-tools.mjs)（`compile` 通道）
-  - [drawio-tools.mjs](drawio-tools.mjs)（`drawio` 通道）
-  - [tag-tools.mjs](tag-tools.mjs)（`tag` 通道）
-  - [web-tools.mjs](web-tools.mjs) / [python-tool.mjs](python-tool.mjs)（本地执行，不走 Rust 桥接）
+- 会话生命周期与 JSONL 分派：[host.mjs](host.mjs)
+- Workspace 工具：[tools/workspace/](tools/workspace/) 按 annotation、compile、drawio、tag 通道归档工具定义，[bridge.mjs](tools/workspace/bridge.mjs) 管理请求与取消。
+- 本地工具：[tools/local/](tools/local/) 管理本机执行工具。
+- 联网工具：[tools/web/](tools/web/) 管理搜索、抓取和抓取脚本。
+- 共用工具错误类型：[tools/tool-failure.mjs](tools/tool-failure.mjs)
 - 开发测试：`test/`（仅测试用，不进入发行包）
 - 打包脚本：[../../scripts/package.ps1](../../scripts/package.ps1)
 
@@ -30,7 +28,7 @@ Draw.io 工具提供文件级 `folio_drawio_read`、`folio_drawio_create`、`fol
 
 ### 方式 A：纯 JS / 本地子进程工具
 适用于不需要读写 Folio 内存状态（编辑器未保存缓冲、项目配置、文件树、标签库等）的工具。
-1. 在 `resources/pi-host/` 新增 `<name>-tool.mjs`，按 `@sinclair/typebox` 定义参数。
+1. 在 `resources/pi-host/tools/local/` 新增工具模块，按 `@sinclair/typebox` 定义参数。
 2. 在 `host.mjs` 的 `createAgentSession({ customTools: [...] })` 中展开注册。
 3. 若需命令审批弹窗，在 `host.mjs` 的 `tool_call` 钩子中处理确认逻辑。
 
@@ -39,7 +37,7 @@ Draw.io 工具提供文件级 `folio_drawio_read`、`folio_drawio_create`、`fol
 
 优先在已有功能的通道中增加操作。新增独立能力时，按以下步骤接入。
 
-1. **JS 工具模块**（如 `compile-tools.mjs`）：
+1. **JS 工具模块**（如 `tools/workspace/compile-tools.mjs`）：
    - 导出工厂函数 `(request) => [...]`，调用 `await request('<operation>', params, signal)`。
    - 参照同类工具将结构化结果转换为 Pi 的工具结果，保留错误码和取消状态。
 2. **注册 JS 通道**（[host.mjs](host.mjs)）：

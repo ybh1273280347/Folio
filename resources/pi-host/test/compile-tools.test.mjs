@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compileTools } from '../compile-tools.mjs';
-import { WorkspaceToolBridge } from '../workspace-tool-bridge.mjs';
+import { compileTools } from '../tools/workspace/compile-tools.mjs';
+import { WorkspaceToolBridge } from '../tools/workspace/bridge.mjs';
 
 test('compile replies stay with their originating session', async () => {
   const sent = [];

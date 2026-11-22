@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { ToolFailure } from './tool-failure.mjs';
+import { ToolFailure } from '../tool-failure.mjs';
 
 async function toolResult(run, signal) {
   try {
@@ -179,7 +179,8 @@ export function webTools(getSettings, cwd, dataRoot) {
         const output = path.join(dataRoot, 'ai-artifacts', randomUUID());
         fs.mkdirSync(output, { recursive: true });
         const script = fileURLToPath(new URL('./fetch.py', import.meta.url));
-        const python = process.env.FOLIO_FETCH_PYTHON ?? path.join(path.dirname(script), '.venv', 'Scripts', 'python.exe');
+        const hostDirectory = path.dirname(fileURLToPath(import.meta.resolve('../../package.json')));
+        const python = process.env.FOLIO_FETCH_PYTHON ?? path.join(hostDirectory, '.venv', 'Scripts', 'python.exe');
         const result = await new Promise((resolve, reject) => {
           const child = spawn(python, [script, '--url', params.url, '--mode', params.mode ?? 'http', '--output', output,
             ...(params.pages ? ['--pages', params.pages] : [])], { cwd, windowsHide: true,
