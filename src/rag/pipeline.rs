@@ -574,7 +574,6 @@ pub fn search_project(
     }
 
     let mut rrf_ranked = fuse_rrf(&ranked_lists);
-    let derived_markdowns = load_derived_markdown_entries(store.project_root());
     let mut rerank_used = false;
     let rerank_anchor = intent
         .or_else(|| vec_queries.first().map(|(_, q)| q.as_str()))
@@ -617,6 +616,7 @@ pub fn search_project(
     if snippet_queries.is_empty() {
         snippet_queries.extend(vec_queries.iter().map(|(_, q)| q.clone()));
     }
+    let derived_markdowns = load_derived_markdown_entries(store.project_root());
     let results = collapse_and_format(
         rrf_ranked,
         &snippet_queries,
@@ -763,10 +763,7 @@ fn fuse_rrf(lists: &[(f64, Vec<Candidate>)]) -> Vec<(f64, Candidate)> {
 fn apply_soft_file_decay(ranked: &mut [(f64, Candidate)]) {
     let mut per_file: HashMap<String, usize> = HashMap::new();
     for (score, candidate) in ranked.iter_mut() {
-        let path = candidate
-            .rel_path
-            .strip_suffix("#annotations")
-            .unwrap_or(&candidate.rel_path);
+        let path = candidate.rel_path.strip_suffix("#annotations").unwrap_or(&candidate.rel_path);
         let rank = per_file.entry(path.to_owned()).or_default();
         *score *= 0.75_f64.powi((*rank).min(i32::MAX as usize) as i32);
         *rank += 1;
@@ -1390,6 +1387,69 @@ mod tests {
     }
 
     #[test]
+    fn derived_export_shares_pdf_quota_and_removes_duplicate_chunks() {
+        let pdf = Candidate {
+            key: "pdf".into(),
+            docid: "pdf-id".into(),
+            rel_path: "papers/book.pdf".into(),
+            kind: "pdf".into(),
+            parse_tier: "accurate".into(),
+            content_hash: Some("pdf-hash".into()),
+            heading_path: "Book > Page 1".into(),
+            line_start: None,
+            line_end: None,
+            page_num: Some(1),
+            chunk_text: "The quick brown fox jumps over the lazy dog.".into(),
+            dirty_buffer: false,
+        };
+        let exported = Candidate {
+            key: "export".into(),
+            docid: "md-id".into(),
+            rel_path: "papers/book_folio-parse.md".into(),
+            kind: "md".into(),
+            parse_tier: "source".into(),
+            content_hash: Some("md-hash".into()),
+            heading_path: "Book > Page 1".into(),
+            line_start: Some(1),
+            line_end: Some(2),
+            page_num: None,
+            chunk_text: "the quick brown fox jumps over the lazy dog".into(),
+            dirty_buffer: false,
+        };
+        let unique = Candidate {
+            key: "unique".into(),
+            docid: "md-id".into(),
+            rel_path: "papers/book_folio-parse.md".into(),
+            kind: "md".into(),
+            parse_tier: "source".into(),
+            content_hash: Some("md-hash".into()),
+            heading_path: "Book > Page 2".into(),
+            line_start: Some(3),
+            line_end: Some(4),
+            page_num: None,
+            chunk_text: "A distinct chapter explains a different theorem.".into(),
+            dirty_buffer: false,
+        };
+        let entries = HashMap::from([(
+            "papers/book_folio-parse.md".into(),
+            super::super::DerivedMarkdownEntry {
+                source_pdf_path: "papers/book.pdf".into(),
+                source_pdf_hash: "pdf-hash".into(),
+                markdown_hash: "md-hash".into(),
+            },
+        )]);
+        let hits = collapse_and_format(
+            vec![(1.0, pdf), (0.9, exported), (0.8, unique)],
+            &[],
+            5,
+            &entries,
+        );
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].path, "papers/book.pdf");
+        assert_eq!(hits[1].snippet, "A distinct chapter explains a different theorem.");
+    }
+
+    #[test]
     fn exported_markdown_shares_pdf_quota_and_near_duplicate_suppression() {
         let pdf = Candidate {
             key: "pdf".into(),
@@ -1466,6 +1526,33 @@ mod tests {
         // Rank 1 keeps 0.75 weight from RRF (0.75) vs rank 12 getting 0.60*1.0 + 0.40*0.2 = 0.68.
         assert!((blended[0] - 0.75).abs() < 1e-6);
         assert!((blended[11] - 0.68).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vector_mmr_selects_relevant_diverse_chunks_without_model_calls() {
+        let candidate = |key: &str| Candidate {
+            key: format!("db:{key}"),
+            docid: key.into(),
+            rel_path: format!("{key}.md"),
+            kind: "md".into(),
+            parse_tier: "source".into(),
+            content_hash: Some(format!("{key}-hash")),
+            heading_path: key.into(),
+            line_start: Some(1),
+            line_end: Some(1),
+            page_num: None,
+            chunk_text: key.into(),
+            dirty_buffer: false,
+        };
+        let mut ranked = vec![(1.0, candidate("1")), (0.95, candidate("2")), (0.8, candidate("3"))];
+        let embeddings = HashMap::from([
+            (1, vec![1.0, 0.0]),
+            (2, vec![0.99, 0.01]),
+            (3, vec![0.0, 1.0]),
+        ]);
+        rerank_with_mmr(&mut ranked, &embeddings, 0.75);
+        assert_eq!(ranked[0].1.key, "db:1");
+        assert_eq!(ranked[1].1.key, "db:3");
     }
 
     #[test]
