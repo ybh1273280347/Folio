@@ -12,6 +12,7 @@ import { webTools } from './tools/web/tools.mjs';
 import { annotationTools } from './tools/workspace/annotation-tools.mjs';
 import { compileTools } from './tools/workspace/compile-tools.mjs';
 import { drawioTools } from './tools/workspace/drawio-tools.mjs';
+import { ragTools } from './tools/workspace/rag-tools.mjs';
 import { tagTools } from './tools/workspace/tag-tools.mjs';
 import { pythonTool } from './tools/local/python.mjs';
 import { WorkspaceToolBridge } from './tools/workspace/bridge.mjs';
@@ -55,6 +56,19 @@ const workspaceToolChannels = [
     retryableForError: (operation, error) =>
       error.code === 'drawio_not_ready'
       || (error.code === 'workspace_tool_timeout' && ['read', 'get_selection'].includes(operation)),
+  },
+  {
+    channel: 'rag',
+    factory: ragTools,
+    timeoutMs: 120_000,
+    timeouts: {
+      search: 120_000,
+      status: 30_000,
+      reindex: 600_000,
+    },
+    timeoutMessage: 'Folio 知识库工具超时，请检查本地索引或模型服务状态。',
+    retryableForError: (operation, error) =>
+      error.code === 'workspace_tool_timeout' && operation === 'status',
   },
   {
     channel: 'tag',

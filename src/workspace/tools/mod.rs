@@ -3,6 +3,7 @@
 mod annotations;
 mod compile;
 mod drawio;
+mod rag;
 mod tags;
 
 use super::Workspace;
@@ -19,6 +20,7 @@ pub(super) struct ToolRequests {
     annotation_requests: BTreeSet<String>,
     compile_requests: HashMap<String, Arc<AtomicBool>>,
     drawio_requests: HashMap<String, WorkspaceToolRequest>,
+    rag_requests: HashMap<String, Arc<AtomicBool>>,
     tag_proposals: tags::TagProposals,
 }
 
@@ -39,6 +41,7 @@ impl Workspace {
             "annotation" => self.annotation_request(request, window, cx),
             "compile" => self.compile_request(request, window, cx),
             "drawio" => self.drawio_request(request, cx),
+            "rag" => self.rag_request(request, cx),
             "tag" => self.tag_request(request, cx),
             _ if request.action == WorkspaceToolAction::Request => {
                 self.ai.read(cx).respond_workspace_tool(

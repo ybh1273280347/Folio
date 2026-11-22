@@ -362,6 +362,42 @@ pub struct AiSettings {
     pub baidu_qianfan_api_key: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RagConfig {
+    pub embed_url: String,
+    pub embed_model: String,
+    pub embed_dim: usize,
+    pub rerank_url: String,
+    pub rerank_model: String,
+    pub server_bin: String,
+    pub embed_model_path: String,
+    pub rerank_model_path: String,
+    pub auto_manage_server: bool,
+    pub idle_release_secs: u64,
+    pub mineru_api_key: String,
+    pub mineru_mode: String,
+}
+
+impl Default for RagConfig {
+    fn default() -> Self {
+        Self {
+            embed_url: "http://127.0.0.1:18101".to_owned(),
+            embed_model: "Qwen3-Embedding-0.6B".to_owned(),
+            embed_dim: 1024,
+            rerank_url: "http://127.0.0.1:18102".to_owned(),
+            rerank_model: "Qwen3-Reranker-0.6B".to_owned(),
+            server_bin: String::new(),
+            embed_model_path: String::new(),
+            rerank_model_path: String::new(),
+            auto_manage_server: true,
+            idle_release_secs: 300,
+            mineru_api_key: String::new(),
+            mineru_mode: "manual".to_owned(),
+        }
+    }
+}
+
 fn default_title_model() -> String { "workbuddy-ai/hy4flash-free".into() }
 
 impl Default for AiSettings {
@@ -422,6 +458,7 @@ pub struct AppSettings {
     pub terminal: TerminalSettings,
     pub translate: TranslateSettings,
     pub ai: AiSettings,
+    pub rag: RagConfig,
     pub keybindings: BTreeMap<String, String>,
 }
 
@@ -494,6 +531,7 @@ impl Default for AppSettings {
             terminal: TerminalSettings::default(),
             translate: TranslateSettings::default(),
             ai: AiSettings::default(),
+            rag: RagConfig::default(),
             keybindings: BTreeMap::new(),
         }
     }
