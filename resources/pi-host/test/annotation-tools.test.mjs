@@ -39,3 +39,21 @@ test('tools preserve structured placement errors without a diagnostic stack', as
   assert.equal(JSON.parse(result.content[0].text).error.code, 'ambiguous_match');
   assert.equal(result.details.candidates[0].occurrence, 1);
 });
+
+test('annotation edits address a file-local ID and keep empty comments', async () => {
+  const requests = [];
+  const tools = annotationTools(async (operation, params) => {
+    requests.push({ operation, params });
+    return { status: 'ok' };
+  });
+  const update = tools.find(tool => tool.name === 'folio_annotation_update');
+  const remove = tools.find(tool => tool.name === 'folio_annotation_delete');
+
+  await update.execute('update', { path: 'notes.md', id: 7, comment: '' });
+  await remove.execute('delete', { path: 'notes.md', id: 7 });
+
+  assert.deepEqual(requests, [
+    { operation: 'update', params: { path: 'notes.md', id: 7, comment: '' } },
+    { operation: 'delete', params: { path: 'notes.md', id: 7 } },
+  ]);
+});

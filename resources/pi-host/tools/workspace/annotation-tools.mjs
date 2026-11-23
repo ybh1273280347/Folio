@@ -3,6 +3,7 @@ import { Type } from '@sinclair/typebox';
 
 export function annotationTools(request) {
   const path = Type.String({ minLength: 1, description: '当前活动项目内的 Markdown 或 PDF 路径，可用相对路径或项目内绝对路径。' });
+  const id = Type.Integer({ minimum: 1, description: '目标文件最近一次 folio_annotations_list 返回的批注 ID。' });
   const execute = operation => async (_id, params, signal) => {
     const result = await request(operation, params, signal);
     return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status !== 'ok' };
@@ -17,5 +18,11 @@ export function annotationTools(request) {
         page: Type.Optional(Type.Integer({ minimum: 1, description: '实际 PDF 文件页码，从 1 开始；不是印刷页码或 Markdown 行号。' })),
         occurrence: Type.Optional(Type.Integer({ minimum: 1, description: '匹配原文的第几处，从 1 开始；唯一匹配时省略。' })),
       }, { additionalProperties: false }), execute: execute('create') },
+    { name: 'folio_annotation_update', label: '修改 Folio 批注',
+      description: '按文件和批注 ID 替换已有 Markdown 或 PDF 批注的评论。传入空字符串可清空评论并保留高亮。',
+      parameters: Type.Object({ path, id, comment: Type.String() }, { additionalProperties: false }), execute: execute('update') },
+    { name: 'folio_annotation_delete', label: '删除 Folio 批注',
+      description: '按文件和批注 ID 删除已有 Markdown 或 PDF 批注及其高亮。先列出目标文件的批注并确认要删除的位置。',
+      parameters: Type.Object({ path, id }, { additionalProperties: false }), execute: execute('delete') },
   ];
 }
