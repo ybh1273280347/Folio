@@ -726,6 +726,14 @@ impl LeafGeometry {
             _ => None,
         })
     }
+
+    /// The painted bounds of the atom whose leaf starts at the given byte index.
+    pub fn atom_bounds(&self, start: usize) -> Option<Bounds<Pixels>> {
+        self.pieces.iter().find_map(|piece| match piece {
+            Piece::Atom { range, bounds } if range.start == start => Some(*bounds),
+            _ => None,
+        })
+    }
 }
 
 /// The closest index in a whole-leaf layout for a window point.

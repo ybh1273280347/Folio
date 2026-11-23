@@ -1368,6 +1368,7 @@ fn compute_mark_rects(
 pub(crate) struct Prepaint {
     hitbox: Hitbox,
     grip_hitbox: Hitbox,
+    image_handle: Option<Hitbox>,
     mark_rects: Vec<(Bounds<Pixels>, Hsla)>,
 }
 
@@ -1543,9 +1544,13 @@ impl Element for EditorRoot {
             point(bounds.left() - px(24.), bounds.top() - px(20.)),
             point(bounds.right() + px(12.), bounds.bottom() + px(12.)),
         );
+        let image_handle = self.state.read(cx).image_resize_bounds().map(|bounds| {
+            window.insert_hitbox(BlockEditorState::image_resize_handle(bounds), HitboxBehavior::Normal)
+        });
         Prepaint {
             hitbox: window.insert_hitbox(bounds, HitboxBehavior::Normal),
             grip_hitbox: window.insert_hitbox(grip_bounds, HitboxBehavior::Normal),
+            image_handle,
             mark_rects,
         }
     }
@@ -1648,6 +1653,20 @@ impl Element for EditorRoot {
 
         let frame = frame.borrow();
         let style = &self.style;
+        if let Some(image) = self.state.read(cx).image_resize_bounds() {
+            window.paint_quad(gpui::quad(
+                image,
+                px(0.),
+                style.selection().opacity(0.),
+                px(1.),
+                style.caret(),
+                gpui::BorderStyle::Solid,
+            ));
+            window.paint_quad(fill(BlockEditorState::image_resize_handle(image), style.caret()));
+        }
+        if let Some(handle) = &prepaint.image_handle {
+            window.set_cursor_style(CursorStyle::ResizeUpLeftDownRight, handle);
+        }
         // Atomic content is painted before this overlay. Keep it translucent,
         // and let whole-block selection paint once instead of stacking two fills.
         if selected_area.is_none() {
@@ -1747,10 +1766,19 @@ impl Element for EditorRoot {
         // Mouse: handlers update the entity at event time, never in paint.
         let hitbox = prepaint.hitbox.clone();
         let grip_hitbox = prepaint.grip_hitbox.clone();
+        let image_handle = prepaint.image_handle.clone();
         let preview_bounds = self.code_preview_bounds.clone();
         let entity = self.state.clone();
         window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
+                return;
+            }
+            if image_handle.as_ref().is_some_and(|handle| handle.is_hovered(window))
+                && entity.update(cx, |state, cx| state.start_image_resize(event.position, cx))
+            {
+                let focus = entity.read(cx).focus_handle.clone();
+                window.focus(&focus, cx);
+                cx.stop_propagation();
                 return;
             }
             let in_editor = hitbox.is_hovered(window);
@@ -1834,7 +1862,7 @@ impl Element for EditorRoot {
                 return;
             }
             entity.update(cx, |state, cx| {
-                if state.block_drag_to(event.position, cx) {
+                if state.move_image_resize(event.position, cx) || state.block_drag_to(event.position, cx) {
                     return;
                 }
                 if state.dragging {
@@ -1843,9 +1871,10 @@ impl Element for EditorRoot {
             });
         });
         let entity = self.state.clone();
-        window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-            if phase == DispatchPhase::Bubble {
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+            if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
                 entity.update(cx, |state, cx| {
+                    state.finish_image_resize(event.position, cx);
                     state.dragging = false;
                     state.finish_block_drag(cx);
                 });

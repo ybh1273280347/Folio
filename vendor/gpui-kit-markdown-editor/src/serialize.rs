@@ -294,6 +294,23 @@ pub(crate) fn inline_markdown(inline: &InlineText) -> String {
     for (range, marks, atom) in inline.pieces() {
         match atom {
             Some(InlineAtom::Custom(node)) => source.push_marked(&custom_markdown(node), marks),
+            Some(InlineAtom::Image(image)) if image.width.is_some() || image.height.is_some() => {
+                // Markdown destinations carry no dimensions. Use the existing HTML
+                // image syntax so the same size is available after reopening.
+                let mut html = format!("<img src=\"{}\"", image_attribute(&image.url));
+                for (name, value) in [("alt", &image.alt), ("title", &image.title)] {
+                    if let Some(value) = value {
+                        html.push_str(&format!(" {name}=\"{}\"", image_attribute(value)));
+                    }
+                }
+                for (name, value) in [("width", image.width), ("height", image.height)] {
+                    if let Some(value) = value {
+                        html.push_str(&format!(" {name}=\"{value}\""));
+                    }
+                }
+                html.push_str(" />");
+                source.push_marked(&html, marks);
+            }
             Some(InlineAtom::Image(image)) => {
                 let alt = image.alt.as_deref().unwrap_or_default();
                 let markdown = match &image.title {
@@ -317,6 +334,16 @@ pub(crate) fn inline_markdown(inline: &InlineText) -> String {
         .map(escape_line_start)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn image_attribute(value: &str) -> String {
+    value.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('|', "&#124;")
+        .replace('\n', "&#10;")
+        .replace('\r', "&#13;")
 }
 
 fn escape_line_start(line: &str) -> String {
