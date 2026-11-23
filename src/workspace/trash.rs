@@ -8,6 +8,23 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_PROJECT_ID: &str = "__folio_default";
+const TRASH_ROW_HEIGHT: f32 = 48.;
+
+struct GroupFold {
+    from: f32,
+    opening: bool,
+    started: Instant,
+}
+
+impl GroupFold {
+    fn sample(&self, now: Instant) -> (f32, bool) {
+        let target = if self.opening { 1. } else { 0. };
+        let distance = (target - self.from).abs();
+        let duration = if self.opening { 0.195 } else { 0.155 };
+        let t = (now.duration_since(self.started).as_secs_f32() / (duration * distance.sqrt()).max(0.06)).min(1.);
+        (self.from + (target - self.from) * (1. - (1. - t).powi(3)), t < 1.)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum TrashScope {
@@ -23,6 +40,7 @@ pub(super) struct TrashView {
     search_input: Entity<InputState>,
     selected: BTreeSet<String>,
     collapsed_projects: BTreeSet<String>,
+    group_folds: BTreeMap<String, GroupFold>,
     scroll: ScrollHandle,
     next_cleanup: Instant,
     last_rendered_minute: u64,
@@ -46,6 +64,7 @@ impl TrashView {
             search_input,
             selected: BTreeSet::new(),
             collapsed_projects: BTreeSet::new(),
+            group_folds: BTreeMap::new(),
             scroll: ScrollHandle::new(),
             next_cleanup: Instant::now(),
             last_rendered_minute: current_epoch_secs() / 60,
@@ -59,6 +78,7 @@ impl TrashView {
     pub(super) fn dismiss(&mut self) {
         self.open = false;
         self.selected.clear();
+        self.group_folds.clear();
     }
 
     pub(super) fn prune_selection(&mut self) {
@@ -483,7 +503,7 @@ impl Workspace {
         metas
     }
 
-    pub(super) fn render_trash(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_trash(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let palette = self.settings.theme.palette;
         let dark = palette.is_dark();
         let t = TrashType::from_ui_font(self.settings.interface_font_size);
@@ -518,6 +538,22 @@ impl Workspace {
 
         let query = self.trash.search_input.read(cx).value().to_string();
         let query_active = !query.trim().is_empty();
+        let anim_now = Instant::now();
+        let mut folds = BTreeMap::new();
+        self.trash.group_folds.retain(|key, fold| {
+            let (progress, moving) = fold.sample(anim_now);
+            let moving = moving
+                && effective_scope == TrashScope::AllProjects
+                && !query_active
+                && !cx.reduce_motion();
+            if moving {
+                folds.insert(key.clone(), (progress, fold.opening));
+            }
+            moving
+        });
+        if !folds.is_empty() {
+            window.request_animation_frame();
+        }
         let metas = self.project_metas();
         let groups = group_trash_entries(
             &self.trash.entries,
@@ -621,6 +657,7 @@ impl Workspace {
                             .active(|s| s.opacity(0.82))
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.trash.scope = TrashScope::AllProjects;
+                                app.trash.group_folds.clear();
                                 cx.notify();
                             }))
                             .child(text::TRASH_VIEW_ALL_PROJECTS.get())
@@ -639,6 +676,7 @@ impl Workspace {
             }
         } else {
             let cards = groups.into_iter().map(|group| {
+                let fold = folds.get(&group.key).copied();
                 self.render_trash_group_card(
                     palette,
                     dark,
@@ -646,6 +684,7 @@ impl Workspace {
                     effective_scope,
                     query_active,
                     now,
+                    fold,
                     group,
                     cx,
                 )
@@ -799,6 +838,7 @@ impl Workspace {
                         return;
                     }
                     app.trash.scope = scope_val;
+                    app.trash.group_folds.clear();
                     let active_id = app.projects.directory().map(|p| p.id.clone());
                     app.trash.prune_selection_to_scope(active_id.as_deref());
                     cx.notify();
@@ -1057,6 +1097,7 @@ impl Workspace {
         effective_scope: TrashScope,
         query_active: bool,
         now: u64,
+        fold: Option<(f32, bool)>,
         group: TrashGroup,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1064,7 +1105,10 @@ impl Workspace {
         let collapsed = collapsible
             && !query_active
             && self.trash.collapsed_projects.contains(&group.key);
-        let expanded = !collapsed;
+        let show_drawer = !collapsed || fold.is_some();
+        let visual_progress = fold
+            .map(|(progress, _)| progress)
+            .unwrap_or(if collapsed { 0. } else { 1. });
 
         let group_ids: Vec<String> = group.entries.iter().map(|e| e.id.clone()).collect();
         let selected_in_group = group_ids
@@ -1139,37 +1183,55 @@ impl Workspace {
             .gap(px(8.))
             .when(collapsible && !query_active, |el| {
                 el.cursor_pointer().on_click(cx.listener(move |app, _, _, cx| {
-                    if !app.trash.collapsed_projects.remove(&group_key_toggle) {
+                    let opening = app.trash.collapsed_projects.remove(&group_key_toggle);
+                    if !opening {
                         app.trash
                             .collapsed_projects
                             .insert(group_key_toggle.clone());
+                    }
+                    if !cx.reduce_motion() {
+                        let now = Instant::now();
+                        let from = app
+                            .trash
+                            .group_folds
+                            .get(&group_key_toggle)
+                            .map_or(if opening { 0. } else { 1. }, |fold| fold.sample(now).0);
+                        app.trash.group_folds.insert(
+                            group_key_toggle.clone(),
+                            GroupFold {
+                                from,
+                                opening,
+                                started: now,
+                            },
+                        );
                     }
                     cx.notify();
                 }))
             })
             .when(collapsible, |el| {
                 el.child(
-                    crate::ui::icon(if expanded {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    })
-                    .w(px(13.))
-                    .h(px(13.))
-                    .flex_shrink_0()
-                    .text_color(gpui_kit::rgb(palette.muted)),
+                    crate::ui::icon(IconName::ChevronRight)
+                        .w(px(13.))
+                        .h(px(13.))
+                        .flex_shrink_0()
+                        .text_color(gpui_kit::rgb(palette.muted))
+                        .rotate(gpui::radians(std::f32::consts::FRAC_PI_2 * visual_progress)),
                 )
             })
             .child(
-                crate::ui::icon(IconName::Folder)
-                    .w(px(14.))
-                    .h(px(14.))
-                    .flex_shrink_0()
-                    .text_color(if group.is_current {
-                        accent
-                    } else {
-                        gpui_kit::rgb(palette.muted)
-                    }),
+                crate::ui::icon(if collapsed {
+                    IconName::Folder
+                } else {
+                    IconName::FolderOpen
+                })
+                .w(px(14.))
+                .h(px(14.))
+                .flex_shrink_0()
+                .text_color(if group.is_current {
+                    accent
+                } else {
+                    gpui_kit::rgb(palette.muted)
+                }),
             )
             .child(
                 div()
@@ -1250,7 +1312,9 @@ impl Workspace {
             .h(px(38.))
             .px(px(14.))
             .bg(palette.paper_header())
-            .when(expanded, |h| h.border_b_1().border_color(palette.paper_border()))
+            .when(show_drawer, |h| {
+                h.border_b_1().border_color(palette.paper_border())
+            })
             .flex()
             .items_center()
             .justify_between()
@@ -1301,7 +1365,7 @@ impl Workspace {
                     }),
             );
 
-        let rows = if expanded {
+        let rows = if show_drawer {
             group
                 .entries
                 .into_iter()
@@ -1323,6 +1387,43 @@ impl Workspace {
             Vec::new()
         };
 
+        let drawer = if let Some((progress, opening)) = fold {
+            if rows.is_empty() {
+                None
+            } else {
+                // Keep rows at full height behind an animated clip so siblings slide smoothly.
+                let height = rows.len() as f32 * TRASH_ROW_HEIGHT * progress;
+                Some(
+                    div()
+                        .relative()
+                        .flex()
+                        .flex_col()
+                        .flex_shrink_0()
+                        .h(px(height))
+                        .overflow_hidden()
+                        .children(rows.into_iter().enumerate().map(|(i, row)| {
+                            let reveal = (height / TRASH_ROW_HEIGHT - i as f32).clamp(0., 1.);
+                            row.opacity(0.55 + 0.45 * reveal)
+                        }))
+                        .when(!opening, |clip| {
+                            clip.child(div().absolute().inset_0().block_mouse_except_scroll())
+                        })
+                        .into_any_element(),
+                )
+            }
+        } else if !collapsed && !rows.is_empty() {
+            Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_shrink_0()
+                    .children(rows)
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+
         div()
             .rounded(px(10.))
             .bg(palette.paper_surface())
@@ -1332,7 +1433,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .child(header)
-            .when(expanded, |card| card.children(rows))
+            .when_some(drawer, |card, drawer| card.child(drawer))
             .into_any_element()
     }
 
@@ -1347,7 +1448,7 @@ impl Workspace {
         now: u64,
         entry: crate::trash::TrashEntry,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Stateful<Div> {
         let is_selected = self.trash.selected.contains(&entry.id);
         let (file_name, parent_dir) = split_relative_path(&entry.relative);
         let (countdown, urgent) = format_remaining_countdown(entry.deleted_at, now);
@@ -1485,9 +1586,9 @@ impl Workspace {
         div()
             .id(row_id)
             .group(row_group)
-            .min_h(px(44.))
+            .h(px(TRASH_ROW_HEIGHT))
+            .flex_shrink_0()
             .px(px(14.))
-            .py(px(7.))
             .when(show_divider, |row| {
                 row.border_t_1().border_color(palette.paper_divider())
             })
@@ -1562,7 +1663,6 @@ impl Workspace {
                     .child(countdown_pill)
                     .child(actions),
             )
-            .into_any_element()
     }
 
     fn render_trash_batch_bar(
@@ -1704,10 +1804,13 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProjectMeta, TrashScope, format_remaining_countdown, group_trash_entries,
+        GroupFold, ProjectMeta, TrashScope, format_remaining_countdown, group_trash_entries,
         split_relative_path,
     };
-    use std::path::PathBuf;
+    use std::{
+        path::PathBuf,
+        time::{Duration, Instant},
+    };
 
     fn sample_entry(
         id: &str,
@@ -1842,5 +1945,34 @@ mod tests {
         );
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "Calculus");
+    }
+
+    #[test]
+    fn group_fold_animates_and_reverses_from_mid_flight() {
+        let start = Instant::now();
+        let open_fold = GroupFold {
+            from: 0.0,
+            opening: true,
+            started: start,
+        };
+        let (p0, moving0) = open_fold.sample(start);
+        assert!((p0 - 0.0).abs() < 1e-5 && moving0);
+
+        let mid_time = start + Duration::from_millis(80);
+        let (p_mid, moving_mid) = open_fold.sample(mid_time);
+        assert!(p_mid > 0.0 && p_mid < 1.0 && moving_mid);
+
+        let (p_end, moving_end) = open_fold.sample(start + Duration::from_millis(220));
+        assert!((p_end - 1.0).abs() < 1e-5 && !moving_end);
+
+        let reverse_fold = GroupFold {
+            from: p_mid,
+            opening: false,
+            started: mid_time,
+        };
+        let (rev_start, rev_moving) = reverse_fold.sample(mid_time);
+        assert!((rev_start - p_mid).abs() < 1e-5 && rev_moving);
+        let (rev_end, rev_done) = reverse_fold.sample(mid_time + Duration::from_millis(200));
+        assert!((rev_end - 0.0).abs() < 1e-5 && !rev_done);
     }
 }
