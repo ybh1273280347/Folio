@@ -7,7 +7,7 @@ use std::{borrow::Cow, cell::RefCell, ops::Range, rc::Rc};
 use gpui::{
     AnyElement, App, AppContext, Bounds, ClipboardItem, Context, Entity, EntityInputHandler, EventEmitter,
     FocusHandle, Focusable, KeyBinding, Pixels, Point, SharedString, Subscription, UTF16Selection,
-    Window, actions,
+    Window, actions, point, px, size,
 };
 
 use super::{
@@ -16,7 +16,7 @@ use super::{
     editor::BlockEditorModel,
     frame::FrameLayout,
     id::BlockId,
-    inline::{InlineAtom, InlineText},
+    inline::{ATOM_LEN, InlineAtom, InlineText},
     kind::BlockKind,
     marks::MarkKind,
     position::BlockPosition,
@@ -26,7 +26,10 @@ use super::{
     transaction::EditOrigin,
 };
 use crate::support::BlinkCursor;
-use gpui_kit::base::text::{MarkdownExtensions, editor_host::{CodeBlock, RenderContext}};
+use gpui_kit::base::text::{
+    MarkdownExtensions,
+    editor_host::{CodeBlock, ImageNode, RenderContext, TextMark},
+};
 
 pub(crate) const CONTEXT: &str = "BlockEditor";
 /// Side of the whole-table corner handle, in px.
@@ -360,6 +363,27 @@ pub(crate) struct BlockDrag {
     pub(crate) drop: Option<usize>,
 }
 
+/// Preview geometry stays outside the document until mouse-up commits one edit.
+#[derive(Clone, Copy)]
+struct ImageResize {
+    start: Point<Pixels>,
+    original: Bounds<Pixels>,
+    max_width: Pixels,
+    preview: Bounds<Pixels>,
+}
+
+impl ImageResize {
+    fn bounds_at(self, at: Point<Pixels>) -> Bounds<Pixels> {
+        let delta = at - self.start;
+        let original = self.original.size;
+        let ratio = original.height / original.width;
+        // Project the pointer onto the image diagonal to preserve the ratio.
+        let width = (original.width + (delta.x + delta.y * ratio) / (1. + ratio * ratio))
+            .clamp(px(16.).min(original.width), self.max_width);
+        Bounds::new(self.original.origin, size(width, width * ratio))
+    }
+}
+
 /// IME composition in progress: the marked byte range in one leaf.
 #[derive(Clone, Debug)]
 struct Marked {
@@ -404,6 +428,7 @@ pub struct BlockEditorState {
     pub(crate) dragging: bool,
     /// A press on a block handle, and the drag to reorder it (D22).
     pub(crate) block_drag: Option<BlockDrag>,
+    image_resize: Option<ImageResize>,
     readonly: bool,
     image_policy: super::ImagePolicy,
     image_source: Option<Arc<dyn Fn(&gpui::SharedUri) -> gpui::ImageSource + Send + Sync>>,
@@ -487,6 +512,7 @@ impl BlockEditorState {
             goal_x: None,
             dragging: false,
             block_drag: None,
+            image_resize: None,
             readonly: false,
             toolbar_hidden: false,
             image_policy: super::ImagePolicy::default(),
@@ -786,6 +812,7 @@ impl BlockEditorState {
     ) -> Result<(), SharedString> {
         let callout_names = std::mem::take(&mut self.model.callout_names);
         self.model = BlockEditorModel::from_markdown(&self.model.source(), extensions)?;
+        self.image_resize = None;
         self.model.callout_names = callout_names;
         self.reset_code_preview_selection();
         self.fold_open.clear();
@@ -798,6 +825,7 @@ impl BlockEditorState {
     /// Replace the content. No `Changed` event; clears history.
     pub fn set_source(&mut self, source: &str, cx: &mut Context<Self>) -> Result<(), SharedString> {
         self.model.set_source(source)?;
+        self.image_resize = None;
         self.reset_code_preview_selection();
         self.fold_open.clear();
         self.reveal_selection_folds();
@@ -820,6 +848,7 @@ impl BlockEditorState {
         model.doc.revision = self.model.revision() + 1;
         model.callout_names = std::mem::take(&mut self.model.callout_names);
         self.model = model;
+        self.image_resize = None;
         self.reset_code_preview_selection();
         self.fold_open.clear();
         self.reveal_selection_folds();
@@ -919,6 +948,7 @@ impl BlockEditorState {
     }
     pub fn set_image_policy(&mut self, policy: super::ImagePolicy, cx: &mut Context<Self>) {
         self.image_policy = policy;
+        self.image_resize = None;
         self.projection.invalidate();
         cx.notify();
     }
@@ -1777,6 +1807,7 @@ impl BlockEditorState {
     /// Block or allow edits.
     pub fn set_readonly(&mut self, readonly: bool, cx: &mut Context<Self>) {
         self.readonly = readonly;
+        self.image_resize = None;
         self.reset_code_preview_selection();
         cx.notify();
     }
@@ -2084,6 +2115,7 @@ impl BlockEditorState {
     // ---- internal edit plumbing -------------------------------------------
 
     fn after_edit(&mut self, origin: EditOrigin, cx: &mut Context<Self>) {
+        self.image_resize = None;
         self.heading_jump.set(None);
         self.sanitize_code_preview_source();
         if self.code_preview_source.is_some() {
@@ -2121,6 +2153,7 @@ impl BlockEditorState {
     }
 
     fn selection_changed(&mut self, cx: &mut Context<Self>) {
+        self.image_resize = None;
         self.heading_jump.set(None);
         self.sanitize_code_preview_source();
         if let Some(block) = self.selection_preview_block() {
@@ -2924,6 +2957,106 @@ impl BlockEditorState {
                 _ => None,
             }
         })
+    }
+
+    /// An exact image-atom selection owns the resize handle.
+    fn selected_image(&self) -> Option<(BlockPosition, &ImageNode, &TextMark)> {
+        let BlockSelection::Text { anchor, head } = *self.model.selection() else {
+            return None;
+        };
+        if anchor.block != head.block || anchor.offset.abs_diff(head.offset) != ATOM_LEN {
+            return None;
+        }
+        let start = anchor.offset.min(head.offset);
+        self.model
+            .doc
+            .inline(anchor.block)?
+            .pieces()
+            .find_map(|(range, marks, atom)| match atom {
+                Some(InlineAtom::Image(image)) if range.start == start => {
+                    Some((BlockPosition::new(anchor.block, start), image, marks))
+                }
+                _ => None,
+            })
+    }
+
+    pub(crate) fn image_resize_bounds(&self) -> Option<Bounds<Pixels>> {
+        if self.readonly || self.image_policy == super::ImagePolicy::Placeholder {
+            return None;
+        }
+        if let Some(drag) = self.image_resize {
+            return Some(drag.preview);
+        }
+        let (pos, _, _) = self.selected_image()?;
+        self.frame.borrow().leaf(pos.block)?.atom_bounds(pos.offset)
+    }
+
+    pub(crate) fn image_resize_handle(bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+        let side = px(10.);
+        Bounds::new(
+            point(bounds.right() - side, bounds.bottom() - side),
+            size(side, side),
+        )
+    }
+
+    pub(crate) fn start_image_resize(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+        let Some(bounds) = self.image_resize_bounds().filter(|bounds| {
+            bounds.size.width > Pixels::ZERO && Self::image_resize_handle(*bounds).contains(&at)
+        }) else {
+            return false;
+        };
+        self.end_composition();
+        let max_width = self.frame.borrow().content.map_or(bounds.size.width, |content| {
+            content.size.width.max(bounds.size.width)
+        });
+        self.image_resize = Some(ImageResize {
+            start: at,
+            original: bounds,
+            max_width,
+            preview: bounds,
+        });
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn move_image_resize(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+        let Some(drag) = self.image_resize.as_mut() else {
+            return false;
+        };
+        drag.preview = drag.bounds_at(at);
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn finish_image_resize(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(drag) = self.image_resize.take() else {
+            return;
+        };
+        let dimensions = drag.bounds_at(at).size;
+        cx.notify();
+        if (dimensions.width - drag.original.size.width).abs() < px(1.) {
+            return;
+        }
+        let Some((pos, image, marks)) = self.selected_image() else {
+            return;
+        };
+        let mut image = image.clone();
+        image.width = Some(dimensions.width.into());
+        image.height = Some(dimensions.height.into());
+        let replacement = InlineText::atom(InlineAtom::Image(image), marks.clone());
+        let selection = self.model.selection().clone();
+        let origin = EditOrigin::Command("resize_image");
+        self.edit(
+            origin,
+            |model| {
+                model.transact(origin, |tx| {
+                    tx.replace_text(pos.block, pos.offset..pos.offset + ATOM_LEN, replacement)?;
+                    Ok(Some(selection))
+                })?;
+                Ok(())
+            },
+            cx,
+        );
     }
 
     /// Mouse: place or extend the caret at a window point.

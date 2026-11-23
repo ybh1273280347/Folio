@@ -142,6 +142,10 @@ impl LeafGeom {
     pub(crate) fn atom_at(&self, at: Point<Pixels>) -> Option<Range<usize>> {
         self.geometry.as_ref()?.atom_at(at)
     }
+
+    pub(crate) fn atom_bounds(&self, start: usize) -> Option<Bounds<Pixels>> {
+        self.geometry.as_ref()?.atom_bounds(start)
+    }
 }
 
 /// The last complete frame's leaf geometry, in document order.
