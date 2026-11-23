@@ -580,7 +580,6 @@ impl DrawioPane {
                 "action": "load",
                 "xml": xml,
                 "autosave": 1,
-                "title": self.display_name(),
             }),
             cx,
         );
