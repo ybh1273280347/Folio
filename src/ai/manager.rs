@@ -1041,16 +1041,25 @@ impl Render for AiPane {
                 |root, view| root.child(div().flex_1().min_h_0().child(view)),
             )
             .when(self.drawer, |root| {
-                root.child(
-                    deferred(
-                        div()
-                            .absolute()
-                            .top(px(40.))
-                            .left_2()
-                            .child(self.history(cx)),
-                    )
-                    .with_priority(5),
-                )
+                let history = div()
+                    .absolute()
+                    .top(px(40.))
+                    .left_2()
+                    .child(self.history(cx));
+                let history = if cx.reduce_motion() {
+                    history.into_any_element()
+                } else {
+                    // Keep the animation state across history refreshes while the drawer is mounted.
+                    history
+                        .with_animation(
+                            "ai-history-open",
+                            Animation::new(Duration::from_millis(140))
+                                .with_easing(ease_out_quint()),
+                            |el, t| el.top(px(36. + 4. * t)).opacity(t),
+                        )
+                        .into_any_element()
+                };
+                root.child(deferred(history).with_priority(5))
             })
             .when_some(self.pending_deletion.clone(), |root, (id, active_task)| {
                 let prompt = if active_task {
