@@ -156,83 +156,51 @@ impl Palette {
         }
     }
 
-    /// Warm book-page surface token (#FBF8F1 in default light mode, warm dark paper in dark mode).
+    /// Clean, modern card surface token derived from theme `surface` (near-white in light mode).
     pub fn paper_surface(self) -> Rgba {
-        if self.is_dark() {
-            mix(self.surface, 0x3a3222, 0.22)
-        } else if self.surface == Self::light().surface {
-            rgb(0xfbf8f1)
-        } else {
-            mix(self.surface, 0xf5ead2, 0.28)
-        }
+        rgb(self.surface)
     }
 
-    /// Title-page / frontispiece header background token, slightly deeper than the inner page.
+    /// Subtle header surface token, just a whisper deeper than the main card surface.
     pub fn paper_header(self) -> Rgba {
-        if self.is_dark() {
-            mix(self.surface, 0x463c28, 0.34)
-        } else if self.surface == Self::light().surface {
-            rgb(0xf3ede0)
-        } else {
-            mix(self.surface, self.background, 0.55)
-        }
+        mix(self.surface, self.background, if self.is_dark() { 0.35 } else { 0.42 })
     }
 
-    /// Hover tint on book paper surfaces.
+    /// Hover tint on card surfaces.
     pub fn paper_hover(self) -> Rgba {
-        if self.is_dark() {
-            mix(self.surface, self.hover, 0.72)
-        } else if self.surface == Self::light().surface {
-            rgb(0xf5efe2)
-        } else {
-            mix(self.surface, self.hover, 0.55)
-        }
+        mix(self.surface, self.hover, 0.55)
     }
 
-    /// Back-stacked sheet background token (layer 1 = closer to top page, layer 2 = deeper sheet).
-    pub fn paper_stack(self, layer: usize) -> Rgba {
-        if self.is_dark() {
-            match layer {
-                1 => mix(self.surface, self.background, 0.35),
-                _ => mix(self.surface, self.background, 0.62),
-            }
-        } else if self.surface == Self::light().surface {
-            match layer {
-                1 => rgb(0xf5efe2),
-                _ => rgb(0xede5d5),
-            }
-        } else {
-            let w = if layer == 1 { 0.42 } else { 0.72 };
-            mix(self.surface, self.background, w)
-        }
+    /// Single subtle back-stacked sheet background token.
+    pub fn paper_stack(self) -> Rgba {
+        mix(self.surface, self.background, if self.is_dark() { 0.45 } else { 0.52 })
     }
 
-    /// Warm cut-paper border token.
+    /// Crisp border token for cards.
     pub fn paper_border(self) -> Rgba {
-        if self.is_dark() {
-            mix(self.border, 0x524838, 0.32)
-        } else if self.border == Self::light().border {
-            rgb(0xe3dbcc)
-        } else {
-            mix(self.border, 0xd8ccb8, 0.35)
-        }
+        rgb(self.border)
     }
 
-    /// Subtle interior rule / divider line on book pages.
+    /// Subtle interior rule / divider line between excerpts.
     pub fn paper_divider(self) -> Rgba {
-        let mut c = self.paper_border();
-        c.a = if self.is_dark() { 0.72 } else { 0.78 };
+        let mut c = rgb(self.border);
+        c.a = if self.is_dark() { 0.62 } else { 0.68 };
         c
     }
 
-    /// Warm brownish-grey ink token for bottom-centered page numbers and folios.
+    /// Clean light-grey metadata token for page numbers and line numbers.
     pub fn paper_folio(self) -> Rgba {
+        let mut c = rgb(self.muted);
+        c.a = if self.is_dark() { 0.78 } else { 0.80 };
+        c
+    }
+
+    /// Clean, high-contrast search match highlight color on card surfaces.
+    pub fn paper_highlight(self) -> Rgba {
         if self.is_dark() {
-            mix(self.muted, 0xb8a68a, 0.35)
-        } else if self.muted == Self::light().muted {
-            rgb(0x9a8b74)
+            mix(self.surface, 0xd97706, 0.28)
         } else {
-            mix(self.muted, 0x8c7a5b, 0.38)
+            rgb(0xfef3c7)
         }
     }
 }
