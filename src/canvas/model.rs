@@ -51,12 +51,27 @@ pub enum EdgeKind {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum CanvasViewMode {
+    #[default]
+    Freeform,
+    Tree,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TreeLayoutMode {
     #[default]
     MindmapRight,
     MindmapLeft,
     MindmapBalanced,
     TreeDown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropPlacement {
+    Child,
+    BeforeSibling,
+    AfterSibling,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -80,6 +95,10 @@ pub struct TreeMeta {
 pub struct CanvasMeta {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    #[serde(default)]
+    pub view_mode: CanvasViewMode,
+    #[serde(default)]
+    pub tree_mode: TreeLayoutMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewport: Option<ViewportState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -100,12 +119,18 @@ pub struct NodeExt {
     #[serde(default, skip_serializing_if = "is_false")]
     pub collapsed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_pos: Option<[f32; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<KnowledgeAnchor>,
 }
 
 impl NodeExt {
     pub fn is_empty(&self) -> bool {
-        self.parent_id.is_none() && !self.pinned && !self.collapsed && self.anchor.is_none()
+        self.parent_id.is_none()
+            && !self.pinned
+            && !self.collapsed
+            && self.free_pos.is_none()
+            && self.anchor.is_none()
     }
 }
 
@@ -207,6 +232,27 @@ impl CanvasNode {
         }
     }
 
+    pub fn new_image(id: impl Into<String>, x: f32, y: f32, file: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            node_type: CanvasNodeType::File,
+            x,
+            y,
+            width: 260.0,
+            height: 190.0,
+            color: None,
+            text: None,
+            file: Some(file.into()),
+            subpath: None,
+            url: None,
+            label: None,
+            background: None,
+            background_style: None,
+            folio: None,
+            extra: BTreeMap::new(),
+        }
+    }
+
     pub fn display_text(&self) -> &str {
         match self.node_type {
             CanvasNodeType::Text => self.text.as_deref().unwrap_or(""),
@@ -226,7 +272,8 @@ impl CanvasNode {
 
     pub fn set_display_text(&mut self, value: String) {
         match self.node_type {
-            CanvasNodeType::Text | CanvasNodeType::File => self.text = Some(value),
+            CanvasNodeType::Text => self.text = Some(value),
+            CanvasNodeType::File => self.text = (!value.is_empty()).then_some(value),
             CanvasNodeType::Link => self.url = Some(value),
             CanvasNodeType::Group => self.label = Some(value),
         }
@@ -269,6 +316,19 @@ impl CanvasNode {
             EdgeSide::Bottom => (self.x + self.width * 0.5, self.y + self.height),
             EdgeSide::Left => (self.x, self.y + self.height * 0.5),
         }
+    }
+
+    pub fn is_image_file(&self) -> bool {
+        if self.node_type != CanvasNodeType::File {
+            return false;
+        }
+        let Some(file) = self.file.as_deref() else {
+            return false;
+        };
+        let lower = file.to_ascii_lowercase();
+        [".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"]
+            .iter()
+            .any(|ext| lower.ends_with(ext))
     }
 }
 
@@ -525,6 +585,271 @@ impl CanvasDocument {
         false
     }
 
+    pub fn view_mode(&self) -> CanvasViewMode {
+        self.folio
+            .as_ref()
+            .map_or(CanvasViewMode::Freeform, |m| m.view_mode)
+    }
+
+    pub fn tree_mode(&self) -> TreeLayoutMode {
+        self.folio
+            .as_ref()
+            .map_or(TreeLayoutMode::MindmapRight, |m| m.tree_mode)
+    }
+
+    /// Switches between `Freeform` and `Tree` view non-destructively using `free_pos` snapshots.
+    pub fn switch_view_mode(&mut self, next: CanvasViewMode) {
+        let current = self.view_mode();
+        if current == next {
+            return;
+        }
+        match (current, next) {
+            (CanvasViewMode::Freeform, CanvasViewMode::Tree) => {
+                for node in &mut self.nodes {
+                    let pos = [node.x, node.y];
+                    node.ext_mut().free_pos = Some(pos);
+                }
+                let meta = self.folio.get_or_insert_with(CanvasMeta::default);
+                meta.schema_version = FOLIO_CANVAS_SCHEMA_VERSION;
+                meta.view_mode = CanvasViewMode::Tree;
+                self.layout_forest(true);
+            }
+            (CanvasViewMode::Tree, CanvasViewMode::Freeform) => {
+                for node in &mut self.nodes {
+                    if let Some(ext) = node.folio.as_mut()
+                        && let Some([fx, fy]) = ext.free_pos.take()
+                    {
+                        node.x = fx;
+                        node.y = fy;
+                        node.compact_ext();
+                    }
+                }
+                let meta = self.folio.get_or_insert_with(CanvasMeta::default);
+                meta.schema_version = FOLIO_CANVAS_SCHEMA_VERSION;
+                meta.view_mode = CanvasViewMode::Freeform;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn layout_forest(&mut self, ignore_pinned: bool) -> usize {
+        let mode = self.tree_mode();
+        let options = super::layout::LayoutOptions {
+            mode,
+            ignore_pinned,
+            ..Default::default()
+        };
+        let updates = super::layout::compute_tree_layout(self, None, options);
+        let mut count = 0;
+        for (id, (nx, ny)) in updates {
+            if let Some(node) = self.node_mut(&id)
+                && ((node.x - nx).abs() > 0.5 || (node.y - ny).abs() > 0.5)
+            {
+                node.x = nx;
+                node.y = ny;
+                count += 1;
+            }
+        }
+        count
+    }
+
+    pub fn auto_layout_if_tree(&mut self) {
+        if self.view_mode() == CanvasViewMode::Tree {
+            self.layout_forest(true);
+        }
+    }
+
+    pub fn is_ancestor(&self, ancestor_id: &str, node_id: &str) -> bool {
+        let mut cur = Some(node_id);
+        let mut seen = HashSet::new();
+        while let Some(id) = cur {
+            if id == ancestor_id {
+                return true;
+            }
+            if !seen.insert(id) {
+                break;
+            }
+            cur = self.node(id).and_then(|n| n.parent_id());
+        }
+        false
+    }
+
+    /// Connects `parent_id -> child_id` as a `Hierarchy` edge, replacing any previous parent link.
+    pub fn connect_hierarchy(&mut self, parent_id: &str, child_id: &str) -> Result<String, String> {
+        if parent_id == child_id {
+            return Err("节点不能连接到自身。".to_owned());
+        }
+        if self.node(parent_id).is_none() || self.node(child_id).is_none() {
+            return Err("节点不存在。".to_owned());
+        }
+        if self.is_ancestor(child_id, parent_id) {
+            return Err("不能将父节点连接到其后代节点（会形成环路）。".to_owned());
+        }
+        self.edges
+            .retain(|e| !(e.to_node == child_id && e.kind() == EdgeKind::Hierarchy));
+        if let Some(child) = self.node_mut(child_id) {
+            child.ext_mut().parent_id = Some(parent_id.to_owned());
+            child.compact_ext();
+        }
+        let edge_id = Self::new_id();
+        self.edges.push(CanvasEdge::new(
+            edge_id.clone(),
+            parent_id,
+            child_id,
+            EdgeKind::Hierarchy,
+        ));
+        self.auto_layout_if_tree();
+        Ok(edge_id)
+    }
+
+    pub fn set_edge_kind(&mut self, edge_id: &str, next_kind: EdgeKind) -> Result<(), String> {
+        let Some(edge) = self.edge(edge_id).cloned() else {
+            return Err("连线不存在。".to_owned());
+        };
+        if edge.kind() == next_kind {
+            return Ok(());
+        }
+        match next_kind {
+            EdgeKind::Hierarchy => {
+                if edge.from_node == edge.to_node {
+                    return Err("自环不能作为父子层级边。".to_owned());
+                }
+                if self.is_ancestor(&edge.to_node, &edge.from_node) {
+                    return Err("转为父子实线会形成环路，请先反转方向或调整结构。".to_owned());
+                }
+                // Replace any previous incoming hierarchy edge to `to_node`.
+                self.edges.retain(|e| {
+                    !(e.id != edge_id && e.to_node == edge.to_node && e.kind() == EdgeKind::Hierarchy)
+                });
+                if let Some(e) = self.edge_mut(edge_id) {
+                    e.folio = Some(EdgeExt {
+                        kind: EdgeKind::Hierarchy,
+                    });
+                }
+                if let Some(child) = self.node_mut(&edge.to_node) {
+                    child.ext_mut().parent_id = Some(edge.from_node);
+                    child.compact_ext();
+                }
+            }
+            EdgeKind::Reference => {
+                if let Some(e) = self.edge_mut(edge_id) {
+                    e.folio = Some(EdgeExt {
+                        kind: EdgeKind::Reference,
+                    });
+                }
+                if let Some(child) = self.node_mut(&edge.to_node)
+                    && child.parent_id() == Some(edge.from_node.as_str())
+                {
+                    child.ext_mut().parent_id = None;
+                    child.compact_ext();
+                }
+            }
+        }
+        self.auto_layout_if_tree();
+        Ok(())
+    }
+
+    pub fn reverse_edge(&mut self, edge_id: &str) -> Result<(), String> {
+        let Some(edge) = self.edge(edge_id).cloned() else {
+            return Err("连线不存在。".to_owned());
+        };
+        let mut working = self.clone();
+        if edge.kind() == EdgeKind::Hierarchy {
+            if let Some(old_child) = working.node_mut(&edge.to_node)
+                && old_child.parent_id() == Some(edge.from_node.as_str())
+            {
+                old_child.ext_mut().parent_id = None;
+                old_child.compact_ext();
+            }
+            working.edges.retain(|e| {
+                !(e.id != edge_id
+                    && e.to_node == edge.from_node
+                    && e.kind() == EdgeKind::Hierarchy)
+            });
+            if let Some(new_child) = working.node_mut(&edge.from_node) {
+                new_child.ext_mut().parent_id = Some(edge.to_node.clone());
+                new_child.compact_ext();
+            }
+        }
+        if let Some(e) = working.edge_mut(edge_id) {
+            std::mem::swap(&mut e.from_node, &mut e.to_node);
+            std::mem::swap(&mut e.from_side, &mut e.to_side);
+        }
+        working.validate_tree_acyclic()?;
+        working.auto_layout_if_tree();
+        *self = working;
+        Ok(())
+    }
+
+    pub fn reparent_or_reorder(
+        &mut self,
+        node_id: &str,
+        target: Option<(&str, DropPlacement)>,
+    ) -> Result<(), String> {
+        let Some(target) = target else {
+            // Detach from parent to become a standalone root.
+            self.edges
+                .retain(|e| !(e.to_node == node_id && e.kind() == EdgeKind::Hierarchy));
+            if let Some(node) = self.node_mut(node_id) {
+                node.ext_mut().parent_id = None;
+                node.compact_ext();
+            }
+            self.auto_layout_if_tree();
+            return Ok(());
+        };
+
+        let (target_id, placement) = target;
+        if node_id == target_id {
+            return Ok(());
+        }
+        if self.node(node_id).is_none() || self.node(target_id).is_none() {
+            return Err("目标节点不存在。".to_owned());
+        }
+        if self.is_ancestor(node_id, target_id) {
+            return Err("不能将节点拖入自身或后代子树。".to_owned());
+        }
+
+        match placement {
+            DropPlacement::Child => {
+                self.connect_hierarchy(target_id, node_id)?;
+            }
+            DropPlacement::BeforeSibling | DropPlacement::AfterSibling => {
+                let new_parent = self
+                    .node(target_id)
+                    .and_then(|n| n.parent_id().map(str::to_owned));
+                self.edges
+                    .retain(|e| !(e.to_node == node_id && e.kind() == EdgeKind::Hierarchy));
+                if let Some(node) = self.node_mut(node_id) {
+                    node.ext_mut().parent_id = new_parent.clone();
+                    node.compact_ext();
+                }
+                if let Some(pid) = new_parent {
+                    self.edges.push(CanvasEdge::new(
+                        Self::new_id(),
+                        pid,
+                        node_id,
+                        EdgeKind::Hierarchy,
+                    ));
+                }
+                if let Some(from_ix) = self.nodes.iter().position(|n| n.id == node_id) {
+                    let moved = self.nodes.remove(from_ix);
+                    if let Some(target_ix) = self.nodes.iter().position(|n| n.id == target_id) {
+                        let insert_ix = match placement {
+                            DropPlacement::BeforeSibling => target_ix,
+                            DropPlacement::AfterSibling => target_ix + 1,
+                            DropPlacement::Child => target_ix,
+                        };
+                        self.nodes.insert(insert_ix, moved);
+                    } else {
+                        self.nodes.push(moved);
+                    }
+                }
+                self.auto_layout_if_tree();
+            }
+        }
+        Ok(())
+    }
+
     /// Applies an atomic batch of operations. Returns an error without mutating `self` if validation fails.
     pub fn apply_ops(&mut self, ops: &[CanvasOp]) -> Result<ApplyReport, String> {
         let mut working = self.clone();
@@ -533,6 +858,7 @@ impl CanvasDocument {
             working.apply_single_op(op, &mut report)?;
         }
         working.validate_tree_acyclic()?;
+        working.auto_layout_if_tree();
         *self = working;
         Ok(report)
     }
@@ -996,5 +1322,101 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("环路"));
         assert_eq!(doc.node("a").unwrap().display_text(), "Root");
+    }
+
+    #[test]
+    fn switch_view_mode_preserves_free_pos_and_layouts_tree() {
+        let mut doc = CanvasDocument::default();
+        doc.apply_ops(&[
+            CanvasOp::AddNode {
+                id: Some("r".into()),
+                node_type: None,
+                text: Some("Root".into()),
+                x: Some(40.0),
+                y: Some(60.0),
+                width: None,
+                height: None,
+                color: None,
+                parent_id: None,
+                pinned: None,
+                anchor: None,
+            },
+            CanvasOp::AddNode {
+                id: Some("c".into()),
+                node_type: None,
+                text: Some("Child".into()),
+                x: Some(820.0),
+                y: Some(540.0),
+                width: None,
+                height: None,
+                color: None,
+                parent_id: Some("r".into()),
+                pinned: None,
+                anchor: None,
+            },
+        ])
+        .unwrap();
+
+        doc.switch_view_mode(CanvasViewMode::Tree);
+        assert_eq!(doc.view_mode(), CanvasViewMode::Tree);
+        let child_tree = doc.node("c").unwrap();
+        assert!((child_tree.x - 820.0).abs() > 10.0);
+        assert_eq!(
+            child_tree.folio.as_ref().and_then(|f| f.free_pos),
+            Some([820.0, 540.0])
+        );
+
+        doc.switch_view_mode(CanvasViewMode::Freeform);
+        assert_eq!(doc.view_mode(), CanvasViewMode::Freeform);
+        let child_free = doc.node("c").unwrap();
+        assert!((child_free.x - 820.0).abs() < 0.01);
+        assert!((child_free.y - 540.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn edge_kind_toggle_reverse_and_reparent_update_hierarchy() {
+        let mut doc = CanvasDocument::default();
+        doc.nodes.push(CanvasNode::new_text("a", 0.0, 0.0, "A"));
+        doc.nodes.push(CanvasNode::new_text("b", 300.0, 0.0, "B"));
+        doc.nodes.push(CanvasNode::new_text("c", 300.0, 140.0, "C"));
+
+        let edge_id = doc.connect_hierarchy("a", "b").unwrap();
+        assert_eq!(doc.node("b").unwrap().parent_id(), Some("a"));
+
+        doc.set_edge_kind(&edge_id, EdgeKind::Reference).unwrap();
+        assert_eq!(doc.node("b").unwrap().parent_id(), None);
+        assert_eq!(doc.edge(&edge_id).unwrap().kind(), EdgeKind::Reference);
+
+        doc.set_edge_kind(&edge_id, EdgeKind::Hierarchy).unwrap();
+        assert_eq!(doc.node("b").unwrap().parent_id(), Some("a"));
+
+        doc.reverse_edge(&edge_id).unwrap();
+        assert_eq!(doc.node("b").unwrap().parent_id(), None);
+        assert_eq!(doc.node("a").unwrap().parent_id(), Some("b"));
+
+        doc.reparent_or_reorder("a", Some(("c", DropPlacement::BeforeSibling)))
+            .unwrap();
+        assert_eq!(doc.node("a").unwrap().parent_id(), None);
+        let ix_a = doc.nodes.iter().position(|n| n.id == "a").unwrap();
+        let ix_c = doc.nodes.iter().position(|n| n.id == "c").unwrap();
+        assert!(ix_a < ix_c);
+
+        doc.reparent_or_reorder("c", Some(("b", DropPlacement::Child)))
+            .unwrap();
+        assert_eq!(doc.node("c").unwrap().parent_id(), Some("b"));
+        doc.reparent_or_reorder("c", None).unwrap();
+        assert_eq!(doc.node("c").unwrap().parent_id(), None);
+    }
+
+    #[test]
+    fn image_node_detection_and_roundtrip() {
+        let mut doc = CanvasDocument::default();
+        doc.nodes
+            .push(CanvasNode::new_image("img1", 10.0, 20.0, "assets/diagram.PNG"));
+        assert!(doc.node("img1").unwrap().is_image_file());
+        let json = doc.to_json_pretty().unwrap();
+        let parsed = CanvasDocument::from_json_str(&json).unwrap();
+        assert!(parsed.node("img1").unwrap().is_image_file());
+        assert_eq!(parsed.node("img1").unwrap().file.as_deref(), Some("assets/diagram.PNG"));
     }
 }

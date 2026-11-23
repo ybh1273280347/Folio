@@ -865,7 +865,7 @@ impl Workspace {
         let text = self.documents.open[path].buffer.text.clone();
         let full = self.documents.open[path].path.clone();
         let pane = cx.new(|cx| CanvasPane::new(&text, full, window, cx));
-        cx.subscribe_in(&pane, window, move |app, pane, event: &CanvasEvent, _window, cx| {
+        cx.subscribe_in(&pane, window, move |app, pane, event: &CanvasEvent, window, cx| {
             let full = pane.read(cx).file_path().to_path_buf();
             let Some(file) = app
                 .documents
@@ -883,6 +883,11 @@ impl Workspace {
                 CanvasEvent::Focus => {
                     app.documents.focused_markdown = None;
                 }
+                CanvasEvent::FilesChanged => {
+                    if let Err(error) = app.refresh_files(window, cx) {
+                        app.report(error, cx);
+                    }
+                }
                 CanvasEvent::JumpToAnchor {
                     anchor,
                     fallback_file,
@@ -893,7 +898,7 @@ impl Workspace {
                         anchor.as_ref(),
                         fallback_file.as_deref(),
                         fallback_subpath.as_deref(),
-                        _window,
+                        window,
                         cx,
                     );
                 }

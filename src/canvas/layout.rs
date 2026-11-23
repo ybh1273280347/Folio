@@ -14,6 +14,7 @@ pub struct LayoutOptions {
     pub mode: TreeLayoutMode,
     pub h_gap: f32,
     pub v_gap: f32,
+    pub ignore_pinned: bool,
 }
 
 impl Default for LayoutOptions {
@@ -22,31 +23,17 @@ impl Default for LayoutOptions {
             mode: TreeLayoutMode::MindmapRight,
             h_gap: HORIZONTAL_GAP,
             v_gap: VERTICAL_GAP,
+            ignore_pinned: false,
         }
     }
 }
 
-/// Computes new `(x, y)` coordinates for unpinned descendants of `root_id` (or all tree roots if `None`).
+/// Computes new `(x, y)` coordinates for a subtree or full forest.
 pub fn compute_tree_layout(
     doc: &CanvasDocument,
     root_id: Option<&str>,
     options: LayoutOptions,
 ) -> HashMap<String, (f32, f32)> {
-    let roots: Vec<&CanvasNode> = if let Some(rid) = root_id {
-        doc.node(rid).into_iter().collect()
-    } else {
-        let mut children_by_parent: HashMap<&str, usize> = HashMap::new();
-        for node in &doc.nodes {
-            if let Some(pid) = node.parent_id() {
-                *children_by_parent.entry(pid).or_insert(0) += 1;
-            }
-        }
-        doc.nodes
-            .iter()
-            .filter(|n| n.parent_id().is_none() && children_by_parent.contains_key(n.id.as_str()))
-            .collect()
-    };
-
     let mut children_map: HashMap<&str, Vec<&CanvasNode>> = HashMap::new();
     for node in &doc.nodes {
         if let Some(pid) = node.parent_id() {
@@ -54,52 +41,111 @@ pub fn compute_tree_layout(
         }
     }
 
+    let roots: Vec<&CanvasNode> = if let Some(rid) = root_id {
+        doc.node(rid).into_iter().collect()
+    } else {
+        doc.nodes
+            .iter()
+            .filter(|n| n.parent_id().is_none())
+            .collect()
+    };
+
     let mut positions = HashMap::new();
-    for root in roots {
+    if roots.is_empty() {
+        return positions;
+    }
+
+    // When laying out the full forest (`root_id.is_none()`), stack roots vertically without overlap.
+    let forest_mode = root_id.is_none();
+    let base_x = roots.first().map_or(80.0, |r| r.x);
+    let mut next_y = roots.first().map_or(80.0, |r| r.y);
+    let forest_gap = 44.0;
+
+    for (idx, root) in roots.into_iter().enumerate() {
         let mut visited = HashSet::new();
+        let mut tree_positions = HashMap::new();
+
+        let (root_x, root_y) = if forest_mode && idx > 0 {
+            let span = match options.mode {
+                TreeLayoutMode::TreeDown => root.height,
+                _ => {
+                    let mut seen = HashSet::new();
+                    measure_horizontal_span(root, &children_map, options.v_gap, &mut seen)
+                }
+            };
+            let centered_y = next_y + span * 0.5 - root.height * 0.5;
+            if options.ignore_pinned || !root.is_pinned() {
+                tree_positions.insert(root.id.clone(), (base_x, centered_y));
+            }
+            (base_x, centered_y)
+        } else {
+            (root.x, root.y)
+        };
+
+        let mut virtual_root = root.clone();
+        virtual_root.x = root_x;
+        virtual_root.y = root_y;
+
         match options.mode {
             TreeLayoutMode::MindmapRight => {
                 layout_horizontal_branch(
-                    root,
-                    root.x,
-                    root.y + root.height * 0.5,
+                    &virtual_root,
+                    virtual_root.x,
+                    virtual_root.y + virtual_root.height * 0.5,
                     1.0,
                     true,
                     &children_map,
                     &options,
                     &mut visited,
-                    &mut positions,
+                    &mut tree_positions,
                 );
             }
             TreeLayoutMode::MindmapLeft => {
                 layout_horizontal_branch(
-                    root,
-                    root.x + root.width,
-                    root.y + root.height * 0.5,
+                    &virtual_root,
+                    virtual_root.x + virtual_root.width,
+                    virtual_root.y + virtual_root.height * 0.5,
                     -1.0,
                     true,
                     &children_map,
                     &options,
                     &mut visited,
-                    &mut positions,
+                    &mut tree_positions,
                 );
             }
             TreeLayoutMode::MindmapBalanced => {
-                layout_balanced_root(root, &children_map, &options, &mut visited, &mut positions);
+                layout_balanced_root(
+                    &virtual_root,
+                    &children_map,
+                    &options,
+                    &mut visited,
+                    &mut tree_positions,
+                );
             }
             TreeLayoutMode::TreeDown => {
                 layout_vertical_branch(
-                    root,
-                    root.x + root.width * 0.5,
-                    root.y,
+                    &virtual_root,
+                    virtual_root.x + virtual_root.width * 0.5,
+                    virtual_root.y,
                     true,
                     &children_map,
                     &options,
                     &mut visited,
-                    &mut positions,
+                    &mut tree_positions,
                 );
             }
         }
+
+        if forest_mode {
+            let mut max_y = root_y + root.height;
+            for (nid, (_, ny)) in &tree_positions {
+                if let Some(node) = doc.node(nid) {
+                    max_y = max_y.max(ny + node.height);
+                }
+            }
+            next_y = max_y + forest_gap;
+        }
+        positions.extend(tree_positions);
     }
     positions
 }
@@ -153,11 +199,12 @@ fn layout_horizontal_branch<'a>(
         anchor_x - node.width
     };
     let ny = center_y - node.height * 0.5;
-    if !is_root && !node.is_pinned() {
+    let locked = !options.ignore_pinned && node.is_pinned();
+    if !is_root && !locked {
         out.insert(node.id.clone(), (nx, ny));
     }
-    let effective_x = if is_root || node.is_pinned() { node.x } else { nx };
-    let effective_cy = if is_root || node.is_pinned() {
+    let effective_x = if is_root || locked { node.x } else { nx };
+    let effective_cy = if is_root || locked {
         node.y + node.height * 0.5
     } else {
         center_y
@@ -323,15 +370,16 @@ fn layout_vertical_branch<'a>(
         return;
     }
     let nx = center_x - node.width * 0.5;
-    if !is_root && !node.is_pinned() {
+    let locked = !options.ignore_pinned && node.is_pinned();
+    if !is_root && !locked {
         out.insert(node.id.clone(), (nx, top_y));
     }
-    let effective_cx = if is_root || node.is_pinned() {
+    let effective_cx = if is_root || locked {
         node.x + node.width * 0.5
     } else {
         center_x
     };
-    let effective_y = if is_root || node.is_pinned() { node.y } else { top_y };
+    let effective_y = if is_root || locked { node.y } else { top_y };
 
     if node.is_collapsed() {
         return;
@@ -426,5 +474,51 @@ mod tests {
         assert!(updates.contains_key("c1"));
         assert!(!updates.contains_key("c2"));
         assert!(updates["c1"].0 > 100.0 + 240.0);
+    }
+
+    #[test]
+    fn forest_layout_stacks_multiple_roots_without_overlap() {
+        let mut doc = CanvasDocument::default();
+        doc.apply_ops(&[
+            CanvasOp::AddNode {
+                id: Some("r1".into()),
+                node_type: None,
+                text: Some("Root 1".into()),
+                x: Some(0.0),
+                y: Some(0.0),
+                width: None,
+                height: None,
+                color: None,
+                parent_id: None,
+                pinned: None,
+                anchor: None,
+            },
+            CanvasOp::AddNode {
+                id: Some("r2".into()),
+                node_type: None,
+                text: Some("Root 2".into()),
+                x: Some(0.0),
+                y: Some(0.0),
+                width: None,
+                height: None,
+                color: None,
+                parent_id: None,
+                pinned: None,
+                anchor: None,
+            },
+        ])
+        .unwrap();
+
+        let updates = compute_tree_layout(
+            &doc,
+            None,
+            LayoutOptions {
+                ignore_pinned: true,
+                ..Default::default()
+            },
+        );
+        let y1 = updates.get("r1").map(|(_, y)| *y).unwrap_or(doc.node("r1").unwrap().y);
+        let y2 = updates.get("r2").map(|(_, y)| *y).unwrap_or(doc.node("r2").unwrap().y);
+        assert!((y2 - y1).abs() >= 100.0);
     }
 }

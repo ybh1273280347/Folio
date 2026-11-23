@@ -1,6 +1,6 @@
 //! Camera transforms, spatial hit-testing, and mutually exclusive interaction states.
 
-use super::model::{CanvasDocument, CanvasEdge, CanvasNode, EdgeSide};
+use super::model::{CanvasDocument, CanvasEdge, CanvasNode, DropPlacement, EdgeKind, EdgeSide};
 use gpui_kit::{Bounds, Pixels, Point, point, px};
 
 pub const MIN_ZOOM: f32 = 0.2;
@@ -101,6 +101,13 @@ pub enum InteractionState {
         snapshot_before: super::model::CanvasDocument,
         moved: bool,
     },
+    ReparentDragging {
+        node_id: String,
+        start_world: (f32, f32),
+        current_world: (f32, f32),
+        target: Option<(String, DropPlacement)>,
+        moved: bool,
+    },
     ResizingNode {
         node_id: String,
         start_world: (f32, f32),
@@ -111,6 +118,7 @@ pub enum InteractionState {
     ConnectingEdge {
         from_node: String,
         from_side: EdgeSide,
+        kind: EdgeKind,
         current_world: (f32, f32),
     },
 }
@@ -243,6 +251,44 @@ pub fn hit_edge<'a>(
         }
     }
     None
+}
+
+pub fn compute_drop_target(
+    doc: &CanvasDocument,
+    dragged_id: &str,
+    wx: f32,
+    wy: f32,
+) -> Option<(String, DropPlacement)> {
+    let target = doc.nodes.iter().rev().find(|node| {
+        node.id != dragged_id
+            && !doc.is_hidden_by_collapse(&node.id)
+            && !doc.is_ancestor(dragged_id, &node.id)
+            && wx >= node.x
+            && wx <= node.x + node.width
+            && wy >= node.y
+            && wy <= node.y + node.height
+    })?;
+    let rel_y = ((wy - target.y) / target.height.max(1.0)).clamp(0.0, 1.0);
+    let placement = if rel_y < 0.25 {
+        DropPlacement::BeforeSibling
+    } else if rel_y > 0.75 {
+        DropPlacement::AfterSibling
+    } else {
+        DropPlacement::Child
+    };
+    Some((target.id.clone(), placement))
+}
+
+pub fn edge_midpoint_local(
+    doc: &CanvasDocument,
+    camera: &Camera,
+    edge_id: &str,
+) -> Option<Point<Pixels>> {
+    let edge = doc.edge(edge_id)?;
+    let (p0, p3, fs, ts) = edge_endpoints(doc, edge)?;
+    let (c1, c2) = edge_bezier_controls(p0, p3, fs, ts);
+    let mid = eval_cubic_bezier(p0, c1, c2, p3, 0.5);
+    Some(camera.world_to_local(mid.0, mid.1))
 }
 
 pub fn nodes_in_rect(doc: &CanvasDocument, a: (f32, f32), b: (f32, f32)) -> Vec<String> {

@@ -4,24 +4,26 @@ use super::{
     anchor::KnowledgeAnchor,
     history::CanvasHistory,
     interaction::{
-        Camera, InteractionState, WHEEL_ZOOM_STEP, ZOOM_STEP, edge_bezier_controls, edge_endpoints,
-        hit_edge, hit_node, hit_port, hit_resize_handle, nearest_side, nodes_in_rect,
+        Camera, InteractionState, WHEEL_ZOOM_STEP, ZOOM_STEP, compute_drop_target,
+        edge_bezier_controls, edge_endpoints, edge_midpoint_local, hit_edge, hit_node, hit_port,
+        hit_resize_handle, nearest_side, nodes_in_rect,
     },
     model::{
-        ApplyReport, CanvasDocument, CanvasEdge, CanvasNode, CanvasNodeType, CanvasOp, EdgeEnd,
-        EdgeKind, MIN_NODE_HEIGHT, MIN_NODE_WIDTH, ViewportState,
+        ApplyReport, CanvasDocument, CanvasEdge, CanvasNode, CanvasNodeType, CanvasOp,
+        CanvasViewMode, DropPlacement, EdgeEnd, EdgeKind, MIN_NODE_HEIGHT, MIN_NODE_WIDTH,
+        ViewportState,
     },
 };
 use crate::theme::palette as active_palette;
 use gpui::{
     CursorStyle, EventEmitter, FocusHandle, Focusable, KeyBinding, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, ScrollDelta,
-    ScrollEvent, Subscription, Window, actions, canvas, point, px,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder, Pixels, Point,
+    ScrollDelta, ScrollEvent, Subscription, Window, actions, canvas, img, point, px,
 };
 use gpui_kit::{
     assets::IconName,
     component::{
-        Sizable,
+        Disableable, Sizable,
         button::{Button, ButtonVariants},
         input::{InputEvent, Textarea, TextareaState},
         tooltip::Tooltip,
@@ -46,6 +48,7 @@ actions!(
         CanvasAddChild,
         CanvasAddSibling,
         CanvasEditNode,
+        CanvasPaste,
         CanvasFitView,
         CanvasZoomIn,
         CanvasZoomOut,
@@ -61,6 +64,7 @@ pub fn bind_shortcuts(cx: &mut App) {
         KeyBinding::new("delete", CanvasDelete, Some("FolioCanvas")),
         KeyBinding::new("backspace", CanvasDelete, Some("FolioCanvas")),
         KeyBinding::new("ctrl-a", CanvasSelectAll, Some("FolioCanvas")),
+        KeyBinding::new("ctrl-v", CanvasPaste, Some("FolioCanvas")),
         KeyBinding::new("tab", CanvasAddChild, Some("FolioCanvas")),
         KeyBinding::new("enter", CanvasAddSibling, Some("FolioCanvas")),
         KeyBinding::new("f2", CanvasEditNode, Some("FolioCanvas")),
@@ -76,6 +80,7 @@ pub fn bind_shortcuts(cx: &mut App) {
 pub enum CanvasEvent {
     Change(String),
     Focus,
+    FilesChanged,
     JumpToAnchor {
         anchor: Option<KnowledgeAnchor>,
         fallback_file: Option<String>,
@@ -90,12 +95,14 @@ pub struct CanvasPane {
     document: CanvasDocument,
     last_synced_json: String,
     parse_error: Option<String>,
+    notice_error: Option<String>,
     history: CanvasHistory,
     camera: Camera,
     selection: BTreeSet<String>,
     selected_edge: Option<String>,
     hovered_node: Option<String>,
     interaction: InteractionState,
+    default_edge_kind: EdgeKind,
     space_pressed: bool,
     editing_node: Option<String>,
     edit_input: Entity<TextareaState>,
@@ -153,12 +160,14 @@ impl CanvasPane {
             document,
             last_synced_json: initial_text.to_owned(),
             parse_error,
+            notice_error: None,
             history: CanvasHistory::default(),
             camera,
             selection: BTreeSet::new(),
             selected_edge: None,
             hovered_node: None,
             interaction: InteractionState::Idle,
+            default_edge_kind: EdgeKind::Reference,
             space_pressed: false,
             editing_node: None,
             edit_input,
@@ -306,6 +315,7 @@ impl CanvasPane {
                 EdgeKind::Hierarchy,
             ));
         }
+        self.document.auto_layout_if_tree();
         self.history.record(before);
         self.selection.clear();
         self.selection.insert(node_id.clone());
@@ -313,6 +323,303 @@ impl CanvasPane {
         self.emit_change(cx);
         cx.notify();
         node_id
+    }
+
+    pub fn switch_view_mode(&mut self, next: CanvasViewMode, cx: &mut Context<Self>) {
+        if self.document.view_mode() == next {
+            return;
+        }
+        let before = self.document.clone();
+        self.document.switch_view_mode(next);
+        self.notice_error = None;
+        self.history.record(before);
+        self.emit_change(cx);
+        cx.notify();
+    }
+
+    pub fn set_selected_edge_kind(&mut self, kind: EdgeKind, cx: &mut Context<Self>) {
+        let Some(edge_id) = self.selected_edge.clone() else {
+            return;
+        };
+        let before = self.document.clone();
+        match self.document.set_edge_kind(&edge_id, kind) {
+            Ok(()) => {
+                self.notice_error = None;
+                self.history.record(before);
+                self.emit_change(cx);
+            }
+            Err(err) => {
+                self.notice_error = Some(err);
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn reverse_selected_edge(&mut self, cx: &mut Context<Self>) {
+        let Some(edge_id) = self.selected_edge.clone() else {
+            return;
+        };
+        let before = self.document.clone();
+        match self.document.reverse_edge(&edge_id) {
+            Ok(()) => {
+                self.notice_error = None;
+                self.history.record(before);
+                self.emit_change(cx);
+            }
+            Err(err) => {
+                self.notice_error = Some(err);
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn detach_selected_nodes(&mut self, cx: &mut Context<Self>) {
+        let has_parent = self.selection.iter().any(|id| {
+            self.document
+                .node(id)
+                .is_some_and(|n| n.parent_id().is_some())
+        });
+        if !has_parent {
+            return;
+        }
+        let before = self.document.clone();
+        let selected = self.selection.clone();
+        self.document
+            .edges
+            .retain(|e| !(e.kind() == EdgeKind::Hierarchy && selected.contains(&e.to_node)));
+        for id in &selected {
+            if let Some(node) = self.document.node_mut(id) {
+                node.ext_mut().parent_id = None;
+                node.compact_ext();
+            }
+        }
+        self.document.auto_layout_if_tree();
+        self.notice_error = None;
+        self.history.record(before);
+        self.emit_change(cx);
+        cx.notify();
+    }
+
+    pub fn cycle_selected_color(&mut self, cx: &mut Context<Self>) {
+        const PALETTE_CYCLE: &[Option<&str>] = &[
+            None,
+            Some("1"),
+            Some("2"),
+            Some("3"),
+            Some("4"),
+            Some("5"),
+            Some("6"),
+        ];
+        let next_color = |cur: Option<&str>| -> Option<String> {
+            let idx = PALETTE_CYCLE
+                .iter()
+                .position(|c| *c == cur)
+                .map(|i| (i + 1) % PALETTE_CYCLE.len())
+                .unwrap_or(1);
+            PALETTE_CYCLE[idx].map(str::to_owned)
+        };
+
+        if !self.selection.is_empty() {
+            let before = self.document.clone();
+            let first = self
+                .primary_selected_id()
+                .and_then(|id| self.document.node(&id))
+                .and_then(|n| n.color.clone());
+            let target = next_color(first.as_deref());
+            for id in &self.selection {
+                if let Some(node) = self.document.node_mut(id) {
+                    node.color = target.clone();
+                }
+            }
+            self.history.record(before);
+            self.emit_change(cx);
+            cx.notify();
+        } else if let Some(edge_id) = self.selected_edge.clone() {
+            let before = self.document.clone();
+            let current = self
+                .document
+                .edge(&edge_id)
+                .and_then(|e| e.color.as_deref());
+            let target = next_color(current);
+            if let Some(edge) = self.document.edge_mut(&edge_id) {
+                edge.color = target;
+            }
+            self.history.record(before);
+            self.emit_change(cx);
+            cx.notify();
+        }
+    }
+
+    fn resolve_image_path(&self, raw: &str) -> Option<PathBuf> {
+        let p = Path::new(raw);
+        if p.is_absolute() {
+            Some(p.to_path_buf())
+        } else {
+            self.file_path.parent().map(|dir| dir.join(p))
+        }
+    }
+
+    pub fn add_image_node(
+        &mut self,
+        file_ref: String,
+        select: bool,
+        cx: &mut Context<Self>,
+    ) -> String {
+        let before = self.document.clone();
+        let parent_id = self.primary_selected_id();
+        let (x, y) = if let Some(pid) = parent_id.as_deref() {
+            self.document.suggest_child_position(pid)
+        } else {
+            self.viewport_center_world()
+        };
+        let node_id = CanvasDocument::new_id();
+        let mut node = CanvasNode::new_image(node_id.clone(), x, y, file_ref);
+        if let Some(pid) = &parent_id {
+            node.ext_mut().parent_id = Some(pid.clone());
+        }
+        self.document.nodes.push(node);
+        if let Some(pid) = parent_id {
+            self.document.edges.push(CanvasEdge::new(
+                CanvasDocument::new_id(),
+                pid,
+                node_id.clone(),
+                EdgeKind::Hierarchy,
+            ));
+        }
+        self.document.auto_layout_if_tree();
+        self.notice_error = None;
+        self.history.record(before);
+        if select {
+            self.selection.clear();
+            self.selection.insert(node_id.clone());
+            self.selected_edge = None;
+        }
+        self.emit_change(cx);
+        cx.notify();
+        node_id
+    }
+
+    pub fn insert_image_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picker = rfd::AsyncFileDialog::new()
+            .set_parent(window)
+            .set_title("插入图片到画布")
+            .add_filter("图片文件", &["png", "jpg", "jpeg", "webp", "gif", "svg"]);
+        let canvas_path = self.file_path.clone();
+        let pane = cx.entity();
+        cx.spawn_in(window, async move |_, cx| {
+            let Some(handle) = picker.pick_file().await else {
+                return;
+            };
+            let source = handle.path().to_path_buf();
+            let canvas_dir = canvas_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let copied_into_workspace: Result<(String, bool), String> = (|| {
+                if source.starts_with(&canvas_dir) {
+                    let rel = crate::image::markdown_relative_image_ref(&canvas_path, &source);
+                    return Ok((rel, false));
+                }
+                let target_dir = crate::image::markdown_paste_image_dir(&canvas_path);
+                std::fs::create_dir_all(&target_dir)
+                    .map_err(|e| format!("创建图片目录失败：{e}"))?;
+                let dest = unique_image_destination(&target_dir, &source);
+                std::fs::copy(&source, &dest).map_err(|e| format!("复制图片失败：{e}"))?;
+                let rel = crate::image::markdown_relative_image_ref(&canvas_path, &dest);
+                Ok((rel, true))
+            })();
+            let _ = pane.update_in(cx, |pane, _, cx| match copied_into_workspace {
+                Ok((rel, created_file)) => {
+                    pane.add_image_node(rel, true, cx);
+                    if created_file {
+                        cx.emit(CanvasEvent::FilesChanged);
+                    }
+                }
+                Err(err) => {
+                    pane.notice_error = Some(err);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        let target_dir = crate::image::markdown_paste_image_dir(&self.file_path);
+        match crate::image::save_clipboard_images_to_dir(&item, &target_dir) {
+            Ok(saved) if !saved.is_empty() => {
+                for saved_path in saved {
+                    let rel =
+                        crate::image::markdown_relative_image_ref(&self.file_path, &saved_path);
+                    self.add_image_node(rel, true, cx);
+                }
+                cx.emit(CanvasEvent::FilesChanged);
+                return;
+            }
+            Err(err) => {
+                self.notice_error = Some(err);
+                cx.notify();
+                return;
+            }
+            Ok(_) => {}
+        }
+
+        if let Some(text) = item.text().filter(|t| !t.trim().is_empty()) {
+            let before = self.document.clone();
+            let parent_id = self.primary_selected_id();
+            let (x, y) = if let Some(pid) = parent_id.as_deref() {
+                self.document.suggest_child_position(pid)
+            } else {
+                self.viewport_center_world()
+            };
+            let node_id = CanvasDocument::new_id();
+            let mut node = CanvasNode::new_text(node_id.clone(), x, y, text);
+            if let Some(pid) = &parent_id {
+                node.ext_mut().parent_id = Some(pid.clone());
+            }
+            self.document.nodes.push(node);
+            if let Some(pid) = parent_id {
+                self.document.edges.push(CanvasEdge::new(
+                    CanvasDocument::new_id(),
+                    pid,
+                    node_id.clone(),
+                    EdgeKind::Hierarchy,
+                ));
+            }
+            self.document.auto_layout_if_tree();
+            self.notice_error = None;
+            self.history.record(before);
+            self.selection.clear();
+            self.selection.insert(node_id);
+            self.selected_edge = None;
+            self.emit_change(cx);
+            cx.notify();
+        }
+    }
+
+    fn add_child_from_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pid) = self.primary_selected_id() {
+            let (x, y) = self.document.suggest_child_position(&pid);
+            self.create_node_at(x, y, Some(pid), "", true, window, cx);
+        } else {
+            let (x, y) = self.viewport_center_world();
+            self.create_node_at(x, y, None, "", true, window, cx);
+        }
+    }
+
+    fn add_sibling_from_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sid) = self.primary_selected_id() else {
+            return;
+        };
+        let parent_id = self
+            .document
+            .node(&sid)
+            .and_then(|n| n.parent_id().map(str::to_owned));
+        let (x, y) = self.document.suggest_sibling_position(&sid);
+        self.create_node_at(x, y, parent_id, "", true, window, cx);
     }
 
     pub fn relocate_paths(&mut self, moves: &[(String, String)], is_folder: bool, cx: &mut Context<Self>) -> bool {
@@ -391,7 +698,11 @@ impl CanvasPane {
         let Some(node) = self.document.node(node_id) else {
             return;
         };
-        let initial = node.display_text().to_owned();
+        let initial = if node.is_image_file() {
+            node.text.clone().unwrap_or_default()
+        } else {
+            node.display_text().to_owned()
+        };
         self.edit_snapshot_before = Some(self.document.clone());
         self.editing_node = Some(node_id.to_owned());
         self.selection.clear();
@@ -432,6 +743,8 @@ impl CanvasPane {
                 EdgeKind::Hierarchy,
             ));
         }
+        self.document.auto_layout_if_tree();
+        self.notice_error = None;
         self.history.record(before);
         self.selection.clear();
         self.selection.insert(node_id.clone());
@@ -474,6 +787,8 @@ impl CanvasPane {
                 }
             }
         }
+        self.document.auto_layout_if_tree();
+        self.notice_error = None;
         self.history.record(before);
         self.emit_change(cx);
         cx.notify();
@@ -583,9 +898,15 @@ impl CanvasPane {
         if let Some((node, side)) = hit_port(&self.document, &self.camera, wx, wy, |id| {
             self.selection.contains(id) || self.hovered_node.as_deref() == Some(id)
         }) {
+            let kind = if event.modifiers.shift {
+                EdgeKind::Hierarchy
+            } else {
+                self.default_edge_kind
+            };
             self.interaction = InteractionState::ConnectingEdge {
                 from_node: node.id.clone(),
                 from_side: side,
+                kind,
                 current_world: (wx, wy),
             };
             cx.notify();
@@ -616,17 +937,29 @@ impl CanvasPane {
                 self.selection.insert(hit.id.clone());
             }
             self.selected_edge = None;
-            let initial_positions = self
-                .selection
-                .iter()
-                .filter_map(|id| self.document.node(id).map(|n| (n.id.clone(), n.x, n.y)))
-                .collect();
-            self.interaction = InteractionState::DraggingNodes {
-                start_world: (wx, wy),
-                initial_positions,
-                snapshot_before: self.document.clone(),
-                moved: false,
-            };
+            if !additive
+                && (self.document.view_mode() == CanvasViewMode::Tree || event.modifiers.alt)
+            {
+                self.interaction = InteractionState::ReparentDragging {
+                    node_id: hit.id,
+                    start_world: (wx, wy),
+                    current_world: (wx, wy),
+                    target: None,
+                    moved: false,
+                };
+            } else {
+                let initial_positions = self
+                    .selection
+                    .iter()
+                    .filter_map(|id| self.document.node(id).map(|n| (n.id.clone(), n.x, n.y)))
+                    .collect();
+                self.interaction = InteractionState::DraggingNodes {
+                    start_world: (wx, wy),
+                    initial_positions,
+                    snapshot_before: self.document.clone(),
+                    moved: false,
+                };
+            }
             cx.notify();
             return;
         }
@@ -701,11 +1034,29 @@ impl CanvasPane {
                     if let Some(node) = self.document.node_mut(id) {
                         node.x = ix + dx;
                         node.y = iy + dy;
-                        if *moved && node.parent_id().is_some() {
-                            node.ext_mut().pinned = true;
-                        }
                     }
                 }
+                cx.notify();
+            }
+            InteractionState::ReparentDragging {
+                node_id,
+                start_world,
+                current_world,
+                target,
+                moved,
+            } => {
+                if !event.dragging() {
+                    return;
+                }
+                if (wx - start_world.0).abs() > 4.0 || (wy - start_world.1).abs() > 4.0 {
+                    *moved = true;
+                }
+                *current_world = (wx, wy);
+                *target = if *moved {
+                    compute_drop_target(&self.document, node_id, wx, wy)
+                } else {
+                    None
+                };
                 cx.notify();
             }
             InteractionState::ResizingNode {
@@ -769,9 +1120,39 @@ impl CanvasPane {
                 self.emit_change(cx);
                 cx.notify();
             }
+            InteractionState::ReparentDragging {
+                node_id,
+                moved: true,
+                target,
+                ..
+            } => {
+                let effective = target
+                    .as_ref()
+                    .map(|(id, placement)| (id.as_str(), *placement));
+                let should_detach = self.document.view_mode() == CanvasViewMode::Tree
+                    && self
+                        .document
+                        .node(&node_id)
+                        .is_some_and(|n| n.parent_id().is_some());
+                if effective.is_some() || should_detach {
+                    let before = self.document.clone();
+                    match self.document.reparent_or_reorder(&node_id, effective) {
+                        Ok(()) => {
+                            self.notice_error = None;
+                            self.history.record(before);
+                            self.emit_change(cx);
+                        }
+                        Err(err) => {
+                            self.notice_error = Some(err);
+                        }
+                    }
+                }
+                cx.notify();
+            }
             InteractionState::ConnectingEdge {
                 from_node,
                 from_side,
+                kind,
                 ..
             } => {
                 if let Some(target) = hit_node(&self.document, wx, wy)
@@ -780,20 +1161,36 @@ impl CanvasPane {
                     let to_id = target.id.clone();
                     let to_side = nearest_side(target, wx, wy);
                     let before = self.document.clone();
-                    let mut edge = CanvasEdge::new(
-                        CanvasDocument::new_id(),
-                        from_node,
-                        to_id,
-                        EdgeKind::Reference,
-                    );
-                    edge.from_side = Some(from_side);
-                    edge.to_side = Some(to_side);
-                    let edge_id = edge.id.clone();
-                    self.document.edges.push(edge);
-                    self.history.record(before);
-                    self.selected_edge = Some(edge_id);
-                    self.selection.clear();
-                    self.emit_change(cx);
+                    if kind == EdgeKind::Hierarchy {
+                        match self.document.connect_hierarchy(&from_node, &to_id) {
+                            Ok(edge_id) => {
+                                self.notice_error = None;
+                                self.history.record(before);
+                                self.selected_edge = Some(edge_id);
+                                self.selection.clear();
+                                self.emit_change(cx);
+                            }
+                            Err(err) => {
+                                self.notice_error = Some(err);
+                            }
+                        }
+                    } else {
+                        let mut edge = CanvasEdge::new(
+                            CanvasDocument::new_id(),
+                            from_node,
+                            to_id,
+                            EdgeKind::Reference,
+                        );
+                        edge.from_side = Some(from_side);
+                        edge.to_side = Some(to_side);
+                        let edge_id = edge.id.clone();
+                        self.document.edges.push(edge);
+                        self.notice_error = None;
+                        self.history.record(before);
+                        self.selected_edge = Some(edge_id);
+                        self.selection.clear();
+                        self.emit_change(cx);
+                    }
                 }
                 cx.notify();
             }
@@ -811,6 +1208,7 @@ impl CanvasPane {
         let next = !node.is_collapsed();
         node.ext_mut().collapsed = next;
         node.compact_ext();
+        self.document.auto_layout_if_tree();
         self.history.record(before);
         self.emit_change(cx);
         cx.notify();
@@ -830,9 +1228,18 @@ impl CanvasPane {
         let hovered = self.hovered_node.as_deref() == Some(node.id.as_str());
         let editing = self.editing_node.as_deref() == Some(node.id.as_str());
         let has_children = !self.document.children_of(&node.id).is_empty();
+        let is_image = node.is_image_file();
+        let drop_placement = match &self.interaction {
+            InteractionState::ReparentDragging {
+                target: Some((target_id, placement)),
+                moved: true,
+                ..
+            } if target_id == &node.id => Some(*placement),
+            _ => None,
+        };
 
         let accent = resolve_node_accent(node.color.as_deref(), palette.accent);
-        let border_color = if selected {
+        let border_color = if selected || drop_placement == Some(DropPlacement::Child) {
             gpui_kit::rgb(palette.accent)
         } else if node.color.is_some() {
             accent
@@ -865,7 +1272,7 @@ impl CanvasPane {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| f.to_owned());
-                ("file", file_name)
+                (if is_image { "图片" } else { "file" }, file_name)
             })
         });
 
@@ -878,7 +1285,13 @@ impl CanvasPane {
             .h(px(lh))
             .rounded(px(radius))
             .bg(card_bg)
-            .border(if selected { px(2.0) } else { px(1.0) })
+            .border(if drop_placement == Some(DropPlacement::Child) {
+                px(2.5)
+            } else if selected {
+                px(2.0)
+            } else {
+                px(1.0)
+            })
             .border_color(border_color)
             .when(node.node_type != CanvasNodeType::Group, |el| el.shadow_sm())
             .flex()
@@ -892,6 +1305,11 @@ impl CanvasPane {
             let jump_anchor = node.anchor().cloned();
             let jump_file = node.file.clone();
             let jump_subpath = node.subpath.clone();
+            let badge_icon = if is_image {
+                IconName::FileImage
+            } else {
+                IconName::FileText
+            };
             card = card.child(
                 div()
                     .id(SharedString::from(format!("canvas-anchor-{}", node.id)))
@@ -909,7 +1327,7 @@ impl CanvasPane {
                             fallback_subpath: jump_subpath.clone(),
                         });
                     }))
-                    .child(crate::ui::icon(IconName::FileText).size(px((11.0 * zoom).clamp(8.0, 15.0))))
+                    .child(crate::ui::icon(badge_icon).size(px((11.0 * zoom).clamp(8.0, 15.0))))
                     .child(
                         div()
                             .flex_1()
@@ -937,6 +1355,34 @@ impl CanvasPane {
                             .text_size(px(text_size)),
                     ),
             );
+        } else if is_image {
+            let image_path = node
+                .file
+                .as_deref()
+                .and_then(|rel| self.resolve_image_path(rel));
+            if let Some(full) = image_path {
+                card = card.child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .overflow_hidden()
+                        .rounded(px(4.0))
+                        .bg(gpui_kit::rgb(palette.background))
+                        .child(img(full).size_full().object_fit(ObjectFit::Contain)),
+                );
+            }
+            if let Some(caption) = node.text.as_deref().filter(|t| !t.trim().is_empty()) {
+                card = card.child(
+                    div()
+                        .text_size(px(meta_size))
+                        .text_color(gpui_kit::rgb(palette.text))
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .overflow_hidden()
+                        .child(caption.to_owned()),
+                );
+            }
         } else {
             let display = node.display_text();
             let placeholder = display.is_empty();
@@ -958,6 +1404,25 @@ impl CanvasPane {
                         display.to_owned()
                     }),
             );
+        }
+
+        if matches!(
+            drop_placement,
+            Some(DropPlacement::BeforeSibling | DropPlacement::AfterSibling)
+        ) {
+            let bar = div()
+                .absolute()
+                .left(px(4.0))
+                .right(px(4.0))
+                .h(px(3.0))
+                .rounded_full()
+                .bg(gpui_kit::rgb(palette.accent));
+            let positioned = if drop_placement == Some(DropPlacement::BeforeSibling) {
+                bar.top(px(0.0))
+            } else {
+                bar.bottom(px(0.0))
+            };
+            card = card.child(positioned);
         }
 
         if has_children {
@@ -1052,7 +1517,8 @@ impl Render for CanvasPane {
             })
             .track_focus(&self.focus_handle)
             .cursor(match self.interaction {
-                InteractionState::Panning { .. } => CursorStyle::ClosedHand,
+                InteractionState::Panning { .. }
+                | InteractionState::ReparentDragging { moved: true, .. } => CursorStyle::ClosedHand,
                 InteractionState::ConnectingEdge { .. } => CursorStyle::Crosshair,
                 _ if self.space_pressed => CursorStyle::OpenHand,
                 _ => CursorStyle::Arrow,
@@ -1098,13 +1564,7 @@ impl Render for CanvasPane {
                     cx.propagate();
                     return;
                 }
-                if let Some(pid) = pane.primary_selected_id() {
-                    let (x, y) = pane.document.suggest_child_position(&pid);
-                    pane.create_node_at(x, y, Some(pid), "", true, window, cx);
-                } else {
-                    let (x, y) = pane.viewport_center_world();
-                    pane.create_node_at(x, y, None, "", true, window, cx);
-                }
+                pane.add_child_from_selection(window, cx);
             }))
             .on_action(cx.listener(|pane, _: &CanvasAddSibling, window, cx| {
                 if pane.editing_node.is_some() {
@@ -1112,17 +1572,24 @@ impl Render for CanvasPane {
                     return;
                 }
                 if let Some(sid) = pane.primary_selected_id() {
-                    let parent_id = pane
+                    let has_parent = pane
                         .document
                         .node(&sid)
-                        .and_then(|n| n.parent_id().map(str::to_owned));
-                    if parent_id.is_some() {
-                        let (x, y) = pane.document.suggest_sibling_position(&sid);
-                        pane.create_node_at(x, y, parent_id, "", true, window, cx);
+                        .and_then(|n| n.parent_id())
+                        .is_some();
+                    if has_parent {
+                        pane.add_sibling_from_selection(window, cx);
                     } else {
                         pane.begin_inline_edit(&sid, window, cx);
                     }
                 }
+            }))
+            .on_action(cx.listener(|pane, _: &CanvasPaste, _, cx| {
+                if pane.editing_node.is_some() {
+                    cx.propagate();
+                    return;
+                }
+                pane.paste_clipboard(cx);
             }))
             .on_action(cx.listener(|pane, _: &CanvasEditNode, window, cx| {
                 if pane.editing_node.is_some() {
@@ -1295,7 +1762,7 @@ impl Render for CanvasPane {
             root = root.child(
                 div()
                     .absolute()
-                    .top_3()
+                    .top(px(48.))
                     .left_3()
                     .px_3()
                     .py_1p5()
@@ -1306,6 +1773,39 @@ impl Render for CanvasPane {
                     .text_xs()
                     .text_color(gpui_kit::rgb(palette.danger))
                     .child(format!("画布 JSON 解析失败：{error}")),
+            );
+        } else if let Some(error) = &self.notice_error {
+            root = root.child(
+                div()
+                    .id("canvas-notice-error")
+                    .absolute()
+                    .top(px(48.))
+                    .left_3()
+                    .px_2p5()
+                    .py_1()
+                    .rounded(px(6.))
+                    .bg(gpui_kit::rgb(0xfff1f0))
+                    .border_1()
+                    .border_color(gpui_kit::rgb(palette.danger))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(gpui_kit::rgb(palette.danger))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(error.clone())
+                    .child(
+                        Button::new("canvas-dismiss-notice")
+                            .ghost()
+                            .compact()
+                            .h(px(18.))
+                            .w(px(18.))
+                            .icon(crate::ui::icon(IconName::Close))
+                            .on_click(cx.listener(|pane, _, _, cx| {
+                                pane.notice_error = None;
+                                cx.notify();
+                            })),
+                    ),
             );
         }
 
@@ -1319,11 +1819,391 @@ impl Render for CanvasPane {
                     .justify_center()
                     .text_sm()
                     .text_color(gpui_kit::rgb(palette.muted))
-                    .child("双击画布空白处新建节点 · 选中节点按 Tab 添加子节点 · 拖拽圆点连线"),
+                    .child("双击画布空白处或点击「+ 节点」新建 · 拖拽圆点连线（Shift 画父子实线）· 支持 Ctrl+V 粘贴图片"),
             );
         }
 
-        // Bottom-right floating canvas control bar.
+        // Top action bar: dual-view toggle + all clickable editing/topology controls.
+        let view_mode = self.document.view_mode();
+        let has_selection = !self.selection.is_empty();
+        let primary_has_parent = self
+            .primary_selected_id()
+            .and_then(|id| self.document.node(&id))
+            .is_some_and(|n| n.parent_id().is_some());
+        let any_selected_has_parent = self.selection.iter().any(|id| {
+            self.document
+                .node(id)
+                .is_some_and(|n| n.parent_id().is_some())
+        });
+        let can_undo = self.history.can_undo();
+        let can_redo = self.history.can_redo();
+        let default_is_hierarchy = self.default_edge_kind == EdgeKind::Hierarchy;
+
+        let mut top_bar = div()
+            .id("canvas-top-toolbar")
+            .absolute()
+            .top_2p5()
+            .left_3()
+            .h(px(32.))
+            .px_1p5()
+            .rounded(px(8.))
+            .bg(gpui_kit::rgb(palette.surface))
+            .border_1()
+            .border_color(gpui_kit::rgb(palette.border))
+            .shadow_md()
+            .flex()
+            .items_center()
+            .gap_1()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .p(px(2.))
+                    .rounded(px(6.))
+                    .bg(gpui_kit::rgb(palette.background))
+                    .child(
+                        div()
+                            .id("canvas-mode-freeform")
+                            .h(px(22.))
+                            .px_2()
+                            .rounded(px(4.))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .cursor_pointer()
+                            .text_xs()
+                            .when(view_mode == CanvasViewMode::Freeform, |s| {
+                                s.bg(gpui_kit::rgb(palette.selection))
+                                    .text_color(gpui_kit::rgb(palette.accent))
+                            })
+                            .when(view_mode != CanvasViewMode::Freeform, |s| {
+                                s.text_color(gpui_kit::rgb(palette.muted))
+                                    .hover(|h| h.bg(gpui_kit::rgb(palette.hover)))
+                            })
+                            .tooltip(|w, cx| {
+                                Tooltip::new("自由画布：任意拖拽位置；按住 Alt 拖拽节点可重组父子/兄弟顺序")
+                                    .build(w, cx)
+                            })
+                            .on_click(cx.listener(|pane, _, _, cx| {
+                                pane.switch_view_mode(CanvasViewMode::Freeform, cx);
+                            }))
+                            .child(crate::ui::icon(IconName::LayoutGrid).size(px(12.)))
+                            .child("自由画布"),
+                    )
+                    .child(
+                        div()
+                            .id("canvas-mode-tree")
+                            .h(px(22.))
+                            .px_2()
+                            .rounded(px(4.))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .cursor_pointer()
+                            .text_xs()
+                            .when(view_mode == CanvasViewMode::Tree, |s| {
+                                s.bg(gpui_kit::rgb(palette.selection))
+                                    .text_color(gpui_kit::rgb(palette.accent))
+                            })
+                            .when(view_mode != CanvasViewMode::Tree, |s| {
+                                s.text_color(gpui_kit::rgb(palette.muted))
+                                    .hover(|h| h.bg(gpui_kit::rgb(palette.hover)))
+                            })
+                            .tooltip(|w, cx| {
+                                Tooltip::new("树状导图：自动树形排版，拖拽节点到目标上/中/下可直接调序或挂为子节点")
+                                    .build(w, cx)
+                            })
+                            .on_click(cx.listener(|pane, _, _, cx| {
+                                pane.switch_view_mode(CanvasViewMode::Tree, cx);
+                            }))
+                            .child(crate::ui::icon(IconName::ListTree).size(px(12.)))
+                            .child("树状导图"),
+                    ),
+            )
+            .child(div().w(px(1.)).h(px(16.)).bg(gpui_kit::rgb(palette.border)))
+            .child(
+                Button::new("canvas-bar-add-node")
+                    .ghost()
+                    .compact()
+                    .h(px(22.))
+                    .px_1p5()
+                    .icon(crate::ui::icon(IconName::Plus))
+                    .label("节点")
+                    .tooltip("新建节点（或双击画布空白处）")
+                    .on_click(cx.listener(|pane, _, window, cx| {
+                        let (x, y) = pane.viewport_center_world();
+                        pane.create_node_at(x, y, None, "", true, window, cx);
+                    })),
+            )
+            .child(
+                Button::new("canvas-bar-insert-image")
+                    .ghost()
+                    .compact()
+                    .h(px(22.))
+                    .px_1p5()
+                    .icon(crate::ui::icon(IconName::Image))
+                    .label("图片")
+                    .tooltip("插入本地图片（png/jpg/webp/gif/svg）")
+                    .on_click(cx.listener(|pane, _, window, cx| {
+                        pane.insert_image_dialog(window, cx);
+                    })),
+            )
+            .child(
+                Button::new("canvas-bar-paste")
+                    .ghost()
+                    .compact()
+                    .h(px(22.))
+                    .px_1p5()
+                    .icon(crate::ui::icon(IconName::FileImage))
+                    .label("粘贴")
+                    .tooltip("粘贴剪贴板图片或文本 (Ctrl+V)")
+                    .on_click(cx.listener(|pane, _, _, cx| {
+                        pane.paste_clipboard(cx);
+                    })),
+            )
+            .child(div().w(px(1.)).h(px(16.)).bg(gpui_kit::rgb(palette.border)))
+            .child(
+                Button::new("canvas-bar-undo")
+                    .ghost()
+                    .compact()
+                    .h(px(22.))
+                    .w(px(24.))
+                    .disabled(!can_undo)
+                    .icon(crate::ui::icon(IconName::RotateCcw))
+                    .tooltip("撤销 (Ctrl+Z)")
+                    .on_click(cx.listener(|pane, _, _, cx| {
+                        pane.undo(cx);
+                    })),
+            )
+            .child(
+                Button::new("canvas-bar-redo")
+                    .ghost()
+                    .compact()
+                    .h(px(22.))
+                    .px_1p5()
+                    .disabled(!can_redo)
+                    .label("重做")
+                    .tooltip("重做 (Ctrl+Y / Ctrl+Shift+Z)")
+                    .on_click(cx.listener(|pane, _, _, cx| {
+                        pane.redo(cx);
+                    })),
+            )
+            .child(
+                Button::new("canvas-bar-select-all")
+                    .ghost()
+                    .compact()
+                    .h(px(22.))
+                    .px_1p5()
+                    .label("全选")
+                    .tooltip("全选可见节点 (Ctrl+A)")
+                    .on_click(cx.listener(|pane, _, _, cx| {
+                        pane.selection = pane
+                            .document
+                            .nodes
+                            .iter()
+                            .filter(|n| !pane.document.is_hidden_by_collapse(&n.id))
+                            .map(|n| n.id.clone())
+                            .collect();
+                        pane.selected_edge = None;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("canvas-bar-edge-kind")
+                    .ghost()
+                    .compact()
+                    .h(px(22.))
+                    .px_1p5()
+                    .icon(crate::ui::icon(IconName::Link))
+                    .label(if default_is_hierarchy {
+                        "连线:实线"
+                    } else {
+                        "连线:虚线"
+                    })
+                    .tooltip("切换拖拽圆点默认连线类型（实线=父子层级，虚线=交叉关联；按住 Shift 拖拽可直接画父子实线）")
+                    .on_click(cx.listener(|pane, _, _, cx| {
+                        pane.default_edge_kind = match pane.default_edge_kind {
+                            EdgeKind::Reference => EdgeKind::Hierarchy,
+                            EdgeKind::Hierarchy => EdgeKind::Reference,
+                        };
+                        cx.notify();
+                    })),
+            );
+
+        if has_selection {
+            top_bar = top_bar
+                .child(div().w(px(1.)).h(px(16.)).bg(gpui_kit::rgb(palette.border)))
+                .child(
+                    Button::new("canvas-sel-add-child")
+                        .ghost()
+                        .compact()
+                        .h(px(22.))
+                        .px_1p5()
+                        .label("+子节点")
+                        .tooltip("为当前选中节点添加子节点 (Tab)")
+                        .on_click(cx.listener(|pane, _, window, cx| {
+                            pane.add_child_from_selection(window, cx);
+                        })),
+                )
+                .when(primary_has_parent, |bar| {
+                    bar.child(
+                        Button::new("canvas-sel-add-sibling")
+                            .ghost()
+                            .compact()
+                            .h(px(22.))
+                            .px_1p5()
+                            .label("+兄弟")
+                            .tooltip("添加同级兄弟节点 (Enter)")
+                            .on_click(cx.listener(|pane, _, window, cx| {
+                                pane.add_sibling_from_selection(window, cx);
+                            })),
+                    )
+                })
+                .child(
+                    Button::new("canvas-sel-edit")
+                        .ghost()
+                        .compact()
+                        .h(px(22.))
+                        .px_1p5()
+                        .icon(crate::ui::icon(IconName::PencilLine))
+                        .label("编辑")
+                        .tooltip("编辑内容或图片说明 (F2 / 双击文本)")
+                        .on_click(cx.listener(|pane, _, window, cx| {
+                            if let Some(id) = pane.primary_selected_id() {
+                                pane.begin_inline_edit(&id, window, cx);
+                            }
+                        })),
+                )
+                .when(any_selected_has_parent, |bar| {
+                    bar.child(
+                        Button::new("canvas-sel-detach")
+                            .ghost()
+                            .compact()
+                            .h(px(22.))
+                            .px_1p5()
+                            .label("脱离父级")
+                            .tooltip("断开所选节点与父节点的层级关系")
+                            .on_click(cx.listener(|pane, _, _, cx| {
+                                pane.detach_selected_nodes(cx);
+                            })),
+                    )
+                })
+                .child(
+                    Button::new("canvas-sel-color")
+                        .ghost()
+                        .compact()
+                        .h(px(22.))
+                        .w(px(24.))
+                        .icon(crate::ui::icon(IconName::Palette))
+                        .tooltip("循环切换节点颜色")
+                        .on_click(cx.listener(|pane, _, _, cx| {
+                            pane.cycle_selected_color(cx);
+                        })),
+                )
+                .child(
+                    Button::new("canvas-sel-delete")
+                        .ghost()
+                        .compact()
+                        .h(px(22.))
+                        .w(px(24.))
+                        .icon(crate::ui::icon(IconName::Trash))
+                        .tooltip("删除选中节点 (Delete / Backspace)")
+                        .on_click(cx.listener(|pane, _, _, cx| {
+                            pane.delete_selection(cx);
+                        })),
+                );
+        }
+
+        root = root.child(top_bar);
+
+        // Floating toolbar anchored near the selected edge.
+        if let Some(edge_id) = &self.selected_edge
+            && let Some(edge) = self.document.edge(edge_id)
+            && let Some(mid) = edge_midpoint_local(&self.document, &self.camera, edge_id)
+        {
+            let is_ref = edge.kind() == EdgeKind::Reference;
+            let bar_x = (f32::from(mid.x) - 115.0).max(12.0);
+            let bar_y = (f32::from(mid.y) - 42.0).max(48.0);
+            root = root.child(
+                div()
+                    .id("canvas-edge-toolbar")
+                    .absolute()
+                    .left(px(bar_x))
+                    .top(px(bar_y))
+                    .h(px(28.))
+                    .px_1p5()
+                    .rounded(px(7.))
+                    .bg(gpui_kit::rgb(palette.surface))
+                    .border_1()
+                    .border_color(gpui_kit::rgb(palette.accent))
+                    .shadow_md()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        Button::new("canvas-edge-toggle-kind")
+                            .ghost()
+                            .compact()
+                            .h(px(20.))
+                            .px_1p5()
+                            .label(if is_ref {
+                                "转为父子实线"
+                            } else {
+                                "转为关联虚线"
+                            })
+                            .tooltip("切换实线(父子层级)与虚线(交叉关联)")
+                            .on_click(cx.listener(move |pane, _, _, cx| {
+                                let next = if is_ref {
+                                    EdgeKind::Hierarchy
+                                } else {
+                                    EdgeKind::Reference
+                                };
+                                pane.set_selected_edge_kind(next, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("canvas-edge-reverse")
+                            .ghost()
+                            .compact()
+                            .h(px(20.))
+                            .px_1p5()
+                            .label("反转方向")
+                            .tooltip("对调连线起点与终点")
+                            .on_click(cx.listener(|pane, _, _, cx| {
+                                pane.reverse_selected_edge(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("canvas-edge-color")
+                            .ghost()
+                            .compact()
+                            .h(px(20.))
+                            .w(px(22.))
+                            .icon(crate::ui::icon(IconName::Palette))
+                            .tooltip("切换连线颜色")
+                            .on_click(cx.listener(|pane, _, _, cx| {
+                                pane.cycle_selected_color(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("canvas-edge-delete")
+                            .ghost()
+                            .compact()
+                            .h(px(20.))
+                            .w(px(22.))
+                            .icon(crate::ui::icon(IconName::Trash))
+                            .tooltip("删除连线 (Delete)")
+                            .on_click(cx.listener(|pane, _, _, cx| {
+                                pane.delete_selection(cx);
+                            })),
+                    ),
+            );
+        }
+
+        // Bottom-right floating canvas zoom & layout control bar.
         root = root.child(
             div()
                 .id("canvas-controls-pill")
@@ -1342,47 +2222,21 @@ impl Render for CanvasPane {
                 .gap_1()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(
-                    Button::new("canvas-add-node")
-                        .ghost()
-                        .compact()
-                        .with_size(px(15.))
-                        .h(px(22.))
-                        .px_1p5()
-                        .icon(crate::ui::icon(IconName::Plus))
-                        .tooltip("新建节点")
-                        .on_click(cx.listener(|pane, _, window, cx| {
-                            let (x, y) = pane.viewport_center_world();
-                            pane.create_node_at(x, y, None, "", true, window, cx);
-                        })),
-                )
-                .child(
-                    Button::new("canvas-undo")
-                        .ghost()
-                        .compact()
-                        .with_size(px(14.))
-                        .h(px(22.))
-                        .w(px(22.))
-                        .icon(crate::ui::icon(IconName::RotateCcw))
-                        .tooltip("撤销 (Ctrl+Z)")
-                        .on_click(cx.listener(|pane, _, _, cx| {
-                            pane.undo(cx);
-                        })),
-                )
-                .child(
                     Button::new("canvas-tidy-layout")
                         .ghost()
                         .compact()
                         .with_size(px(14.))
                         .h(px(22.))
-                        .w(px(22.))
+                        .px_1p5()
                         .icon(crate::ui::icon(IconName::ListTree))
-                        .tooltip("整理导图树形布局（跳过手动固定节点）")
+                        .label("整理")
+                        .tooltip("按树形导图整理布局")
                         .on_click(cx.listener(|pane, _, _, cx| {
                             let root = pane.primary_selected_id();
                             pane.layout_tree_transaction(
                                 root.as_deref(),
                                 super::model::TreeLayoutMode::MindmapRight,
-                                false,
+                                true,
                                 cx,
                             );
                         })),
@@ -1536,6 +2390,7 @@ fn paint_edges(
     if let InteractionState::ConnectingEdge {
         from_node,
         from_side,
+        kind,
         current_world,
     } = interaction
         && let Some(node) = doc.node(from_node)
@@ -1545,6 +2400,11 @@ fn paint_edges(
         let to_side = super::interaction::nearest_side(node, p3.0, p3.1);
         let (c1, c2) = edge_bezier_controls(p0, p3, *from_side, to_side);
         let mut builder = PathBuilder::stroke(px(2.0));
+        if *kind == EdgeKind::Reference {
+            let dash = px((6.0 * camera.zoom).clamp(3.0, 10.0));
+            let gap = px((4.0 * camera.zoom).clamp(2.0, 8.0));
+            builder = builder.dash_array(&[dash, gap]);
+        }
         let sp0 = to_screen(p0.0, p0.1);
         let sc1 = to_screen(c1.0, c1.1);
         let sc2 = to_screen(c2.0, c2.1);
@@ -1554,6 +2414,25 @@ fn paint_edges(
         if let Ok(path) = builder.build() {
             window.paint_path(path, gpui_kit::rgb(palette.accent));
         }
+    }
+
+    if let InteractionState::ReparentDragging {
+        node_id,
+        current_world,
+        moved: true,
+        ..
+    } = interaction
+        && let Some(node) = doc.node(node_id)
+    {
+        let w = (node.width * camera.zoom).clamp(80.0, 220.0);
+        let h = (node.height * camera.zoom).clamp(36.0, 96.0);
+        let pt = to_screen(current_world.0, current_world.1) - point(px(w * 0.5), px(h * 0.5));
+        let mut fill_col = gpui_kit::rgb(palette.accent);
+        fill_col.a = 0.14;
+        window.paint_quad(fill(
+            Bounds::new(pt, gpui_kit::size(px(w), px(h))),
+            fill_col,
+        ));
     }
 }
 
@@ -1603,4 +2482,24 @@ fn resolve_node_accent(raw: Option<&str>, fallback: u32) -> Rgba {
         }
         _ => gpui_kit::rgb(fallback),
     }
+}
+
+fn unique_image_destination(target_dir: &Path, source: &Path) -> PathBuf {
+    let stem = source
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("image");
+    let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("png");
+    let first = target_dir.join(format!("{stem}.{ext}"));
+    if !first.exists() {
+        return first;
+    }
+    for n in 1..10_000 {
+        let candidate = target_dir.join(format!("{stem}-{n}.{ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    first
 }
