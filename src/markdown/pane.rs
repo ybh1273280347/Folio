@@ -44,6 +44,7 @@ const PREVIEW_BYTES: usize = 8 * 1024;
 pub enum MarkdownEvent {
     RenameTitle(String),
     Change(String),
+    DeleteAnnotation(u64),
     Focus,
     Zoom(u8),
     OpenLink(String),
@@ -3740,15 +3741,8 @@ impl MarkdownPane {
                                     .gap_1()
                                     .child(
                                         crate::ui::control("delete-md-annotation", IconName::Trash)
-                                            .on_click(cx.listener(move |pane, _, _, cx| {
-                                                pane.annotations.retain(|a| a.id != id);
-                                                if pane.selected_annotation_id == Some(id) { pane.selected_annotation_id = None; }
-                                                let _ = annotations::save_annotations(
-                                                    &pane.path,
-                                                    &pane.annotations,
-                                                );
-                                                pane.active_annotation_id = None;
-                                                pane.clear_highlight(cx);
+                                            .on_click(cx.listener(move |_, _, _, cx| {
+                                                cx.emit(MarkdownEvent::DeleteAnnotation(id));
                                             })),
                                     )
                                     .child(

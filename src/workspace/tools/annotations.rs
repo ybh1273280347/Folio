@@ -158,57 +158,25 @@ impl Workspace {
         window: &mut Window, cx: &mut Context<Self>) -> Result<Value, Failure>
     {
         let (path, id, comment) = match mutation {
-            Mutation::Update { path, id, comment } => (path, id, Some(comment)),
-            Mutation::Delete { path, id } => (path, id, None),
+            Mutation::Update { path, id, comment } => (path, id, comment),
+            Mutation::Delete { path, id } => {
+                let path = self.annotation_path(request, &path)?;
+                self.delete_document_annotation(&path, id, window, cx)?;
+                return Ok(json!({"status":"ok", "deleted":true, "id":id}));
+            }
         };
         let path = self.annotation_path(request, &path)?;
-        // Keep lookup, document write and sidecar write in one GPUI dispatch so
-        // another session or a manual edit cannot interleave between them.
         let mut items = annotations::try_load_annotations(&path)?;
         let index = items.iter().position(|item| item.id == id)
             .ok_or_else(|| Failure::new("annotation_not_found", crate::i18n::tags::ERR_ANN_ID_NOT_FOUND.get()))?;
-        let mut markdown_saved = false;
-        let result = if let Some(comment) = comment {
-            items[index].comment = comment;
-            json!({"status":"ok", "annotation":annotations::item_json(&items[index], &path)})
-        } else {
-            let item = items.remove(index);
-            if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("md")) {
-                let disk;
-                let (open_key, source, revision) = if let Some((key, buffer)) = self.documents.open_buffer_at(&path) {
-                    if buffer.conflict.is_some() || buffer.deleted {
-                        return Err(Failure::new("document_conflict", crate::i18n::tags::ERR_ANN_DOC_CONFLICT.get()));
-                    }
-                    (Some(key.to_owned()), &buffer.text, &buffer.revision)
-                } else {
-                    disk = files::read_document_at(&path)?;
-                    (None, &disk.text, &disk.revision)
-                };
-                let extensions = crate::markdown::extensions::markdown_extensions(
-                    &self.math, crate::math::MathDisplaySize::Markdown, cx,
-                );
-                if let Some(text) = annotations::remove_markdown_highlight(source, &item, extensions)? {
-                    let revision = revision.clone();
-                    if !self.save_markdown_snapshot(&path, open_key.as_deref(), &text, &revision, window, cx)? {
-                        return Err(Failure::new("document_changed", crate::i18n::tags::ERR_ANN_DISK_CHANGED.get()));
-                    }
-                    markdown_saved = true;
-                }
-            }
-            json!({"status":"ok", "deleted":true, "id":id})
-        };
-        if let Err(error) = annotations::save_annotations(&path, &items) {
-            let prefix = if markdown_saved {
-                cx.notify();
-                crate::i18n::tags::ERR_ANN_REMOVE_HIGHLIGHT_ONLY.get()
-            } else {
-                crate::i18n::tags::ERR_ANN_SAVE_RECORD.get()
-            };
-            return Err(Failure::new("save_failed", format!("{prefix}: {error}")));
-        }
+        items[index].comment = comment;
+        annotations::save_annotations(&path, &items).map_err(|error| {
+            let prefix = crate::i18n::tags::ERR_ANN_SAVE_RECORD.get();
+            Failure::new("save_failed", format!("{prefix}: {error}"))
+        })?;
         self.sync_document_annotations(&path, &items, cx);
         self.schedule_rag_sync();
         cx.notify();
-        Ok(result)
+        Ok(json!({"status":"ok", "annotation":annotations::item_json(&items[index], &path)}))
     }
 }
