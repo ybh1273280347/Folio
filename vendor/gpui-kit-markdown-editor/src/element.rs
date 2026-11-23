@@ -1473,6 +1473,9 @@ impl Element for EditorRoot {
                 self.snapshot.leaves.clone(),
                 &self.snapshot.tables,
             );
+            // The measured content spans the editor column, even when the selected image is narrow.
+            let mut content = self.content_bounds.get();
+            frame.content = Some(content);
             frame.insert_atoms(&self.snapshot.leaves, &self.atom_bounds.lock().expect("atom bounds"));
             frame.insert_code_previews(
                 &self.snapshot.leaves,
@@ -1513,7 +1516,6 @@ impl Element for EditorRoot {
             );
             *self.state.read(cx).frame.borrow_mut() = frame;
             let mask = window.content_mask().bounds;
-            let mut content = self.content_bounds.get();
             let cull = self.state.read(cx).cull.clone();
             let geometry_changed = cull.borrow_mut().set_geometry(
                 content.size.width,
