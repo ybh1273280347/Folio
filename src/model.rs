@@ -222,6 +222,15 @@ pub struct DiskDocument {
     pub revision: String,
 }
 
+/// Characters that remain once whitespace is removed.
+///
+/// Counts Unicode scalar values, so ordinary spaces, tabs, line breaks, the
+/// ideographic space and other separators are all excluded. Syntax characters
+/// stay in the count because the visible source is the document.
+pub fn nonspace_char_count(text: &str) -> usize {
+    text.chars().filter(|ch| !ch.is_whitespace()).count()
+}
+
 #[derive(Clone, Debug)]
 pub struct DocumentBuffer {
     pub text: String,
@@ -230,11 +239,14 @@ pub struct DocumentBuffer {
     pub conflict: Option<DiskDocument>,
     pub deleted: bool,
     pub dirty: bool,
+    /// Recomputed on every buffer write so editors can render it per frame.
+    pub char_count: usize,
 }
 
 impl DocumentBuffer {
     pub fn from_disk(document: DiskDocument) -> Self {
         Self {
+            char_count: nonspace_char_count(&document.text),
             text: document.text.clone(),
             saved_text: document.text,
             revision: document.revision,
@@ -250,10 +262,12 @@ impl DocumentBuffer {
 
     pub fn set_text(&mut self, text: String) {
         self.dirty = text != self.saved_text;
+        self.char_count = nonspace_char_count(&text);
         self.text = text;
     }
 
     pub fn replace_from_disk(&mut self, document: DiskDocument) {
+        self.char_count = nonspace_char_count(&document.text);
         self.text = document.text.clone();
         self.saved_text = document.text;
         self.revision = document.revision;

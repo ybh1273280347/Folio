@@ -314,6 +314,8 @@ pub struct MarkdownPane {
     export: Rc<RefCell<Option<pdf::ExportRequest>>>,
     export_width: Pixels,
     text: String,
+    /// Whitespace-free characters of `text`, kept current for the corner badge.
+    char_count: usize,
     path: PathBuf,
     title_input: Entity<InputState>,
     headings: Vec<OutlineHeading>,
@@ -787,6 +789,7 @@ impl MarkdownPane {
                     pane.loading = None;
                     pane.mermaid.update(cx, |renderer, _| renderer.retain_blocks([]));
                     pane.text = state.read(cx).value().to_string();
+                    pane.char_count = crate::model::nonspace_char_count(&pane.text);
                     pane.visual_needs_sync = true;
                     pane.parse_outline();
                     cx.emit(MarkdownEvent::Change(pane.text.clone()));
@@ -802,6 +805,7 @@ impl MarkdownPane {
             |pane, editor, event: &BlockEditorEvent, window, cx| match event {
                 BlockEditorEvent::Changed { .. } => {
                     pane.text = editor.read(cx).source();
+                    pane.char_count = crate::model::nonspace_char_count(&pane.text);
                     pane.source_needs_sync = true;
                     pane.retain_mermaid_blocks(cx);
                     pane.parse_outline();
@@ -923,10 +927,12 @@ impl MarkdownPane {
             cx.notify();
         });
         let annotations = annotations::load_annotations(&path);
+        let char_count = crate::model::nonspace_char_count(&text);
         let mut pane = Self {
             export: Rc::new(RefCell::new(None)),
             export_width: px(0.),
             text,
+            char_count,
             path,
             title_input,
             headings: Vec::new(),
@@ -1662,6 +1668,7 @@ impl MarkdownPane {
             return;
         }
         self.text = text.to_owned();
+        self.char_count = crate::model::nonspace_char_count(text);
         self.source_needs_sync = true;
         self.pending_source_heading = None;
         self.load_visual(cx);
