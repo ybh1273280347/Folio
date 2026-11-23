@@ -84,6 +84,12 @@ impl Camera {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EdgeHandleEnd {
+    From,
+    To,
+}
+
 #[derive(Clone, Debug)]
 pub enum InteractionState {
     Idle,
@@ -120,6 +126,12 @@ pub enum InteractionState {
         from_side: EdgeSide,
         kind: EdgeKind,
         current_world: (f32, f32),
+    },
+    ReconnectEdge {
+        edge_id: String,
+        end: EdgeHandleEnd,
+        current_world: (f32, f32),
+        snap: Option<(String, EdgeSide)>,
     },
 }
 
@@ -291,6 +303,26 @@ pub fn edge_midpoint_local(
     Some(camera.world_to_local(mid.0, mid.1))
 }
 
+pub fn hit_edge_endpoint(
+    doc: &CanvasDocument,
+    camera: &Camera,
+    edge_id: &str,
+    wx: f32,
+    wy: f32,
+) -> Option<EdgeHandleEnd> {
+    let edge = doc.edge(edge_id)?;
+    let (p0, p3, _, _) = edge_endpoints(doc, edge)?;
+    let r = (PORT_HIT_RADIUS_PX + 2.0) / camera.zoom;
+    let r2 = r * r;
+    if (wx - p3.0).powi(2) + (wy - p3.1).powi(2) <= r2 {
+        return Some(EdgeHandleEnd::To);
+    }
+    if (wx - p0.0).powi(2) + (wy - p0.1).powi(2) <= r2 {
+        return Some(EdgeHandleEnd::From);
+    }
+    None
+}
+
 pub fn nodes_in_rect(doc: &CanvasDocument, a: (f32, f32), b: (f32, f32)) -> Vec<String> {
     let min_x = a.0.min(b.0);
     let max_x = a.0.max(b.0);
@@ -358,5 +390,31 @@ mod tests {
         let after = cam.screen_to_world(cursor, viewport);
         assert!((before.0 - after.0).abs() < 1e-3);
         assert!((before.1 - after.1).abs() < 1e-3);
+    }
+
+    #[test]
+    fn hit_edge_endpoint_detects_from_and_to_handles() {
+        let mut doc = CanvasDocument::default();
+        let a = CanvasNode::new_text("a", 0.0, 0.0, "A");
+        let b = CanvasNode::new_text("b", 400.0, 0.0, "B");
+        let p0 = a.side_point(EdgeSide::Right);
+        let p3 = b.side_point(EdgeSide::Left);
+        doc.nodes.push(a);
+        doc.nodes.push(b);
+        let mut edge = CanvasEdge::new("e1", "a", "b", EdgeKind::Reference);
+        edge.from_side = Some(EdgeSide::Right);
+        edge.to_side = Some(EdgeSide::Left);
+        doc.edges.push(edge);
+
+        let cam = Camera::default();
+        assert_eq!(
+            hit_edge_endpoint(&doc, &cam, "e1", p0.0, p0.1),
+            Some(EdgeHandleEnd::From)
+        );
+        assert_eq!(
+            hit_edge_endpoint(&doc, &cam, "e1", p3.0, p3.1),
+            Some(EdgeHandleEnd::To)
+        );
+        assert_eq!(hit_edge_endpoint(&doc, &cam, "e1", 200.0, 200.0), None);
     }
 }

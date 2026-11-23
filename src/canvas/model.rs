@@ -677,13 +677,13 @@ impl CanvasDocument {
     /// Connects `parent_id -> child_id` as a `Hierarchy` edge, replacing any previous parent link.
     pub fn connect_hierarchy(&mut self, parent_id: &str, child_id: &str) -> Result<String, String> {
         if parent_id == child_id {
-            return Err("节点不能连接到自身。".to_owned());
+            return Err(crate::i18n::canvas::ERR_SELF_LOOP.get().to_owned());
         }
         if self.node(parent_id).is_none() || self.node(child_id).is_none() {
-            return Err("节点不存在。".to_owned());
+            return Err(crate::i18n::canvas::ERR_NODE_MISSING.get().to_owned());
         }
         if self.is_ancestor(child_id, parent_id) {
-            return Err("不能将父节点连接到其后代节点（会形成环路）。".to_owned());
+            return Err(crate::i18n::canvas::ERR_CYCLE_DESCENDANT.get().to_owned());
         }
         self.edges
             .retain(|e| !(e.to_node == child_id && e.kind() == EdgeKind::Hierarchy));
@@ -704,7 +704,7 @@ impl CanvasDocument {
 
     pub fn set_edge_kind(&mut self, edge_id: &str, next_kind: EdgeKind) -> Result<(), String> {
         let Some(edge) = self.edge(edge_id).cloned() else {
-            return Err("连线不存在。".to_owned());
+            return Err(crate::i18n::canvas::ERR_EDGE_MISSING.get().to_owned());
         };
         if edge.kind() == next_kind {
             return Ok(());
@@ -712,10 +712,10 @@ impl CanvasDocument {
         match next_kind {
             EdgeKind::Hierarchy => {
                 if edge.from_node == edge.to_node {
-                    return Err("自环不能作为父子层级边。".to_owned());
+                    return Err(crate::i18n::canvas::ERR_SELF_LOOP_HIERARCHY.get().to_owned());
                 }
                 if self.is_ancestor(&edge.to_node, &edge.from_node) {
-                    return Err("转为父子实线会形成环路，请先反转方向或调整结构。".to_owned());
+                    return Err(crate::i18n::canvas::ERR_CYCLE_CONVERT_HIERARCHY.get().to_owned());
                 }
                 // Replace any previous incoming hierarchy edge to `to_node`.
                 self.edges.retain(|e| {
@@ -751,7 +751,7 @@ impl CanvasDocument {
 
     pub fn reverse_edge(&mut self, edge_id: &str) -> Result<(), String> {
         let Some(edge) = self.edge(edge_id).cloned() else {
-            return Err("连线不存在。".to_owned());
+            return Err(crate::i18n::canvas::ERR_EDGE_MISSING.get().to_owned());
         };
         let mut working = self.clone();
         if edge.kind() == EdgeKind::Hierarchy {
@@ -781,6 +781,67 @@ impl CanvasDocument {
         Ok(())
     }
 
+    /// Reconnects an edge's source or target endpoint to a port on the same or a different node.
+    pub fn reconnect_edge(
+        &mut self,
+        edge_id: &str,
+        is_source: bool,
+        target_node_id: &str,
+        target_side: EdgeSide,
+    ) -> Result<(), String> {
+        if self.node(target_node_id).is_none() {
+            return Err(crate::i18n::canvas::ERR_NODE_MISSING.get().to_owned());
+        }
+        let Some(old_edge) = self.edge(edge_id).cloned() else {
+            return Err(crate::i18n::canvas::ERR_EDGE_MISSING.get().to_owned());
+        };
+        let mut working = self.clone();
+        let next_from = if is_source {
+            target_node_id.to_owned()
+        } else {
+            old_edge.from_node.clone()
+        };
+        let next_to = if is_source {
+            old_edge.to_node.clone()
+        } else {
+            target_node_id.to_owned()
+        };
+
+        if old_edge.kind() == EdgeKind::Hierarchy {
+            if next_from == next_to {
+                return Err(crate::i18n::canvas::ERR_SELF_LOOP_HIERARCHY.get().to_owned());
+            }
+            if next_to != old_edge.to_node
+                && let Some(old_child) = working.node_mut(&old_edge.to_node)
+                && old_child.parent_id() == Some(old_edge.from_node.as_str())
+            {
+                old_child.ext_mut().parent_id = None;
+                old_child.compact_ext();
+            }
+            working.edges.retain(|e| {
+                !(e.id != edge_id && e.to_node == next_to && e.kind() == EdgeKind::Hierarchy)
+            });
+            if let Some(new_child) = working.node_mut(&next_to) {
+                new_child.ext_mut().parent_id = Some(next_from.clone());
+                new_child.compact_ext();
+            }
+        }
+
+        if let Some(edge) = working.edge_mut(edge_id) {
+            if is_source {
+                edge.from_node = next_from;
+                edge.from_side = Some(target_side);
+            } else {
+                edge.to_node = next_to;
+                edge.to_side = Some(target_side);
+            }
+        }
+        working.validate_tree_acyclic()?;
+        working.auto_layout_if_tree();
+        *self = working;
+        Ok(())
+    }
+
     pub fn reparent_or_reorder(
         &mut self,
         node_id: &str,
@@ -803,10 +864,10 @@ impl CanvasDocument {
             return Ok(());
         }
         if self.node(node_id).is_none() || self.node(target_id).is_none() {
-            return Err("目标节点不存在。".to_owned());
+            return Err(crate::i18n::canvas::ERR_REORDER_TARGET_MISSING.get().to_owned());
         }
         if self.is_ancestor(node_id, target_id) {
-            return Err("不能将节点拖入自身或后代子树。".to_owned());
+            return Err(crate::i18n::canvas::ERR_CYCLE_REPARENT.get().to_owned());
         }
 
         match placement {
@@ -880,12 +941,12 @@ impl CanvasDocument {
             } => {
                 let node_id = id.clone().unwrap_or_else(Self::new_id);
                 if self.node(&node_id).is_some() {
-                    return Err(format!("节点 ID 已存在：{node_id}"));
+                    return Err(crate::i18n::canvas::err_duplicate_node(&node_id));
                 }
                 if let Some(pid) = parent_id.as_deref()
                     && self.node(pid).is_none()
                 {
-                    return Err(format!("父节点不存在：{pid}"));
+                    return Err(crate::i18n::canvas::err_missing_parent(pid));
                 }
                 let (px, py) = match (x, y, parent_id.as_deref()) {
                     (Some(x), Some(y), _) => (*x, *y),
@@ -955,7 +1016,7 @@ impl CanvasDocument {
                 anchor,
             } => {
                 let Some(node) = self.node_mut(id) else {
-                    return Err(format!("节点不存在：{id}"));
+                    return Err(crate::i18n::canvas::err_missing_node(id));
                 };
                 if let Some(text) = text {
                     node.set_display_text(text.clone());
@@ -997,14 +1058,14 @@ impl CanvasDocument {
             }
             CanvasOp::MoveSubtree { id, new_parent_id } => {
                 if self.node(id).is_none() {
-                    return Err(format!("节点不存在：{id}"));
+                    return Err(crate::i18n::canvas::err_missing_node(id));
                 }
                 if let Some(pid) = new_parent_id.as_deref() {
                     if pid == id {
-                        return Err("节点不能成为自身的父节点。".to_owned());
+                        return Err(crate::i18n::canvas::ERR_SELF_PARENT.get().to_owned());
                     }
                     if self.node(pid).is_none() {
-                        return Err(format!("目标父节点不存在：{pid}"));
+                        return Err(crate::i18n::canvas::err_missing_target_parent(pid));
                     }
                 }
                 // Remove old hierarchy edge targeting this node.
@@ -1028,7 +1089,7 @@ impl CanvasDocument {
             }
             CanvasOp::DeleteNode { id, cascade } => {
                 if self.node(id).is_none() {
-                    return Err(format!("节点不存在：{id}"));
+                    return Err(crate::i18n::canvas::err_missing_node(id));
                 }
                 let mut to_remove = HashSet::new();
                 to_remove.insert(id.clone());
@@ -1067,14 +1128,14 @@ impl CanvasDocument {
                 color,
             } => {
                 if self.node(from_node).is_none() {
-                    return Err(format!("起点节点不存在：{from_node}"));
+                    return Err(crate::i18n::canvas::err_missing_source_node(from_node));
                 }
                 if self.node(to_node).is_none() {
-                    return Err(format!("终点节点不存在：{to_node}"));
+                    return Err(crate::i18n::canvas::err_missing_target_node(to_node));
                 }
                 let edge_id = id.clone().unwrap_or_else(Self::new_id);
                 if self.edge(&edge_id).is_some() {
-                    return Err(format!("连线 ID 已存在：{edge_id}"));
+                    return Err(crate::i18n::canvas::err_duplicate_edge(&edge_id));
                 }
                 let mut edge = CanvasEdge::new(
                     edge_id.clone(),
@@ -1094,7 +1155,7 @@ impl CanvasDocument {
             }
             CanvasOp::DeleteEdge { id } => {
                 let Some(pos) = self.edges.iter().position(|e| e.id == *id) else {
-                    return Err(format!("连线不存在：{id}"));
+                    return Err(crate::i18n::canvas::err_missing_edge(id));
                 };
                 let removed = self.edges.remove(pos);
                 if removed.kind() == EdgeKind::Hierarchy
@@ -1151,7 +1212,7 @@ impl CanvasDocument {
             let mut cur = Some(start);
             while let Some(id) = cur {
                 if !seen.insert(id) {
-                    return Err(format!("检测到树形父子环路，涉及节点：{id}"));
+                    return Err(crate::i18n::canvas::err_cycle_detected(id));
                 }
                 cur = parent_map.get(id).copied();
             }
@@ -1320,7 +1381,7 @@ mod tests {
                 },
             ])
             .unwrap_err();
-        assert!(err.contains("环路"));
+        assert!(err.contains("环路") || err.contains("cycle"));
         assert_eq!(doc.node("a").unwrap().display_text(), "Root");
     }
 
@@ -1418,5 +1479,24 @@ mod tests {
         let parsed = CanvasDocument::from_json_str(&json).unwrap();
         assert!(parsed.node("img1").unwrap().is_image_file());
         assert_eq!(parsed.node("img1").unwrap().file.as_deref(), Some("assets/diagram.PNG"));
+    }
+
+    #[test]
+    fn reconnect_edge_changes_side_and_rewires_hierarchy() {
+        let mut doc = CanvasDocument::default();
+        doc.nodes.push(CanvasNode::new_text("a", 0.0, 0.0, "A"));
+        doc.nodes.push(CanvasNode::new_text("b", 300.0, 0.0, "B"));
+        doc.nodes.push(CanvasNode::new_text("c", 300.0, 200.0, "C"));
+
+        let edge_id = doc.connect_hierarchy("a", "b").unwrap();
+        doc.reconnect_edge(&edge_id, false, "b", EdgeSide::Top).unwrap();
+        assert_eq!(doc.edge(&edge_id).unwrap().to_side, Some(EdgeSide::Top));
+        assert_eq!(doc.node("b").unwrap().parent_id(), Some("a"));
+
+        doc.reconnect_edge(&edge_id, false, "c", EdgeSide::Left).unwrap();
+        assert_eq!(doc.node("b").unwrap().parent_id(), None);
+        assert_eq!(doc.node("c").unwrap().parent_id(), Some("a"));
+        assert_eq!(doc.edge(&edge_id).unwrap().to_node, "c");
+        assert_eq!(doc.edge(&edge_id).unwrap().to_side, Some(EdgeSide::Left));
     }
 }

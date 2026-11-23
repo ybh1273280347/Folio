@@ -1,5 +1,6 @@
 //! Centralized bilingual (Chinese / English) UI copy and active locale state.
 pub mod ai;
+pub mod canvas;
 pub mod common;
 pub mod markdown;
 pub mod media;

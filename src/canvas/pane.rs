@@ -4,17 +4,17 @@ use super::{
     anchor::KnowledgeAnchor,
     history::CanvasHistory,
     interaction::{
-        Camera, InteractionState, WHEEL_ZOOM_STEP, ZOOM_STEP, compute_drop_target,
-        edge_bezier_controls, edge_endpoints, edge_midpoint_local, hit_edge, hit_node, hit_port,
-        hit_resize_handle, nearest_side, nodes_in_rect,
+        Camera, EdgeHandleEnd, InteractionState, WHEEL_ZOOM_STEP, ZOOM_STEP, compute_drop_target,
+        edge_bezier_controls, edge_endpoints, edge_midpoint_local, hit_edge, hit_edge_endpoint,
+        hit_node, hit_port, hit_resize_handle, nearest_side, nodes_in_rect,
     },
     model::{
         ApplyReport, CanvasDocument, CanvasEdge, CanvasNode, CanvasNodeType, CanvasOp,
-        CanvasViewMode, DropPlacement, EdgeEnd, EdgeKind, MIN_NODE_HEIGHT, MIN_NODE_WIDTH,
-        ViewportState,
+        CanvasViewMode, DropPlacement, EdgeEnd, EdgeKind, EdgeSide, MIN_NODE_HEIGHT,
+        MIN_NODE_WIDTH, ViewportState,
     },
 };
-use crate::theme::palette as active_palette;
+use crate::{i18n::canvas as i18n_canvas, theme::palette as active_palette};
 use gpui::{
     CursorStyle, EventEmitter, FocusHandle, Focusable, KeyBinding, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder, Pixels, Point,
@@ -103,6 +103,7 @@ pub struct CanvasPane {
     hovered_node: Option<String>,
     interaction: InteractionState,
     default_edge_kind: EdgeKind,
+    color_picker_open: bool,
     space_pressed: bool,
     editing_node: Option<String>,
     edit_input: Entity<TextareaState>,
@@ -144,7 +145,7 @@ impl CanvasPane {
             TextareaState::new(window, cx)
                 .auto_grow(2, 10)
                 .submit_on_enter(true)
-                .placeholder("输入节点内容…")
+                .placeholder(i18n_canvas::NODE_INPUT_PLACEHOLDER.get())
         });
         let sub = cx.subscribe_in(&edit_input, window, |pane, _, event: &InputEvent, window, cx| {
             match event {
@@ -168,6 +169,7 @@ impl CanvasPane {
             hovered_node: None,
             interaction: InteractionState::Idle,
             default_edge_kind: EdgeKind::Reference,
+            color_picker_open: false,
             space_pressed: false,
             editing_node: None,
             edit_input,
@@ -255,7 +257,7 @@ impl CanvasPane {
         cx: &mut Context<Self>,
     ) -> Result<ApplyReport, String> {
         if self.parse_error.is_some() {
-            return Err("当前画布 JSON 解析异常，请先修复或重新加载后再操作。".to_owned());
+            return Err(i18n_canvas::ERR_PARSE_LOCKED.get().to_owned());
         }
         let before = self.document.clone();
         let report = self.document.apply_ops(ops)?;
@@ -400,50 +402,25 @@ impl CanvasPane {
         cx.notify();
     }
 
-    pub fn cycle_selected_color(&mut self, cx: &mut Context<Self>) {
-        const PALETTE_CYCLE: &[Option<&str>] = &[
-            None,
-            Some("1"),
-            Some("2"),
-            Some("3"),
-            Some("4"),
-            Some("5"),
-            Some("6"),
-        ];
-        let next_color = |cur: Option<&str>| -> Option<String> {
-            let idx = PALETTE_CYCLE
-                .iter()
-                .position(|c| *c == cur)
-                .map(|i| (i + 1) % PALETTE_CYCLE.len())
-                .unwrap_or(1);
-            PALETTE_CYCLE[idx].map(str::to_owned)
-        };
-
+    pub fn set_selection_color(&mut self, color: Option<&str>, cx: &mut Context<Self>) {
+        let next = color.map(str::to_owned);
         if !self.selection.is_empty() {
             let before = self.document.clone();
-            let first = self
-                .primary_selected_id()
-                .and_then(|id| self.document.node(&id))
-                .and_then(|n| n.color.clone());
-            let target = next_color(first.as_deref());
             for id in &self.selection {
                 if let Some(node) = self.document.node_mut(id) {
-                    node.color = target.clone();
+                    node.color = next.clone();
                 }
             }
+            self.color_picker_open = false;
             self.history.record(before);
             self.emit_change(cx);
             cx.notify();
         } else if let Some(edge_id) = self.selected_edge.clone() {
             let before = self.document.clone();
-            let current = self
-                .document
-                .edge(&edge_id)
-                .and_then(|e| e.color.as_deref());
-            let target = next_color(current);
             if let Some(edge) = self.document.edge_mut(&edge_id) {
-                edge.color = target;
+                edge.color = next;
             }
+            self.color_picker_open = false;
             self.history.record(before);
             self.emit_change(cx);
             cx.notify();
@@ -502,8 +479,11 @@ impl CanvasPane {
     pub fn insert_image_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let picker = rfd::AsyncFileDialog::new()
             .set_parent(window)
-            .set_title("插入图片到画布")
-            .add_filter("图片文件", &["png", "jpg", "jpeg", "webp", "gif", "svg"]);
+            .set_title(i18n_canvas::DIALOG_INSERT_IMAGE.get())
+            .add_filter(
+                i18n_canvas::IMAGE_FILTER_LABEL.get(),
+                &["png", "jpg", "jpeg", "webp", "gif", "svg"],
+            );
         let canvas_path = self.file_path.clone();
         let pane = cx.entity();
         cx.spawn_in(window, async move |_, cx| {
@@ -522,9 +502,10 @@ impl CanvasPane {
                 }
                 let target_dir = crate::image::markdown_paste_image_dir(&canvas_path);
                 std::fs::create_dir_all(&target_dir)
-                    .map_err(|e| format!("创建图片目录失败：{e}"))?;
+                    .map_err(|e| i18n_canvas::err_create_image_dir(&e.to_string()))?;
                 let dest = unique_image_destination(&target_dir, &source);
-                std::fs::copy(&source, &dest).map_err(|e| format!("复制图片失败：{e}"))?;
+                std::fs::copy(&source, &dest)
+                    .map_err(|e| i18n_canvas::err_copy_image(&e.to_string()))?;
                 let rel = crate::image::markdown_relative_image_ref(&canvas_path, &dest);
                 Ok((rel, true))
             })();
@@ -861,6 +842,7 @@ impl CanvasPane {
         cx: &mut Context<Self>,
     ) {
         cx.emit(CanvasEvent::Focus);
+        self.color_picker_open = false;
         if self.editing_node.is_some() {
             self.commit_inline_edit(false, window, cx);
         }
@@ -882,6 +864,19 @@ impl CanvasPane {
 
         let viewport = self.viewport_bounds.get();
         let (wx, wy) = self.camera.screen_to_world(event.position, viewport);
+
+        if let Some(edge_id) = &self.selected_edge
+            && let Some(end) = hit_edge_endpoint(&self.document, &self.camera, edge_id, wx, wy)
+        {
+            self.interaction = InteractionState::ReconnectEdge {
+                edge_id: edge_id.clone(),
+                end,
+                current_world: (wx, wy),
+                snap: None,
+            };
+            cx.notify();
+            return;
+        }
 
         if let Some(node) = hit_resize_handle(&self.document, &self.camera, wx, wy, &self.selection) {
             self.interaction = InteractionState::ResizingNode {
@@ -1085,6 +1080,20 @@ impl CanvasPane {
                 self.hovered_node = hit_node(&self.document, wx, wy).map(|n| n.id.clone());
                 cx.notify();
             }
+            InteractionState::ReconnectEdge {
+                current_world,
+                snap,
+                ..
+            } => {
+                *current_world = (wx, wy);
+                *snap = hit_port(&self.document, &self.camera, wx, wy, |_| true)
+                    .map(|(n, s)| (n.id.clone(), s))
+                    .or_else(|| {
+                        hit_node(&self.document, wx, wy).map(|n| (n.id.clone(), nearest_side(n, wx, wy)))
+                    });
+                self.hovered_node = snap.as_ref().map(|(id, _)| id.clone());
+                cx.notify();
+            }
             InteractionState::BoxSelecting {
                 anchor_world,
                 current_world,
@@ -1137,6 +1146,32 @@ impl CanvasPane {
                 if effective.is_some() || should_detach {
                     let before = self.document.clone();
                     match self.document.reparent_or_reorder(&node_id, effective) {
+                        Ok(()) => {
+                            self.notice_error = None;
+                            self.history.record(before);
+                            self.emit_change(cx);
+                        }
+                        Err(err) => {
+                            self.notice_error = Some(err);
+                        }
+                    }
+                }
+                cx.notify();
+            }
+            InteractionState::ReconnectEdge {
+                edge_id,
+                end,
+                snap,
+                ..
+            } => {
+                if let Some((target_id, target_side)) = snap {
+                    let before = self.document.clone();
+                    match self.document.reconnect_edge(
+                        &edge_id,
+                        end == EdgeHandleEnd::From,
+                        &target_id,
+                        target_side,
+                    ) {
                         Ok(()) => {
                             self.notice_error = None;
                             self.history.record(before);
@@ -1239,42 +1274,87 @@ impl CanvasPane {
         };
 
         let accent = resolve_node_accent(node.color.as_deref(), palette.accent);
-        let border_color = if selected || drop_placement == Some(DropPlacement::Child) {
+        let border_color = if drop_placement == Some(DropPlacement::Child) {
             gpui_kit::rgb(palette.accent)
         } else if node.color.is_some() {
             accent
+        } else if selected {
+            gpui_kit::rgb(palette.accent)
         } else {
             gpui_kit::rgb(palette.border)
         };
-        let card_bg = if node.node_type == CanvasNodeType::Group {
-            let mut bg = gpui_kit::rgb(palette.hover);
-            bg.a = 0.35;
+        let card_bg = if is_image {
+            Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            }
+        } else if node.node_type == CanvasNodeType::Group {
+            let mut bg = if node.color.is_some() {
+                accent
+            } else {
+                gpui_kit::rgb(palette.hover)
+            };
+            bg.a = if node.color.is_some() { 0.14 } else { 0.35 };
             bg
+        } else if node.color.is_some() {
+            blend_rgb(gpui_kit::rgb(palette.surface), accent, 0.12)
         } else {
             gpui_kit::rgb(palette.surface)
         };
 
         let text_size = (13.0 * zoom).clamp(9.0, 22.0);
         let meta_size = (10.5 * zoom).clamp(8.0, 14.0);
-        let pad_x = (10.0 * zoom).clamp(4.0, 18.0);
-        let pad_y = (8.0 * zoom).clamp(3.0, 14.0);
+        let pad_x = if is_image {
+            0.0
+        } else {
+            (10.0 * zoom).clamp(4.0, 18.0)
+        };
+        let pad_y = if is_image {
+            0.0
+        } else {
+            (8.0 * zoom).clamp(3.0, 14.0)
+        };
         let radius = (8.0 * zoom).clamp(4.0, 14.0);
 
-        let anchor_badge = node.anchor().map(|a| {
-            let file_name = Path::new(a.target_path())
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| a.target_path().to_owned());
-            (a.kind_label(), file_name)
-        }).or_else(|| {
-            node.file.as_deref().map(|f| {
-                let file_name = Path::new(f)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| f.to_owned());
-                (if is_image { "图片" } else { "file" }, file_name)
-            })
-        });
+        let anchor_badge = if is_image {
+            None
+        } else {
+            node.anchor()
+                .map(|a| {
+                    let file_name = Path::new(a.target_path())
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| a.target_path().to_owned());
+                    (i18n_canvas::anchor_kind_label(a.kind_label()), file_name)
+                })
+                .or_else(|| {
+                    node.file.as_deref().map(|f| {
+                        let file_name = Path::new(f)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| f.to_owned());
+                        (i18n_canvas::anchor_kind_label("file"), file_name)
+                    })
+                })
+        };
+
+        let border_width = if drop_placement == Some(DropPlacement::Child) {
+            px(2.5)
+        } else if is_image {
+            if selected {
+                px(1.5)
+            } else if node.color.is_some() {
+                px(1.5)
+            } else {
+                px(0.0)
+            }
+        } else if selected {
+            px(2.0)
+        } else {
+            px(1.0)
+        };
 
         let mut card = div()
             .id(SharedString::from(format!("canvas-node-{}", node.id)))
@@ -1285,31 +1365,26 @@ impl CanvasPane {
             .h(px(lh))
             .rounded(px(radius))
             .bg(card_bg)
-            .border(if drop_placement == Some(DropPlacement::Child) {
-                px(2.5)
-            } else if selected {
-                px(2.0)
-            } else {
-                px(1.0)
-            })
+            .border(border_width)
             .border_color(border_color)
-            .when(node.node_type != CanvasNodeType::Group, |el| el.shadow_sm())
+            .when(node.node_type != CanvasNodeType::Group && !is_image, |el| {
+                el.shadow_sm()
+            })
             .flex()
             .flex_col()
             .px(px(pad_x))
             .py(px(pad_y))
-            .gap(px((4.0 * zoom).clamp(2.0, 8.0)))
+            .gap(px(if is_image {
+                0.0
+            } else {
+                (4.0 * zoom).clamp(2.0, 8.0)
+            }))
             .overflow_hidden();
 
         if let Some((kind_label, file_name)) = anchor_badge {
             let jump_anchor = node.anchor().cloned();
             let jump_file = node.file.clone();
             let jump_subpath = node.subpath.clone();
-            let badge_icon = if is_image {
-                IconName::FileImage
-            } else {
-                IconName::FileText
-            };
             card = card.child(
                 div()
                     .id(SharedString::from(format!("canvas-anchor-{}", node.id)))
@@ -1327,7 +1402,7 @@ impl CanvasPane {
                             fallback_subpath: jump_subpath.clone(),
                         });
                     }))
-                    .child(crate::ui::icon(badge_icon).size(px((11.0 * zoom).clamp(8.0, 15.0))))
+                    .child(crate::ui::icon(IconName::FileText).size(px((11.0 * zoom).clamp(8.0, 15.0))))
                     .child(
                         div()
                             .flex_1()
@@ -1346,6 +1421,7 @@ impl CanvasPane {
                     .key_context("FolioCanvasEditing")
                     .flex_1()
                     .min_h_0()
+                    .when(is_image, |el| el.p_1p5().bg(gpui_kit::rgb(palette.surface)))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
                         Textarea::new(&self.edit_input)
@@ -1366,15 +1442,17 @@ impl CanvasPane {
                         .flex_1()
                         .min_h_0()
                         .w_full()
+                        .rounded(px(radius))
                         .overflow_hidden()
-                        .rounded(px(4.0))
-                        .bg(gpui_kit::rgb(palette.background))
                         .child(img(full).size_full().object_fit(ObjectFit::Contain)),
                 );
             }
             if let Some(caption) = node.text.as_deref().filter(|t| !t.trim().is_empty()) {
                 card = card.child(
                     div()
+                        .px(px((8.0 * zoom).clamp(4.0, 12.0)))
+                        .py(px((4.0 * zoom).clamp(2.0, 8.0)))
+                        .bg(gpui_kit::rgb(palette.surface))
                         .text_size(px(meta_size))
                         .text_color(gpui_kit::rgb(palette.text))
                         .whitespace_nowrap()
@@ -1399,7 +1477,7 @@ impl CanvasPane {
                         palette.text
                     }))
                     .child(if placeholder {
-                        "双击编辑内容…".to_owned()
+                        i18n_canvas::NODE_DOUBLE_CLICK_EDIT.get().to_owned()
                     } else {
                         display.to_owned()
                     }),
@@ -1455,25 +1533,37 @@ impl CanvasPane {
         }
 
         if (selected || hovered) && !editing {
+            let snapped_side = match &self.interaction {
+                InteractionState::ReconnectEdge {
+                    snap: Some((target_id, side)),
+                    ..
+                } if target_id == &node.id => Some(*side),
+                _ => None,
+            };
             let port_size = px(8.0);
             let port_half = px(4.0);
-            let port_dot = |id: &str| {
+            let port_dot = |id: &str, side: EdgeSide| {
+                let active = snapped_side == Some(side);
                 div()
                     .id(SharedString::from(id.to_owned()))
                     .absolute()
                     .w(port_size)
                     .h(port_size)
                     .rounded_full()
-                    .bg(gpui_kit::rgb(palette.surface))
+                    .bg(gpui_kit::rgb(if active {
+                        palette.accent
+                    } else {
+                        palette.surface
+                    }))
                     .border_1()
                     .border_color(gpui_kit::rgb(palette.accent))
                     .cursor_crosshair()
             };
             card = card
-                .child(port_dot(&format!("port-t-{}", node.id)).top(-port_half).left(px(lw * 0.5 - 4.0)))
-                .child(port_dot(&format!("port-r-{}", node.id)).right(-port_half).top(px(lh * 0.5 - 4.0)))
-                .child(port_dot(&format!("port-b-{}", node.id)).bottom(-port_half).left(px(lw * 0.5 - 4.0)))
-                .child(port_dot(&format!("port-l-{}", node.id)).left(-port_half).top(px(lh * 0.5 - 4.0)));
+                .child(port_dot(&format!("port-t-{}", node.id), EdgeSide::Top).top(-port_half).left(px(lw * 0.5 - 4.0)))
+                .child(port_dot(&format!("port-r-{}", node.id), EdgeSide::Right).right(-port_half).top(px(lh * 0.5 - 4.0)))
+                .child(port_dot(&format!("port-b-{}", node.id), EdgeSide::Bottom).bottom(-port_half).left(px(lw * 0.5 - 4.0)))
+                .child(port_dot(&format!("port-l-{}", node.id), EdgeSide::Left).left(-port_half).top(px(lh * 0.5 - 4.0)));
         }
 
         if selected && !editing {
@@ -1504,10 +1594,17 @@ impl Render for CanvasPane {
         let interaction_snapshot = self.interaction.clone();
         let percent = (camera.zoom * 100.0).round() as u32;
 
-        let mut root = div()
+        let header_bg = if palette.is_dark() {
+            palette.background
+        } else {
+            palette.hover
+        };
+
+        let root = div()
             .id("folio-canvas-root")
-            .relative()
             .size_full()
+            .flex()
+            .flex_col()
             .overflow_hidden()
             .bg(gpui_kit::rgb(palette.background))
             .key_context(if self.editing_node.is_some() {
@@ -1516,13 +1613,6 @@ impl Render for CanvasPane {
                 "FolioCanvas"
             })
             .track_focus(&self.focus_handle)
-            .cursor(match self.interaction {
-                InteractionState::Panning { .. }
-                | InteractionState::ReparentDragging { moved: true, .. } => CursorStyle::ClosedHand,
-                InteractionState::ConnectingEdge { .. } => CursorStyle::Crosshair,
-                _ if self.space_pressed => CursorStyle::OpenHand,
-                _ => CursorStyle::Arrow,
-            })
             .on_action(cx.listener(|pane, _: &CanvasUndo, _, cx| {
                 if pane.editing_node.is_some() {
                     cx.propagate();
@@ -1618,6 +1708,9 @@ impl Render for CanvasPane {
             .on_action(cx.listener(|pane, _: &CanvasEscape, window, cx| {
                 if pane.editing_node.is_some() {
                     pane.commit_inline_edit(true, window, cx);
+                } else if pane.color_picker_open {
+                    pane.color_picker_open = false;
+                    cx.notify();
                 } else if !pane.selection.is_empty() || pane.selected_edge.is_some() {
                     pane.selection.clear();
                     pane.selected_edge = None;
@@ -1637,7 +1730,24 @@ impl Render for CanvasPane {
                     pane.space_pressed = false;
                     cx.notify();
                 }
-            }))
+            }));
+
+        let mut viewport = div()
+            .id("folio-canvas-viewport")
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .overflow_hidden()
+            .bg(gpui_kit::rgb(palette.background))
+            .cursor(match self.interaction {
+                InteractionState::Panning { .. }
+                | InteractionState::ReparentDragging { moved: true, .. } => CursorStyle::ClosedHand,
+                InteractionState::ConnectingEdge { .. }
+                | InteractionState::ReconnectEdge { .. } => CursorStyle::Crosshair,
+                _ if self.space_pressed => CursorStyle::OpenHand,
+                _ => CursorStyle::Arrow,
+            })
             .on_scroll(cx.listener(|pane, event: &ScrollEvent, _, cx| {
                 pane.handle_scroll(event, cx);
             }))
@@ -1715,7 +1825,7 @@ impl Render for CanvasPane {
             .iter()
             .filter(|n| n.node_type == CanvasNodeType::Group && !self.document.is_hidden_by_collapse(&n.id))
         {
-            root = root.child(self.render_node_card(node, cx));
+            viewport = viewport.child(self.render_node_card(node, cx));
         }
         for node in self
             .document
@@ -1723,7 +1833,7 @@ impl Render for CanvasPane {
             .iter()
             .filter(|n| n.node_type != CanvasNodeType::Group && !self.document.is_hidden_by_collapse(&n.id))
         {
-            root = root.child(self.render_node_card(node, cx));
+            viewport = viewport.child(self.render_node_card(node, cx));
         }
 
         if let InteractionState::BoxSelecting {
@@ -1745,7 +1855,7 @@ impl Render for CanvasPane {
                     .world_rect_to_local_bounds(ax, ay, bx - ax, by - ay);
             let mut fill = gpui_kit::rgb(palette.accent);
             fill.a = 0.12;
-            root = root.child(
+            viewport = viewport.child(
                 div()
                     .absolute()
                     .left(px(lx))
@@ -1759,10 +1869,10 @@ impl Render for CanvasPane {
         }
 
         if let Some(error) = &self.parse_error {
-            root = root.child(
+            viewport = viewport.child(
                 div()
                     .absolute()
-                    .top(px(48.))
+                    .top_3()
                     .left_3()
                     .px_3()
                     .py_1p5()
@@ -1772,14 +1882,14 @@ impl Render for CanvasPane {
                     .border_color(gpui_kit::rgb(palette.danger))
                     .text_xs()
                     .text_color(gpui_kit::rgb(palette.danger))
-                    .child(format!("画布 JSON 解析失败：{error}")),
+                    .child(i18n_canvas::err_json_parse(error)),
             );
         } else if let Some(error) = &self.notice_error {
-            root = root.child(
+            viewport = viewport.child(
                 div()
                     .id("canvas-notice-error")
                     .absolute()
-                    .top(px(48.))
+                    .top_3()
                     .left_3()
                     .px_2p5()
                     .py_1()
@@ -1810,7 +1920,7 @@ impl Render for CanvasPane {
         }
 
         if self.document.nodes.is_empty() && self.parse_error.is_none() {
-            root = root.child(
+            viewport = viewport.child(
                 div()
                     .absolute()
                     .inset_0()
@@ -1819,11 +1929,11 @@ impl Render for CanvasPane {
                     .justify_center()
                     .text_sm()
                     .text_color(gpui_kit::rgb(palette.muted))
-                    .child("双击画布空白处或点击「+ 节点」新建 · 拖拽圆点连线（Shift 画父子实线）· 支持 Ctrl+V 粘贴图片"),
+                    .child(i18n_canvas::EMPTY_CANVAS_HINT.get()),
             );
         }
 
-        // Top action bar: dual-view toggle + all clickable editing/topology controls.
+        // Docked top toolbar strip below tabs matching tab-bar color family.
         let view_mode = self.document.view_mode();
         let has_selection = !self.selection.is_empty();
         let primary_has_parent = self
@@ -1835,26 +1945,25 @@ impl Render for CanvasPane {
                 .node(id)
                 .is_some_and(|n| n.parent_id().is_some())
         });
+        let active_color = if !self.selection.is_empty() {
+            self.primary_selected_id()
+                .and_then(|id| self.document.node(&id))
+                .and_then(|n| n.color.clone())
+        } else if let Some(edge_id) = &self.selected_edge {
+            self.document
+                .edge(edge_id)
+                .and_then(|e| e.color.clone())
+        } else {
+            None
+        };
         let can_undo = self.history.can_undo();
         let can_redo = self.history.can_redo();
         let default_is_hierarchy = self.default_edge_kind == EdgeKind::Hierarchy;
 
-        let mut top_bar = div()
-            .id("canvas-top-toolbar")
-            .absolute()
-            .top_2p5()
-            .left_3()
-            .h(px(32.))
-            .px_1p5()
-            .rounded(px(8.))
-            .bg(gpui_kit::rgb(palette.surface))
-            .border_1()
-            .border_color(gpui_kit::rgb(palette.border))
-            .shadow_md()
+        let left_group = div()
             .flex()
             .items_center()
             .gap_1()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
                     .flex()
@@ -1862,11 +1971,13 @@ impl Render for CanvasPane {
                     .gap(px(2.))
                     .p(px(2.))
                     .rounded(px(6.))
-                    .bg(gpui_kit::rgb(palette.background))
+                    .bg(gpui_kit::rgb(palette.surface))
+                    .border_1()
+                    .border_color(gpui_kit::rgb(palette.border))
                     .child(
                         div()
                             .id("canvas-mode-freeform")
-                            .h(px(22.))
+                            .h(px(21.))
                             .px_2()
                             .rounded(px(4.))
                             .flex()
@@ -1883,19 +1994,18 @@ impl Render for CanvasPane {
                                     .hover(|h| h.bg(gpui_kit::rgb(palette.hover)))
                             })
                             .tooltip(|w, cx| {
-                                Tooltip::new("自由画布：任意拖拽位置；按住 Alt 拖拽节点可重组父子/兄弟顺序")
-                                    .build(w, cx)
+                                Tooltip::new(i18n_canvas::TOOLTIP_VIEW_FREEFORM.get()).build(w, cx)
                             })
                             .on_click(cx.listener(|pane, _, _, cx| {
                                 pane.switch_view_mode(CanvasViewMode::Freeform, cx);
                             }))
                             .child(crate::ui::icon(IconName::LayoutGrid).size(px(12.)))
-                            .child("自由画布"),
+                            .child(i18n_canvas::VIEW_FREEFORM.get()),
                     )
                     .child(
                         div()
                             .id("canvas-mode-tree")
-                            .h(px(22.))
+                            .h(px(21.))
                             .px_2()
                             .rounded(px(4.))
                             .flex()
@@ -1912,26 +2022,24 @@ impl Render for CanvasPane {
                                     .hover(|h| h.bg(gpui_kit::rgb(palette.hover)))
                             })
                             .tooltip(|w, cx| {
-                                Tooltip::new("树状导图：自动树形排版，拖拽节点到目标上/中/下可直接调序或挂为子节点")
-                                    .build(w, cx)
+                                Tooltip::new(i18n_canvas::TOOLTIP_VIEW_TREE.get()).build(w, cx)
                             })
                             .on_click(cx.listener(|pane, _, _, cx| {
                                 pane.switch_view_mode(CanvasViewMode::Tree, cx);
                             }))
                             .child(crate::ui::icon(IconName::ListTree).size(px(12.)))
-                            .child("树状导图"),
+                            .child(i18n_canvas::VIEW_TREE.get()),
                     ),
             )
-            .child(div().w(px(1.)).h(px(16.)).bg(gpui_kit::rgb(palette.border)))
+            .child(div().w(px(1.)).h(px(14.)).mx_0p5().bg(gpui_kit::rgb(palette.border)))
             .child(
                 Button::new("canvas-bar-add-node")
                     .ghost()
                     .compact()
-                    .h(px(22.))
-                    .px_1p5()
+                    .h(px(24.))
+                    .w(px(24.))
                     .icon(crate::ui::icon(IconName::Plus))
-                    .label("节点")
-                    .tooltip("新建节点（或双击画布空白处）")
+                    .tooltip(i18n_canvas::TOOLTIP_NEW_NODE)
                     .on_click(cx.listener(|pane, _, window, cx| {
                         let (x, y) = pane.viewport_center_world();
                         pane.create_node_at(x, y, None, "", true, window, cx);
@@ -1941,38 +2049,24 @@ impl Render for CanvasPane {
                 Button::new("canvas-bar-insert-image")
                     .ghost()
                     .compact()
-                    .h(px(22.))
-                    .px_1p5()
+                    .h(px(24.))
+                    .w(px(24.))
                     .icon(crate::ui::icon(IconName::Image))
-                    .label("图片")
-                    .tooltip("插入本地图片（png/jpg/webp/gif/svg）")
+                    .tooltip(i18n_canvas::TOOLTIP_INSERT_IMAGE)
                     .on_click(cx.listener(|pane, _, window, cx| {
                         pane.insert_image_dialog(window, cx);
                     })),
             )
-            .child(
-                Button::new("canvas-bar-paste")
-                    .ghost()
-                    .compact()
-                    .h(px(22.))
-                    .px_1p5()
-                    .icon(crate::ui::icon(IconName::FileImage))
-                    .label("粘贴")
-                    .tooltip("粘贴剪贴板图片或文本 (Ctrl+V)")
-                    .on_click(cx.listener(|pane, _, _, cx| {
-                        pane.paste_clipboard(cx);
-                    })),
-            )
-            .child(div().w(px(1.)).h(px(16.)).bg(gpui_kit::rgb(palette.border)))
+            .child(div().w(px(1.)).h(px(14.)).mx_0p5().bg(gpui_kit::rgb(palette.border)))
             .child(
                 Button::new("canvas-bar-undo")
                     .ghost()
                     .compact()
-                    .h(px(22.))
+                    .h(px(24.))
                     .w(px(24.))
                     .disabled(!can_undo)
                     .icon(crate::ui::icon(IconName::RotateCcw))
-                    .tooltip("撤销 (Ctrl+Z)")
+                    .tooltip(i18n_canvas::TOOLTIP_UNDO)
                     .on_click(cx.listener(|pane, _, _, cx| {
                         pane.undo(cx);
                     })),
@@ -1981,11 +2075,11 @@ impl Render for CanvasPane {
                 Button::new("canvas-bar-redo")
                     .ghost()
                     .compact()
-                    .h(px(22.))
-                    .px_1p5()
+                    .h(px(24.))
+                    .w(px(24.))
                     .disabled(!can_redo)
-                    .label("重做")
-                    .tooltip("重做 (Ctrl+Y / Ctrl+Shift+Z)")
+                    .icon(crate::ui::icon(IconName::RefreshCw))
+                    .tooltip(i18n_canvas::TOOLTIP_REDO)
                     .on_click(cx.listener(|pane, _, _, cx| {
                         pane.redo(cx);
                     })),
@@ -1994,10 +2088,10 @@ impl Render for CanvasPane {
                 Button::new("canvas-bar-select-all")
                     .ghost()
                     .compact()
-                    .h(px(22.))
-                    .px_1p5()
-                    .label("全选")
-                    .tooltip("全选可见节点 (Ctrl+A)")
+                    .h(px(24.))
+                    .w(px(24.))
+                    .icon(crate::ui::icon(IconName::Square))
+                    .tooltip(i18n_canvas::TOOLTIP_SELECT_ALL)
                     .on_click(cx.listener(|pane, _, _, cx| {
                         pane.selection = pane
                             .document
@@ -2010,19 +2104,21 @@ impl Render for CanvasPane {
                         cx.notify();
                     })),
             )
+            .child(div().w(px(1.)).h(px(14.)).mx_0p5().bg(gpui_kit::rgb(palette.border)))
             .child(
                 Button::new("canvas-bar-edge-kind")
                     .ghost()
                     .compact()
-                    .h(px(22.))
+                    .h(px(24.))
                     .px_1p5()
+                    .when(default_is_hierarchy, |b| b.bg(gpui_kit::rgb(palette.selection)))
                     .icon(crate::ui::icon(IconName::Link))
                     .label(if default_is_hierarchy {
-                        "连线:实线"
+                        i18n_canvas::EDGE_KIND_SOLID_SHORT.get()
                     } else {
-                        "连线:虚线"
+                        i18n_canvas::EDGE_KIND_DASHED_SHORT.get()
                     })
-                    .tooltip("切换拖拽圆点默认连线类型（实线=父子层级，虚线=交叉关联；按住 Shift 拖拽可直接画父子实线）")
+                    .tooltip(i18n_canvas::TOOLTIP_EDGE_KIND_TOGGLE)
                     .on_click(cx.listener(|pane, _, _, cx| {
                         pane.default_edge_kind = match pane.default_edge_kind {
                             EdgeKind::Reference => EdgeKind::Hierarchy,
@@ -2032,17 +2128,17 @@ impl Render for CanvasPane {
                     })),
             );
 
+        let mut right_group = div().flex().items_center().gap_1();
         if has_selection {
-            top_bar = top_bar
-                .child(div().w(px(1.)).h(px(16.)).bg(gpui_kit::rgb(palette.border)))
+            right_group = right_group
                 .child(
                     Button::new("canvas-sel-add-child")
                         .ghost()
                         .compact()
-                        .h(px(22.))
-                        .px_1p5()
-                        .label("+子节点")
-                        .tooltip("为当前选中节点添加子节点 (Tab)")
+                        .h(px(24.))
+                        .w(px(24.))
+                        .icon(crate::ui::icon(IconName::ListIndentIncrease))
+                        .tooltip(i18n_canvas::TOOLTIP_ADD_CHILD)
                         .on_click(cx.listener(|pane, _, window, cx| {
                             pane.add_child_from_selection(window, cx);
                         })),
@@ -2052,10 +2148,10 @@ impl Render for CanvasPane {
                         Button::new("canvas-sel-add-sibling")
                             .ghost()
                             .compact()
-                            .h(px(22.))
-                            .px_1p5()
-                            .label("+兄弟")
-                            .tooltip("添加同级兄弟节点 (Enter)")
+                            .h(px(24.))
+                            .w(px(24.))
+                            .icon(crate::ui::icon(IconName::List))
+                            .tooltip(i18n_canvas::TOOLTIP_ADD_SIBLING)
                             .on_click(cx.listener(|pane, _, window, cx| {
                                 pane.add_sibling_from_selection(window, cx);
                             })),
@@ -2065,11 +2161,10 @@ impl Render for CanvasPane {
                     Button::new("canvas-sel-edit")
                         .ghost()
                         .compact()
-                        .h(px(22.))
-                        .px_1p5()
+                        .h(px(24.))
+                        .w(px(24.))
                         .icon(crate::ui::icon(IconName::PencilLine))
-                        .label("编辑")
-                        .tooltip("编辑内容或图片说明 (F2 / 双击文本)")
+                        .tooltip(i18n_canvas::TOOLTIP_EDIT_NODE)
                         .on_click(cx.listener(|pane, _, window, cx| {
                             if let Some(id) = pane.primary_selected_id() {
                                 pane.begin_inline_edit(&id, window, cx);
@@ -2081,10 +2176,10 @@ impl Render for CanvasPane {
                         Button::new("canvas-sel-detach")
                             .ghost()
                             .compact()
-                            .h(px(22.))
-                            .px_1p5()
-                            .label("脱离父级")
-                            .tooltip("断开所选节点与父节点的层级关系")
+                            .h(px(24.))
+                            .w(px(24.))
+                            .icon(crate::ui::icon(IconName::ListIndentDecrease))
+                            .tooltip(i18n_canvas::TOOLTIP_DETACH_NODE)
                             .on_click(cx.listener(|pane, _, _, cx| {
                                 pane.detach_selected_nodes(cx);
                             })),
@@ -2094,29 +2189,107 @@ impl Render for CanvasPane {
                     Button::new("canvas-sel-color")
                         .ghost()
                         .compact()
-                        .h(px(22.))
-                        .w(px(24.))
+                        .h(px(24.))
+                        .w(px(26.))
+                        .when(self.color_picker_open, |b| b.bg(gpui_kit::rgb(palette.selection)))
                         .icon(crate::ui::icon(IconName::Palette))
-                        .tooltip("循环切换节点颜色")
+                        .tooltip(i18n_canvas::TOOLTIP_COLOR_PICKER)
                         .on_click(cx.listener(|pane, _, _, cx| {
-                            pane.cycle_selected_color(cx);
+                            pane.color_picker_open = !pane.color_picker_open;
+                            cx.notify();
                         })),
                 )
                 .child(
                     Button::new("canvas-sel-delete")
                         .ghost()
                         .compact()
-                        .h(px(22.))
+                        .h(px(24.))
                         .w(px(24.))
                         .icon(crate::ui::icon(IconName::Trash))
-                        .tooltip("删除选中节点 (Delete / Backspace)")
+                        .tooltip(i18n_canvas::TOOLTIP_DELETE_SELECTION)
                         .on_click(cx.listener(|pane, _, _, cx| {
                             pane.delete_selection(cx);
                         })),
                 );
         }
 
-        root = root.child(top_bar);
+        let top_bar = div()
+            .id("canvas-top-toolbar")
+            .h(px(34.))
+            .w_full()
+            .flex_shrink_0()
+            .px_2p5()
+            .bg(gpui_kit::rgb(header_bg))
+            .border_b_1()
+            .border_color(gpui_kit::rgb(palette.border))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(left_group)
+            .child(right_group);
+
+        // Color swatch popover when palette is toggled.
+        if self.color_picker_open && (has_selection || self.selected_edge.is_some()) {
+            let swatches: &[(Option<&str>, u32)] = &[
+                (Some("1"), 0xd93025),
+                (Some("2"), 0xe67e22),
+                (Some("3"), 0xeab308),
+                (Some("4"), 0x22c55e),
+                (Some("5"), 0x06b6d4),
+                (Some("6"), 0x8b5cf6),
+            ];
+            let mut swatch_row = div()
+                .id("canvas-color-popover")
+                .absolute()
+                .top_2()
+                .right_3()
+                .h(px(32.))
+                .px_2()
+                .rounded(px(8.))
+                .bg(gpui_kit::rgb(palette.surface))
+                .border_1()
+                .border_color(gpui_kit::rgb(palette.border))
+                .shadow_md()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    Button::new("canvas-color-clear")
+                        .ghost()
+                        .compact()
+                        .h(px(20.))
+                        .px_1p5()
+                        .label(i18n_canvas::COLOR_CLEAR.get())
+                        .on_click(cx.listener(|pane, _, _, cx| {
+                            pane.set_selection_color(None, cx);
+                        })),
+                );
+            for (code, hex) in swatches.iter().copied() {
+                let is_active = active_color.as_deref() == code;
+                swatch_row = swatch_row.child(
+                    div()
+                        .id(SharedString::from(format!("canvas-swatch-{}", code.unwrap_or("0"))))
+                        .w(px(16.))
+                        .h(px(16.))
+                        .rounded_full()
+                        .bg(gpui_kit::rgb(hex))
+                        .cursor_pointer()
+                        .border(if is_active { px(2.) } else { px(1.) })
+                        .border_color(gpui_kit::rgb(if is_active {
+                            palette.text
+                        } else {
+                            palette.border
+                        }))
+                        .on_click(cx.listener(move |pane, _, _, cx| {
+                            pane.set_selection_color(code, cx);
+                        })),
+                );
+            }
+            viewport = viewport.child(swatch_row);
+        }
 
         // Floating toolbar anchored near the selected edge.
         if let Some(edge_id) = &self.selected_edge
@@ -2124,9 +2297,9 @@ impl Render for CanvasPane {
             && let Some(mid) = edge_midpoint_local(&self.document, &self.camera, edge_id)
         {
             let is_ref = edge.kind() == EdgeKind::Reference;
-            let bar_x = (f32::from(mid.x) - 115.0).max(12.0);
-            let bar_y = (f32::from(mid.y) - 42.0).max(48.0);
-            root = root.child(
+            let bar_x = (f32::from(mid.x) - 86.0).max(12.0);
+            let bar_y = (f32::from(mid.y) - 44.0).max(12.0);
+            viewport = viewport.child(
                 div()
                     .id("canvas-edge-toolbar")
                     .absolute()
@@ -2149,12 +2322,13 @@ impl Render for CanvasPane {
                             .compact()
                             .h(px(20.))
                             .px_1p5()
+                            .icon(crate::ui::icon(IconName::Link))
                             .label(if is_ref {
-                                "转为父子实线"
+                                i18n_canvas::EDGE_TO_SOLID.get()
                             } else {
-                                "转为关联虚线"
+                                i18n_canvas::EDGE_TO_DASHED.get()
                             })
-                            .tooltip("切换实线(父子层级)与虚线(交叉关联)")
+                            .tooltip(i18n_canvas::TOOLTIP_EDGE_TOGGLE_KIND)
                             .on_click(cx.listener(move |pane, _, _, cx| {
                                 let next = if is_ref {
                                     EdgeKind::Hierarchy
@@ -2169,9 +2343,9 @@ impl Render for CanvasPane {
                             .ghost()
                             .compact()
                             .h(px(20.))
-                            .px_1p5()
-                            .label("反转方向")
-                            .tooltip("对调连线起点与终点")
+                            .w(px(22.))
+                            .icon(crate::ui::icon(IconName::Replace))
+                            .tooltip(i18n_canvas::TOOLTIP_EDGE_REVERSE)
                             .on_click(cx.listener(|pane, _, _, cx| {
                                 pane.reverse_selected_edge(cx);
                             })),
@@ -2182,10 +2356,12 @@ impl Render for CanvasPane {
                             .compact()
                             .h(px(20.))
                             .w(px(22.))
+                            .when(self.color_picker_open, |b| b.bg(gpui_kit::rgb(palette.selection)))
                             .icon(crate::ui::icon(IconName::Palette))
-                            .tooltip("切换连线颜色")
+                            .tooltip(i18n_canvas::TOOLTIP_COLOR_PICKER)
                             .on_click(cx.listener(|pane, _, _, cx| {
-                                pane.cycle_selected_color(cx);
+                                pane.color_picker_open = !pane.color_picker_open;
+                                cx.notify();
                             })),
                     )
                     .child(
@@ -2195,7 +2371,7 @@ impl Render for CanvasPane {
                             .h(px(20.))
                             .w(px(22.))
                             .icon(crate::ui::icon(IconName::Trash))
-                            .tooltip("删除连线 (Delete)")
+                            .tooltip(i18n_canvas::TOOLTIP_EDGE_DELETE)
                             .on_click(cx.listener(|pane, _, _, cx| {
                                 pane.delete_selection(cx);
                             })),
@@ -2203,14 +2379,14 @@ impl Render for CanvasPane {
             );
         }
 
-        // Bottom-right floating canvas zoom & layout control bar.
-        root = root.child(
+        // Bottom-right floating canvas zoom control bar.
+        viewport = viewport.child(
             div()
                 .id("canvas-controls-pill")
                 .absolute()
                 .bottom_3()
                 .right_3()
-                .h(px(30.))
+                .h(px(28.))
                 .px_1p5()
                 .rounded(px(8.))
                 .bg(gpui_kit::rgb(palette.surface))
@@ -2222,27 +2398,6 @@ impl Render for CanvasPane {
                 .gap_1()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(
-                    Button::new("canvas-tidy-layout")
-                        .ghost()
-                        .compact()
-                        .with_size(px(14.))
-                        .h(px(22.))
-                        .px_1p5()
-                        .icon(crate::ui::icon(IconName::ListTree))
-                        .label("整理")
-                        .tooltip("按树形导图整理布局")
-                        .on_click(cx.listener(|pane, _, _, cx| {
-                            let root = pane.primary_selected_id();
-                            pane.layout_tree_transaction(
-                                root.as_deref(),
-                                super::model::TreeLayoutMode::MindmapRight,
-                                true,
-                                cx,
-                            );
-                        })),
-                )
-                .child(div().w(px(1.)).h(px(14.)).bg(gpui_kit::rgb(palette.border)))
-                .child(
                     Button::new("canvas-zoom-out")
                         .ghost()
                         .compact()
@@ -2250,7 +2405,7 @@ impl Render for CanvasPane {
                         .h(px(22.))
                         .w(px(22.))
                         .icon(crate::ui::icon(IconName::Minus))
-                        .tooltip("缩小 (Ctrl+-)")
+                        .tooltip(i18n_canvas::TOOLTIP_ZOOM_OUT)
                         .on_click(cx.listener(|pane, _, _, cx| {
                             let viewport = pane.viewport_bounds.get();
                             pane.camera
@@ -2270,7 +2425,9 @@ impl Render for CanvasPane {
                         .text_xs()
                         .text_color(gpui_kit::rgb(palette.muted))
                         .hover(|s| s.bg(gpui_kit::rgb(palette.hover)))
-                        .tooltip(|window, cx| Tooltip::new("适配内容 (Ctrl+0)").build(window, cx))
+                        .tooltip(|window, cx| {
+                            Tooltip::new(i18n_canvas::TOOLTIP_ZOOM_FIT.get()).build(window, cx)
+                        })
                         .on_click(cx.listener(|pane, _, _, cx| {
                             pane.fit_view(cx);
                         }))
@@ -2284,7 +2441,7 @@ impl Render for CanvasPane {
                         .h(px(22.))
                         .w(px(22.))
                         .icon(crate::ui::icon(IconName::Plus))
-                        .tooltip("放大 (Ctrl+=)")
+                        .tooltip(i18n_canvas::TOOLTIP_ZOOM_IN)
                         .on_click(cx.listener(|pane, _, _, cx| {
                             let viewport = pane.viewport_bounds.get();
                             pane.camera.zoom_at(viewport.center(), viewport, ZOOM_STEP);
@@ -2293,7 +2450,7 @@ impl Render for CanvasPane {
                 ),
         );
 
-        root
+        root.child(top_bar).child(viewport)
     }
 }
 
@@ -2385,6 +2542,59 @@ fn paint_edges(
         if edge.to_end.unwrap_or(EdgeEnd::Arrow) == EdgeEnd::Arrow {
             paint_arrowhead(sp3, sc2, color, camera.zoom, window);
         }
+        let reconnecting_this = matches!(
+            interaction,
+            InteractionState::ReconnectEdge { edge_id, .. } if edge_id == &edge.id
+        );
+        if is_selected && !reconnecting_this {
+            paint_edge_handle(sp0, palette, window);
+            paint_edge_handle(sp3, palette, window);
+        }
+    }
+
+    if let InteractionState::ReconnectEdge {
+        edge_id,
+        end,
+        current_world,
+        snap,
+    } = interaction
+        && let Some(edge) = doc.edge(edge_id)
+        && let Some((orig_p0, orig_p3, orig_fs, orig_ts)) = edge_endpoints(doc, edge)
+    {
+        let drag_pt = snap
+            .as_ref()
+            .and_then(|(nid, side)| doc.node(nid).map(|n| (n.side_point(*side), *side)))
+            .unwrap_or_else(|| {
+                let side = match end {
+                    EdgeHandleEnd::From => orig_fs,
+                    EdgeHandleEnd::To => orig_ts,
+                };
+                (*current_world, side)
+            });
+        let (p0, p3, fs, ts) = match end {
+            EdgeHandleEnd::From => (drag_pt.0, orig_p3, drag_pt.1, orig_ts),
+            EdgeHandleEnd::To => (orig_p0, drag_pt.0, orig_fs, drag_pt.1),
+        };
+        let (c1, c2) = edge_bezier_controls(p0, p3, fs, ts);
+        let mut builder = PathBuilder::stroke(px(2.4));
+        if edge.kind() == EdgeKind::Reference {
+            let dash = px((6.0 * camera.zoom).clamp(3.0, 10.0));
+            let gap = px((4.0 * camera.zoom).clamp(2.0, 8.0));
+            builder = builder.dash_array(&[dash, gap]);
+        }
+        let sp0 = to_screen(p0.0, p0.1);
+        let sc1 = to_screen(c1.0, c1.1);
+        let sc2 = to_screen(c2.0, c2.1);
+        let sp3 = to_screen(p3.0, p3.1);
+        builder.move_to(sp0);
+        builder.cubic_bezier_to(sp3, sc1, sc2);
+        let preview_color = gpui_kit::rgb(palette.accent);
+        if let Ok(path) = builder.build() {
+            window.paint_path(path, preview_color);
+        }
+        if edge.to_end.unwrap_or(EdgeEnd::Arrow) == EdgeEnd::Arrow {
+            paint_arrowhead(sp3, sc2, preview_color, camera.zoom, window);
+        }
     }
 
     if let InteractionState::ConnectingEdge {
@@ -2464,6 +2674,31 @@ fn paint_arrowhead(
     arrow.close();
     if let Ok(path) = arrow.build() {
         window.paint_path(path, color);
+    }
+}
+
+fn paint_edge_handle(center: Point<Pixels>, palette: crate::theme::Palette, window: &mut Window) {
+    let outer = Bounds::new(
+        center - point(px(5.0), px(5.0)),
+        gpui_kit::size(px(10.0), px(10.0)),
+    );
+    window.paint_quad(gpui::quad(
+        outer,
+        px(5.0),
+        gpui_kit::rgb(palette.surface),
+        px(2.0),
+        gpui_kit::rgb(palette.accent),
+        gpui::BorderStyle::default(),
+    ));
+}
+
+fn blend_rgb(base: Rgba, tint: Rgba, alpha: f32) -> Rgba {
+    let inv = 1.0 - alpha;
+    Rgba {
+        r: base.r * inv + tint.r * alpha,
+        g: base.g * inv + tint.g * alpha,
+        b: base.b * inv + tint.b * alpha,
+        a: base.a,
     }
 }
 

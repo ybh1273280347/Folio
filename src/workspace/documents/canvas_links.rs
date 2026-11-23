@@ -81,50 +81,25 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(target_canvas) = self.resolve_or_create_target_canvas(cx) else {
-            self.report("无法确定或创建目标画布文件。", cx);
-            return;
-        };
-        let full = self.document_path(&target_canvas);
-        let file = ProjectFile {
-            kind: Self::file_kind(&full),
-            path: target_canvas.clone(),
-        };
-
-        // Prefer opening the target canvas in the right split pane when sent from a note.
-        let target_key = if self.documents.tabs.contains(&target_canvas)
-            && self.documents.active == target_canvas
-        {
-            PaneKey::tab(&target_canvas)
-        } else {
-            self.open_reading_pane(&file, window, cx);
-            PaneKey::reading(&target_canvas)
-        };
-
-        let Some(canvas_pane) = self.documents.canvas_panes.get(&target_key).cloned() else {
-            return;
-        };
-
         let preview: String = quote.lines().next().unwrap_or("").chars().take(120).collect();
+        let norm_source = source_path.replace('\\', "/");
         let anchor = KnowledgeAnchor::MarkdownQuote {
-            path: source_path.replace('\\', "/"),
+            path: norm_source.clone(),
             quote,
             occurrence,
             heading_path,
             line_hint,
         };
-        canvas_pane.update(cx, |pane, cx| {
-            pane.add_anchor_node(preview, anchor, cx);
-        });
-        if let Some(doc) = self.documents.open.get(&target_canvas) {
-            let text = doc.buffer.text.clone();
-            self.sync_canvas_index_from_text(&target_canvas, &text);
-        }
-        let canvas_name = Path::new(&target_canvas)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or(target_canvas);
-        self.report(format!("已添加到画布：{canvas_name}"), cx);
+        let source_folder = Path::new(&norm_source)
+            .parent()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .filter(|s| !s.is_empty());
+        let default_stem = Path::new(&norm_source)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("notes");
+        self.dispatch_anchor_to_canvas(preview, anchor, source_folder, default_stem, window, cx);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -138,10 +113,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(target_canvas) = self.resolve_or_create_target_canvas(cx) else {
-            self.report("无法确定或创建目标画布文件。", cx);
-            return;
-        };
         let rel_pdf = if let Some(project) = self.projects.directory()
             && let Ok(root) = dunce::canonicalize(&project.folder)
             && let Ok(canon_pdf) = dunce::canonicalize(pdf_full_path)
@@ -151,24 +122,8 @@ impl Workspace {
         } else {
             pdf_full_path.to_string_lossy().into_owned()
         };
-        let full = self.document_path(&target_canvas);
-        let file = ProjectFile {
-            kind: Self::file_kind(&full),
-            path: target_canvas.clone(),
-        };
-        let target_key = if self.documents.tabs.contains(&target_canvas)
-            && self.documents.active == target_canvas
-        {
-            PaneKey::tab(&target_canvas)
-        } else {
-            self.open_reading_pane(&file, window, cx);
-            PaneKey::reading(&target_canvas)
-        };
-        let Some(canvas_pane) = self.documents.canvas_panes.get(&target_key).cloned() else {
-            return;
-        };
         let preview = if quote.trim().is_empty() {
-            format!("PDF 第 {page_1based} 页批注")
+            crate::i18n::canvas::pdf_page_annotation_preview(page_1based)
         } else {
             quote.lines().next().unwrap_or("").chars().take(120).collect()
         };
@@ -182,59 +137,374 @@ impl Workspace {
             })
             .collect();
         let anchor = KnowledgeAnchor::PdfAnnotation {
-            path: rel_pdf,
+            path: rel_pdf.clone(),
             annotation_id,
             page: page_1based,
             quote,
             rects: norm_rects,
         };
-        canvas_pane.update(cx, |pane, cx| {
-            pane.add_anchor_node(preview, anchor, cx);
-        });
-        if let Some(doc) = self.documents.open.get(&target_canvas) {
-            let text = doc.buffer.text.clone();
-            self.sync_canvas_index_from_text(&target_canvas, &text);
-        }
-        let canvas_name = Path::new(&target_canvas)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or(target_canvas);
-        self.report(format!("已添加到画布：{canvas_name}"), cx);
+        let source_folder = if !Path::new(&rel_pdf).is_absolute() {
+            Path::new(&rel_pdf)
+                .parent()
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
+        let default_stem = Path::new(&rel_pdf)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("notes");
+        self.dispatch_anchor_to_canvas(preview, anchor, source_folder, default_stem, window, cx);
     }
 
-    fn resolve_or_create_target_canvas(&mut self, cx: &mut Context<Self>) -> Option<String> {
-        if let Some(reading) = self
+    fn dispatch_anchor_to_canvas(
+        &mut self,
+        preview: String,
+        anchor: KnowledgeAnchor,
+        source_folder: Option<String>,
+        default_stem: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(open_split) = self
             .documents
             .reading_panes
             .iter()
             .rev()
             .find(|p| Self::is_canvas_path(p))
+            .cloned()
         {
-            return Some(reading.clone());
+            self.insert_anchor_into_canvas(&open_split, preview, anchor, window, cx);
+            return;
         }
-        if let Some(tab) = self
-            .documents
-            .tabs
-            .iter()
-            .rev()
-            .find(|p| Self::is_canvas_path(p))
+
+        let default_name = format!("{default_stem}.canvas");
+        let name_input = cx.new(|cx| {
+            let mut state = gpui_kit::component::input::InputState::new(window, cx)
+                .placeholder(crate::i18n::canvas::PICKER_NEW_PLACEHOLDER.get());
+            state.set_value(default_name, window, cx);
+            state.focus(window, cx);
+            state
+        });
+        let submit_sub = cx.subscribe_in(
+            &name_input,
+            window,
+            |app, _, event: &gpui_kit::component::input::InputEvent, window, cx| {
+                if matches!(event, gpui_kit::component::input::InputEvent::PressEnter { .. }) {
+                    app.create_and_insert_pending_canvas(window, cx);
+                }
+            },
+        );
+        self.documents.pending_canvas_insert = Some(super::PendingCanvasInsert {
+            preview,
+            anchor,
+            source_folder,
+            name_input,
+            _submit_sub: submit_sub,
+        });
+        cx.notify();
+    }
+
+    fn insert_anchor_into_canvas(
+        &mut self,
+        target_canvas: &str,
+        preview: String,
+        anchor: KnowledgeAnchor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let full = self.document_path(target_canvas);
+        let file = ProjectFile {
+            kind: Self::file_kind(&full),
+            path: target_canvas.to_owned(),
+        };
+        let target_key = if self.documents.tabs.contains(&file.path)
+            && self.documents.active == file.path
         {
-            return Some(tab.clone());
+            PaneKey::tab(&file.path)
+        } else {
+            self.open_reading_pane(&file, window, cx);
+            PaneKey::reading(&file.path)
+        };
+        let Some(canvas_pane) = self.documents.canvas_panes.get(&target_key).cloned() else {
+            return;
+        };
+        canvas_pane.update(cx, |pane, cx| {
+            pane.add_anchor_node(preview, anchor, cx);
+        });
+        if let Some(doc) = self.documents.open.get(&file.path) {
+            let text = doc.buffer.text.clone();
+            self.sync_canvas_index_from_text(&file.path, &text);
         }
-        if let Some(existing) = self
+        let canvas_name = Path::new(&file.path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| file.path.clone());
+        self.report(crate::i18n::canvas::toast_added_to_canvas(&canvas_name), cx);
+    }
+
+    pub(in crate::workspace) fn create_and_insert_pending_canvas(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self.documents.pending_canvas_insert.as_ref() else {
+            return;
+        };
+        let raw_name = pending.name_input.read(cx).value().to_string();
+        let source_folder = pending.source_folder.clone();
+        let Some(project) = self.projects.directory() else {
+            return;
+        };
+        let root = PathBuf::from(&project.folder);
+        let created = match files::create_named_canvas_in(&root, source_folder.as_deref(), &raw_name)
+        {
+            Ok(file) => file,
+            Err(err) => {
+                self.report(err.to_string(), cx);
+                return;
+            }
+        };
+        let _ = self.tree.reload_files(&root);
+        let Some(pending) = self.documents.pending_canvas_insert.take() else {
+            return;
+        };
+        self.insert_anchor_into_canvas(&created.path, pending.preview, pending.anchor, window, cx);
+        cx.notify();
+    }
+
+    pub(in crate::workspace) fn render_canvas_target_picker(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let pending = self.documents.pending_canvas_insert.as_ref()?;
+        let palette = crate::theme::palette();
+        let source_folder = pending.source_folder.as_deref();
+
+        let mut canvases: Vec<(String, bool, bool)> = self
             .tree
             .files()
             .iter()
-            .find(|f| Self::is_canvas_path(&f.path))
-        {
-            return Some(existing.path.clone());
+            .filter(|f| Self::is_canvas_path(&f.path))
+            .map(|f| {
+                let is_open = self.documents.tabs.contains(&f.path);
+                let same_dir = source_folder.is_some_and(|dir| {
+                    Path::new(&f.path)
+                        .parent()
+                        .map(|p| p.to_string_lossy().replace('\\', "/"))
+                        .as_deref()
+                        == Some(dir)
+                });
+                (f.path.clone(), is_open, same_dir)
+            })
+            .collect();
+        canvases.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| b.2.cmp(&a.2))
+                .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+        });
+
+        let mut list = div()
+            .id("canvas-picker-list")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .max_h(px(220.))
+            .overflow_y_scroll();
+
+        if canvases.is_empty() {
+            list = list.child(
+                div()
+                    .px_2p5()
+                    .py_3()
+                    .text_xs()
+                    .text_color(rgb(palette.muted))
+                    .child(crate::i18n::canvas::PICKER_EMPTY_LIST.get()),
+            );
+        } else {
+            for (idx, (path, is_open, _)) in canvases.into_iter().enumerate() {
+                let target_path = path.clone();
+                list = list.child(
+                    div()
+                        .id(("canvas-picker-item", idx))
+                        .px_2p5()
+                        .py_1p5()
+                        .rounded(px(6.))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(palette.hover)))
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            if let Some(pending) = app.documents.pending_canvas_insert.take() {
+                                app.insert_anchor_into_canvas(
+                                    &target_path,
+                                    pending.preview,
+                                    pending.anchor,
+                                    window,
+                                    cx,
+                                );
+                                cx.notify();
+                            }
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .flex_1()
+                                .min_w_0()
+                                .child(
+                                    crate::ui::icon(IconName::LayoutGrid)
+                                        .size(px(14.))
+                                        .text_color(rgb(palette.accent)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .overflow_hidden()
+                                        .text_xs()
+                                        .text_color(rgb(palette.text))
+                                        .child(path),
+                                ),
+                        )
+                        .when(is_open, |row| {
+                            row.child(
+                                div()
+                                    .px_1p5()
+                                    .py(px(1.))
+                                    .rounded(px(4.))
+                                    .bg(rgb(palette.selection))
+                                    .text_xs()
+                                    .text_color(rgb(palette.accent))
+                                    .child(crate::i18n::canvas::PICKER_OPEN_TAB_BADGE.get()),
+                            )
+                        }),
+                );
+            }
         }
-        let project = self.projects.directory()?;
-        let root = PathBuf::from(&project.folder);
-        let created = files::create_canvas_in(&root, None).ok()?;
-        let _ = self.tree.reload_files(&root);
-        cx.notify();
-        Some(created.path)
+
+        let dir_label = crate::i18n::canvas::picker_target_dir_label(source_folder);
+        Some(
+            div()
+                .id("canvas-target-picker-backdrop")
+                .absolute()
+                .inset_0()
+                .bg(rgba(0x0000004d))
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|app, _, _, cx| {
+                    app.documents.pending_canvas_insert = None;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .id("canvas-target-picker-card")
+                        .w(px(420.))
+                        .p_4()
+                        .rounded(px(10.))
+                        .bg(rgb(palette.surface))
+                        .border_1()
+                        .border_color(rgb(palette.border))
+                        .shadow_lg()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .on_click(|_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .flex()
+                                .items_start()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_0p5()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(rgb(palette.text))
+                                                .child(crate::i18n::canvas::PICKER_TITLE.get()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(palette.muted))
+                                                .child(crate::i18n::canvas::PICKER_SUBTITLE.get()),
+                                        ),
+                                )
+                                .child(
+                                    Button::new("canvas-picker-close")
+                                        .ghost()
+                                        .compact()
+                                        .h(px(22.))
+                                        .w(px(22.))
+                                        .icon(crate::ui::icon(IconName::Close))
+                                        .on_click(cx.listener(|app, _, _, cx| {
+                                            app.documents.pending_canvas_insert = None;
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(list)
+                        .child(
+                            div()
+                                .pt_2()
+                                .border_t_1()
+                                .border_color(rgb(palette.border))
+                                .flex()
+                                .flex_col()
+                                .gap_1p5()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(palette.muted))
+                                        .child(dir_label),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div().flex_1().min_w_0().child(
+                                                gpui_kit::component::input::Input::new(
+                                                    &pending.name_input,
+                                                ),
+                                            ),
+                                        )
+                                        .child(
+                                            Button::new("canvas-picker-create")
+                                                .primary()
+                                                .compact()
+                                                .h(px(28.))
+                                                .px_3()
+                                                .label(
+                                                    crate::i18n::canvas::PICKER_BTN_CREATE_AND_ADD
+                                                        .get(),
+                                                )
+                                                .on_click(cx.listener(|app, _, window, cx| {
+                                                    app.create_and_insert_pending_canvas(
+                                                        window, cx,
+                                                    );
+                                                })),
+                                        ),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     pub(in crate::workspace) fn jump_from_canvas_anchor(

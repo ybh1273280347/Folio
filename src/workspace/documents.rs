@@ -55,6 +55,14 @@ struct OpenDocument {
     subscription: Subscription,
 }
 
+pub(super) struct PendingCanvasInsert {
+    pub(super) preview: String,
+    pub(super) anchor: crate::canvas::KnowledgeAnchor,
+    pub(super) source_folder: Option<String>,
+    pub(super) name_input: Entity<gpui_kit::component::input::InputState>,
+    pub(super) _submit_sub: Subscription,
+}
+
 /// The open buffer is shared by all panes for the same document. Navigation
 /// stores paths only, so workspace-session files remain independent of GPUI.
 #[derive(Default)]
@@ -73,6 +81,7 @@ pub(super) struct Documents {
     markdown_changed: BTreeSet<String>,
     canvas_changed: BTreeSet<String>,
     active_canvas_backlinks: Vec<crate::canvas::CanvasBacklink>,
+    pending_canvas_insert: Option<PendingCanvasInsert>,
     source_version: u64,
     document_watch: DocumentWatch,
 }
@@ -92,6 +101,10 @@ impl Documents {
 
     pub(super) fn focused_markdown(&self) -> Option<&str> {
         self.focused_markdown.as_deref()
+    }
+
+    pub(super) fn clear_pending_canvas_insert(&mut self) {
+        self.pending_canvas_insert = None;
     }
 
     pub(super) fn open_buffers(&self) -> impl Iterator<Item = (&str, &DocumentBuffer)> {

@@ -295,6 +295,47 @@ pub fn create_canvas_in(root: &Path, folder: Option<&str>) -> io::Result<Project
     Ok(created)
 }
 
+pub fn create_named_canvas_in(
+    root: &Path,
+    folder: Option<&str>,
+    raw_name: &str,
+) -> io::Result<ProjectFile> {
+    let trimmed = raw_name.trim();
+    if trimmed.is_empty()
+        || trimmed == "."
+        || trimmed == ".."
+        || trimmed
+            .chars()
+            .any(|ch| ch == '/' || ch == '\\' || "<>:\"|?*".contains(ch))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            crate::i18n::workspace::ERR_INVALID_FILENAME_EXT.get(),
+        ));
+    }
+    let filename = if trimmed.to_ascii_lowercase().ends_with(".canvas") {
+        trimmed.to_owned()
+    } else {
+        format!("{trimmed}.canvas")
+    };
+    let clean_folder = folder.map(str::trim).filter(|s| !s.is_empty());
+    let rel = match clean_folder {
+        Some(dir) => format!("{}/{}", dir.trim_end_matches('/'), filename),
+        None => filename,
+    };
+    let full = project_path(root, &rel)?;
+    if let Some(parent) = full.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if !full.exists() {
+        fs::write(&full, "{\n  \"nodes\": [],\n  \"edges\": []\n}\n")?;
+    }
+    Ok(ProjectFile {
+        kind: FileKind::Text,
+        path: rel,
+    })
+}
+
 pub fn rename_file(root: &Path, relative: &str, name: &str) -> io::Result<String> {
     if name.is_empty()
         || name == "."

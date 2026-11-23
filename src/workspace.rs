@@ -887,6 +887,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::find_file))
             .on_action(cx.listener(|app, _: &Dismiss, _, cx| {
                 app.show_preferences = false;
+                app.documents.clear_pending_canvas_insert();
                 app.tree.dismiss_overlays();
                 cx.notify();
             }))
@@ -1328,6 +1329,7 @@ impl Render for Workspace {
             );
         }
         app.children(self.render_dialog(cx))
+            .children(self.render_canvas_target_picker(cx))
     }
 }
 
