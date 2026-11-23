@@ -329,7 +329,7 @@ impl Workspace {
         bar.into_any_element()
     }
 
-    pub(in crate::workspace) fn render_editor(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(in crate::workspace) fn render_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let trash_open = self.trash.is_open();
         let document = self.documents.open.get(&self.documents.active);
         let show_background = !trash_open
