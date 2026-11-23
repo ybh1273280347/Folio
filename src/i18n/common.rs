@@ -10,6 +10,7 @@ pub const COPY: BiText = BiText::new("复制", "Copy");
 pub const COPIED: BiText = BiText::new("已复制", "Copied");
 pub const COPY_FULL_TEXT: BiText = BiText::new("复制全文", "Copy all");
 pub const COPIED_FULL_TEXT: BiText = BiText::new("已复制全文", "Copied all");
+pub const CHAR_COUNT_UNIT: BiText = BiText::new("字符", "chars");
 pub const ENABLED: BiText = BiText::new("已开启", "On");
 pub const DISABLED: BiText = BiText::new("已关闭", "Off");
 pub const PENDING_APPROVAL: BiText = BiText::new("待确认", "Pending");

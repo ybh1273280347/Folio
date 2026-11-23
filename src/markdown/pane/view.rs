@@ -1022,6 +1022,12 @@ impl Render for MarkdownPane {
             }
         }
 
+        // Pane chrome: the badge stays put while the document scrolls and is
+        // shared by both view modes, which report the same source text.
+        if self.char_count > 0 && !self.show_annotations_drawer {
+            content = content.child(crate::ui::char_count_badge(self.char_count));
+        }
+
         div()
             .relative()
             .size_full()

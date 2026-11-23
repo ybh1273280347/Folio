@@ -248,6 +248,47 @@ impl ZoomHud {
     }
 }
 
+/// Whitespace-free character count, pinned to the editor's bottom-right corner.
+///
+/// The pill is display-only: without a mouse handler it never takes clicks or
+/// scroll gestures away from the document behind it.
+pub fn char_count_badge(count: usize) -> impl IntoElement {
+    let mut bg = rgb(0xfafaf9);
+    bg.a = 0.88;
+    let mut border = rgb(0xe6e5e1);
+    border.a = 0.88;
+
+    div()
+        .absolute()
+        .bottom_2()
+        .right_4()
+        .px(px(7.))
+        .py(px(2.))
+        .rounded_full()
+        .bg(bg)
+        .border_1()
+        .border_color(border)
+        .text_size(px(11.))
+        .text_color(rgb(0x7c7c78))
+        .child(format!(
+            "{} {}",
+            group_digits(count),
+            crate::i18n::common::CHAR_COUNT_UNIT.get()
+        ))
+}
+
+fn group_digits(value: usize) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
 icon_assets!(
     FolioIcons,
     [

@@ -382,6 +382,9 @@ impl Workspace {
                                         }),
                                 ),
                         )
+                        .when(document.buffer.char_count > 0, |area| {
+                            area.child(crate::ui::char_count_badge(document.buffer.char_count))
+                        })
                         .when_some(
                             self.editor_zoom_hud.render("editor-zoom-hud"),
                             |area, hud| area.child(hud),
