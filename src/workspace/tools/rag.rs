@@ -756,10 +756,7 @@ impl Workspace {
                     .map_err(|e| RagError::new("store_error", e))?;
             store
                 .with_read_snapshot(|store| {
-                    let buckets = search_kb_snapshots(store, &query, &dirty_docs, 20)
-                        .map_err(|e| e.message)?;
-                    let meta_snapshot = store.stats().ok().zip(store.pdf_library_items().ok());
-                    Ok((buckets, meta_snapshot))
+                    search_kb_snapshots(store, &query, &dirty_docs, 20).map_err(|e| e.message)
                 })
                 .map_err(|e| RagError::new("store_error", e))
         });
@@ -776,13 +773,10 @@ impl Workspace {
                 }
                 app.right_panel.kb.searching = false;
                 match outcome {
-                    Ok((buckets, meta_snapshot)) => {
+                    Ok(buckets) => {
                         let live = app.live_project_paths();
                         app.right_panel.kb.snapshot = buckets;
                         app.right_panel.kb.search_error = None;
-                        if let Some((stats, items)) = meta_snapshot {
-                            app.right_panel.kb.apply_snapshot(stats, items);
-                        }
                         app.right_panel.kb.prune_missing_paths(&live);
                     }
                     Err(err) => {
