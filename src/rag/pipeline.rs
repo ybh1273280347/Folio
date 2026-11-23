@@ -643,6 +643,8 @@ pub fn search_project(
 
 #[derive(Clone, Debug, Default)]
 pub struct KbSearchSnapshots {
+    /// The query that produced these hits, including while a newer search is running.
+    pub query: String,
     pub all: Vec<SearchHit>,
     pub notes: Vec<SearchHit>,
     pub pdf: Vec<SearchHit>,
@@ -726,7 +728,12 @@ fn search_kb_snapshots(
     let notes = rank_bucket(buckets.notes, dirty_hits);
     let pdf = rank_bucket(buckets.pdf, Vec::new());
 
-    Ok(KbSearchSnapshots { all, notes, pdf })
+    Ok(KbSearchSnapshots {
+        query: q.to_owned(),
+        all,
+        notes,
+        pdf,
+    })
 }
 
 fn chunks_to_candidates(
@@ -994,6 +1001,7 @@ fn collapse_and_format(
             None
         };
 
+        let (snippet, keyword) = build_snippet(&cand.chunk_text, &snippet_terms);
         out.push(SearchHit {
             docid: cand.docid,
             path: cand.rel_path,
@@ -1004,7 +1012,8 @@ fn collapse_and_format(
             line_end: cand.line_end,
             page: cand.page_num,
             score: (score * 1000.0).round() / 1000.0,
-            snippet: build_snippet(&cand.chunk_text, &snippet_terms),
+            snippet,
+            keyword,
             markdown_cache,
             dirty_buffer: cand.dirty_buffer,
         });
@@ -1145,7 +1154,7 @@ pub fn clean_markdown_snippet(chunk_text: &str) -> String {
     collapse_spaces(&cleaned_lines.join(" "))
 }
 
-fn clean_inline_markdown_line(line: &str) -> String {
+pub(super) fn clean_inline_markdown_line(line: &str) -> String {
     let mut s = line.trim_start_matches('#').trim_start();
     if let Some(rest) = s.strip_prefix("> ") {
         s = rest.trim_start();
@@ -1326,20 +1335,21 @@ fn collapse_spaces(input: &str) -> String {
     input.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn build_snippet(chunk_text: &str, terms: &[String]) -> String {
+fn build_snippet(chunk_text: &str, terms: &[String]) -> (String, Option<std::ops::Range<usize>>) {
     let body = clean_markdown_snippet(chunk_text);
+    let lower = body.to_ascii_lowercase();
+    let keyword = terms
+        .iter()
+        .filter_map(|term| {
+            let start = lower.find(&term.to_ascii_lowercase())?;
+            Some(start..start + term.len())
+        })
+        .min_by_key(|range| (range.start, std::cmp::Reverse(range.len())));
     if body.chars().count() <= SNIPPET_CHARS {
-        return body;
+        return (body, keyword);
     }
 
-    let lower = body.to_ascii_lowercase();
-    let match_pos = terms
-        .iter()
-        .filter(|t| !t.trim().is_empty())
-        .filter_map(|t| lower.find(&t.trim().to_ascii_lowercase()))
-        .min()
-        .unwrap_or(0);
-
+    let match_pos = keyword.as_ref().map_or(0, |range| range.start);
     let match_char_idx = body[..match_pos].chars().count();
     let start_char = match_char_idx.saturating_sub(28);
     let start_byte = body
@@ -1355,11 +1365,19 @@ fn build_snippet(chunk_text: &str, terms: &[String]) -> String {
     if start_byte > 0 {
         snippet.push('…');
     }
-    snippet.push_str(body[start_byte..end_byte].trim());
+    let excerpt = &body[start_byte..end_byte];
+    let trimmed = excerpt.trim_start();
+    let keyword = keyword.filter(|range| range.end <= end_byte).map(|range| {
+        // Translate offsets through excerpt trimming and the optional leading ellipsis.
+        let source_start = start_byte + excerpt.len() - trimmed.len();
+        let prefix_len = snippet.len();
+        prefix_len + range.start - source_start..prefix_len + range.end - source_start
+    });
+    snippet.push_str(trimmed.trim_end());
     if end_byte < body.len() {
         snippet.push('…');
     }
-    snippet
+    (snippet, keyword)
 }
 
 #[cfg(test)]
@@ -1431,6 +1449,28 @@ mod tests {
         draft.text = "A note about eigenvalues.".into();
         let updated = cache.search(&store, "gradient".into(), vec![draft]).unwrap();
         assert!(updated.all.is_empty());
+    }
+
+    #[test]
+    fn kb_hit_resolves_the_body_keyword_in_its_own_section() {
+        let dir = tempdir().unwrap();
+        let store = RagStore::open(&dir.path().join("rag.sqlite3"), "test-embed", 2).unwrap();
+        let text = concat!(
+            "## 前一节\r\n已有时间复杂度。\r\n\r\n",
+            "## 时间复杂度\r\n\r\n先看递归式。\r\n",
+            "该算法的**时间复杂度**为 O(n)。\r\n",
+        );
+        let draft = DirtyDocument {
+            rel_path: "note.md".into(),
+            text: text.into(),
+        };
+        let hits = KbSearchCache::default()
+            .search(&store, "时间复杂度".into(), vec![draft])
+            .unwrap();
+        let hit = hits.notes.iter().find(|hit| hit.line_start == Some(4)).unwrap();
+        let range = hit.source_keyword(text).unwrap();
+        assert_eq!(&text[range.clone()], "时间复杂度");
+        assert_eq!(range.start, text.rfind("时间复杂度").unwrap());
     }
 
     #[test]
@@ -2029,13 +2069,14 @@ mod tests {
     #[test]
     fn clean_snippet_strips_markdown_and_centers_on_match() {
         let raw = "[Notes/线性表.md > 2\\.1\\.1 什么是线性表]\n### 2\\.1\\.1 什么是**线性表**\n\n线性表是 $n$ 个数据元素的**有限序列**：\n$$\nL = (a_1, a_2, \\dots, a_n)\n$$\n当需要描述复杂的逻辑前驱与后继关系时，可以借助 `ArrayList` 或链式结构存储数据元素。";
-        let snippet = build_snippet(raw, &["有限序列".to_owned()]);
+        let (snippet, keyword) = build_snippet(raw, &["有限序列".to_owned()]);
         assert!(!snippet.contains("###"));
         assert!(!snippet.contains("**"));
         assert!(!snippet.contains("\\."));
         assert!(!snippet.contains("$$"));
         assert!(snippet.contains("n 个数据元素的有限序列"));
         assert!(snippet.contains("[公式]"));
+        assert_eq!(&snippet[keyword.unwrap()], "有限序列");
         assert_eq!(clean_heading_text("2\\.1\\.1 **线性表**"), "2.1.1 线性表");
     }
 

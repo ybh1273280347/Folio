@@ -805,27 +805,6 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(in crate::workspace) fn open_kb_result(
-        &mut self,
-        rel_path: &str,
-        line_1based: Option<usize>,
-        page_1based: Option<usize>,
-        heading: Option<&str>,
-        snippet: Option<&str>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_kb_location(
-            rel_path,
-            line_1based,
-            page_1based,
-            heading,
-            snippet,
-            window,
-            cx,
-        );
-    }
-
     pub(in crate::workspace) fn open_kb_api_settings(
         &mut self,
         window: &mut Window,

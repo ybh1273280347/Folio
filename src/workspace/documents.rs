@@ -11,9 +11,11 @@ use crate::drawio::{DrawioPane, DrawioPaneEvent};
 use crate::markdown::{MarkdownEvent, MarkdownPane};
 use crate::model::DocumentBuffer;
 use crate::pdf::{PdfPane, PdfPaneEvent};
+use crate::rag::SearchHit;
 use crate::web_view::{HtmlPane, HtmlPaneEvent};
 use gpui_kit::component::input::{
-    Editor, EditorState, Position, RangeDecoration, RangeDecorationCollection, RangeDecorationStyle,
+    BufferPoint, Editor, EditorState, RangeDecoration, RangeDecorationCollection, RangeDecorationStyle,
+    RopeExt,
 };
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::sync::mpsc;
@@ -696,10 +698,8 @@ impl Workspace {
     pub(in crate::workspace) fn open_kb_location(
         &mut self,
         rel_path: &str,
-        line_1based: Option<usize>,
         page_1based: Option<usize>,
-        heading: Option<&str>,
-        snippet: Option<&str>,
+        hit: Option<&SearchHit>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -739,30 +739,21 @@ impl Workspace {
             && let Some(pdf) = self.documents.pdf_panes.get(&pane_key).cloned()
         {
             pdf.update(cx, |pane, cx| pane.jump_to_page(page, cx));
-        } else if let Some(md) = self.documents.markdown_panes.get(&pane_key).cloned() {
-            let clean_heading = heading
-                .and_then(|h| h.rsplit(" > ").next())
-                .map(crate::rag::pipeline::clean_heading_text);
-            let s_owned = snippet.map(str::to_owned);
-            md.update(cx, |pane, cx| {
-                pane.jump_to_search_hit(
-                    line_1based,
-                    clean_heading.as_deref(),
-                    s_owned.as_deref(),
-                    window,
-                    cx,
-                );
-            });
-        } else if let Some(line) = line_1based {
-            self.jump_to_document_line(&key_path, line, window, cx);
+        } else if let Some(hit) = hit {
+            if let Some(md) = self.documents.markdown_panes.get(&pane_key) {
+                md.update(cx, |pane, cx| pane.jump_to_kb_hit(hit, window, cx));
+            } else if let Some(line) = hit.line_start {
+                self.jump_to_document_hit(&key_path, line, hit, window, cx);
+            }
         }
         cx.notify();
     }
 
-    fn jump_to_document_line(
+    fn jump_to_document_hit(
         &mut self,
         path: &str,
         line_1based: usize,
+        hit: &SearchHit,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -773,15 +764,22 @@ impl Workspace {
         let mut highlight_range = None;
         document.editor.update(cx, |editor, cx| {
             let text = editor.value().to_string();
-            highlight_range = crate::workspace::line_byte_range(&text, line0);
-            editor.set_cursor_position(Position::new(line0 as u32, 0), window, cx);
+            highlight_range = hit.source_keyword(&text)
+                .or_else(|| crate::workspace::line_byte_range(&text, line0));
+            let Some(range) = &highlight_range else {
+                return;
+            };
+            let point = editor.text().offset_to_point(range.start);
+            editor.set_cursor_position(editor.text().offset_to_position(range.start), window, cx);
             if let Some(line_height) = editor.line_height() {
-                let row = editor.display_map().buffer_line_to_display_row(line0);
+                let row = editor
+                    .display_map()
+                    .buffer_pos_to_display_pos(BufferPoint::new(point.row, point.column))
+                    .row;
                 let mut offset = editor.scroll_offset();
                 offset.y = editor.input_bounds().size.height * 0.25 - line_height * row;
                 editor.set_scroll_offset(offset, cx);
             }
-            editor.focus(window, cx);
         });
         if let Some(range) = highlight_range {
             document.line_highlight.set(

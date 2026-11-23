@@ -1371,11 +1371,7 @@ impl Workspace {
                     mix_color(spine_hex, palette.text, 0.58)
                 };
 
-                let header_open_path = first_hit.path.clone();
-                let header_line = first_hit.line_start;
-                let header_page = first_hit.page;
-                let header_heading = first_hit.heading.clone();
-                let header_snippet = first_hit.snippet.clone();
+                let header_hit = first_hit.clone();
 
                 let mut body_col = div()
                     .flex_1()
@@ -1393,12 +1389,10 @@ impl Workspace {
                             .py_2()
                             .hover(move |s| s.bg(card_hover))
                             .on_click(cx.listener(move |app, _, window, cx| {
-                                app.open_kb_result(
-                                    &header_open_path,
-                                    header_line,
-                                    header_page,
-                                    Some(&header_heading),
-                                    Some(&header_snippet),
+                                app.open_kb_location(
+                                    &header_hit.path,
+                                    header_hit.page,
+                                    Some(&header_hit),
                                     window,
                                     cx,
                                 );
@@ -1505,11 +1499,7 @@ impl Workspace {
                     )
                     .child({
                         let render_hit_row = |hit_idx: usize, hit: &SearchHit| {
-                            let open_path = hit.path.clone();
-                            let open_line = hit.line_start;
-                            let open_page = hit.page;
-                            let open_heading = hit.heading.clone();
-                            let open_snippet = hit.snippet.clone();
+                            let open_hit = hit.clone();
                             let subtitle = section_subtitle(hit, &group.file_name);
                             let folio_label = match (hit.page, hit.line_start) {
                                 (Some(page), _) => Some(format!("p.{page}")),
@@ -1525,7 +1515,7 @@ impl Workspace {
                             };
                             let styled_snippet = build_highlighted_text(
                                 &hit.snippet,
-                                &kb.last_query,
+                                &kb.snapshot.query,
                                 snippet_style.clone(),
                                 hi_bg,
                                 hi_fg,
@@ -1544,12 +1534,10 @@ impl Workspace {
                                 .cursor_pointer()
                                 .hover(move |s| s.bg(card_hover))
                                 .on_click(cx.listener(move |app, _, window, cx| {
-                                    app.open_kb_result(
-                                        &open_path,
-                                        open_line,
-                                        open_page,
-                                        Some(&open_heading),
-                                        Some(&open_snippet),
+                                    app.open_kb_location(
+                                        &open_hit.path,
+                                        open_hit.page,
+                                        Some(&open_hit),
                                         window,
                                         cx,
                                     );
@@ -2507,11 +2495,9 @@ impl Workspace {
                                                 .build(window, cx)
                                             })
                                             .on_click(cx.listener(move |app, _, window, cx| {
-                                                app.open_kb_result(
+                                                app.open_kb_location(
                                                     &open_path,
-                                                    None,
                                                     Some(1),
-                                                    None,
                                                     None,
                                                     window,
                                                     cx,
@@ -2624,11 +2610,9 @@ impl Workspace {
                                                 .build(window, cx)
                                             })
                                             .on_click(cx.listener(move |app, _, window, cx| {
-                                                app.open_kb_result(
+                                                app.open_kb_location(
                                                     &open_path,
-                                                    None,
                                                     Some(1),
-                                                    None,
                                                     None,
                                                     window,
                                                     cx,

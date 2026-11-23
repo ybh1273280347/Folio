@@ -10,8 +10,10 @@ pub use crate::model::RagConfig;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    cmp::Reverse,
     collections::{HashMap, HashSet},
     fs,
+    ops::Range,
     path::{Path, PathBuf},
 };
 
@@ -78,10 +80,78 @@ pub struct SearchHit {
     pub page: Option<usize>,
     pub score: f64,
     pub snippet: String,
+    /// UTF-8 byte range of the first highlighted term in the displayed snippet.
+    #[serde(skip)]
+    pub(crate) keyword: Option<Range<usize>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub markdown_cache: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub dirty_buffer: bool,
+}
+
+impl SearchHit {
+    /// Resolve the snippet's keyword against the live document, scoped to the indexed chunk.
+    pub(crate) fn source_keyword(&self, text: &str) -> Option<Range<usize>> {
+        self.keyword.as_ref()?;
+        let first_line = self.line_start?;
+        let last_line = self.line_end.unwrap_or(first_line);
+        let mut line_offsets = std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1));
+        let start = line_offsets.nth(first_line - 1)?;
+        let end = line_offsets.nth(last_line - first_line).unwrap_or(text.len());
+        let mut line_start = start;
+        text[start..end]
+            .split_inclusive('\n')
+            .flat_map(|line| {
+                let offset = line_start;
+                line_start += line.len();
+                let raw = self.keyword_occurrences(line);
+                let cleaned = if raw.is_empty() {
+                    Vec::new()
+                } else {
+                    self.keyword_occurrences(&pipeline::clean_inline_markdown_line(line.trim()))
+                };
+                // Formatting may surround the term. Use cleaned context only when the
+                // projection preserves each occurrence, so the raw byte range stays valid.
+                let same_occurrences = raw.len() == cleaned.len();
+                raw.into_iter().enumerate().map(move |(index, (range, mut score))| {
+                    if same_occurrences {
+                        score = score.max(cleaned[index].1);
+                    }
+                    (offset + range.start..offset + range.end, score)
+                })
+            })
+            .max_by_key(|(range, score)| (*score, Reverse(range.start)))
+            .map(|(range, _)| range)
+    }
+
+    /// Compare the text adjacent to each occurrence with the excerpt. Markdown
+    /// syntax can interrupt either side, so each side contributes independently.
+    pub(crate) fn keyword_occurrences(&self, text: &str) -> Vec<(Range<usize>, usize)> {
+        let Some(keyword) = &self.keyword else {
+            return Vec::new();
+        };
+        let before = self.snippet[..keyword.start].trim_start_matches('…');
+        let after = self.snippet[keyword.end..].trim_end_matches('…');
+        let term = self.snippet[keyword.clone()].to_ascii_lowercase();
+        text.to_ascii_lowercase()
+            .match_indices(&term)
+            .map(|(start, _)| {
+                let end = start + term.len();
+                let left = text[..start]
+                    .chars()
+                    .rev()
+                    .zip(before.chars().rev())
+                    .take_while(|(a, b)| a.eq_ignore_ascii_case(b))
+                    .count();
+                let right = text[end..]
+                    .chars()
+                    .zip(after.chars())
+                    .take_while(|(a, b)| a.eq_ignore_ascii_case(b))
+                    .count();
+                (start..end, left + right)
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
