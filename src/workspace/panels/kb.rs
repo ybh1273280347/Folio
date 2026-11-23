@@ -1304,7 +1304,8 @@ impl Workspace {
             4
         } else if panel_w >= 620.0 {
             3
-        } else if panel_w >= 460.0 {
+        } else if panel_w >= 390.0 {
+            // Side padding and the gutter leave 178 px per card at this threshold.
             2
         } else {
             1
