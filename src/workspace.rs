@@ -36,7 +36,7 @@ use gpui_kit::{
         input::{Input, InputEvent, InputState},
         menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
         progress::Progress,
-        resizable::{HandleEdge, h_resizable, resizable_panel, resize_handle, v_resizable},
+        resizable::{HandleEdge, h_resizable, resizable_panel, resize_handle},
     },
     prelude::FluentBuilder,
     *,
@@ -671,8 +671,13 @@ impl Render for Workspace {
         } else {
             right_target_w * right_progress
         };
+        let log_w = if self.build.panels.logs {
+            self.settings.log_width
+        } else {
+            0.0
+        };
         let area_width =
-            (f32::from(window.viewport_size().width) - right_now_w - sidebar_now_w - 16.)
+            (f32::from(window.viewport_size().width) - right_now_w - sidebar_now_w - log_w - 16.)
                 .max(200.0);
         let mut work_area = h_resizable("work-area")
             .on_resize(move |state, _, cx| {
@@ -709,7 +714,7 @@ impl Render for Workspace {
             crate::i18n::workspace::BTN_COMPILE_BUILD.get()
         };
         let status = self.build.status_label(self.documents.source_version());
-        let mut vertical_work_area = v_resizable(if self.build.panels.logs {
+        let mut work_with_logs = h_resizable(if self.build.panels.logs {
             "work-with-logs"
         } else {
             "work-no-logs"
@@ -717,7 +722,7 @@ impl Render for Workspace {
         .on_resize({
             let app = cx.entity();
             move |state, _, cx| {
-                let log_height = f32::from(
+                let log_width = f32::from(
                     *state
                         .read(cx)
                         .sizes()
@@ -726,7 +731,7 @@ impl Render for Workspace {
                 );
                 app.update(cx, |app, cx| {
                     if app.build.panels.logs {
-                        app.settings.log_height = log_height;
+                        app.settings.log_width = log_width;
                         app.persist_settings(cx);
                     }
                 });
@@ -734,10 +739,10 @@ impl Render for Workspace {
         })
         .child(resizable_panel().child(work_area));
         if self.build.panels.logs {
-            vertical_work_area = vertical_work_area.child(
+            work_with_logs = work_with_logs.child(
                 resizable_panel()
-                    .size(px(self.settings.log_height))
-                    .size_range(px(100.)..px(700.))
+                    .size(px(self.settings.log_width))
+                    .size_range(px(220.)..px(700.))
                     .fixed()
                     .child(self.render_build_log(cx)),
             );
@@ -782,7 +787,7 @@ impl Render for Workspace {
                         .flex_1()
                         .min_w_0()
                         .min_h_0()
-                        .child(vertical_work_area),
+                        .child(work_with_logs),
                 )
                 .when(right_rendered, |row| {
                     row.child(

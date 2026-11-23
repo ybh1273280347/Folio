@@ -9,14 +9,19 @@ use std::{
 use gpui_kit::{
     Bounds, Context, CursorStyle, FocusHandle, Focusable, Image, ImageFormat, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, RenderImage, ScrollDelta,
-    ScrollEvent, Window, assets::IconName, canvas, component::tooltip::Tooltip, div, img, point,
+    ScrollEvent, Window, assets::IconName, canvas,
+    component::{
+        Sizable,
+        button::{Button, ButtonVariants},
+        tooltip::Tooltip,
+    },
+    div, img, point,
     prelude::FluentBuilder, px, *,
 };
 use image::Frame;
 
 use crate::theme::color as rgb;
 
-const BORDER: u32 = 0xe8e7e3;
 const MUTED: u32 = 0x787774;
 
 const MIN_SCALE: f32 = 0.1;
@@ -404,11 +409,7 @@ impl Render for ImagePane {
         let percent = (scale * 100.0).round() as u32;
         let is_fit = matches!(self.zoom_mode, ZoomMode::Fit);
         let is_actual = !is_fit && percent == 100;
-        let zoom_label = if is_fit {
-            format!("{} ({percent}%)", crate::i18n::media::IMG_FIT.get())
-        } else {
-            format!("{percent}%")
-        };
+        let palette = crate::theme::palette();
 
         let mut stage = div()
             .id("image-viewer-stage")
@@ -521,84 +522,46 @@ impl Render for ImagePane {
             let hud = div()
                 .id("image-viewer-hud")
                 .absolute()
-                .bottom_4()
-                .right_4()
+                .bottom_3()
+                .right_3()
+                .h(px(28.))
+                .px_1p5()
+                .rounded(px(8.))
+                .bg(gpui_kit::rgb(palette.surface))
+                .border_1()
+                .border_color(gpui_kit::rgb(palette.border))
+                .shadow_md()
                 .flex()
                 .items_center()
                 .gap_1()
-                .px_2()
-                .py_1()
-                .rounded(px(8.))
-                .bg(rgb(0xffffff).opacity(0.94))
-                .border_1()
-                .border_color(rgb(BORDER))
-                .shadow_sm()
                 .cursor_default()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_scroll(|_, _, cx| cx.stop_propagation())
                 .child(
-                    crate::ui::control("image-zoom-out", IconName::Minus)
-                        .tooltip(|window, cx| {
-                            Tooltip::new(crate::i18n::media::IMG_TOOLTIP_ZOOM_OUT.get())
-                                .build(window, cx)
-                        })
+                    Button::new("image-zoom-out")
+                        .ghost()
+                        .compact()
+                        .with_size(px(14.))
+                        .h(px(22.))
+                        .w(px(22.))
+                        .icon(crate::ui::icon(IconName::Minus))
+                        .tooltip(crate::i18n::media::IMG_TOOLTIP_ZOOM_OUT)
                         .on_click(cx.listener(|pane, _, _, cx| {
                             pane.zoom_by(1.0 / ZOOM_STEP, None, cx);
                         })),
                 )
                 .child(
                     div()
-                        .px_1p5()
-                        .text_xs()
-                        .text_color(rgb(0x37352f))
-                        .child(zoom_label),
-                )
-                .child(
-                    crate::ui::control("image-zoom-in", IconName::Plus)
-                        .tooltip(|window, cx| {
-                            Tooltip::new(crate::i18n::media::IMG_TOOLTIP_ZOOM_IN.get())
-                                .build(window, cx)
-                        })
-                        .on_click(cx.listener(|pane, _, _, cx| {
-                            pane.zoom_by(ZOOM_STEP, None, cx);
-                        })),
-                )
-                .child(div().w(px(1.)).h(px(14.)).mx_0p5().bg(rgb(BORDER)))
-                .child(
-                    div()
-                        .id("image-zoom-actual")
-                        .px_2()
-                        .py_0p5()
-                        .rounded(px(4.))
-                        .text_xs()
-                        .cursor_pointer()
-                        .when(is_actual, |btn| btn.bg(rgb(0xedf2fa)).text_color(rgb(0x165dff)))
-                        .when(!is_actual, |btn| {
-                            btn.text_color(rgb(MUTED))
-                                .hover(|s| s.bg(rgb(0xf4f4f2)).text_color(rgb(0x37352f)))
-                        })
-                        .tooltip(|window, cx| {
-                            Tooltip::new(crate::i18n::media::IMG_TOOLTIP_ACTUAL.get())
-                                .build(window, cx)
-                        })
-                        .on_click(cx.listener(|pane, _, _, cx| {
-                            pane.set_actual_size(None, cx);
-                        }))
-                        .child(crate::i18n::media::IMG_ACTUAL_SIZE.get()),
-                )
-                .child(
-                    div()
                         .id("image-zoom-fit")
-                        .px_2()
-                        .py_0p5()
+                        .px_1p5()
+                        .h(px(22.))
                         .rounded(px(4.))
-                        .text_xs()
+                        .flex()
+                        .items_center()
                         .cursor_pointer()
-                        .when(is_fit, |btn| btn.bg(rgb(0xedf2fa)).text_color(rgb(0x165dff)))
-                        .when(!is_fit, |btn| {
-                            btn.text_color(rgb(MUTED))
-                                .hover(|s| s.bg(rgb(0xf4f4f2)).text_color(rgb(0x37352f)))
-                        })
+                        .text_xs()
+                        .text_color(gpui_kit::rgb(palette.muted))
+                        .hover(|s| s.bg(gpui_kit::rgb(palette.hover)))
                         .tooltip(|window, cx| {
                             Tooltip::new(crate::i18n::media::IMG_TOOLTIP_FIT.get())
                                 .build(window, cx)
@@ -606,24 +569,52 @@ impl Render for ImagePane {
                         .on_click(cx.listener(|pane, _, _, cx| {
                             pane.reset_fit(cx);
                         }))
-                        .child(crate::i18n::media::IMG_FIT.get()),
+                        .child(format!("{percent}%")),
+                )
+                .child(
+                    Button::new("image-zoom-in")
+                        .ghost()
+                        .compact()
+                        .with_size(px(14.))
+                        .h(px(22.))
+                        .w(px(22.))
+                        .icon(crate::ui::icon(IconName::Plus))
+                        .tooltip(crate::i18n::media::IMG_TOOLTIP_ZOOM_IN)
+                        .on_click(cx.listener(|pane, _, _, cx| {
+                            pane.zoom_by(ZOOM_STEP, None, cx);
+                        })),
+                )
+                .child(div().w(px(1.)).h(px(14.)).bg(gpui_kit::rgb(palette.border)))
+                .child(
+                    div()
+                        .id("image-zoom-actual")
+                        .px_1p5()
+                        .h(px(22.))
+                        .rounded(px(4.))
+                        .flex()
+                        .items_center()
+                        .text_xs()
+                        .when(is_actual, |btn| {
+                            btn.cursor_default()
+                                .text_color(gpui_kit::rgb(palette.muted))
+                                .opacity(0.5)
+                        })
+                        .when(!is_actual, |btn| {
+                            btn.cursor_pointer()
+                                .text_color(gpui_kit::rgb(palette.text))
+                                .hover(|s| s.bg(gpui_kit::rgb(palette.hover)))
+                                .on_click(cx.listener(|pane, _, _, cx| {
+                                    pane.set_actual_size(None, cx);
+                                }))
+                        })
+                        .tooltip(|window, cx| {
+                            Tooltip::new(crate::i18n::media::IMG_TOOLTIP_ACTUAL.get())
+                                .build(window, cx)
+                        })
+                        .child(crate::i18n::media::IMG_ACTUAL_SIZE.get()),
                 );
 
-            let hint = div()
-                .absolute()
-                .bottom_4()
-                .left_4()
-                .px_2p5()
-                .py_1()
-                .rounded(px(6.))
-                .bg(rgb(0xffffff).opacity(0.86))
-                .border_1()
-                .border_color(rgb(BORDER))
-                .text_xs()
-                .text_color(rgb(MUTED))
-                .child(crate::i18n::media::IMG_HINT_INTERACTION.get());
-
-            stage = stage.child(hint).child(hud);
+            stage = stage.child(hud);
 
             if self.has_complex_rich_text && !self.svg_complex_notice_dismissed {
                 let notice = div()

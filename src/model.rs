@@ -525,7 +525,7 @@ pub struct AppSettings {
     pub editor_ratio: f32,
     pub sidebar_open: bool,
     pub sidebar_width: f32,
-    pub log_height: f32,
+    pub log_width: f32,
     /// User-configurable terminal launch and display settings.
     pub terminal: TerminalSettings,
     pub translate: TranslateSettings,
@@ -602,7 +602,7 @@ impl Default for AppSettings {
             editor_ratio: 0.5,
             sidebar_open: true,
             sidebar_width: 232.,
-            log_height: 220.,
+            log_width: 360.,
             terminal: TerminalSettings::default(),
             translate: TranslateSettings::default(),
             ai: AiSettings::default(),
