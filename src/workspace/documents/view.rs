@@ -11,6 +11,7 @@ impl Workspace {
             Rgba { r, g, b, a: alpha }
         };
         let palette = crate::theme::palette();
+        let trash_open = self.tree.is_trash_open();
         let header_bg = if palette.is_dark() {
             palette.background
         } else {
@@ -27,7 +28,9 @@ impl Workspace {
             .border_b_1()
             .border_color(gpui_kit::rgb(palette.border));
 
-        if let Some(md_pane) = self.documents.markdown_panes.get(&PaneKey::tab(&self.documents.active)) {
+        if !trash_open
+            && let Some(md_pane) = self.documents.markdown_panes.get(&PaneKey::tab(&self.documents.active))
+        {
             let outline_open = md_pane.read(cx).is_outline_open();
             let outline_pane = md_pane.clone();
             bar = bar.child(
@@ -55,6 +58,48 @@ impl Workspace {
             );
         }
 
+        let tab_hover_bg = fg_alpha(palette.text, 0.07);
+        let tab_shell = |id: SharedString, title: String, current: bool| {
+            div()
+                .id(id)
+                .w(px(150.))
+                .min_w_0()
+                .flex_shrink(1.)
+                .when(current, |tab| tab.flex_shrink_0().max_w(relative(0.65)))
+                .h(px(26.))
+                .px_2()
+                .rounded(px(6.))
+                .flex()
+                .overflow_hidden()
+                .items_center()
+                .gap_1()
+                .cursor_pointer()
+                .text_color(fg_alpha(palette.text, 0.78))
+                .when(current, |s| {
+                    s.text_color(gpui_kit::rgb(palette.text))
+                        .when(!show_background, |s| s.bg(gpui_kit::rgb(palette.surface)))
+                })
+                .when(!current || show_background, |s| {
+                    s.hover(move |h| {
+                        h.bg(tab_hover_bg)
+                            .text_color(gpui_kit::rgb(palette.text))
+                    })
+                })
+                .when(show_background, |tab| {
+                    tab.focusable().tab_stop(true).focus_visible(move |s| s.bg(tab_hover_bg))
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(title),
+                )
+        };
+
         bar = bar.child(
             div()
                 .id("editor-tabs")
@@ -65,7 +110,7 @@ impl Workspace {
                 .gap_1()
                 .overflow_hidden()
                 .children(self.documents.tabs.iter().map(|path| {
-                    let current = self.documents.active == *path;
+                    let current = !trash_open && self.documents.active == *path;
                     let title = Path::new(path)
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
@@ -73,35 +118,11 @@ impl Workspace {
                     let switch_path = path.clone();
                     let close_path = path.clone();
                     let tooltip_path = path.clone();
-                    let tab_hover_bg = fg_alpha(palette.text, 0.07);
-                    div()
-                        .id(SharedString::from(format!("editor-tab-{path}")))
-                        .w(px(150.))
-                        .min_w_0()
-                        .flex_shrink(1.)
-                        .when(current, |tab| tab.flex_shrink_0().max_w(relative(0.65)))
-                        .h(px(26.))
-                        .px_2()
-                        .rounded(px(6.))
-                        .flex()
-                        .overflow_hidden()
-                        .items_center()
-                        .gap_1()
-                        .cursor_pointer()
-                        .text_color(fg_alpha(palette.text, 0.78))
-                        .when(current, |s| {
-                            s.text_color(gpui_kit::rgb(palette.text))
-                                .when(!show_background, |s| s.bg(gpui_kit::rgb(palette.surface)))
-                        })
-                        .when(!current || show_background, |s| {
-                            s.hover(move |h| {
-                                h.bg(tab_hover_bg)
-                                    .text_color(gpui_kit::rgb(palette.text))
-                            })
-                        })
-                        .when(show_background, |tab| {
-                            tab.focusable().tab_stop(true).focus_visible(move |s| s.bg(tab_hover_bg))
-                        })
+                    tab_shell(
+                        SharedString::from(format!("editor-tab-{path}")),
+                        title,
+                        current,
+                    )
                         .tooltip(move |window, cx| {
                             gpui_kit::component::tooltip::Tooltip::new(tooltip_path.clone())
                                 .build(window, cx)
@@ -109,16 +130,6 @@ impl Workspace {
                         .on_click(cx.listener(move |app, _, window, cx| {
                             app.activate_tab(&switch_path, window, cx);
                         }))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_xs()
-                                .whitespace_nowrap()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(title),
-                        )
                         .child(
                             Button::new(SharedString::from(format!("close-editor-tab-{path}")))
                                 .ghost()
@@ -135,10 +146,42 @@ impl Workspace {
                                 })),
                         )
                         .into_any_element()
-                })),
+                }))
+                .when(trash_open, |strip| {
+                    strip.child(
+                        tab_shell(
+                            SharedString::from("editor-tab-trash"),
+                            crate::i18n::workspace::TRASH_LABEL.get().to_owned(),
+                            true,
+                        )
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(
+                                crate::i18n::workspace::TRASH_LABEL.get(),
+                            )
+                            .build(window, cx)
+                        })
+                        .child(
+                            Button::new("close-editor-tab-trash")
+                                .ghost()
+                                .compact()
+                                .with_size(px(16.))
+                                .w(px(18.))
+                                .h(px(18.))
+                                .flex_shrink_0()
+                                .icon(crate::ui::icon(IconName::Close))
+                                .tooltip(crate::i18n::workspace::TOOLTIP_CLOSE_TAB.get())
+                                .on_click(cx.listener(|app, _, window, cx| {
+                                    cx.stop_propagation();
+                                    app.close_trash(window, cx);
+                                })),
+                        ),
+                    )
+                }),
         );
 
-        if let Some(md_pane) = self.documents.markdown_panes.get(&PaneKey::tab(&self.documents.active)) {
+        if !trash_open
+            && let Some(md_pane) = self.documents.markdown_panes.get(&PaneKey::tab(&self.documents.active))
+        {
             let count = md_pane.read(cx).annotation_count();
             if count > 0 {
                 let drawer_pane = md_pane.clone();
@@ -192,7 +235,9 @@ impl Workspace {
                             source_pane.update(cx, |pane, cx| pane.toggle_source(window, cx));
                         }),
                 );
-        } else if let Some(document) = self.documents.open.get(&self.documents.active) {
+        } else if !trash_open
+            && let Some(document) = self.documents.open.get(&self.documents.active)
+        {
             let editor = document.editor.clone();
             let ask_editor = document.editor.clone();
             let ask_path = document.path.clone();
@@ -232,8 +277,10 @@ impl Workspace {
     }
 
     pub(in crate::workspace) fn render_editor(&self, cx: &mut Context<Self>) -> AnyElement {
+        let trash_open = self.tree.is_trash_open();
         let document = self.documents.open.get(&self.documents.active);
-        let show_background = self.has_visible_background()
+        let show_background = !trash_open
+            && self.has_visible_background()
             && (self.documents.active.is_empty() || document.is_some());
         let mut area = div()
             .relative()
@@ -245,10 +292,12 @@ impl Workspace {
                 MouseButton::Left,
                 cx.listener(|app, _, _, _| app.documents.focused_markdown = None),
             );
-        if !self.zen_mode && !self.documents.tabs.is_empty() {
+        if !self.zen_mode && (!self.documents.tabs.is_empty() || trash_open) {
             area = area.child(self.render_editor_tab_bar(show_background, cx));
         }
-        if let Some(document) = document {
+        if trash_open {
+            area = area.child(div().flex_1().min_h_0().child(self.render_trash(cx)));
+        } else if let Some(document) = document {
             if document.buffer.deleted {
                 area = area.child(
                     div()

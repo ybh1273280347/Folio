@@ -1339,6 +1339,15 @@ impl Workspace {
             .into_any_element()
     }
 
+    pub(super) fn close_trash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.tree.is_trash_open() {
+            return;
+        }
+        self.tree.dismiss_trash();
+        self.focus_active_or_workspace(window, cx);
+        cx.notify();
+    }
+
     pub(super) fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if !cx.has_active_drag() {
             self.tree.dragging_tree_item.store(false, Ordering::Relaxed);

@@ -894,6 +894,10 @@ impl Render for Workspace {
                 app.save_all(cx);
             }))
             .on_action(cx.listener(|app, _: &CloseTab, window, cx| {
+                if app.tree.is_trash_open() {
+                    app.close_trash(window, cx);
+                    return;
+                }
                 let path = app.documents.active().to_owned();
                 app.close_tab(&path, window, cx);
             }))
@@ -1111,7 +1115,7 @@ impl Render for Workspace {
                 // Constrain the resize group to the space below the title bar.
                 div().flex_1().min_h_0().overflow_hidden().child({
                     let main_content = if trash_open {
-                        self.render_trash(cx)
+                        self.render_editor(cx)
                     } else {
                         editor_with_terminal
                     };
