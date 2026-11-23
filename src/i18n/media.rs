@@ -397,16 +397,11 @@ pub fn drawio_err_export(err: &dyn std::fmt::Display) -> String {
 }
 
 // Image viewer (src/image/viewer.rs)
-pub const IMG_FIT: BiText = BiText::new("适应", "Fit");
-pub const IMG_ACTUAL_SIZE: BiText = BiText::new("1:1", "1:1");
+pub const IMG_ACTUAL_SIZE: BiText = BiText::new("100%", "100%");
 pub const IMG_TOOLTIP_ZOOM_OUT: BiText = BiText::new("缩小 (Ctrl+-)", "Zoom Out (Ctrl+-)");
 pub const IMG_TOOLTIP_ZOOM_IN: BiText = BiText::new("放大 (Ctrl+=)", "Zoom In (Ctrl+=)");
 pub const IMG_TOOLTIP_FIT: BiText = BiText::new("适应窗口 (Ctrl+0)", "Fit to Window (Ctrl+0)");
 pub const IMG_TOOLTIP_ACTUAL: BiText = BiText::new("实际大小 100% (Ctrl+1)", "Actual Size 100% (Ctrl+1)");
-pub const IMG_HINT_INTERACTION: BiText = BiText::new(
-    "Ctrl+滚轮缩放 · 滚轮上下移动 · 拖拽平移 · 双击切换 100%",
-    "Ctrl+Scroll zoom · Scroll pan · Drag to move · Double-click 100%",
-);
 pub const IMG_SVG_COMPLEX_NOTICE: BiText = BiText::new(
     "检测到公式或表格等复杂富文本，静态预览可能不完整；建议在 draw.io 导出时取消勾选「格式化文本」或改用内置 .drawio 编辑器打开。",
     "Complex rich text (math/table) detected; static SVG preview may be incomplete. Uncheck 'Formatted Text' in draw.io or open as .drawio.",

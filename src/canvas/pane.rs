@@ -2647,17 +2647,31 @@ impl Render for CanvasPane {
                 )
                 .child(div().w(px(1.)).h(px(14.)).bg(gpui_kit::rgb(palette.border)))
                 .child(
-                    Button::new("canvas-zoom-100")
-                        .ghost()
-                        .compact()
-                        .h(px(22.))
+                    div()
+                        .id("canvas-zoom-100")
                         .px_1p5()
-                        .disabled(percent == 100)
-                        .label("100%")
-                        .tooltip(i18n_canvas::TOOLTIP_ZOOM_100)
-                        .on_click(cx.listener(|pane, _, _, cx| {
-                            pane.reset_zoom_100(cx);
-                        })),
+                        .h(px(22.))
+                        .rounded(px(4.))
+                        .flex()
+                        .items_center()
+                        .text_xs()
+                        .when(percent == 100, |btn| {
+                            btn.cursor_default()
+                                .text_color(gpui_kit::rgb(palette.muted))
+                                .opacity(0.5)
+                        })
+                        .when(percent != 100, |btn| {
+                            btn.cursor_pointer()
+                                .text_color(gpui_kit::rgb(palette.text))
+                                .hover(|s| s.bg(gpui_kit::rgb(palette.hover)))
+                                .on_click(cx.listener(|pane, _, _, cx| {
+                                    pane.reset_zoom_100(cx);
+                                }))
+                        })
+                        .tooltip(|window, cx| {
+                            Tooltip::new(i18n_canvas::TOOLTIP_ZOOM_100.get()).build(window, cx)
+                        })
+                        .child("100%"),
                 ),
         );
 
