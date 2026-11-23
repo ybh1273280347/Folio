@@ -34,12 +34,12 @@ test('canvasTools exposes expected tool names and forwards workspace requests', 
   const res = await applyTool.execute('id-1', {
     path: 'maps/test.canvas',
     expected_revision: 'rev1',
-    ops: [{ op: 'add_node', node_type: 'file', file: 'assets/diagram.png', text: 'Diagram' }],
+    ops: [{ op: 'add_node', node_type: 'file', file: '../assets/diagram.png', text: 'Diagram' }],
   });
   assert.equal(res.isError, false);
   assert.equal(calls[0].operation, 'apply_ops');
   assert.equal(calls[0].params.path, 'maps/test.canvas');
-  assert.equal(calls[0].params.ops[0].file, 'assets/diagram.png');
+  assert.equal(calls[0].params.ops[0].file, '../assets/diagram.png');
 
   const createTool = tools.find(t => t.name === 'folio_canvas_create');
   await createTool.execute('id-2', {

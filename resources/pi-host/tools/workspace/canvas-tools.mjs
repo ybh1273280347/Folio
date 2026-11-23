@@ -49,7 +49,9 @@ const opSchema = Type.Union([
     id: Type.Optional(nodeId),
     node_type: Type.Optional(Type.Union(['text', 'file', 'group'].map(v => Type.Literal(v)))),
     text: Type.Optional(Type.String()),
-    file: Type.Optional(Type.String()),
+    file: Type.Optional(Type.String({
+      description: '图片路径相对于 .canvas 文件所在目录（如 ../assets/diagram.png）。其他项目文件使用项目相对路径。',
+    })),
     x: Type.Optional(Type.Number()),
     y: Type.Optional(Type.Number()),
     width: Type.Optional(Type.Number()),
