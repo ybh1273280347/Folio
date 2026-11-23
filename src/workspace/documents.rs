@@ -670,7 +670,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> io::Result<()> {
-        self.tree.dismiss_trash();
+        self.trash.dismiss();
         self.documents.focused_markdown = None;
         let tab = PaneKey::tab(&file.path);
         self.mount_document_pane(&tab, file.kind, window, cx)?;
@@ -1204,10 +1204,10 @@ impl Workspace {
     }
 
     pub(super) fn activate_tab(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.documents.active == path && !self.tree.is_trash_open() {
+        if self.documents.active == path && !self.trash.is_open() {
             return;
         }
-        self.tree.dismiss_trash();
+        self.trash.dismiss();
         self.documents.focused_markdown = None;
         self.documents.active = path.to_owned();
         self.refresh_active_canvas_backlinks();
@@ -1262,7 +1262,7 @@ impl Workspace {
         }
         if self.documents.active == path {
             self.documents.active = self.documents.tabs.last().cloned().unwrap_or_default();
-            if !self.tree.is_trash_open()
+            if !self.trash.is_open()
                 && let Some(document) = self.documents.open.get(&self.documents.active)
             {
                 document

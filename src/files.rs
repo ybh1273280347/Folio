@@ -83,6 +83,10 @@ pub(crate) fn is_text(path: &Path) -> bool {
             || extension_in(path, TEXT_EXTENSIONS))
 }
 
+pub(crate) fn is_asset(path: &Path) -> bool {
+    extension_in(path, ASSET_EXTENSIONS)
+}
+
 pub fn is_creatable(path: &Path) -> bool {
     is_text(path) || is_drawio(path)
 }

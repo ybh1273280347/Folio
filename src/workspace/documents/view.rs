@@ -11,7 +11,7 @@ impl Workspace {
             Rgba { r, g, b, a: alpha }
         };
         let palette = crate::theme::palette();
-        let trash_open = self.tree.is_trash_open();
+        let trash_open = self.trash.is_open();
         let header_bg = if palette.is_dark() {
             palette.background
         } else {
@@ -329,8 +329,8 @@ impl Workspace {
         bar.into_any_element()
     }
 
-    pub(in crate::workspace) fn render_editor(&self, cx: &mut Context<Self>) -> AnyElement {
-        let trash_open = self.tree.is_trash_open();
+    pub(in crate::workspace) fn render_editor(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let trash_open = self.trash.is_open();
         let document = self.documents.open.get(&self.documents.active);
         let show_background = !trash_open
             && self.has_visible_background()
@@ -351,7 +351,7 @@ impl Workspace {
             area = area.child(self.render_editor_tab_bar(show_background, cx));
         }
         if trash_open {
-            area = area.child(div().flex_1().min_h_0().child(self.render_trash(cx)));
+            area = area.child(div().flex_1().min_h_0().child(self.render_trash(window, cx)));
         } else if let Some(document) = document {
             if document.buffer.deleted {
                 area = area.child(
