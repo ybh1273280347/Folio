@@ -856,11 +856,11 @@ impl RenderOnce for BlockEditor {
                 .collect();
             wanted.extend(first..last);
             let state = self.state.read(cx);
-            if let Some(heading) = state.heading_jump.get()
-                && let Some(&ix) = state.model.doc.path(heading).iter().find_map(|id| index.unit_of.get(id))
+            if let Some(target) = state.navigation_jump.get()
+                && let Some(&ix) = state.model.doc.path(target).iter().find_map(|id| index.unit_of.get(id))
             {
                 // Measure near the destination in the jump frame so the
-                // heading's position includes the actual preceding blocks.
+                // caret's position includes the actual nearby block heights.
                 let height = state.scroll_handle.as_ref().map_or(window.viewport_size().height, |handle| {
                     handle.bounds().size.height
                 });
@@ -1376,14 +1376,14 @@ impl EditorRoot {
     /// Scroll the caret into view in the owner's scroll container, once its
     /// block has been laid out (a culled block is pinned, so it is laid out
     /// in the frame after the caret moved there).
-    fn reveal_caret(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) -> Pixels {
+    fn reveal_caret(&self, bounds: Bounds<Pixels>, window: &Window, cx: &App) -> Pixels {
         let state = self.state.read(cx);
         if !state.reveal.get() {
             return px(0.);
         }
         let (Some(handle), Some(pos)) = (state.scroll_handle.clone(), state.model.caret()) else {
             state.reveal.set(false);
-            state.heading_jump.set(None);
+            state.navigation_jump.set(None);
             return px(0.);
         };
         let Some(caret) = state
@@ -1393,7 +1393,6 @@ impl EditorRoot {
         else {
             return px(0.);
         };
-        state.reveal.set(false);
         // The scroll owner stays at the region edge; text and the revealed
         // caret stay inside the root's presentation inset at either scroll end.
         let padding = self
@@ -1403,26 +1402,27 @@ impl EditorRoot {
         view.origin.y += padding.top;
         view.size.height = (view.size.height - padding.top - padding.bottom).max(Pixels::ZERO);
         let mut offset = handle.offset();
-        if state.heading_jump.take() == Some(pos.block) {
-            let previous = offset.y;
-            let target = view.top() + view.size.height * 0.25;
-            offset.y = (offset.y + target - caret.top()).clamp(-handle.max_offset().y, px(0.));
-            if offset.y != previous {
-                handle.set_offset(offset);
-                window.request_animation_frame();
-            }
-            return offset.y - previous;
-        }
-        if caret.top() < view.top() {
-            offset.y += view.top() - caret.top();
+        let correction = if state.navigation_jump.get() == Some(pos.block) {
+            view.top() + view.size.height * 0.25 - caret.top()
+        } else if caret.top() < view.top() {
+            view.top() - caret.top()
         } else if caret.bottom() > view.bottom() {
-            offset.y -= caret.bottom() - view.bottom();
+            view.bottom() - caret.bottom()
         } else {
+            px(0.)
+        };
+        let previous_y = offset.y;
+        offset.y = (previous_y + correction).clamp(-handle.max_offset().y, px(0.));
+        let delta = offset.y - previous_y;
+        if delta.abs() <= px(0.5) {
+            state.reveal.set(false);
+            state.navigation_jump.set(None);
             return px(0.);
         }
+        // A jump can replace estimated spacers with measured blocks. Keep the
+        // reveal pending until the caret is checked at the new scroll offset.
         handle.set_offset(offset);
-        window.refresh();
-        px(0.)
+        delta
     }
 }
 
@@ -1474,7 +1474,7 @@ impl Element for EditorRoot {
                 &self.snapshot.tables,
             );
             // The measured content spans the editor column, even when the selected image is narrow.
-            let mut content = self.content_bounds.get();
+            let content = self.content_bounds.get();
             frame.content = Some(content);
             frame.insert_atoms(&self.snapshot.leaves, &self.atom_bounds.lock().expect("atom bounds"));
             frame.insert_code_previews(
@@ -1515,7 +1515,7 @@ impl Element for EditorRoot {
                 &inline_atoms,
             );
             *self.state.read(cx).frame.borrow_mut() = frame;
-            let mask = window.content_mask().bounds;
+            let mut mask = window.content_mask().bounds;
             let cull = self.state.read(cx).cull.clone();
             let geometry_changed = cull.borrow_mut().set_geometry(
                 content.size.width,
@@ -1524,16 +1524,19 @@ impl Element for EditorRoot {
             );
             // Retain a visible caret or an existing reveal request, but do not
             // interrupt manual scrolling. Wait for fresh spacer positions.
-            if geometry_changed {
+            let scroll_delta = if geometry_changed {
                 if self.caret_was_visible {
                     self.state.read(cx).reveal.set(true);
                 }
+                px(0.)
             } else {
-                // Cull the next layout against the heading jump's new viewport.
-                content.origin.y += self.reveal_caret(bounds, window, cx);
-            }
-            if geometry_changed || cull.borrow_mut().finish_frame(content, mask) {
-                // Geometry changed or scrolling left the laid-out span.
+                self.reveal_caret(bounds, window, cx)
+            };
+            // Translate the viewport into this frame's coordinates. The
+            // measured blocks still use the pre-scroll content origin.
+            mask.origin.y -= scroll_delta;
+            if geometry_changed || cull.borrow_mut().finish_frame(content, mask) || scroll_delta != px(0.) {
+                // ScrollHandle changes made during prepaint take effect in the next layout.
                 let state = self.state.clone();
                 window.on_next_frame(move |_, cx| state.update(cx, |_, cx| cx.notify()));
             }

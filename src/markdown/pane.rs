@@ -1429,11 +1429,7 @@ impl MarkdownPane {
                     anchor: BlockPosition::new(block, range.start),
                     head: BlockPosition::new(block, range.end),
                 });
-            if let Some(selection) = selection && editor.set_selection(selection, cx).is_ok() {
-                editor.reveal_caret(cx);
-                return true;
-            }
-            false
+            selection.is_some_and(|selection| editor.navigate_to_selection(selection, cx).is_ok())
         })
     }
 
