@@ -377,10 +377,10 @@ impl ImageResize {
         let delta = at - self.start;
         let original = self.original.size;
         let ratio = original.height / original.width;
-        // Project the pointer onto the image diagonal to preserve the ratio.
-        let width = (original.width + (delta.x + delta.y * ratio) / (1. + ratio * ratio))
+        // The dragged corner moves half the total size change around the fixed center.
+        let width = (original.width + 2. * (delta.x + delta.y * ratio) / (1. + ratio * ratio))
             .clamp(px(16.).min(original.width), self.max_width);
-        Bounds::new(self.original.origin, size(width, width * ratio))
+        Bounds::centered_at(self.original.center(), size(width, width * ratio))
     }
 }
 

@@ -4514,15 +4514,26 @@ impl BlockNode {
                     )
                 }))
                 .into_any_element(),
-            BlockNode::Paragraph(paragraph) => gapped(
-                paragraph.render(
+            BlockNode::Paragraph(paragraph) => {
+                let rendered = paragraph.render(
                     paragraph.span.map(|span| TextLeafKey::block(span.start)),
                     node_cx,
                     window,
                     cx,
-                ),
-                mb,
-            ),
+                );
+                // Keyed image-only paragraphs share one centered layout in the
+                // editor and document export. Mixed paragraphs can still reflow.
+                let rendered = if paragraph.leaf_key().is_some()
+                    && matches!(paragraph.children(), [child] if child.as_image().is_some())
+                {
+                    div().flex().w_full().justify_center()
+                        .child(div().min_w_0().child(rendered))
+                        .into_any_element()
+                } else {
+                    rendered
+                };
+                gapped(rendered, mb)
+            }
             BlockNode::Heading {
                 level,
                 children,
