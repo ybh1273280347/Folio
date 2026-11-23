@@ -554,8 +554,15 @@ impl BlockEditor {
             } else {
                 px(0.)
             };
-            let rendered = node.render(ix, FlowPosition::at(&node_refs, ix, false).last(ix + 1 == node_refs.len()), &context, window, cx);
+            // Source spans are local to editor blocks. Give each exported node
+            // its own scope so deferred layouts cannot share span-keyed state.
+            let id = ("document-block", ix);
+            let flow = FlowPosition::at(&node_refs, ix, false).last(ix + 1 == node_refs.len());
+            let rendered = window.with_id(id, |window| {
+                node.render(ix, flow, &context, window, cx)
+            });
             let block_el = div()
+                .id(id)
                 .relative()
                 .child(rendered)
                 .child(canvas(|_,_,_| (), |bounds,_,window,_| window.vector_block(bounds)).absolute().size_full())

@@ -5,6 +5,7 @@
 - `gpui-pre-windows 0.3.12`：从 DirectWrite 取得实际字体文件和集合索引，供 PDF 字体嵌入及文字复制使用。
 - `gpui-pre-windows 0.3.12`：读取文件剪贴板时将 `CF_HDROP` 句柄直接传给 `DragQueryFileW`，供资源管理器文件粘贴使用。
 - `gpui-kit-markdown-editor`：增加使用同一快照、节点渲染器的完整文档视图，省略编辑选区、光标和视口裁剪，并记录分页使用的块边界。
+- `gpui-kit-markdown-editor`：完整文档视图为每个导出块建立独立的 GPUI 元素作用域，防止块内源偏移相同的行内节点共享排版状态。
 - `gpui-pre 0.3.12`：增加 `VectorPaint::Svg` 与 `Window::paint_svg_document`，把图表 SVG 原文连同裁剪区域记录进文档捕获，供 PDF 用 `krilla-svg` 直接写成矢量图形与可选文字；不截图、不引入第二套排版。
 - `gpui-kit-markdown-editor`：可选单语言代码块预览接口只改变视图，保留原代码模型与序列化；源码模式复用原编辑几何，预览保留真实源码长度，完整文档导出强制预览且不带工具栏。
 - `gpui-kit-markdown-editor`：按文档 revision 缓存标题块序列，大纲跳转按标题索引定位，活动标题同步只遍历标题块。
