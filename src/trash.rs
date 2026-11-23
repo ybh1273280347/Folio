@@ -14,7 +14,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-const RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
+pub const RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
 const PAYLOAD_FILE: &str = "payload";
 const METADATA_FILE: &str = "entry.json";
 const METADATA_TEMP_FILE: &str = "entry.json.tmp";

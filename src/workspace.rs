@@ -8,12 +8,14 @@ mod panels;
 mod projects;
 mod tags;
 mod tools;
+mod trash;
 use build::{Build, BuildPanelVisibility};
 use dialogs::{Dialog, DialogButtons, Dialogs};
 use documents::Documents;
 use file_tree::FileTree;
 use panels::{RightPanel, RightPanelView};
 use projects::Projects;
+use trash::TrashView;
 use crate::ai::{AiPane, AiPaneEvent};
 use gpui_kit::component::Sizable;
 use crate::theme::color as rgb;
@@ -220,6 +222,7 @@ pub struct Workspace {
     show_preferences: bool,
     tags: tags::TagPanel,
     tree: FileTree,
+    trash: TrashView,
     documents: Documents,
     build: Build,
     zen_mode: bool,
@@ -282,6 +285,7 @@ impl Workspace {
         })
         .detach();
         let tree = FileTree::new(window, cx);
+        let trash = TrashView::new(window, cx);
         let right_panel = RightPanel::new(window, cx);
         let tags = tags::TagPanel::new(window, cx);
         let entity = cx.entity();
@@ -337,6 +341,7 @@ impl Workspace {
             show_preferences: false,
             tags,
             tree,
+            trash,
             documents: Documents::default(),
             build: Build::default(),
             zen_mode: false,
@@ -413,7 +418,7 @@ impl Workspace {
             };
             self.zen_snapshot = Some(snapshot);
             self.zen_mode = true;
-            self.tree.dismiss_trash();
+            self.trash.dismiss();
             self.settings.sidebar_open = false;
             if self.right_panel.open {
                 self.right_panel.open = false;
@@ -604,7 +609,7 @@ impl Render for Workspace {
             .into_iter()
             .filter_map(|pane| pane.read(cx).export_element())
             .collect();
-        let trash_open = self.tree.is_trash_open();
+        let trash_open = self.trash.is_open();
         let modal_open = trash_open || self.show_preferences
             || self.tags.is_editing()
             || self.tree.name_dialog_open()
@@ -693,7 +698,7 @@ impl Render for Workspace {
             .child(
                 resizable_panel()
                     .size(px(area_width * self.settings.editor_ratio))
-                    .child(self.render_editor(cx)),
+                    .child(self.render_editor(window, cx)),
             );
         if self.build.panels.preview {
             work_area = work_area.child(
@@ -900,7 +905,7 @@ impl Render for Workspace {
                 app.save_all(cx);
             }))
             .on_action(cx.listener(|app, _: &CloseTab, window, cx| {
-                if app.tree.is_trash_open() {
+                if app.trash.is_open() {
                     app.close_trash(window, cx);
                     return;
                 }
@@ -1121,7 +1126,7 @@ impl Render for Workspace {
                 // Constrain the resize group to the space below the title bar.
                 div().flex_1().min_h_0().overflow_hidden().child({
                     let main_content = if trash_open {
-                        self.render_editor(cx)
+                        self.render_editor(window, cx)
                     } else {
                         editor_with_terminal
                     };

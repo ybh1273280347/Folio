@@ -190,7 +190,7 @@ impl Workspace {
         }
         self.remember_session()?;
         let watcher = DocumentWatch::new(None)?;
-        self.tree.dismiss_trash();
+        self.trash.dismiss();
         self.tags.reset();
         self.tool_requests.clear_tag_proposals();
         self.documents.replace_watch(watcher);
@@ -256,7 +256,7 @@ impl Workspace {
             .join(&project.id)
             .join("preview.pdf");
 
-        self.tree.dismiss_trash();
+        self.trash.dismiss();
         self.tags.reset();
         self.tool_requests.clear_tag_proposals();
         self.projects.active_session = Some(id.to_owned());

@@ -65,24 +65,65 @@ pub fn selected_count(count: usize) -> String {
     }
 }
 
-pub fn trash_title(count: usize) -> String {
-    match locale() {
-        Locale::ZhCn => format!("废纸篓 · {count} 项"),
-        Locale::En => format!("Trash · {count}"),
-    }
-}
-
-pub fn trash_dates(deleted: &str, expires: &str) -> String {
-    match locale() {
-        Locale::ZhCn => format!("删除：{deleted}  ·  清理：{expires}"),
-        Locale::En => format!("Deleted: {deleted}  ·  Purges: {expires}"),
-    }
-}
-
+pub const TRASH_SUBTITLE: BiText = BiText::new(
+    "删除的文件保留 7 天，到期自动清除",
+    "Deleted files are kept for 7 days before automatic removal",
+);
+pub const TRASH_SCOPE_CURRENT: BiText = BiText::new("当前项目", "Current Project");
+pub const TRASH_SCOPE_ALL: BiText = BiText::new("全部项目", "All Projects");
+pub const TRASH_SEARCH_PLACEHOLDER: BiText = BiText::new("筛选文件名或路径…", "Filter by file name or path…");
 pub const TRASH_RESTORE: BiText = BiText::new("恢复", "Restore");
+pub const TRASH_RESTORE_ALL: BiText = BiText::new("全部恢复", "Restore All");
+pub const TRASH_RESTORE_SELECTED: BiText = BiText::new("恢复选中", "Restore Selected");
 pub const TRASH_PURGE: BiText = BiText::new("彻底删除", "Delete Permanently");
-pub const TRASH_CLEAR: BiText = BiText::new("清空废纸篓", "Empty Trash");
+pub const TRASH_CLEAR_PROJECT: BiText = BiText::new("清空当前项目", "Empty Project");
+pub const TRASH_CLEAR_ALL: BiText = BiText::new("清空全部", "Empty All");
+pub const TRASH_CLEAR_GROUP: BiText = BiText::new("清空", "Empty");
 pub const TRASH_EMPTY: BiText = BiText::new("废纸篓为空", "Trash is empty");
+pub const TRASH_EMPTY_PROJECT: BiText = BiText::new("当前项目废纸篓为空", "Current project Trash is empty");
+pub const TRASH_EMPTY_SUBTITLE: BiText = BiText::new(
+    "删除的文件会在此保留 7 天，可随时恢复",
+    "Deleted files stay here for 7 days and can be restored anytime",
+);
+pub const TRASH_NO_MATCHES: BiText = BiText::new("没有匹配的已删除文件", "No matching deleted files");
+pub const TRASH_CLEAR_FILTER: BiText = BiText::new("清除筛选", "Clear Filter");
+pub const TRASH_VIEW_ALL_PROJECTS: BiText = BiText::new("查看全部项目", "View All Projects");
+pub const TRASH_PROJECT_REMOVED: BiText = BiText::new("已移除", "Removed");
+pub const TRASH_DIR_MISSING: BiText = BiText::new("目录缺失", "Folder missing");
+pub const TRASH_MAIN_FILE_BADGE: BiText = BiText::new("主文件", "Main");
+
+pub fn trash_other_projects_hint(count: usize) -> String {
+    match locale() {
+        Locale::ZhCn => format!("其他项目中还有 {count} 个已删除文件"),
+        Locale::En => {
+            if count == 1 {
+                "1 deleted item in other projects".to_owned()
+            } else {
+                format!("{count} deleted items in other projects")
+            }
+        }
+    }
+}
+
+pub fn trash_item_count(count: usize) -> String {
+    match locale() {
+        Locale::ZhCn => format!("{count} 项"),
+        Locale::En => {
+            if count == 1 {
+                "1 item".to_owned()
+            } else {
+                format!("{count} items")
+            }
+        }
+    }
+}
+
+pub fn trash_time_tooltip(deleted: &str, expires: &str) -> String {
+    match locale() {
+        Locale::ZhCn => format!("删除于 {deleted} · 将于 {expires} 自动清除"),
+        Locale::En => format!("Deleted {deleted} · Auto-purges {expires}"),
+    }
+}
 
 // File dialogs & pickers
 pub const DIALOG_EXPORT_PDF: BiText = BiText::new("导出 PDF", "Export PDF");
