@@ -207,7 +207,7 @@ async function createRecord(cwd, manager, replacement) {
   const record = { project, id, cwd, manager, sequence: 0, running: false, failed: false,
     pending: new Map(), editorText: '', retained: true, models: await ModelRuntime.create() };
   await configureModels(record);
-  const bundledSkills = ['folio-annotations', 'folio-drawio', 'folio-markdown']
+  const bundledSkills = ['folio-annotations', 'folio-drawio', 'folio-intro', 'folio-markdown']
     .filter(name => !fs.existsSync(path.join(getAgentDir(), 'skills', name, 'SKILL.md')))
     .map(name => path.join(import.meta.dirname, 'skills', name));
   const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir(),
