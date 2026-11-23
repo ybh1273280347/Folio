@@ -8,7 +8,7 @@
 
 - 运行时入口：[host.mjs](host.mjs)
 - 会话生命周期与初始化去重：[sessions/registry.mjs](sessions/registry.mjs)。宿主持有 Pi SDK 装配、JSONL 命令分派和与 GPUI 的通信。
-- Workspace 工具：[tools/workspace/](tools/workspace/) 按 annotation、compile、drawio、tag 通道归档工具定义，[bridge.mjs](tools/workspace/bridge.mjs) 管理请求与取消。
+- Workspace 工具：[tools/workspace/](tools/workspace/) 按 annotation、canvas、compile、drawio、rag、tag 通道归档工具定义，[bridge.mjs](tools/workspace/bridge.mjs) 管理请求与取消。
 - 本地工具：[tools/local/](tools/local/) 管理本机执行工具。
 - 联网工具：[tools/web/](tools/web/) 管理搜索、抓取和抓取脚本。
 - 共用工具错误类型：[tools/tool-failure.mjs](tools/tool-failure.mjs)
@@ -21,6 +21,7 @@
 > - 不要把本机调试文件、大体积临时数据放到 `resources/pi-host` 根目录下。
 
 Draw.io 工具提供文件级 `folio_drawio_read`、`folio_drawio_create`、`folio_drawio_update`，以及当前画布级 `folio_drawio_get_selection` 和 `folio_drawio_edit_cells`。画布级工具操作当前活动的 `.drawio` 页签。修改支持新增顶点/连线、按 ID 更新文本/样式/几何/端点，以及按 ID 删除。文件级工具只接受项目内 `.drawio` 相对路径，创建不会覆盖已有文件，写入内容必须是根元素为 `mxfile` 的有效 XML。
+知识画布工具提供 `folio_canvas_read`、`folio_canvas_get_selection`、`folio_canvas_create`、`folio_canvas_apply_ops` 与 `folio_canvas_layout`。文件操作只接受项目内 `.canvas` 相对路径，创建不覆盖已有文件；`apply_ops` 在一个事务里批量增删改节点与连线，并用 `expected_revision` 校验版本，作用于打开中的画布时合并为一次可撤销操作。画布工具无需审批，由 `folio-canvas` 技能指导先读后写、导图视图只改 `parent_id` 等约定。
 
 ---
 

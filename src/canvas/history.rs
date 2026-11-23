@@ -41,11 +41,6 @@ impl CanvasHistory {
     pub fn can_redo(&self) -> bool {
         !self.redo_stack.is_empty()
     }
-
-    pub fn clear(&mut self) {
-        self.undo_stack.clear();
-        self.redo_stack.clear();
-    }
 }
 
 #[cfg(test)]

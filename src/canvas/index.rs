@@ -114,18 +114,6 @@ pub fn sync_canvas_links(
     tx.commit().map_err(|e| e.to_string())
 }
 
-pub fn remove_canvas_links(db_path: &Path, canvas_path: &str) -> Result<(), String> {
-    let Some(conn) = open_links_db(db_path, false)? else {
-        return Ok(());
-    };
-    conn.execute(
-        "DELETE FROM canvas_links WHERE canvas_path = ?1",
-        [canvas_path.replace('\\', "/")],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 pub fn backlinks_for(db_path: &Path, target_path: &str) -> Vec<CanvasBacklink> {
     let Ok(Some(conn)) = open_links_db(db_path, false) else {
         return Vec::new();
