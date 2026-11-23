@@ -110,7 +110,6 @@ pub struct CanvasPane {
     space_pressed: bool,
     editing_node: Option<String>,
     edit_input: Entity<TextareaState>,
-    edit_snapshot_before: Option<CanvasDocument>,
     viewport_bounds: Rc<Cell<Bounds<Pixels>>>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -175,7 +174,6 @@ impl CanvasPane {
             space_pressed: false,
             editing_node: None,
             edit_input,
-            edit_snapshot_before: None,
             viewport_bounds: Rc::new(Cell::new(Bounds::default())),
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![sub],
@@ -203,6 +201,24 @@ impl CanvasPane {
         &self.document
     }
 
+    pub fn is_current_draft(&self, text: &str) -> bool {
+        text == self.last_synced_json
+    }
+
+    pub fn document_at(&self, text: &str) -> Option<&CanvasDocument> {
+        (self.is_current_draft(text)
+            && self.parse_error.is_none()
+            && !matches!(self.interaction, InteractionState::DraggingNodes { .. } | InteractionState::ResizingNode { .. }))
+            .then_some(&self.document)
+    }
+
+    pub fn is_editing(&self) -> bool {
+        self.editing_node.is_some() || !matches!(
+            self.interaction,
+            InteractionState::Idle | InteractionState::Panning { .. } | InteractionState::BoxSelecting { .. }
+        )
+    }
+
     pub fn selected_ids(&self) -> Vec<String> {
         self.selection.iter().cloned().collect()
     }
@@ -223,18 +239,20 @@ impl CanvasPane {
         }
     }
 
-    pub fn sync_text(&mut self, text: &str, _window: &mut Window, cx: &mut Context<Self>) {
-        if text == self.last_synced_json {
+    pub fn sync_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if self.is_current_draft(text) {
             return;
         }
+        // History snapshots belong to this pane's previous draft. Replaying them
+        // after a disk reload or an edit in the other pane would replace newer data.
+        self.last_synced_json = text.to_owned();
+        self.history = CanvasHistory::default();
+        self.editing_node = None;
+        self.interaction = InteractionState::Idle;
         match CanvasDocument::from_json_str(text) {
             Ok(doc) => {
                 self.document = doc;
                 self.parse_error = None;
-                self.last_synced_json = text.to_owned();
-                self.editing_node = None;
-                self.edit_snapshot_before = None;
-                self.interaction = InteractionState::Idle;
                 self.selection.retain(|id| self.document.node(id).is_some());
                 if self
                     .selected_edge
@@ -257,22 +275,28 @@ impl CanvasPane {
         &mut self,
         ops: &[CanvasOp],
         cx: &mut Context<Self>,
-    ) -> Result<ApplyReport, String> {
+    ) -> Result<(ApplyReport, Option<String>), String> {
         if self.parse_error.is_some() {
             return Err(i18n_canvas::ERR_PARSE_LOCKED.get().to_owned());
         }
-        let before = self.document.clone();
-        let report = self.document.apply_ops(ops)?;
-        self.history.record(before);
+        let (next, report) = self.document.with_ops_applied(ops)?;
+        if next == self.document {
+            return Ok((report, None));
+        }
+        self.history.record(std::mem::replace(&mut self.document, next));
         if !report.created_node_ids.is_empty() {
-            self.selection = report.created_node_ids.iter().cloned().collect();
+            self.selection = report.created_node_ids.iter()
+                .filter(|id| self.document.node(id).is_some()).cloned().collect();
             self.selected_edge = None;
         } else {
             self.selection.retain(|id| self.document.node(id).is_some());
+            if self.selected_edge.as_deref().is_some_and(|id| self.document.edge(id).is_none()) {
+                self.selected_edge = None;
+            }
         }
-        self.emit_change(cx);
+        let text = self.serialize_change();
         cx.notify();
-        Ok(report)
+        Ok((report, Some(text)))
     }
 
     pub fn apply_view_or_layout_transaction(
@@ -282,23 +306,22 @@ impl CanvasPane {
         mode: Option<TreeLayoutMode>,
         unpin_subtree: bool,
         cx: &mut Context<Self>,
-    ) -> usize {
+    ) -> Result<(usize, Option<String>), String> {
+        if self.parse_error.is_some() {
+            return Err(i18n_canvas::ERR_PARSE_LOCKED.get().to_owned());
+        }
         let before = self.document.clone();
-        let prev_view = before.view_mode();
-        let prev_tree = before.tree_mode();
-        let moved = self
+        let (moved, changed) = self
             .document
             .apply_view_or_layout(view_mode, root_id, mode, unpin_subtree);
-        if moved > 0
-            || self.document.view_mode() != prev_view
-            || self.document.tree_mode() != prev_tree
-        {
-            self.notice_error = None;
-            self.history.record(before);
-            self.emit_change(cx);
-            cx.notify();
+        if !changed {
+            return Ok((moved, None));
         }
-        moved
+        self.notice_error = None;
+        self.history.record(before);
+        let text = self.serialize_change();
+        cx.notify();
+        Ok((moved, Some(text)))
     }
 
     pub fn add_anchor_node(
@@ -658,13 +681,14 @@ impl CanvasPane {
         self.create_node_at(x, y, parent_id, "", true, window, cx);
     }
 
-    pub fn relocate_paths(&mut self, moves: &[(String, String)], is_folder: bool, cx: &mut Context<Self>) -> bool {
-        if !self.document.relocate_paths(moves, is_folder) {
-            return false;
+    pub fn relocate_paths(&mut self, moves: &[(String, String)], is_folder: bool, cx: &mut Context<Self>) -> Option<String> {
+        self.history.relocate_paths(moves, is_folder);
+        if self.parse_error.is_some() || !self.document.relocate_paths(moves, is_folder) {
+            return None;
         }
-        self.emit_change(cx);
+        let text = self.serialize_change();
         cx.notify();
-        true
+        Some(text)
     }
 
     fn primary_selected_id(&self) -> Option<String> {
@@ -680,7 +704,8 @@ impl CanvasPane {
         (wx, wy)
     }
 
-    fn emit_change(&mut self, cx: &mut Context<Self>) {
+    /// Workspace-initiated transactions publish this text synchronously before acknowledging.
+    fn serialize_change(&mut self) -> String {
         // Persist latest camera state quietly inside `folio.viewport`.
         let meta = self.document.folio.get_or_insert_with(Default::default);
         meta.schema_version = super::model::FOLIO_CANVAS_SCHEMA_VERSION;
@@ -689,10 +714,16 @@ impl CanvasPane {
             pan_y: self.camera.pan_y,
             zoom: self.camera.zoom,
         });
-        if let Ok(json) = self.document.to_json_pretty() {
-            self.last_synced_json = json.clone();
-            cx.emit(CanvasEvent::Change(json));
+        let json = self.document.to_json_pretty().expect("canvas model serializes to JSON");
+        self.last_synced_json.clone_from(&json);
+        json
+    }
+
+    fn emit_change(&mut self, cx: &mut Context<Self>) {
+        if self.parse_error.is_some() {
+            return;
         }
+        cx.emit(CanvasEvent::Change(self.serialize_change()));
     }
 
     fn commit_inline_edit(
@@ -705,15 +736,19 @@ impl CanvasPane {
             return;
         };
         let next_text = self.edit_input.read(cx).value().to_string();
-        let before = self.edit_snapshot_before.take();
         let changed = self
             .document
             .node(&node_id)
-            .is_some_and(|node| node.display_text() != next_text);
+            .is_some_and(|node| {
+                let current = if node.is_image_file() {
+                    node.text.as_deref().unwrap_or_default()
+                } else {
+                    node.display_text()
+                };
+                current != next_text
+            });
         if changed {
-            if let Some(snapshot) = before {
-                self.history.record(snapshot);
-            }
+            self.history.record(self.document.clone());
             if let Some(node) = self.document.node_mut(&node_id) {
                 node.set_display_text(next_text);
             }
@@ -739,7 +774,6 @@ impl CanvasPane {
         } else {
             node.display_text().to_owned()
         };
-        self.edit_snapshot_before = Some(self.document.clone());
         self.editing_node = Some(node_id.to_owned());
         self.selection.clear();
         self.selection.insert(node_id.to_owned());
@@ -827,6 +861,16 @@ impl CanvasPane {
         self.notice_error = None;
         self.history.record(before);
         self.emit_change(cx);
+        cx.notify();
+    }
+
+    fn select_all(&mut self, cx: &mut Context<Self>) {
+        let hidden = self.document.hidden_node_ids();
+        self.selection = self.document.nodes.iter()
+            .filter(|node| !hidden.contains(node.id.as_str()))
+            .map(|node| node.id.clone())
+            .collect();
+        self.selected_edge = None;
         cx.notify();
     }
 
@@ -1081,8 +1125,9 @@ impl CanvasPane {
                 }
                 let dx = wx - start_world.0;
                 let dy = wy - start_world.1;
-                if dx.abs() > 2.0 || dy.abs() > 2.0 {
-                    *moved = true;
+                *moved |= dx.abs() > 2.0 || dy.abs() > 2.0;
+                if !*moved {
+                    return;
                 }
                 for (id, ix, iy) in initial_positions.iter() {
                     if let Some(node) = self.document.node_mut(id) {
@@ -1125,8 +1170,9 @@ impl CanvasPane {
                 }
                 let dx = wx - start_world.0;
                 let dy = wy - start_world.1;
-                if dx.abs() > 2.0 || dy.abs() > 2.0 {
-                    *moved = true;
+                *moved |= dx.abs() > 2.0 || dy.abs() > 2.0;
+                if !*moved {
+                    return;
                 }
                 if let Some(node) = self.document.node_mut(node_id) {
                     node.width = (initial_size.0 + dx).max(MIN_NODE_WIDTH);
@@ -1693,9 +1739,7 @@ impl Render for CanvasPane {
         let palette = active_palette();
         let bounds_cell = self.viewport_bounds.clone();
         let camera = self.camera;
-        let doc_snapshot = self.document.clone();
-        let selected_edge = self.selected_edge.clone();
-        let interaction_snapshot = self.interaction.clone();
+        let pane = cx.entity();
         let percent = (camera.zoom * 100.0).round() as u32;
 
         let header_bg = if palette.is_dark() {
@@ -1745,15 +1789,7 @@ impl Render for CanvasPane {
                     cx.propagate();
                     return;
                 }
-                pane.selection = pane
-                    .document
-                    .nodes
-                    .iter()
-                    .filter(|n| !pane.document.is_hidden_by_collapse(&n.id))
-                    .map(|n| n.id.clone())
-                    .collect();
-                pane.selected_edge = None;
-                cx.notify();
+                pane.select_all(cx);
             }))
             .on_action(cx.listener(|pane, _: &CanvasAddChild, window, cx| {
                 if pane.editing_node.is_some() {
@@ -1920,14 +1956,17 @@ impl Render for CanvasPane {
                     move |bounds, _, _| {
                         bounds_cell.set(bounds);
                     },
-                    move |bounds, (), window, _| {
+                    move |bounds, (), window, cx| {
+                        // Paint runs after render releases the pane, so borrow its geometry
+                        // without cloning node text or the current gesture's undo snapshot.
+                        let pane = pane.read(cx);
                         paint_grid(bounds, &camera, palette, window);
                         paint_edges(
                             bounds,
                             &camera,
-                            &doc_snapshot,
-                            selected_edge.as_deref(),
-                            &interaction_snapshot,
+                            &pane.document,
+                            pane.selected_edge.as_deref(),
+                            &pane.interaction,
                             palette,
                             window,
                         );
@@ -1938,11 +1977,12 @@ impl Render for CanvasPane {
             );
 
         // Render Group nodes underneath regular nodes so cards sit cleanly on top.
+        let hidden = self.document.hidden_node_ids();
         for node in self
             .document
             .nodes
             .iter()
-            .filter(|n| n.node_type == CanvasNodeType::Group && !self.document.is_hidden_by_collapse(&n.id))
+            .filter(|n| n.node_type == CanvasNodeType::Group && !hidden.contains(n.id.as_str()))
         {
             viewport = viewport.child(self.render_node_card(node, cx));
         }
@@ -1950,7 +1990,7 @@ impl Render for CanvasPane {
             .document
             .nodes
             .iter()
-            .filter(|n| n.node_type != CanvasNodeType::Group && !self.document.is_hidden_by_collapse(&n.id))
+            .filter(|n| n.node_type != CanvasNodeType::Group && !hidden.contains(n.id.as_str()))
         {
             viewport = viewport.child(self.render_node_card(node, cx));
         }
@@ -2251,15 +2291,7 @@ impl Render for CanvasPane {
                     .icon(crate::ui::icon(IconName::Square))
                     .tooltip(i18n_canvas::TOOLTIP_SELECT_ALL)
                     .on_click(cx.listener(|pane, _, _, cx| {
-                        pane.selection = pane
-                            .document
-                            .nodes
-                            .iter()
-                            .filter(|n| !pane.document.is_hidden_by_collapse(&n.id))
-                            .map(|n| n.id.clone())
-                            .collect();
-                        pane.selected_edge = None;
-                        cx.notify();
+                        pane.select_all(cx);
                     })),
             )
             .child(div().w(px(1.)).h(px(14.)).mx_0p5().bg(gpui_kit::rgb(palette.border)))
@@ -2723,9 +2755,11 @@ fn paint_edges(
     window: &mut Window,
 ) {
     let to_screen = |wx: f32, wy: f32| bounds.origin + camera.world_to_local(wx, wy);
+    let visible = doc.visible_nodes();
+    let visible_node = |id: &str| visible.get(id).copied();
 
     for edge in &doc.edges {
-        let Some((p0, p3, fs, ts)) = edge_endpoints(doc, edge) else {
+        let Some((p0, p3, fs, ts)) = edge_endpoints(edge, visible_node) else {
             continue;
         };
         let (c1, c2) = edge_bezier_controls(p0, p3, fs, ts);
@@ -2784,7 +2818,7 @@ fn paint_edges(
         snap,
     } = interaction
         && let Some(edge) = doc.edge(edge_id)
-        && let Some((orig_p0, orig_p3, orig_fs, orig_ts)) = edge_endpoints(doc, edge)
+        && let Some((orig_p0, orig_p3, orig_fs, orig_ts)) = edge_endpoints(edge, visible_node)
     {
         let drag_pt = snap
             .as_ref()

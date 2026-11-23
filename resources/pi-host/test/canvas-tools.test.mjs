@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { Value } from '@sinclair/typebox/value';
 import { canvasTools } from '../tools/workspace/canvas-tools.mjs';
 
 test('canvasTools exposes expected tool names and forwards workspace requests', async () => {
@@ -51,14 +52,18 @@ test('canvasTools exposes expected tool names and forwards workspace requests', 
   assert.equal(calls[1].params.tree_mode, 'tree_down');
 
   const layoutTool = tools.find(t => t.name === 'folio_canvas_layout');
-  await layoutTool.execute('id-3', {
+  const layoutParams = {
     path: 'maps/tree.canvas',
+    expected_revision: 'rev2',
     view_mode: 'tree',
     mode: 'mindmap_right',
     root_id: 'root',
-  });
+  };
+  assert.ok(Value.Check(layoutTool.parameters, layoutParams));
+  await layoutTool.execute('id-3', layoutParams);
   assert.equal(calls[2].operation, 'layout');
   assert.equal(calls[2].params.view_mode, 'tree');
+  assert.equal(calls[2].params.expected_revision, 'rev2');
   assert.equal(calls[2].params.mode, 'mindmap_right');
   assert.equal(calls[2].params.root_id, 'root');
 });

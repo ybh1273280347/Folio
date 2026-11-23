@@ -136,6 +136,14 @@ impl Documents {
         })
     }
 
+    pub(super) fn canvas_gesture_in_progress(&self, path: &str, cx: &App) -> bool {
+        [PaneRole::Tab, PaneRole::Reading].into_iter().any(|role| {
+            self.canvas_panes
+                .get(&PaneKey::new(path, role))
+                .is_some_and(|pane| pane.read(cx).is_editing())
+        })
+    }
+
     pub(super) fn active_markdown_search_open(&self, cx: &App) -> bool {
         self.markdown_panes.get(&PaneKey::tab(&self.active))
             .is_some_and(|pane| pane.read(cx).is_search_open())
@@ -286,13 +294,29 @@ impl DocumentWatch {
 }
 
 impl Workspace {
-    /// Both editable Markdown projections and the plain editor submit the same draft.
+    /// Editable document panes and the plain editor submit to the shared draft.
     pub(super) fn edit_document(&mut self, path: &str, text: String) {
         let document = self.documents.open.get_mut(path).expect("editor owns an open document");
         if document.buffer.text != text {
             document.buffer.set_text(text);
             document.last_edit = Instant::now();
             self.documents.source_changed(path);
+        }
+    }
+
+    pub(super) fn edit_canvas_document(&mut self, path: &str, text: String, cx: &mut Context<Self>) {
+        self.edit_document(path, text);
+        self.documents.canvas_changed.remove(path);
+        self.sync_canvas_panes(path, cx);
+    }
+
+    fn sync_canvas_panes(&self, path: &str, cx: &mut Context<Self>) {
+        if let Some(document) = self.documents.open.get(path) {
+            for role in [PaneRole::Tab, PaneRole::Reading] {
+                if let Some(pane) = self.documents.canvas_panes.get(&PaneKey::new(path, role)) {
+                    pane.update(cx, |pane, cx| pane.sync_text(&document.buffer.text, cx));
+                }
+            }
         }
     }
 }
@@ -517,7 +541,7 @@ impl Workspace {
         if self.documents.focused_markdown.as_deref() == Some(path) {
             self.documents.focused_markdown = None;
         }
-        self.remove_canvas_index(path);
+        self.remove_canvas_index(path, cx);
     }
 
     pub(super) fn invalidate_document_tree(&mut self) {
@@ -893,7 +917,9 @@ impl Workspace {
             };
             match event {
                 CanvasEvent::Change(next_text) => {
-                    app.edit_document(&file, next_text.clone());
+                    if pane.read(cx).is_current_draft(next_text) {
+                        app.edit_canvas_document(&file, next_text.clone(), cx);
+                    }
                 }
                 CanvasEvent::Focus => {
                     app.documents.focused_markdown = None;
@@ -928,7 +954,8 @@ impl Workspace {
             PaneKey::new(path, if reading { PaneRole::Reading } else { PaneRole::Tab }),
             pane,
         );
-        self.sync_canvas_index_from_text(path, &text);
+        let saved_text = self.documents.open[path].buffer.saved_text.clone();
+        self.sync_canvas_index_from_text(path, &saved_text, cx);
     }
 
     fn add_markdown_pane(
@@ -1060,7 +1087,7 @@ impl Workspace {
                 document.buffer.dirty = false;
                 document.buffer.revision = saved.revision;
                 document.buffer.conflict = None;
-                self.sync_canvas_index_from_text(path, &saved_text);
+                self.sync_canvas_index_from_text(path, &saved_text, cx);
                 self.schedule_rag_sync();
                 cx.notify();
                 Ok(true)
@@ -1308,6 +1335,38 @@ impl Workspace {
             self.refresh_tags(cx);
         }
         let changed = std::mem::take(&mut self.documents.document_watch.paths);
+        let mut changed_canvases: BTreeSet<_> = changed.iter()
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("canvas")))
+            .map(|path| {
+                let key = root.as_ref().map_or(path.as_path(), |root| {
+                    path.strip_prefix(root).expect("watch paths are scoped to the current project")
+                });
+                key.to_string_lossy().replace('\\', "/")
+            })
+            .collect();
+        if refresh_tree && root.is_some() {
+            // Folder notifications may omit their individual files.
+            let current_canvases: BTreeSet<_> = self.tree.files().iter()
+                .filter(|file| Self::is_canvas_path(&file.path)).map(|file| &file.path).collect();
+            let previous_canvases: BTreeSet<_> = previous.iter()
+                .filter(|path| Self::is_canvas_path(path)).collect();
+            changed_canvases.extend(current_canvases.symmetric_difference(&previous_canvases).map(|path| (*path).clone()));
+        }
+        for key in changed_canvases {
+            let disk = if let Some(root) = &root {
+                files::read_document(root, &key)
+            } else {
+                files::read_document_at(Path::new(&key))
+            };
+            match disk {
+                Ok(disk) if self.documents.open_buffer(&key).is_none_or(|buffer| buffer.revision != disk.revision) => {
+                    self.sync_canvas_index_from_text(&key, &disk.text, cx);
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => self.remove_canvas_index(&key, cx),
+                Err(error) => self.report(error, cx),
+            }
+        }
         if refresh_tree {
             self.reconcile_rag_on_tree_change(&previous);
         }
@@ -1426,15 +1485,7 @@ impl Workspace {
             }
         }
         for path in std::mem::take(&mut self.documents.canvas_changed) {
-            if let Some(document) = self.documents.open.get(&path) {
-                for role in [PaneRole::Tab, PaneRole::Reading] {
-                    if let Some(pane) = self.documents.canvas_panes.get(&PaneKey::new(&path, role)) {
-                        pane.update(cx, |pane, cx| {
-                            pane.sync_text(&document.buffer.text, window, cx)
-                        });
-                    }
-                }
-            }
+            self.sync_canvas_panes(&path, cx);
         }
         let events: Vec<_> = self.documents.document_watch.transport
             .iter()

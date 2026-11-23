@@ -401,7 +401,20 @@ impl CanvasDocument {
         if raw.trim().is_empty() {
             return Ok(Self::default());
         }
-        serde_json::from_str(raw)
+        let mut doc: Self = serde_json::from_str(raw)?;
+        // Older AI batches could leave superseded hierarchy edges behind. Layout already
+        // uses parentId as the source of truth, so keep only its matching incoming edge.
+        let parents: HashMap<_, _> = doc.nodes.iter()
+            .filter_map(|node| node.parent_id().map(|parent| (node.id.as_str(), parent)))
+            .collect();
+        let mut linked_children = HashSet::new();
+        doc.edges.retain(|edge| {
+            edge.kind() != EdgeKind::Hierarchy || (
+                parents.get(edge.to_node.as_str()) == Some(&edge.from_node.as_str())
+                    && linked_children.insert(edge.to_node.clone())
+            )
+        });
+        Ok(doc)
     }
 
     pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
@@ -448,7 +461,8 @@ impl CanvasDocument {
 
     /// Computes bounding box `(min_x, min_y, max_x, max_y)` across all visible nodes.
     pub fn content_bounds(&self) -> Option<(f32, f32, f32, f32)> {
-        let mut iter = self.nodes.iter().filter(|n| !self.is_hidden_by_collapse(&n.id));
+        let hidden = self.hidden_node_ids();
+        let mut iter = self.nodes.iter().filter(|n| !hidden.contains(n.id.as_str()));
         let first = iter.next()?;
         let mut min_x = first.x;
         let mut min_y = first.y;
@@ -479,6 +493,36 @@ impl CanvasDocument {
             current = parent.parent_id();
         }
         false
+    }
+
+    /// Computes visibility once for callers that traverse the canvas as a whole.
+    pub fn hidden_node_ids(&self) -> HashSet<&str> {
+        let mut pending: Vec<_> = self.nodes.iter()
+            .filter(|node| node.is_collapsed()).map(|node| node.id.as_str()).collect();
+        let mut hidden = HashSet::new();
+        if pending.is_empty() {
+            return hidden;
+        }
+        let mut children = HashMap::<&str, Vec<&str>>::new();
+        for node in &self.nodes {
+            if let Some(parent) = node.parent_id() {
+                children.entry(parent).or_default().push(&node.id);
+            }
+        }
+        while let Some(id) = pending.pop() {
+            if let Some(descendants) = children.get(id) {
+                pending.extend(descendants.iter().copied().filter(|child| hidden.insert(*child)));
+            }
+        }
+        hidden
+    }
+
+    pub fn visible_nodes(&self) -> HashMap<&str, &CanvasNode> {
+        let hidden = self.hidden_node_ids();
+        self.nodes.iter()
+            .filter(|node| !hidden.contains(node.id.as_str()))
+            .map(|node| (node.id.as_str(), node))
+            .collect()
     }
 
     pub fn children_of(&self, parent_id: &str) -> Vec<&CanvasNode> {
@@ -528,61 +572,30 @@ impl CanvasDocument {
     }
 
     /// Applies deterministic tidy-tree coordinates to unpinned descendants.
-    pub fn apply_tree_layout(
-        &mut self,
-        root_id: Option<&str>,
-        mode: TreeLayoutMode,
-        unpin_subtree: bool,
-    ) -> usize {
-        if unpin_subtree {
-            let targets: Option<HashSet<String>> = root_id.map(|rid| {
-                self.nodes
-                    .iter()
-                    .filter(|n| self.is_descendant_of_root(&n.id, rid))
-                    .map(|n| n.id.clone())
-                    .collect()
-            });
-            for node in &mut self.nodes {
-                if let Some(ext) = node.folio.as_mut()
-                    && ext.pinned
-                    && targets.as_ref().is_none_or(|set| set.contains(&node.id))
-                {
-                    ext.pinned = false;
-                    node.compact_ext();
-                }
-            }
-        }
+    fn apply_tree_layout(&mut self, root_id: Option<&str>, mode: TreeLayoutMode) {
         let options = super::layout::LayoutOptions {
             mode,
             ..Default::default()
         };
         let updates = super::layout::compute_tree_layout(self, root_id, options);
-        let mut count = 0;
-        for (id, (nx, ny)) in updates {
-            if let Some(node) = self.node_mut(&id) {
-                if (node.x - nx).abs() > 0.5 || (node.y - ny).abs() > 0.5 {
-                    node.x = nx;
-                    node.y = ny;
-                    count += 1;
-                }
-            }
-        }
-        count
+        self.apply_layout_positions(&updates);
     }
 
-    fn is_descendant_of_root(&self, node_id: &str, root_id: &str) -> bool {
-        let mut cur = self.node(node_id).and_then(|n| n.parent_id());
-        let mut seen = HashSet::new();
-        while let Some(pid) = cur {
-            if pid == root_id {
-                return true;
+    fn subtree_ids(&self, root_id: &str) -> HashSet<String> {
+        let mut children = HashMap::<&str, Vec<&str>>::new();
+        for node in &self.nodes {
+            if let Some(parent) = node.parent_id() {
+                children.entry(parent).or_default().push(&node.id);
             }
-            if !seen.insert(pid) {
-                break;
-            }
-            cur = self.node(pid).and_then(|n| n.parent_id());
         }
-        false
+        let mut pending = vec![root_id];
+        let mut subtree = HashSet::new();
+        while let Some(id) = pending.pop() {
+            if subtree.insert(id.to_owned()) && let Some(children) = children.get(id) {
+                pending.extend(children);
+            }
+        }
+        subtree
     }
 
     pub fn view_mode(&self) -> CanvasViewMode {
@@ -612,7 +625,7 @@ impl CanvasDocument {
                 let meta = self.folio.get_or_insert_with(CanvasMeta::default);
                 meta.schema_version = FOLIO_CANVAS_SCHEMA_VERSION;
                 meta.view_mode = CanvasViewMode::Tree;
-                self.layout_forest(true);
+                self.layout_forest();
             }
             (CanvasViewMode::Tree, CanvasViewMode::Freeform) => {
                 for node in &mut self.nodes {
@@ -640,74 +653,89 @@ impl CanvasDocument {
         if self.view_mode() == CanvasViewMode::Freeform {
             self.switch_view_mode(CanvasViewMode::Tree);
         } else {
-            self.layout_forest(true);
+            self.layout_forest();
         }
     }
 
-    /// Dual-view-aware layout transition shared by live panes and AI tools.
+    /// Returns the number of moved nodes and whether a persistent field changed.
     pub fn apply_view_or_layout(
         &mut self,
         view_mode: Option<CanvasViewMode>,
         root_id: Option<&str>,
         mode: Option<TreeLayoutMode>,
         unpin_subtree: bool,
-    ) -> usize {
-        let before_coords: HashMap<String, (f32, f32)> = self
-            .nodes
-            .iter()
-            .map(|n| (n.id.clone(), (n.x, n.y)))
-            .collect();
+    ) -> (usize, bool) {
+        let before_coords: Vec<_> = self.nodes.iter().map(|n| (n.x, n.y)).collect();
+        let prev_view = self.view_mode();
+        let prev_mode = self.tree_mode();
+        let mut unpinned = false;
+        let local_layout = view_mode.is_none() && root_id.is_some() && prev_view == CanvasViewMode::Freeform;
+        if unpin_subtree && view_mode != Some(CanvasViewMode::Freeform) {
+            let targets = root_id.filter(|_| local_layout).map(|root| self.subtree_ids(root));
+            for node in &mut self.nodes {
+                if let Some(ext) = node.folio.as_mut()
+                    && ext.pinned
+                    && targets.as_ref().is_none_or(|set| set.contains(&node.id) && root_id != Some(&node.id))
+                {
+                    ext.pinned = false;
+                    node.compact_ext();
+                    unpinned = true;
+                }
+            }
+        }
 
         if view_mode == Some(CanvasViewMode::Freeform) {
             self.switch_view_mode(CanvasViewMode::Freeform);
-        } else if view_mode.is_none()
-            && root_id.is_some()
-            && self.view_mode() == CanvasViewMode::Freeform
-        {
+            if let Some(mode) = mode && mode != prev_mode {
+                let meta = self.folio.get_or_insert_with(CanvasMeta::default);
+                meta.schema_version = FOLIO_CANVAS_SCHEMA_VERSION;
+                meta.tree_mode = mode;
+            }
+        } else if local_layout {
             let target_mode = mode.unwrap_or_else(|| self.tree_mode());
-            self.apply_tree_layout(root_id, target_mode, unpin_subtree);
-        } else if let Some(target_mode) = mode {
+            self.apply_tree_layout(root_id, target_mode);
+        } else if let Some(target_mode) = mode
+            && (target_mode != prev_mode || prev_view == CanvasViewMode::Freeform)
+        {
             self.set_tree_mode(target_mode);
         } else if self.view_mode() == CanvasViewMode::Freeform {
             self.switch_view_mode(CanvasViewMode::Tree);
         } else {
-            self.layout_forest(!unpin_subtree);
+            self.layout_forest();
         }
 
-        self.nodes
+        let moved = self.nodes
             .iter()
-            .filter(|n| {
-                before_coords
-                    .get(&n.id)
-                    .is_some_and(|&(bx, by)| (n.x - bx).abs() > 0.5 || (n.y - by).abs() > 0.5)
-            })
-            .count()
+            .zip(before_coords)
+            .filter(|(n, (bx, by))| n.x != *bx || n.y != *by)
+            .count();
+        (moved, moved > 0 || unpinned || self.view_mode() != prev_view || self.tree_mode() != prev_mode)
     }
 
-    pub fn layout_forest(&mut self, ignore_pinned: bool) -> usize {
+    fn layout_forest(&mut self) {
         let mode = self.tree_mode();
         let options = super::layout::LayoutOptions {
             mode,
-            ignore_pinned,
             ..Default::default()
         };
         let updates = super::layout::compute_tree_layout(self, None, options);
-        let mut count = 0;
-        for (id, (nx, ny)) in updates {
-            if let Some(node) = self.node_mut(&id)
+        self.apply_layout_positions(&updates);
+    }
+
+    fn apply_layout_positions(&mut self, updates: &HashMap<String, (f32, f32)>) {
+        for node in &mut self.nodes {
+            if let Some(&(nx, ny)) = updates.get(&node.id)
                 && ((node.x - nx).abs() > 0.5 || (node.y - ny).abs() > 0.5)
             {
                 node.x = nx;
                 node.y = ny;
-                count += 1;
             }
         }
-        count
     }
 
     pub fn auto_layout_if_tree(&mut self) {
         if self.view_mode() == CanvasViewMode::Tree {
-            self.layout_forest(true);
+            self.layout_forest();
         }
     }
 
@@ -965,6 +993,13 @@ impl CanvasDocument {
 
     /// Applies an atomic batch of operations. Returns an error without mutating `self` if validation fails.
     pub fn apply_ops(&mut self, ops: &[CanvasOp]) -> Result<ApplyReport, String> {
+        let (working, report) = self.with_ops_applied(ops)?;
+        *self = working;
+        Ok(report)
+    }
+
+    /// Prepares an atomic batch, allowing the live pane to retain the original for undo.
+    pub(super) fn with_ops_applied(&self, ops: &[CanvasOp]) -> Result<(Self, ApplyReport), String> {
         let mut working = self.clone();
         let mut report = ApplyReport::default();
         for op in ops {
@@ -972,8 +1007,7 @@ impl CanvasDocument {
         }
         working.validate_tree_acyclic()?;
         working.auto_layout_if_tree();
-        *self = working;
-        Ok(report)
+        Ok((working, report))
     }
 
     fn apply_single_op(&mut self, op: &CanvasOp, report: &mut ApplyReport) -> Result<(), String> {
@@ -1109,6 +1143,9 @@ impl CanvasDocument {
                             node.node_type = CanvasNodeType::File;
                             node.file = Some(a.target_path().to_owned());
                             node.subpath = a.to_json_canvas_subpath();
+                        } else {
+                            // Keep the file link while removing the anchor's exact location.
+                            node.subpath = None;
                         }
                     }
                     node.compact_ext();
@@ -1128,8 +1165,13 @@ impl CanvasDocument {
                     }
                 }
                 // Remove old hierarchy edge targeting this node.
-                self.edges
-                    .retain(|e| !(e.to_node == *id && e.kind() == EdgeKind::Hierarchy));
+                self.edges.retain(|edge| {
+                    let removed = edge.to_node == *id && edge.kind() == EdgeKind::Hierarchy;
+                    if removed {
+                        report.deleted_edge_ids.push(edge.id.clone());
+                    }
+                    !removed
+                });
                 if let Some(node) = self.node_mut(id) {
                     node.ext_mut().parent_id = new_parent_id.clone();
                     node.compact_ext();
@@ -1150,21 +1192,8 @@ impl CanvasDocument {
                 if self.node(id).is_none() {
                     return Err(crate::i18n::canvas::err_missing_node(id));
                 }
-                let mut to_remove = HashSet::new();
-                to_remove.insert(id.clone());
-                if *cascade {
-                    let mut changed = true;
-                    while changed {
-                        changed = false;
-                        for node in &self.nodes {
-                            if !to_remove.contains(&node.id)
-                                && node.parent_id().is_some_and(|p| to_remove.contains(p))
-                            {
-                                to_remove.insert(node.id.clone());
-                                changed = true;
-                            }
-                        }
-                    }
+                let to_remove = if *cascade {
+                    self.subtree_ids(id)
                 } else {
                     for node in &mut self.nodes {
                         if node.parent_id() == Some(id.as_str()) {
@@ -1172,11 +1201,22 @@ impl CanvasDocument {
                             node.compact_ext();
                         }
                     }
-                }
-                self.nodes.retain(|n| !to_remove.contains(&n.id));
-                self.edges
-                    .retain(|e| !to_remove.contains(&e.from_node) && !to_remove.contains(&e.to_node));
-                report.deleted_node_ids.extend(to_remove);
+                    HashSet::from([id.clone()])
+                };
+                self.nodes.retain(|node| {
+                    let removed = to_remove.contains(&node.id);
+                    if removed {
+                        report.deleted_node_ids.push(node.id.clone());
+                    }
+                    !removed
+                });
+                self.edges.retain(|edge| {
+                    let removed = to_remove.contains(&edge.from_node) || to_remove.contains(&edge.to_node);
+                    if removed {
+                        report.deleted_edge_ids.push(edge.id.clone());
+                    }
+                    !removed
+                });
             }
             CanvasOp::AddEdge {
                 id,
@@ -1205,6 +1245,14 @@ impl CanvasDocument {
                 edge.label = label.clone();
                 edge.color = color.clone();
                 if edge.kind() == EdgeKind::Hierarchy {
+                    // The incoming hierarchy edge and parentId represent the same relationship.
+                    self.edges.retain(|existing| {
+                        let replaced = existing.to_node == *to_node && existing.kind() == EdgeKind::Hierarchy;
+                        if replaced {
+                            report.deleted_edge_ids.push(existing.id.clone());
+                        }
+                        !replaced
+                    });
                     if let Some(target) = self.node_mut(to_node) {
                         target.ext_mut().parent_id = Some(from_node.clone());
                     }
@@ -1266,15 +1314,23 @@ impl CanvasDocument {
             .iter()
             .filter_map(|n| n.parent_id().map(|p| (n.id.as_str(), p)))
             .collect();
+        let mut validated = HashSet::new();
         for &start in parent_map.keys() {
+            if validated.contains(start) {
+                continue;
+            }
             let mut seen = HashSet::new();
             let mut cur = Some(start);
             while let Some(id) = cur {
+                if validated.contains(id) {
+                    break;
+                }
                 if !seen.insert(id) {
                     return Err(crate::i18n::canvas::err_cycle_detected(id));
                 }
                 cur = parent_map.get(id).copied();
             }
+            validated.extend(seen);
         }
         Ok(())
     }
@@ -1327,7 +1383,7 @@ pub enum CanvasOp {
         pinned: Option<bool>,
         #[serde(default)]
         collapsed: Option<bool>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_anchor_update", skip_serializing_if = "Option::is_none")]
         anchor: Option<Option<KnowledgeAnchor>>,
     },
     MoveSubtree {
@@ -1357,6 +1413,13 @@ pub enum CanvasOp {
     },
 }
 
+// A missing field leaves the anchor intact, while an explicit null clears it.
+fn deserialize_anchor_update<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<KnowledgeAnchor>>, D::Error> {
+    Option::deserialize(deserializer).map(Some)
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyReport {
@@ -1370,6 +1433,58 @@ pub struct ApplyReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adding_a_hierarchy_edge_replaces_the_previous_parent_link() {
+        let mut doc = CanvasDocument::from_json_str(r#"{
+            "nodes": [
+                {"id":"old","x":0,"y":0,"width":240,"height":84},
+                {"id":"new","x":0,"y":0,"width":240,"height":84},
+                {"id":"child","x":0,"y":0,"width":240,"height":84,"folio":{"parentId":"old"}}
+            ],
+            "edges": [{"id":"old-link","fromNode":"old","toNode":"child","folio":{"kind":"hierarchy"}}]
+        }"#).unwrap();
+        let ops = serde_json::from_value::<Vec<CanvasOp>>(serde_json::json!([
+            {"op":"add_edge","id":"new-link","from_node":"new","to_node":"child","kind":"hierarchy"}
+        ])).unwrap();
+
+        let report = doc.apply_ops(&ops).unwrap();
+        assert_eq!(doc.node("child").unwrap().parent_id(), Some("new"));
+        assert_eq!(doc.edges.len(), 1);
+        assert_eq!(doc.edges[0].id, "new-link");
+        assert_eq!(report.deleted_edge_ids, ["old-link"]);
+    }
+
+    #[test]
+    fn explicit_null_removes_the_anchor_and_subpath_but_keeps_the_file() {
+        let mut doc = CanvasDocument::default();
+        doc.apply_ops(&serde_json::from_value::<Vec<CanvasOp>>(serde_json::json!([
+            {"op":"add_node","id":"a","anchor":{"kind":"markdown_heading","path":"notes.md","heading":"Results"}},
+            {"op":"update_node","id":"a","text":"Read results"}
+        ])).unwrap()).unwrap();
+        assert!(doc.node("a").unwrap().anchor().is_some());
+
+        doc.apply_ops(&serde_json::from_value::<Vec<CanvasOp>>(serde_json::json!([
+            {"op":"update_node","id":"a","anchor":null}
+        ])).unwrap()).unwrap();
+        let node = doc.node("a").unwrap();
+        assert!(node.anchor().is_none());
+        assert!(node.subpath.is_none());
+        assert_eq!(node.file.as_deref(), Some("notes.md"));
+    }
+
+    #[test]
+    fn layout_persists_an_unpin_even_when_no_coordinates_change() {
+        let mut doc = CanvasDocument::default();
+        doc.apply_ops(&serde_json::from_value::<Vec<CanvasOp>>(serde_json::json!([
+            {"op":"add_node","id":"root","x":0,"y":0},
+            {"op":"add_node","id":"child","parent_id":"root","x":316,"y":0,"pinned":true}
+        ])).unwrap()).unwrap();
+
+        assert_eq!(doc.apply_view_or_layout(None, Some("root"), None, true), (0, true));
+        let reopened = CanvasDocument::from_json_str(&doc.to_json_pretty().unwrap()).unwrap();
+        assert!(!reopened.node("child").unwrap().is_pinned());
+    }
 
     #[test]
     fn json_canvas_roundtrip_preserves_standard_and_extra_fields() {
@@ -1643,7 +1758,7 @@ mod tests {
         assert_eq!(img.text.as_deref(), Some("Architecture"));
 
         // Local subtree layout in freeform preserves isolated freeform nodes.
-        let moved = doc.apply_view_or_layout(
+        let (moved, _) = doc.apply_view_or_layout(
             None,
             Some("root"),
             Some(TreeLayoutMode::TreeDown),

@@ -159,10 +159,11 @@ export function canvasTools(request) {
       name: 'folio_canvas_layout',
       label: '整理画布导图布局',
       description:
-        '切换画布视图（view_mode: freeform/tree）或对指定根节点/整张画布执行树形自动排布（mode: mindmap_right/tree_down 等）。从 freeform 切入 tree 时会自动保留手摆坐标以便无损切回；在 freeform 中仅传 root_id 时只整理该局部子树，不打乱其余节点。',
+        '切换画布视图（view_mode: freeform/tree）或执行树形自动排布（mode: mindmap_right/tree_down 等）。传入读取时获得的 expected_revision 可防止覆盖后续编辑。从 freeform 切入 tree 时会保留手摆坐标；在 freeform 中仅传 root_id 时只整理该局部子树。',
       parameters: parameters({
         path,
         view_mode: Type.Optional(viewModeSchema),
+        expected_revision: Type.Optional(Type.String()),
         root_id: Type.Optional(nodeId),
         mode: Type.Optional(treeModeSchema),
         unpin_subtree: Type.Optional(Type.Boolean()),

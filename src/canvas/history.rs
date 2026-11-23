@@ -41,6 +41,13 @@ impl CanvasHistory {
     pub fn can_redo(&self) -> bool {
         !self.redo_stack.is_empty()
     }
+
+    pub fn relocate_paths(&mut self, moves: &[(String, String)], is_folder: bool) {
+        // Undoing a canvas edit must not undo a workspace file move.
+        for snapshot in self.undo_stack.iter_mut().chain(&mut self.redo_stack) {
+            snapshot.relocate_paths(moves, is_folder);
+        }
+    }
 }
 
 #[cfg(test)]

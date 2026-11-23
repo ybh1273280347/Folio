@@ -146,11 +146,11 @@ impl Default for InteractionState {
 
 pub fn hit_node(doc: &CanvasDocument, wx: f32, wy: f32) -> Option<&CanvasNode> {
     doc.nodes.iter().rev().find(|node| {
-        !doc.is_hidden_by_collapse(&node.id)
-            && wx >= node.x
+        wx >= node.x
             && wx <= node.x + node.width
             && wy >= node.y
             && wy <= node.y + node.height
+            && !doc.is_hidden_by_collapse(&node.id)
     })
 }
 
@@ -164,11 +164,11 @@ pub fn hit_resize_handle<'a>(
     let margin = RESIZE_HIT_SIZE_PX / camera.zoom;
     doc.nodes.iter().rev().find(|node| {
         selected.contains(&node.id)
-            && !doc.is_hidden_by_collapse(&node.id)
             && wx >= node.x + node.width - margin
             && wx <= node.x + node.width + margin * 0.35
             && wy >= node.y + node.height - margin
             && wy <= node.y + node.height + margin * 0.35
+            && !doc.is_hidden_by_collapse(&node.id)
     })
 }
 
@@ -182,14 +182,14 @@ pub fn hit_port<'a>(
     let r = PORT_HIT_RADIUS_PX / camera.zoom;
     let r2 = r * r;
     for node in doc.nodes.iter().rev() {
-        if doc.is_hidden_by_collapse(&node.id) || !active_ids(&node.id) {
+        if !active_ids(&node.id) {
             continue;
         }
         for side in [EdgeSide::Top, EdgeSide::Right, EdgeSide::Bottom, EdgeSide::Left] {
             let (px_w, py_w) = node.side_point(side);
             let dx = wx - px_w;
             let dy = wy - py_w;
-            if dx * dx + dy * dy <= r2 {
+            if dx * dx + dy * dy <= r2 && !doc.is_hidden_by_collapse(&node.id) {
                 return Some((node, side));
             }
         }
@@ -210,12 +210,12 @@ pub fn nearest_side(node: &CanvasNode, wx: f32, wy: f32) -> EdgeSide {
         .unwrap_or(EdgeSide::Left)
 }
 
-pub fn edge_endpoints(doc: &CanvasDocument, edge: &CanvasEdge) -> Option<((f32, f32), (f32, f32), EdgeSide, EdgeSide)> {
-    let from = doc.node(&edge.from_node)?;
-    let to = doc.node(&edge.to_node)?;
-    if doc.is_hidden_by_collapse(&from.id) || doc.is_hidden_by_collapse(&to.id) {
-        return None;
-    }
+pub fn edge_endpoints<'a>(
+    edge: &CanvasEdge,
+    visible_node: impl Fn(&str) -> Option<&'a CanvasNode>,
+) -> Option<((f32, f32), (f32, f32), EdgeSide, EdgeSide)> {
+    let from = visible_node(&edge.from_node)?;
+    let to = visible_node(&edge.to_node)?;
     let (auto_from, auto_to) = CanvasDocument::auto_sides(from, to);
     let from_side = edge.from_side.unwrap_or(auto_from);
     let to_side = edge.to_side.unwrap_or(auto_to);
@@ -249,11 +249,20 @@ pub fn hit_edge<'a>(
 ) -> Option<&'a CanvasEdge> {
     let threshold = EDGE_HIT_DISTANCE_PX / camera.zoom;
     let thresh2 = threshold * threshold;
+    let visible = doc.visible_nodes();
     for edge in doc.edges.iter().rev() {
-        let Some((p0, p3, fs, ts)) = edge_endpoints(doc, edge) else {
+        let Some((p0, p3, fs, ts)) = edge_endpoints(edge, |id| visible.get(id).copied()) else {
             continue;
         };
         let (c1, c2) = edge_bezier_controls(p0, p3, fs, ts);
+        // A cubic lies inside the bounding box of its endpoints and control points.
+        if wx < p0.0.min(c1.0).min(c2.0).min(p3.0) - threshold
+            || wx > p0.0.max(c1.0).max(c2.0).max(p3.0) + threshold
+            || wy < p0.1.min(c1.1).min(c2.1).min(p3.1) - threshold
+            || wy > p0.1.max(c1.1).max(c2.1).max(p3.1) + threshold
+        {
+            continue;
+        }
         let steps = 16;
         let mut prev = p0;
         for i in 1..=steps {
@@ -276,12 +285,12 @@ pub fn compute_drop_target(
 ) -> Option<(String, DropPlacement)> {
     let target = doc.nodes.iter().rev().find(|node| {
         node.id != dragged_id
-            && !doc.is_hidden_by_collapse(&node.id)
-            && !doc.is_ancestor(dragged_id, &node.id)
             && wx >= node.x
             && wx <= node.x + node.width
             && wy >= node.y
             && wy <= node.y + node.height
+            && !doc.is_hidden_by_collapse(&node.id)
+            && !doc.is_ancestor(dragged_id, &node.id)
     })?;
     let placement = if doc.tree_mode() == TreeLayoutMode::TreeDown {
         let rel_x = ((wx - target.x) / target.width.max(1.0)).clamp(0.0, 1.0);
@@ -311,7 +320,7 @@ pub fn edge_midpoint_local(
     edge_id: &str,
 ) -> Option<Point<Pixels>> {
     let edge = doc.edge(edge_id)?;
-    let (p0, p3, fs, ts) = edge_endpoints(doc, edge)?;
+    let (p0, p3, fs, ts) = edge_endpoints(edge, |id| doc.node(id).filter(|_| !doc.is_hidden_by_collapse(id)))?;
     let (c1, c2) = edge_bezier_controls(p0, p3, fs, ts);
     let mid = eval_cubic_bezier(p0, c1, c2, p3, 0.5);
     Some(camera.world_to_local(mid.0, mid.1))
@@ -325,7 +334,7 @@ pub fn hit_edge_endpoint(
     wy: f32,
 ) -> Option<EdgeHandleEnd> {
     let edge = doc.edge(edge_id)?;
-    let (p0, p3, _, _) = edge_endpoints(doc, edge)?;
+    let (p0, p3, _, _) = edge_endpoints(edge, |id| doc.node(id).filter(|_| !doc.is_hidden_by_collapse(id)))?;
     let r = (PORT_HIT_RADIUS_PX + 2.0) / camera.zoom;
     let r2 = r * r;
     if (wx - p3.0).powi(2) + (wy - p3.1).powi(2) <= r2 {
@@ -342,10 +351,11 @@ pub fn nodes_in_rect(doc: &CanvasDocument, a: (f32, f32), b: (f32, f32)) -> Vec<
     let max_x = a.0.max(b.0);
     let min_y = a.1.min(b.1);
     let max_y = a.1.max(b.1);
+    let hidden = doc.hidden_node_ids();
     doc.nodes
         .iter()
         .filter(|n| {
-            !doc.is_hidden_by_collapse(&n.id)
+            !hidden.contains(n.id.as_str())
                 && n.x + n.width >= min_x
                 && n.x <= max_x
                 && n.y + n.height >= min_y

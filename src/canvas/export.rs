@@ -56,10 +56,11 @@ pub fn collect_export_subset<'a>(
 ) -> Result<(Vec<&'a CanvasNode>, Vec<&'a CanvasEdge>, ExportBounds), String> {
     let mut node_ids = BTreeSet::new();
     let mut edge_ids = BTreeSet::new();
+    let visible = doc.visible_nodes();
 
     if !selected_nodes.is_empty() {
         for id in selected_nodes {
-            if !doc.is_hidden_by_collapse(id) && doc.node(id).is_some() {
+            if visible.contains_key(id.as_str()) {
                 node_ids.insert(id.clone());
             }
         }
@@ -70,15 +71,15 @@ pub fn collect_export_subset<'a>(
         }
     } else if let Some(eid) = selected_edge
         && let Some(edge) = doc.edge(eid)
-        && !doc.is_hidden_by_collapse(&edge.from_node)
-        && !doc.is_hidden_by_collapse(&edge.to_node)
+        && visible.contains_key(edge.from_node.as_str())
+        && visible.contains_key(edge.to_node.as_str())
     {
         node_ids.insert(edge.from_node.clone());
         node_ids.insert(edge.to_node.clone());
         edge_ids.insert(edge.id.clone());
     } else {
         for node in &doc.nodes {
-            if !doc.is_hidden_by_collapse(&node.id) {
+            if visible.contains_key(node.id.as_str()) {
                 node_ids.insert(node.id.clone());
             }
         }
@@ -116,7 +117,7 @@ pub fn collect_export_subset<'a>(
     }
 
     for edge in &edges {
-        if let Some((p0, p3, fs, ts)) = edge_endpoints(doc, edge) {
+        if let Some((p0, p3, fs, ts)) = edge_endpoints(edge, |id| visible.get(id).copied()) {
             let (c1, c2) = edge_bezier_controls(p0, p3, fs, ts);
             for (px, py) in [p0, c1, c2, p3] {
                 min_x = min_x.min(px - 8.0);
@@ -212,8 +213,10 @@ pub fn render_svg(
     }
 
     // 2. Vector Bezier edges & arrowheads.
+    let nodes_by_id: std::collections::HashMap<_, _> = nodes.iter()
+        .map(|&node| (node.id.as_str(), node)).collect();
     for edge in &edges {
-        let Some((p0, p3, fs, ts)) = edge_endpoints(doc, edge) else {
+        let Some((p0, p3, fs, ts)) = edge_endpoints(edge, |id| nodes_by_id.get(id).copied()) else {
             continue;
         };
         let (c1, c2) = edge_bezier_controls(p0, p3, fs, ts);
