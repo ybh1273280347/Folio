@@ -192,10 +192,12 @@ impl Workspace {
                     .px_2()
                     .icon(crate::ui::icon(IconName::ListTree))
                     .label(format!("{count}"))
-                    .tooltip("查看引用此文档的知识画布")
+                    .tooltip(crate::i18n::canvas::TOOLTIP_BACKLINKS.get())
                     .dropdown_menu(move |menu, _, _| {
                         backlinks.iter().fold(
-                            menu.item(PopupMenuItem::label("画布反向引用")),
+                            menu.item(PopupMenuItem::label(
+                                crate::i18n::canvas::BACKLINKS_MENU_HEADER.get(),
+                            )),
                             |menu, link| {
                                 let app = app.clone();
                                 let item = link.clone();
@@ -338,6 +340,8 @@ impl Workspace {
             .flex()
             .flex_col()
             .size_full()
+            .min_w_0()
+            .overflow_hidden()
             .when(!show_background, |area| area.bg(rgb(0xffffff)))
             .on_mouse_down(
                 MouseButton::Left,
@@ -385,7 +389,14 @@ impl Workspace {
             if let Some(markdown) = self.documents.markdown_panes.get(&PaneKey::tab(&self.documents.active)) {
                 area = area.child(div().flex_1().min_h_0().child(markdown.clone()));
             } else if let Some(canvas) = self.documents.canvas_panes.get(&PaneKey::tab(&self.documents.active)) {
-                area = area.child(div().flex_1().min_h_0().child(canvas.clone()));
+                area = area.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .child(canvas.clone()),
+                );
             } else {
                 area = area.child(
                     div()

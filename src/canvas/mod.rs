@@ -2,6 +2,7 @@
 //! bidirectional document anchors, and transactional AI operations.
 
 pub mod anchor;
+pub mod export;
 pub mod history;
 pub mod index;
 pub mod interaction;

@@ -60,8 +60,8 @@ pub const TOOLTIP_ZOOM_IN: BiText = BiText::new("放大 (Ctrl+=)", "Zoom in (Ctr
 pub const NODE_INPUT_PLACEHOLDER: BiText = BiText::new("输入节点内容…", "Enter node text…");
 pub const NODE_DOUBLE_CLICK_EDIT: BiText = BiText::new("双击编辑内容…", "Double-click to edit…");
 pub const EMPTY_CANVAS_HINT: BiText = BiText::new(
-    "双击画布空白处或点击左上「+」新建节点 · 拖拽圆点连线（Shift 画实线）· 支持 Ctrl+V 粘贴图片",
-    "Double-click canvas or click '+' to add a node · Drag ports to connect (Shift for solid) · Ctrl+V pastes images",
+    "双击空白处或点击左上「+」新建 · 右键拖动画布 · 左键框选 · 拖拽圆点连线 · Ctrl+V 粘贴图片",
+    "Double-click or click '+' to add · Right-drag to pan · Left-drag to select · Drag ports to connect · Ctrl+V pastes images",
 );
 
 // Image dialog
@@ -238,3 +238,23 @@ pub fn picker_target_dir_label(folder: Option<&str>) -> String {
         (Locale::En, _) => "Create in: Workspace root/".to_owned(),
     }
 }
+
+// Export & backlinks
+pub const TOOLTIP_EXPORT: BiText = BiText::new(
+    "导出为 PDF / SVG / PNG（未选中时默认导出全部）",
+    "Export to PDF / SVG / PNG (exports all when nothing is selected)",
+);
+pub const EXPORT_SCOPE_ALL: BiText = BiText::new("导出范围：全部可见节点", "Scope: All visible items");
+pub fn export_scope_selected(count: usize) -> String {
+    match (locale(), count) {
+        (Locale::ZhCn, _) => format!("导出范围：已选 {count} 项"),
+        (Locale::En, 1) => "Scope: 1 selected item".to_owned(),
+        (Locale::En, _) => format!("Scope: {count} selected items"),
+    }
+}
+pub const ERR_EXPORT_EMPTY: BiText = BiText::new(
+    "当前画布中没有可导出的内容。",
+    "Nothing to export on the canvas.",
+);
+pub const TOOLTIP_BACKLINKS: BiText = BiText::new("查看引用此文档的知识画布", "Canvases referencing this document");
+pub const BACKLINKS_MENU_HEADER: BiText = BiText::new("画布反向引用", "Canvas Backlinks");

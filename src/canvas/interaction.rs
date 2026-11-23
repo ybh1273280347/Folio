@@ -1,7 +1,7 @@
 //! Camera transforms, spatial hit-testing, and mutually exclusive interaction states.
 
 use super::model::{CanvasDocument, CanvasEdge, CanvasNode, DropPlacement, EdgeKind, EdgeSide};
-use gpui_kit::{Bounds, Pixels, Point, point, px};
+use gpui_kit::{Bounds, MouseButton, Pixels, Point, point, px};
 
 pub const MIN_ZOOM: f32 = 0.2;
 pub const MAX_ZOOM: f32 = 3.0;
@@ -94,6 +94,7 @@ pub enum EdgeHandleEnd {
 pub enum InteractionState {
     Idle,
     Panning {
+        button: MouseButton,
         last_screen: Point<Pixels>,
     },
     BoxSelecting {

@@ -2,6 +2,7 @@
 
 use super::{
     anchor::KnowledgeAnchor,
+    export::{ExportFormat, export_canvas_to_file},
     history::CanvasHistory,
     interaction::{
         Camera, EdgeHandleEnd, InteractionState, WHEEL_ZOOM_STEP, ZOOM_STEP, compute_drop_target,
@@ -26,6 +27,7 @@ use gpui_kit::{
         Disableable, Sizable,
         button::{Button, ButtonVariants},
         input::{InputEvent, Textarea, TextareaState},
+        menu::{DropdownMenu, PopupMenuItem},
         tooltip::Tooltip,
     },
     prelude::FluentBuilder,
@@ -81,6 +83,7 @@ pub enum CanvasEvent {
     Change(String),
     Focus,
     FilesChanged,
+    Notice(String),
     JumpToAnchor {
         anchor: Option<KnowledgeAnchor>,
         fallback_file: Option<String>,
@@ -143,7 +146,7 @@ impl CanvasPane {
 
         let edit_input = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .auto_grow(2, 10)
+                .auto_grow(1, 10)
                 .submit_on_enter(true)
                 .placeholder(i18n_canvas::NODE_INPUT_PLACEHOLDER.get())
         });
@@ -425,6 +428,28 @@ impl CanvasPane {
             self.emit_change(cx);
             cx.notify();
         }
+    }
+
+    pub fn export_to(&mut self, format: ExportFormat, cx: &mut Context<Self>) {
+        let palette = active_palette();
+        match export_canvas_to_file(
+            &self.document,
+            &self.file_path,
+            &self.selection,
+            self.selected_edge.as_deref(),
+            palette,
+            format,
+        ) {
+            Ok(dest) => {
+                self.notice_error = None;
+                cx.emit(CanvasEvent::FilesChanged);
+                cx.emit(CanvasEvent::Notice(crate::i18n::media::drawio_exported(&dest)));
+            }
+            Err(err) => {
+                self.notice_error = Some(err);
+            }
+        }
+        cx.notify();
     }
 
     fn resolve_image_path(&self, raw: &str) -> Option<PathBuf> {
@@ -853,6 +878,7 @@ impl CanvasPane {
             || (button == MouseButton::Left && self.space_pressed)
         {
             self.interaction = InteractionState::Panning {
+                button,
                 last_screen: event.position,
             };
             cx.notify();
@@ -998,8 +1024,11 @@ impl CanvasPane {
                     cx.notify();
                 }
             }
-            InteractionState::Panning { last_screen } => {
-                if !event.dragging() {
+            InteractionState::Panning {
+                button,
+                last_screen,
+            } => {
+                if event.pressed_button != Some(*button) {
                     self.interaction = InteractionState::Idle;
                     cx.notify();
                     return;
@@ -1076,6 +1105,11 @@ impl CanvasPane {
                 cx.notify();
             }
             InteractionState::ConnectingEdge { current_world, .. } => {
+                if !event.dragging() {
+                    self.interaction = InteractionState::Idle;
+                    cx.notify();
+                    return;
+                }
                 *current_world = (wx, wy);
                 self.hovered_node = hit_node(&self.document, wx, wy).map(|n| n.id.clone());
                 cx.notify();
@@ -1085,6 +1119,11 @@ impl CanvasPane {
                 snap,
                 ..
             } => {
+                if !event.dragging() {
+                    self.interaction = InteractionState::Idle;
+                    cx.notify();
+                    return;
+                }
                 *current_world = (wx, wy);
                 *snap = hit_port(&self.document, &self.camera, wx, wy, |_| true)
                     .map(|(n, s)| (n.id.clone(), s))
@@ -1099,6 +1138,11 @@ impl CanvasPane {
                 current_world,
                 additive,
             } => {
+                if !event.dragging() {
+                    self.interaction = InteractionState::Idle;
+                    cx.notify();
+                    return;
+                }
                 *current_world = (wx, wy);
                 let hits = nodes_in_rect(&self.document, *anchor_world, *current_world);
                 if !*additive {
@@ -1304,19 +1348,19 @@ impl CanvasPane {
             gpui_kit::rgb(palette.surface)
         };
 
-        let text_size = (13.0 * zoom).clamp(9.0, 22.0);
-        let meta_size = (10.5 * zoom).clamp(8.0, 14.0);
+        let text_size = (13.0 * zoom).clamp(3.0, 40.0);
+        let meta_size = (10.5 * zoom).clamp(2.5, 32.0);
         let pad_x = if is_image {
             0.0
         } else {
-            (10.0 * zoom).clamp(4.0, 18.0)
+            (10.0 * zoom).clamp(2.0, 30.0)
         };
         let pad_y = if is_image {
             0.0
         } else {
-            (8.0 * zoom).clamp(3.0, 14.0)
+            (8.0 * zoom).clamp(2.0, 24.0)
         };
-        let radius = (8.0 * zoom).clamp(4.0, 14.0);
+        let radius = (8.0 * zoom).clamp(2.0, 18.0);
 
         let anchor_badge = if is_image {
             None
@@ -1421,13 +1465,19 @@ impl CanvasPane {
                     .key_context("FolioCanvasEditing")
                     .flex_1()
                     .min_h_0()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
                     .when(is_image, |el| el.p_1p5().bg(gpui_kit::rgb(palette.surface)))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
                         Textarea::new(&self.edit_input)
                             .appearance(false)
                             .bordered(false)
-                            .size_full()
+                            .w_full()
+                            .text_center()
                             .text_size(px(text_size)),
                     ),
             );
@@ -1468,7 +1518,13 @@ impl CanvasPane {
                 div()
                     .flex_1()
                     .min_h_0()
+                    .w_full()
                     .overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .text_center()
                     .text_size(px(text_size))
                     .line_height(relative(1.38))
                     .text_color(gpui_kit::rgb(if placeholder {
@@ -1506,14 +1562,16 @@ impl CanvasPane {
         if has_children {
             let collapse_id = node.id.clone();
             let collapsed = node.is_collapsed();
+            let collapse_sz = (16.0 * zoom).clamp(7.0, 22.0);
+            let collapse_inset = (4.0 * zoom).clamp(1.5, 6.0);
             card = card.child(
                 div()
                     .id(SharedString::from(format!("canvas-collapse-{}", node.id)))
                     .absolute()
-                    .right(px(4.0))
-                    .top(px(4.0))
-                    .w(px(16.0))
-                    .h(px(16.0))
+                    .right(px(collapse_inset))
+                    .top(px(collapse_inset))
+                    .w(px(collapse_sz))
+                    .h(px(collapse_sz))
                     .rounded_full()
                     .bg(gpui_kit::rgb(palette.hover))
                     .border_1()
@@ -1521,7 +1579,7 @@ impl CanvasPane {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(10.0))
+                    .text_size(px((10.0 * zoom).clamp(4.0, 14.0)))
                     .text_color(gpui_kit::rgb(palette.muted))
                     .cursor_pointer()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1603,6 +1661,8 @@ impl Render for CanvasPane {
         let root = div()
             .id("folio-canvas-root")
             .size_full()
+            .min_w_0()
+            .min_h_0()
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -1736,6 +1796,7 @@ impl Render for CanvasPane {
             .id("folio-canvas-viewport")
             .relative()
             .flex_1()
+            .min_w_0()
             .min_h_0()
             .w_full()
             .overflow_hidden()
@@ -1792,6 +1853,18 @@ impl Render for CanvasPane {
             )
             .on_mouse_up_out(
                 MouseButton::Left,
+                cx.listener(|pane, event: &MouseUpEvent, _, cx| {
+                    pane.handle_mouse_up(event, cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Right,
+                cx.listener(|pane, event: &MouseUpEvent, _, cx| {
+                    pane.handle_mouse_up(event, cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Middle,
                 cx.listener(|pane, event: &MouseUpEvent, _, cx| {
                     pane.handle_mouse_up(event, cx);
                 }),
@@ -1960,8 +2033,20 @@ impl Render for CanvasPane {
         let can_redo = self.history.can_redo();
         let default_is_hierarchy = self.default_edge_kind == EdgeKind::Hierarchy;
 
+        let export_scope_label: String = if !self.selection.is_empty() {
+            i18n_canvas::export_scope_selected(self.selection.len())
+        } else if self.selected_edge.is_some() {
+            i18n_canvas::export_scope_selected(1)
+        } else {
+            i18n_canvas::EXPORT_SCOPE_ALL.get().to_owned()
+        };
+        let pane_entity = cx.entity();
+
         let left_group = div()
             .flex()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
             .items_center()
             .gap_1()
             .child(
@@ -2126,9 +2211,50 @@ impl Render for CanvasPane {
                         };
                         cx.notify();
                     })),
+            )
+            .child(div().w(px(1.)).h(px(14.)).mx_0p5().bg(gpui_kit::rgb(palette.border)))
+            .child(
+                Button::new("canvas-bar-export")
+                    .ghost()
+                    .compact()
+                    .h(px(24.))
+                    .w(px(24.))
+                    .icon(crate::ui::icon(IconName::FileDown))
+                    .tooltip(i18n_canvas::TOOLTIP_EXPORT)
+                    .dropdown_menu(move |menu, _, _| {
+                        let p_pdf = pane_entity.clone();
+                        let p_svg = pane_entity.clone();
+                        let p_png = pane_entity.clone();
+                        menu.item(PopupMenuItem::label(export_scope_label.clone()))
+                            .separator()
+                            .item(
+                                PopupMenuItem::new(crate::i18n::media::DRAWIO_EXPORT_PDF.get())
+                                    .on_click(move |_, _, cx| {
+                                        p_pdf.update(cx, |pane, cx| {
+                                            pane.export_to(ExportFormat::Pdf, cx);
+                                        });
+                                    }),
+                            )
+                            .item(
+                                PopupMenuItem::new(crate::i18n::media::DRAWIO_EXPORT_SVG.get())
+                                    .on_click(move |_, _, cx| {
+                                        p_svg.update(cx, |pane, cx| {
+                                            pane.export_to(ExportFormat::Svg, cx);
+                                        });
+                                    }),
+                            )
+                            .item(
+                                PopupMenuItem::new(crate::i18n::media::DRAWIO_EXPORT_PNG.get())
+                                    .on_click(move |_, _, cx| {
+                                        p_png.update(cx, |pane, cx| {
+                                            pane.export_to(ExportFormat::Png, cx);
+                                        });
+                                    }),
+                            )
+                    }),
             );
 
-        let mut right_group = div().flex().items_center().gap_1();
+        let mut right_group = div().flex().flex_shrink_0().items_center().gap_1();
         if has_selection {
             right_group = right_group
                 .child(

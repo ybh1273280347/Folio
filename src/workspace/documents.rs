@@ -901,6 +901,9 @@ impl Workspace {
                         app.report(error, cx);
                     }
                 }
+                CanvasEvent::Notice(message) => {
+                    app.report(message.clone(), cx);
+                }
                 CanvasEvent::JumpToAnchor {
                     anchor,
                     fallback_file,
