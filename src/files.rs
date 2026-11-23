@@ -10,7 +10,7 @@ use crate::model::{DiskDocument, FileKind, ProjectFile};
 
 const TEXT_EXTENSIONS: &[&str] = &[
     "tex", "ltx", "bib", "sty", "cls", "bst", "bbx", "cbx", "cfg", "def", "clo", "ist", "glsdefs",
-    "txt", "md", "csv", "tsv", "dat", "tikz", "pgf", "asy", "json", "yaml", "yml", "toml", "eps",
+    "txt", "md", "canvas", "csv", "tsv", "dat", "tikz", "pgf", "asy", "json", "yaml", "yml", "toml", "eps",
 ];
 const ASSET_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "webp", "gif", "svg", "pdf", "html", "htm", "drawio",
@@ -285,6 +285,58 @@ pub fn create_markdown_in(root: &Path, folder: Option<&str>) -> io::Result<Proje
 
 pub fn create_drawio_in(root: &Path, folder: Option<&str>) -> io::Result<ProjectFile> {
     create_untitled_in(root, folder, crate::i18n::workspace::untitled_drawio)
+}
+
+pub fn create_canvas_in(root: &Path, folder: Option<&str>) -> io::Result<ProjectFile> {
+    let created = create_untitled_in(root, folder, crate::i18n::workspace::untitled_canvas)?;
+    if let Ok(path) = project_path(root, &created.path) {
+        let _ = fs::write(path, "{\n  \"nodes\": [],\n  \"edges\": []\n}\n");
+    }
+    Ok(created)
+}
+
+pub fn create_named_canvas_in(
+    root: &Path,
+    folder: Option<&str>,
+    raw_name: &str,
+) -> io::Result<ProjectFile> {
+    let trimmed = raw_name.trim();
+    if trimmed.is_empty()
+        || trimmed == "."
+        || trimmed == ".."
+        || trimmed
+            .chars()
+            .any(|ch| ch == '/' || ch == '\\' || "<>:\"|?*".contains(ch))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            crate::i18n::workspace::ERR_INVALID_FILENAME_EXT.get(),
+        ));
+    }
+    let filename = if trimmed.to_ascii_lowercase().ends_with(".canvas") {
+        trimmed.to_owned()
+    } else {
+        format!("{trimmed}.canvas")
+    };
+    let clean_folder = folder
+        .map(|s| s.trim().trim_matches(['/', '\\']))
+        .filter(|s| !s.is_empty());
+    let parent = match clean_folder {
+        Some(dir) => project_path(root, dir)?,
+        None => dunce::canonicalize(root)?,
+    };
+    let full = parent.join(&filename);
+    if !full.exists() {
+        fs::write(&full, "{\n  \"nodes\": [],\n  \"edges\": []\n}\n")?;
+    }
+    let rel = match clean_folder {
+        Some(dir) => format!("{dir}/{filename}"),
+        None => filename,
+    };
+    Ok(ProjectFile {
+        kind: FileKind::Text,
+        path: rel,
+    })
 }
 
 pub fn rename_file(root: &Path, relative: &str, name: &str) -> io::Result<String> {
@@ -712,5 +764,18 @@ mod tests {
         assert_eq!(first.kind, FileKind::Text);
         assert_eq!(second.path, "未命名2.tex");
         assert_eq!(second.kind, FileKind::Text);
+    }
+
+    #[test]
+    fn create_named_canvas_creates_in_root_and_subfolder() {
+        let temp = tempdir().unwrap();
+        let root_file = create_named_canvas_in(temp.path(), None, "导图").unwrap();
+        assert_eq!(root_file.path, "导图.canvas");
+        assert!(temp.path().join("导图.canvas").is_file());
+
+        fs::create_dir_all(temp.path().join("Notes/第一章")).unwrap();
+        let nested = create_named_canvas_in(temp.path(), Some("Notes/第一章"), "复杂度.canvas").unwrap();
+        assert_eq!(nested.path, "Notes/第一章/复杂度.canvas");
+        assert!(temp.path().join("Notes/第一章/复杂度.canvas").is_file());
     }
 }

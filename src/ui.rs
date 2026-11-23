@@ -700,6 +700,13 @@ pub fn file_icon(path: &str, asset: bool, main: bool) -> AnyElement {
             .flex_shrink_0()
             .into_any_element();
     }
+    if lower.ends_with(".canvas") {
+        return div()
+            .flex_shrink_0()
+            .text_color(rgb(0x0d9488))
+            .child(icon(IconName::ListTree))
+            .into_any_element();
+    }
     if lower.ends_with(".drawio") || lower.ends_with(".drawio.svg") {
         return div()
             .flex_shrink_0()

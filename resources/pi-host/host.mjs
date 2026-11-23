@@ -10,6 +10,7 @@ import { createAgentSession, SessionManager, DefaultResourceLoader, ModelRuntime
   createMcpExtension, createCodemodeExtension, createToolSearchExtension } from '@earendil-works/pi-coding-agent';
 import { webTools } from './tools/web/tools.mjs';
 import { annotationTools } from './tools/workspace/annotation-tools.mjs';
+import { canvasTools } from './tools/workspace/canvas-tools.mjs';
 import { compileTools } from './tools/workspace/compile-tools.mjs';
 import { drawioTools } from './tools/workspace/drawio-tools.mjs';
 import { ragTools } from './tools/workspace/rag-tools.mjs';
@@ -33,6 +34,21 @@ const workspaceToolChannels = [
     timeouts: { list: 30_000, create: 30_000 },
     timeoutMessage: 'Folio 批注工具在 30 秒内没有响应。',
     retryableForError: (operation, error) => operation === 'list' && error.code === 'workspace_tool_timeout',
+  },
+  {
+    channel: 'canvas',
+    factory: canvasTools,
+    timeoutMs: 15_000,
+    timeouts: {
+      read: 15_000,
+      get_selection: 10_000,
+      create: 15_000,
+      apply_ops: 15_000,
+      layout: 15_000,
+    },
+    timeoutMessage: 'Folio 画布工具在 15 秒内没有响应。',
+    retryableForError: (operation, error) =>
+      error.code === 'workspace_tool_timeout' && ['read', 'get_selection'].includes(operation),
   },
   {
     channel: 'compile',
@@ -207,7 +223,7 @@ async function createRecord(cwd, manager, replacement) {
   const record = { project, id, cwd, manager, sequence: 0, running: false, failed: false,
     pending: new Map(), editorText: '', retained: true, models: await ModelRuntime.create() };
   await configureModels(record);
-  const bundledSkills = ['folio-annotations', 'folio-drawio', 'folio-intro', 'folio-markdown']
+  const bundledSkills = ['folio-annotations', 'folio-canvas', 'folio-drawio', 'folio-intro', 'folio-markdown']
     .filter(name => !fs.existsSync(path.join(getAgentDir(), 'skills', name, 'SKILL.md')))
     .map(name => path.join(import.meta.dirname, 'skills', name));
   const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir(),

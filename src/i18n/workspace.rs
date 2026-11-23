@@ -270,6 +270,7 @@ pub const MENU_COPY_FULL_PATH: BiText = BiText::new("复制完整路径", "Copy 
 pub const MENU_EDIT_TAGS: BiText = BiText::new("编辑标签…", "Edit Tags…");
 pub const MENU_RENAME: BiText = BiText::new("重命名…", "Rename…");
 pub const MENU_NEW_MARKDOWN: BiText = BiText::new("新建 .md", "New .md");
+pub const MENU_NEW_CANVAS: BiText = BiText::new("新建 .canvas", "New .canvas");
 pub const MENU_NEW_TEX: BiText = BiText::new("新建 .tex", "New .tex");
 pub const MENU_NEW_DRAWIO: BiText = BiText::new("新建 .drawio", "New .drawio");
 pub const MENU_NEW_BIB: BiText = BiText::new("新建 .bib", "New .bib");
@@ -390,6 +391,15 @@ pub fn untitled_drawio(number: Option<usize>) -> String {
         (Locale::ZhCn, Some(n)) => format!("未命名绘图 {n}.drawio"),
         (Locale::En, None) => "Untitled.drawio".to_owned(),
         (Locale::En, Some(n)) => format!("Untitled {n}.drawio"),
+    }
+}
+
+pub fn untitled_canvas(number: Option<usize>) -> String {
+    match (locale(), number) {
+        (Locale::ZhCn, None) => "未命名画布.canvas".to_owned(),
+        (Locale::ZhCn, Some(n)) => format!("未命名画布 {n}.canvas"),
+        (Locale::En, None) => "Untitled.canvas".to_owned(),
+        (Locale::En, Some(n)) => format!("Untitled {n}.canvas"),
     }
 }
 

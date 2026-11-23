@@ -46,6 +46,12 @@ pub enum MarkdownEvent {
     Zoom(u8),
     OpenLink(String),
     AskAi(String),
+    SendToCanvas {
+        quote: String,
+        occurrence: usize,
+        heading_path: Vec<String>,
+        line_hint: Option<usize>,
+    },
     FilesChanged,
     UpdateTextColorPresets(Vec<String>),
 }
@@ -53,6 +59,11 @@ pub enum MarkdownEvent {
 enum PendingVisualJump {
     Heading(String),
     Annotation(u64),
+    Quote {
+        quote: String,
+        occurrence: usize,
+        fallback_heading: Option<String>,
+    },
 }
 
 actions!(
@@ -1451,8 +1462,77 @@ impl MarkdownPane {
         match self.pending_visual_jump.take() {
             Some(PendingVisualJump::Heading(anchor)) => self.reveal_anchor(&anchor, None, cx),
             Some(PendingVisualJump::Annotation(id)) => self.reveal_annotation(id, cx),
+            Some(PendingVisualJump::Quote {
+                quote,
+                occurrence,
+                fallback_heading,
+            }) => {
+                let matched = self
+                    .visual_editor
+                    .update(cx, |editor, cx| editor.select_quote_occurrence(&quote, occurrence, cx));
+                if !matched && let Some(heading) = fallback_heading {
+                    self.reveal_anchor(&heading, None, cx);
+                }
+            }
             None => {}
         }
+    }
+
+    pub fn jump_to_canvas_quote(
+        &mut self,
+        quote: &str,
+        occurrence: usize,
+        fallback_heading: Option<&str>,
+        line_hint: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.source {
+            self.jump_to_search_hit(line_hint, fallback_heading, Some(quote), window, cx);
+            return true;
+        }
+        if self.loading.is_some() {
+            self.pending_visual_jump = Some(PendingVisualJump::Quote {
+                quote: quote.to_owned(),
+                occurrence,
+                fallback_heading: fallback_heading.map(str::to_owned),
+            });
+            return true;
+        }
+        let matched = self.visual_editor.update(cx, |editor, cx| {
+            if editor.select_quote_occurrence(quote, occurrence, cx) {
+                editor.focus(window, cx);
+                true
+            } else {
+                false
+            }
+        });
+        if matched {
+            cx.notify();
+            return true;
+        }
+        if let Some(heading) = fallback_heading {
+            self.navigate_to_anchor(heading, window, cx);
+        }
+        false
+    }
+
+    fn active_heading_context(&self) -> (Vec<String>, Option<usize>) {
+        let Some(active_ix) = self.active_heading.filter(|ix| *ix < self.headings.len()) else {
+            return (Vec::new(), None);
+        };
+        let line_hint = Some(self.headings[active_ix].line + 1);
+        let mut chain = Vec::new();
+        let mut current_level = self.headings[active_ix].level;
+        chain.push(self.headings[active_ix].display_title.clone());
+        for heading in self.headings[..active_ix].iter().rev() {
+            if heading.level < current_level {
+                chain.push(heading.display_title.clone());
+                current_level = heading.level;
+            }
+        }
+        chain.reverse();
+        (chain, line_hint)
     }
 
     fn find_heading_index(&self, anchor: &str) -> Option<usize> {
@@ -2596,6 +2676,33 @@ impl MarkdownPane {
                         && !text.trim().is_empty()
                     {
                         cx.emit(MarkdownEvent::AskAi(text));
+                    }
+                    pane.defer_focus_visual(window, cx);
+                })),
+            ))
+            // 11. Send to Canvas (添加到画布)
+            .child(tool_btn(
+                "ft-send-to-canvas",
+                false,
+                crate::ui::icon(IconName::LayoutGrid).into_any_element(),
+                Box::new(cx.listener(move |pane, _, window, cx| {
+                    let visual = pane.visual_editor.read(cx);
+                    let quote_pair = visual
+                        .selected_quote_and_occurrence()
+                        .or_else(|| {
+                            visual
+                                .selected_plain_text()
+                                .filter(|s| !s.trim().is_empty())
+                                .map(|s| (s, 0))
+                        });
+                    if let Some((quote, occurrence)) = quote_pair {
+                        let (heading_path, line_hint) = pane.active_heading_context();
+                        cx.emit(MarkdownEvent::SendToCanvas {
+                            quote,
+                            occurrence,
+                            heading_path,
+                            line_hint,
+                        });
                     }
                     pane.defer_focus_visual(window, cx);
                 })),

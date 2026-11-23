@@ -2891,6 +2891,14 @@ fn summarize_tool_call(name: &str, args: &Value, diffs: &[FileDiff]) -> String {
             "编辑 Draw.io 元素 ({})",
             args["operations"].as_array().map_or(0, Vec::len)
         ),
+        "folio_canvas_read" => format!("读取画布 {}", args["path"].as_str().unwrap_or_default()),
+        "folio_canvas_get_selection" => "读取当前画布选区".into(),
+        "folio_canvas_create" => format!("新建画布 {}", args["path"].as_str().unwrap_or_default()),
+        "folio_canvas_apply_ops" => format!(
+            "修改画布 ({} 项操作)",
+            args["ops"].as_array().map_or(0, Vec::len)
+        ),
+        "folio_canvas_layout" => format!("整理画布导图布局 {}", args["path"].as_str().unwrap_or_default()),
         "run_python" => crate::i18n::ai::TOOL_RUN_PYTHON.get().into(),
         "bash" | "powershell" => args
             .get("command")

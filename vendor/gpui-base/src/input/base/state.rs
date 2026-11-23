@@ -1083,7 +1083,7 @@ impl<M: InputModeKind> InputBaseState<M> {
     }
 
     pub fn set_text_align(&mut self, text_align: TextAlign, cx: &mut Context<Self>) {
-        if !self.is_single_line() || self.text_align == text_align {
+        if self.is_code_editor() || self.text_align == text_align {
             return;
         }
 

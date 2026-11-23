@@ -238,6 +238,12 @@ const CREATABLE_PRESETS: &[CreatablePreset] = &[
         folder_label: crate::i18n::workspace::MENU_NEW_MARKDOWN,
     },
     CreatablePreset {
+        ext: "canvas",
+        sample_path: "untitled.canvas",
+        menu_label: ".canvas",
+        folder_label: crate::i18n::workspace::MENU_NEW_CANVAS,
+    },
+    CreatablePreset {
         ext: "tex",
         sample_path: "untitled.tex",
         menu_label: ".tex",
@@ -462,6 +468,7 @@ impl Workspace {
         self.tree.folders = files::list_folders(&root)?;
         self.relocate_tags(&relocated, false, cx);
         self.relocate_rag_paths(&relocated, false, cx);
+        self.relocate_canvas_links(&relocated, false, cx);
         self.projects.save()?;
         self.remember_session()?;
         cx.notify();
@@ -490,6 +497,7 @@ impl Workspace {
         let relocated = [(dragged.0.clone(), renamed.clone())];
         self.relocate_tags(&relocated, true, cx);
         self.relocate_rag_paths(&relocated, true, cx);
+        self.relocate_canvas_links(&relocated, true, cx);
         self.projects.save()?;
         self.remember_session()?;
         if !cx.reduce_motion() {
@@ -738,6 +746,7 @@ impl Workspace {
         let root = PathBuf::from(&self.projects.directory().unwrap().folder);
         let file = match ext {
             "md" => files::create_markdown_in(&root, folder)?,
+            "canvas" => files::create_canvas_in(&root, folder)?,
             "drawio" => files::create_drawio_in(&root, folder)?,
             _ => files::create_untitled_in(&root, folder, |n| {
                 crate::i18n::workspace::untitled_ext(ext, n)
@@ -900,6 +909,7 @@ impl Workspace {
                     let relocated = [(folder_path, renamed)];
                     self.relocate_tags(&relocated, true, cx);
                     self.relocate_rag_paths(&relocated, true, cx);
+                    self.relocate_canvas_links(&relocated, true, cx);
                     self.projects.save()?;
                 }
             }

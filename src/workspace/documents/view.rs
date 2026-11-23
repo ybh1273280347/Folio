@@ -179,6 +179,50 @@ impl Workspace {
                 }),
         );
 
+        if !trash_open && !self.documents.active_canvas_backlinks.is_empty() {
+            let backlinks = self.documents.active_canvas_backlinks.clone();
+            let count = backlinks.len();
+            let app = cx.entity();
+            bar = bar.child(
+                Button::new("canvas-backlinks-pill")
+                    .ghost()
+                    .compact()
+                    .with_size(px(14.))
+                    .h(px(22.))
+                    .px_2()
+                    .icon(crate::ui::icon(IconName::ListTree))
+                    .label(format!("{count}"))
+                    .tooltip(crate::i18n::canvas::TOOLTIP_BACKLINKS.get())
+                    .dropdown_menu(move |menu, _, _| {
+                        backlinks.iter().fold(
+                            menu.item(PopupMenuItem::label(
+                                crate::i18n::canvas::BACKLINKS_MENU_HEADER.get(),
+                            )),
+                            |menu, link| {
+                                let app = app.clone();
+                                let item = link.clone();
+                                let canvas_name = Path::new(&link.canvas_path)
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| link.canvas_path.clone());
+                                let title = if link.label.is_empty() {
+                                    canvas_name
+                                } else {
+                                    format!("{canvas_name} · {}", link.label)
+                                };
+                                menu.item(PopupMenuItem::new(title).on_click(
+                                    move |_, window, cx| {
+                                        app.update(cx, |app, cx| {
+                                            app.open_canvas_backlink(&item, window, cx);
+                                        });
+                                    },
+                                ))
+                            },
+                        )
+                    }),
+            );
+        }
+
         if !trash_open
             && let Some(md_pane) = self.documents.markdown_panes.get(&PaneKey::tab(&self.documents.active))
         {
@@ -236,6 +280,15 @@ impl Workspace {
                         }),
                 );
         } else if !trash_open
+            && Self::is_canvas_path(&self.documents.active)
+            && let Some(canvas_pane) = self.documents.canvas_panes.get(&PaneKey::tab(&self.documents.active))
+        {
+            let copy_pane = canvas_pane.clone();
+            bar = bar.child(crate::ui::copy_document_button(
+                SharedString::from(format!("canvas-copy-document:{}", self.documents.active)),
+                move |cx| copy_pane.read(cx).document().to_json_pretty().unwrap_or_default(),
+            ));
+        } else if !trash_open
             && let Some(document) = self.documents.open.get(&self.documents.active)
         {
             let editor = document.editor.clone();
@@ -287,6 +340,8 @@ impl Workspace {
             .flex()
             .flex_col()
             .size_full()
+            .min_w_0()
+            .overflow_hidden()
             .when(!show_background, |area| area.bg(rgb(0xffffff)))
             .on_mouse_down(
                 MouseButton::Left,
@@ -333,6 +388,15 @@ impl Workspace {
             }
             if let Some(markdown) = self.documents.markdown_panes.get(&PaneKey::tab(&self.documents.active)) {
                 area = area.child(div().flex_1().min_h_0().child(markdown.clone()));
+            } else if let Some(canvas) = self.documents.canvas_panes.get(&PaneKey::tab(&self.documents.active)) {
+                area = area.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .child(canvas.clone()),
+                );
             } else {
                 area = area.child(
                     div()
