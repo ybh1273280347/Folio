@@ -3715,6 +3715,27 @@ mod tests {
     }
 
     #[test]
+    fn reopens_a_saved_resized_image_as_editable_content() {
+        use super::{BlockEditorModel, MarkdownExtensions};
+        use markdown_editor::BlockKind;
+
+        let saved = r#"# 递推式
+
+<img src="images/复杂度表达式/图.png" alt="Image" width="802px" height="486.52518px" />
+
+下一段"#;
+        let model = BlockEditorModel::from_markdown(saved, MarkdownExtensions::default()).unwrap();
+        let document = model.document();
+        let mut leaves = document.leaves();
+        leaves.next().unwrap();
+        let image = leaves.next().unwrap();
+        assert_eq!(image.kind(), BlockKind::Paragraph);
+        assert_eq!(image.text(), Some("\u{FFFC}"));
+        assert_eq!(leaves.next().unwrap().text(), Some("下一段"));
+        assert_eq!(model.source(), saved);
+    }
+
+    #[test]
     fn text_color_round_trips_and_toggles_in_editor_model() {
         use super::{
             BlockEditorModel, BlockPosition, BlockSelection, EditorCommand, MarkChange, MarkKind,
