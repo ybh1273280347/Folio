@@ -318,18 +318,21 @@ pub fn create_named_canvas_in(
     } else {
         format!("{trimmed}.canvas")
     };
-    let clean_folder = folder.map(str::trim).filter(|s| !s.is_empty());
-    let rel = match clean_folder {
-        Some(dir) => format!("{}/{}", dir.trim_end_matches('/'), filename),
-        None => filename,
+    let clean_folder = folder
+        .map(|s| s.trim().trim_matches(['/', '\\']))
+        .filter(|s| !s.is_empty());
+    let parent = match clean_folder {
+        Some(dir) => project_path(root, dir)?,
+        None => dunce::canonicalize(root)?,
     };
-    let full = project_path(root, &rel)?;
-    if let Some(parent) = full.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    let full = parent.join(&filename);
     if !full.exists() {
         fs::write(&full, "{\n  \"nodes\": [],\n  \"edges\": []\n}\n")?;
     }
+    let rel = match clean_folder {
+        Some(dir) => format!("{dir}/{filename}"),
+        None => filename,
+    };
     Ok(ProjectFile {
         kind: FileKind::Text,
         path: rel,
@@ -761,5 +764,18 @@ mod tests {
         assert_eq!(first.kind, FileKind::Text);
         assert_eq!(second.path, "未命名2.tex");
         assert_eq!(second.kind, FileKind::Text);
+    }
+
+    #[test]
+    fn create_named_canvas_creates_in_root_and_subfolder() {
+        let temp = tempdir().unwrap();
+        let root_file = create_named_canvas_in(temp.path(), None, "导图").unwrap();
+        assert_eq!(root_file.path, "导图.canvas");
+        assert!(temp.path().join("导图.canvas").is_file());
+
+        fs::create_dir_all(temp.path().join("Notes/第一章")).unwrap();
+        let nested = create_named_canvas_in(temp.path(), Some("Notes/第一章"), "复杂度.canvas").unwrap();
+        assert_eq!(nested.path, "Notes/第一章/复杂度.canvas");
+        assert!(temp.path().join("Notes/第一章/复杂度.canvas").is_file());
     }
 }
