@@ -238,6 +238,12 @@ const CREATABLE_PRESETS: &[CreatablePreset] = &[
         folder_label: crate::i18n::workspace::MENU_NEW_MARKDOWN,
     },
     CreatablePreset {
+        ext: "canvas",
+        sample_path: "untitled.canvas",
+        menu_label: ".canvas",
+        folder_label: crate::i18n::workspace::MENU_NEW_CANVAS,
+    },
+    CreatablePreset {
         ext: "tex",
         sample_path: "untitled.tex",
         menu_label: ".tex",
@@ -738,6 +744,7 @@ impl Workspace {
         let root = PathBuf::from(&self.projects.directory().unwrap().folder);
         let file = match ext {
             "md" => files::create_markdown_in(&root, folder)?,
+            "canvas" => files::create_canvas_in(&root, folder)?,
             "drawio" => files::create_drawio_in(&root, folder)?,
             _ => files::create_untitled_in(&root, folder, |n| {
                 crate::i18n::workspace::untitled_ext(ext, n)

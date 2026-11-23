@@ -4,6 +4,7 @@
 mod ai;
 mod annotations;
 mod build;
+mod canvas;
 mod drawio;
 mod files;
 mod http;
@@ -40,6 +41,7 @@ fn main() {
         gpui_kit::init(cx);
         math_layout::register_fonts(cx);
         markdown_editor::init(cx);
+        canvas::bind_shortcuts(cx);
         let initial_settings = storage::load_settings().expect(i18n::workspace::ERR_LOAD_SETTINGS.get());
         i18n::apply_settings(&initial_settings);
         cx.set_global(initial_settings.translate.clone());

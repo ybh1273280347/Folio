@@ -10,7 +10,7 @@ use crate::model::{DiskDocument, FileKind, ProjectFile};
 
 const TEXT_EXTENSIONS: &[&str] = &[
     "tex", "ltx", "bib", "sty", "cls", "bst", "bbx", "cbx", "cfg", "def", "clo", "ist", "glsdefs",
-    "txt", "md", "csv", "tsv", "dat", "tikz", "pgf", "asy", "json", "yaml", "yml", "toml", "eps",
+    "txt", "md", "canvas", "csv", "tsv", "dat", "tikz", "pgf", "asy", "json", "yaml", "yml", "toml", "eps",
 ];
 const ASSET_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "webp", "gif", "svg", "pdf", "html", "htm", "drawio",
@@ -285,6 +285,14 @@ pub fn create_markdown_in(root: &Path, folder: Option<&str>) -> io::Result<Proje
 
 pub fn create_drawio_in(root: &Path, folder: Option<&str>) -> io::Result<ProjectFile> {
     create_untitled_in(root, folder, crate::i18n::workspace::untitled_drawio)
+}
+
+pub fn create_canvas_in(root: &Path, folder: Option<&str>) -> io::Result<ProjectFile> {
+    let created = create_untitled_in(root, folder, crate::i18n::workspace::untitled_canvas)?;
+    if let Ok(path) = project_path(root, &created.path) {
+        let _ = fs::write(path, "{\n  \"nodes\": [],\n  \"edges\": []\n}\n");
+    }
+    Ok(created)
 }
 
 pub fn rename_file(root: &Path, relative: &str, name: &str) -> io::Result<String> {

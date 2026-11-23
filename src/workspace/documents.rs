@@ -5,6 +5,7 @@ mod view;
 
 use super::*;
 use crate::annotations::AnnotationItem;
+use crate::canvas::{CanvasEvent, CanvasPane};
 use crate::drawio::{DrawioPane, DrawioPaneEvent};
 use crate::markdown::{MarkdownEvent, MarkdownPane};
 use crate::model::DocumentBuffer;
@@ -63,11 +64,13 @@ pub(super) struct Documents {
     reading_panes: Vec<String>,
     focused_markdown: Option<String>,
     markdown_panes: BTreeMap<PaneKey, Entity<MarkdownPane>>,
+    canvas_panes: BTreeMap<PaneKey, Entity<CanvasPane>>,
     pdf_panes: BTreeMap<PaneKey, Entity<PdfPane>>,
     html_panes: BTreeMap<PaneKey, Entity<HtmlPane>>,
     drawio_panes: BTreeMap<PaneKey, Entity<DrawioPane>>,
     image_panes: BTreeMap<PaneKey, Entity<crate::image::ImagePane>>,
     markdown_changed: BTreeSet<String>,
+    canvas_changed: BTreeSet<String>,
     source_version: u64,
     document_watch: DocumentWatch,
 }
@@ -209,7 +212,11 @@ impl Documents {
     }
 
     fn source_changed(&mut self, path: &str) {
-        self.markdown_changed.insert(path.to_owned());
+        if path.to_ascii_lowercase().ends_with(".canvas") {
+            self.canvas_changed.insert(path.to_owned());
+        } else {
+            self.markdown_changed.insert(path.to_owned());
+        }
         self.source_version += 1;
     }
 }
@@ -275,6 +282,10 @@ impl Workspace {
     pub(super) fn is_drawio_path(path: &str) -> bool {
         let lower = path.to_lowercase();
         lower.ends_with(".drawio") || lower.ends_with(".drawio.svg")
+    }
+
+    pub(super) fn is_canvas_path(path: &str) -> bool {
+        path.to_ascii_lowercase().ends_with(".canvas")
     }
 
     pub(super) fn is_html_path(path: &str) -> bool {
@@ -437,6 +448,7 @@ impl Workspace {
         self.release_drawio_pane(key, window, cx);
         self.documents.image_panes.remove(key);
         self.documents.markdown_panes.remove(key);
+        self.documents.canvas_panes.remove(key);
     }
 
     /// The file tree calls this only after moving the file to trash succeeds.
@@ -473,8 +485,10 @@ impl Workspace {
         self.documents.active.clear();
         self.documents.reading_panes.clear();
         self.documents.markdown_panes.clear();
+        self.documents.canvas_panes.clear();
         self.documents.focused_markdown = None;
         self.documents.markdown_changed.clear();
+        self.documents.canvas_changed.clear();
     }
 
     fn prepare_standalone_file(&mut self, path: &Path) -> io::Result<ProjectFile> {
@@ -522,6 +536,7 @@ impl Workspace {
     pub(super) fn supports_split_pane(path: &str) -> bool {
         let lower = path.to_ascii_lowercase();
         lower.ends_with(".md")
+            || lower.ends_with(".canvas")
             || lower.ends_with(".pdf")
             || Self::is_html_path(&lower)
             || Self::is_drawio_path(&lower)
@@ -583,6 +598,8 @@ impl Workspace {
         self.documents.active = file.path.clone();
         if focus_editor {
             if let Some(pane) = self.documents.markdown_panes.get(&tab) {
+                pane.update(cx, |pane, cx| pane.focus(window, cx));
+            } else if let Some(pane) = self.documents.canvas_panes.get(&tab) {
                 pane.update(cx, |pane, cx| pane.focus(window, cx));
             } else if let Some(document) = self.documents.open.get(&file.path) {
                 document.editor.update(cx, |editor, cx| editor.focus(window, cx));
@@ -760,11 +777,13 @@ impl Workspace {
                     .language(language)
                     .line_number(self.settings.show_line_numbers)
                     .searchable(true)
-                    .default_value(if path.to_ascii_lowercase().ends_with(".md") {
-                        String::new()
-                    } else {
-                        disk.text.clone()
-                    })
+                    .default_value(
+                        if path.to_ascii_lowercase().ends_with(".md") || Self::is_canvas_path(path) {
+                            String::new()
+                        } else {
+                            disk.text.clone()
+                        },
+                    )
             });
             let line_highlight = editor.update(cx, |editor, cx| {
                 editor.create_range_decorations_collection(Vec::new(), cx)
@@ -788,7 +807,51 @@ impl Workspace {
         {
             self.add_markdown_pane(path, key.role == PaneRole::Reading, window, cx);
         }
+        if Self::is_canvas_path(path) && !self.documents.canvas_panes.contains_key(key) {
+            self.add_canvas_pane(path, key.role == PaneRole::Reading, window, cx);
+        }
         Ok(())
+    }
+
+    fn add_canvas_pane(
+        &mut self,
+        path: &str,
+        reading: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = self.documents.open[path].buffer.text.clone();
+        let full = self.documents.open[path].path.clone();
+        let pane = cx.new(|cx| CanvasPane::new(&text, full, window, cx));
+        cx.subscribe_in(&pane, window, move |app, pane, event: &CanvasEvent, _window, cx| {
+            let full = pane.read(cx).file_path().to_path_buf();
+            let Some(file) = app
+                .documents
+                .open
+                .iter()
+                .find(|(_, doc)| doc.path == full)
+                .map(|(k, _)| k.clone())
+            else {
+                return;
+            };
+            match event {
+                CanvasEvent::Change(next_text) => {
+                    app.edit_document(&file, next_text.clone());
+                }
+                CanvasEvent::Focus => {
+                    app.documents.focused_markdown = None;
+                }
+                CanvasEvent::JumpToAnchor { .. } => {
+                    // Stage 2 wires anchor navigation into Markdown and PDF panes.
+                }
+            }
+            cx.notify();
+        })
+        .detach();
+        self.documents.canvas_panes.insert(
+            PaneKey::new(path, if reading { PaneRole::Reading } else { PaneRole::Tab }),
+            pane,
+        );
     }
 
     fn add_markdown_pane(
@@ -996,6 +1059,8 @@ impl Workspace {
     pub(super) fn focus_document_tab(&self, path: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if let Some(pane) = self.documents.markdown_panes.get(&PaneKey::tab(path)) {
             pane.update(cx, |pane, cx| pane.focus(window, cx));
+        } else if let Some(pane) = self.documents.canvas_panes.get(&PaneKey::tab(path)) {
+            pane.update(cx, |pane, cx| pane.focus(window, cx));
         } else if let Some(document) = self.documents.open.get(path) {
             document.editor.update(cx, |editor, cx| editor.focus(window, cx));
         } else {
@@ -1099,11 +1164,13 @@ impl Workspace {
                 let document = self.documents.open
                     .get_mut(path)
                     .expect("reload only open documents");
-                document.editor.update(cx, |editor, cx| {
-                    editor.set_value(disk.text.clone(), window, cx)
-                });
+                if !path.to_ascii_lowercase().ends_with(".md") && !Self::is_canvas_path(path) {
+                    document.editor.update(cx, |editor, cx| {
+                        editor.set_value(disk.text.clone(), window, cx)
+                    });
+                }
                 document.buffer.replace_from_disk(disk);
-                self.documents.markdown_changed.insert(path.to_owned());
+                self.documents.source_changed(path);
                 cx.notify();
             }
             Err(error) => self.report(error, cx),
@@ -1164,6 +1231,7 @@ impl Workspace {
             cx,
         );
         self.documents.document_watch.tree = false;
+        let mut updated_sources = Vec::new();
         for (path, document) in &mut self.documents.open {
             // notify gives absolute paths; read only drafts touched by this event.
             if !changed.is_empty() && !changed.contains(&document.path) {
@@ -1183,14 +1251,13 @@ impl Workspace {
                     if document.buffer.is_dirty() {
                         document.buffer.conflict = Some(disk);
                     } else {
-                        if !path.to_lowercase().ends_with(".md") {
+                        if !path.to_lowercase().ends_with(".md") && !Self::is_canvas_path(path) {
                             document.editor.update(cx, |editor, cx| {
                                 editor.set_value(disk.text.clone(), window, cx)
                             });
                         }
                         document.buffer.replace_from_disk(disk);
-                        self.documents.markdown_changed.insert(path.clone());
-                        self.documents.source_version += 1;
+                        updated_sources.push(path.clone());
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -1198,6 +1265,9 @@ impl Workspace {
                 }
                 Err(error) => return Err(error),
             }
+        }
+        for path in updated_sources {
+            self.documents.source_changed(&path);
         }
         let pdf_keys: Vec<_> = self.documents.pdf_panes
             .keys()
@@ -1252,6 +1322,17 @@ impl Workspace {
                     if let Some(pane) = self.documents.markdown_panes.get(&PaneKey::new(&path, role)) {
                         pane.update(cx, |pane, cx| {
                             pane.sync(&document.buffer.text, window, cx)
+                        });
+                    }
+                }
+            }
+        }
+        for path in std::mem::take(&mut self.documents.canvas_changed) {
+            if let Some(document) = self.documents.open.get(&path) {
+                for role in [PaneRole::Tab, PaneRole::Reading] {
+                    if let Some(pane) = self.documents.canvas_panes.get(&PaneKey::new(&path, role)) {
+                        pane.update(cx, |pane, cx| {
+                            pane.sync_text(&document.buffer.text, window, cx)
                         });
                     }
                 }
@@ -1407,6 +1488,12 @@ impl Workspace {
                 pane.update(cx, |pane, cx| pane.set_path(full.clone(), window, cx));
                 self.documents.markdown_panes.insert(new_key.clone(), pane);
             }
+            if let Some(pane) = self.documents.canvas_panes.remove(&old_key)
+                && Self::is_canvas_path(&renamed)
+            {
+                pane.update(cx, |pane, cx| pane.set_path(full.clone(), cx));
+                self.documents.canvas_panes.insert(new_key.clone(), pane);
+            }
             if self.documents.pdf_panes.contains_key(&old_key) {
                 self.release_pdf_pane(&old_key, window, cx);
                 if renamed.to_ascii_lowercase().ends_with(".pdf") {
@@ -1441,6 +1528,9 @@ impl Workspace {
         if self.documents.markdown_changed.remove(key) {
             self.documents.markdown_changed.insert(renamed.clone());
         }
+        if self.documents.canvas_changed.remove(key) {
+            self.documents.canvas_changed.insert(renamed.clone());
+        }
     }
 
     pub(super) fn open_reading_pane(
@@ -1460,6 +1550,8 @@ impl Workspace {
         self.documents.reading_panes.push(file.path.clone());
         self.documents.focused_markdown = None;
         if let Some(pane) = self.documents.markdown_panes.get(&key) {
+            pane.update(cx, |pane, cx| pane.focus(window, cx));
+        } else if let Some(pane) = self.documents.canvas_panes.get(&key) {
             pane.update(cx, |pane, cx| pane.focus(window, cx));
         }
         if let Err(error) = self.remember_session() {
@@ -1548,6 +1640,8 @@ impl Workspace {
             pane = pane.child(div().flex_1().min_h_0().child(image.clone()));
         } else if let Some(markdown) = markdown {
             pane = pane.child(div().flex_1().min_h_0().child(markdown.clone()));
+        } else if let Some(canvas) = self.documents.canvas_panes.get(&key) {
+            pane = pane.child(div().flex_1().min_h_0().child(canvas.clone()));
         }
         pane.into_any_element()
     }

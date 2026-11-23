@@ -236,6 +236,15 @@ impl Workspace {
                         }),
                 );
         } else if !trash_open
+            && Self::is_canvas_path(&self.documents.active)
+            && let Some(canvas_pane) = self.documents.canvas_panes.get(&PaneKey::tab(&self.documents.active))
+        {
+            let copy_pane = canvas_pane.clone();
+            bar = bar.child(crate::ui::copy_document_button(
+                SharedString::from(format!("canvas-copy-document:{}", self.documents.active)),
+                move |cx| copy_pane.read(cx).document().to_json_pretty().unwrap_or_default(),
+            ));
+        } else if !trash_open
             && let Some(document) = self.documents.open.get(&self.documents.active)
         {
             let editor = document.editor.clone();
@@ -333,6 +342,8 @@ impl Workspace {
             }
             if let Some(markdown) = self.documents.markdown_panes.get(&PaneKey::tab(&self.documents.active)) {
                 area = area.child(div().flex_1().min_h_0().child(markdown.clone()));
+            } else if let Some(canvas) = self.documents.canvas_panes.get(&PaneKey::tab(&self.documents.active)) {
+                area = area.child(div().flex_1().min_h_0().child(canvas.clone()));
             } else {
                 area = area.child(
                     div()
