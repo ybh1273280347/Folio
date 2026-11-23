@@ -5,7 +5,7 @@ mod links;
 mod view;
 
 use super::*;
-use crate::annotations::AnnotationItem;
+use crate::annotations::{self, AnnotationItem, Failure};
 use crate::canvas::{CanvasEvent, CanvasPane};
 use crate::drawio::{DrawioPane, DrawioPaneEvent};
 use crate::markdown::{MarkdownEvent, MarkdownPane};
@@ -993,6 +993,13 @@ impl Workspace {
                 MarkdownEvent::Change(text) => {
                     app.edit_document(&file, text.clone());
                 }
+                MarkdownEvent::DeleteAnnotation(id) => {
+                    let result = dunce::canonicalize(&full).map_err(Failure::from)
+                        .and_then(|path| app.delete_document_annotation(&path, *id, window, cx));
+                    if let Err(error) = result {
+                        app.report(error.0["error"]["message"].as_str().expect("annotation error message"), cx);
+                    }
+                }
                 MarkdownEvent::Focus => app.documents.focused_markdown = reading.then(|| file.clone()),
                 MarkdownEvent::Zoom(size) => {
                     let mut settings = app.settings.clone();
@@ -1123,6 +1130,58 @@ impl Workspace {
         }
         self.schedule_rag_sync();
         Ok(true)
+    }
+
+    /// Commit deletion from the UI or AI using the current shared buffer and sidecar.
+    pub(super) fn delete_document_annotation(
+        &mut self,
+        path: &Path,
+        id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), Failure> {
+        let mut items = annotations::try_load_annotations(path)?;
+        let index = items.iter().position(|item| item.id == id).ok_or_else(|| {
+            Failure::new("annotation_not_found", crate::i18n::tags::ERR_ANN_ID_NOT_FOUND.get())
+        })?;
+        let item = items.remove(index);
+        let mut markdown_saved = false;
+        if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("md")) {
+            let disk;
+            let (open_key, source, revision) = if let Some((key, buffer)) = self.documents.open_buffer_at(path) {
+                if buffer.conflict.is_some() || buffer.deleted {
+                    return Err(Failure::new("document_conflict", crate::i18n::tags::ERR_ANN_DOC_CONFLICT.get()));
+                }
+                (Some(key.to_owned()), &buffer.text, &buffer.revision)
+            } else {
+                disk = files::read_document_at(path)?;
+                (None, &disk.text, &disk.revision)
+            };
+            let extensions = crate::markdown::extensions::markdown_extensions(
+                &self.math, crate::math::MathDisplaySize::Markdown, cx,
+            );
+            // Save the inline mark removal before deleting its anchor from the sidecar.
+            if let Some(text) = annotations::remove_markdown_highlight(source, &item, extensions)? {
+                let revision = revision.clone();
+                if !self.save_markdown_snapshot(path, open_key.as_deref(), &text, &revision, window, cx)? {
+                    return Err(Failure::new("document_changed", crate::i18n::tags::ERR_ANN_DISK_CHANGED.get()));
+                }
+                markdown_saved = true;
+            }
+        }
+        annotations::save_annotations(path, &items).map_err(|error| {
+            let prefix = if markdown_saved {
+                cx.notify();
+                crate::i18n::tags::ERR_ANN_REMOVE_HIGHLIGHT_ONLY.get()
+            } else {
+                crate::i18n::tags::ERR_ANN_SAVE_RECORD.get()
+            };
+            Failure::new("save_failed", format!("{prefix}: {error}"))
+        })?;
+        self.sync_document_annotations(path, &items, cx);
+        self.schedule_rag_sync();
+        cx.notify();
+        Ok(())
     }
 
     /// Refresh every open projection after the annotation sidecar has been saved.

@@ -762,23 +762,9 @@ impl Render for MarkdownPane {
                                     )
                                     .flex_shrink_0()
                                     .on_click(cx.listener(
-                                        move |pane, _, _, cx| {
+                                        move |_, _, _, cx| {
                                             cx.stop_propagation();
-                                            pane.annotations.retain(|a| a.id != id);
-                                            if pane.selected_annotation_id == Some(id) {
-                                                pane.selected_annotation_id = None;
-                                            }
-                                            if pane.active_annotation_id == Some(id) {
-                                                pane.active_annotation_id = None;
-                                            }
-                                            if pane.editing_drawer_annotation_id == Some(id) {
-                                                pane.editing_drawer_annotation_id = None;
-                                            }
-                                            let _ = annotations::save_annotations(
-                                                &pane.path,
-                                                &pane.annotations,
-                                            );
-                                            cx.notify();
+                                            cx.emit(MarkdownEvent::DeleteAnnotation(id));
                                         },
                                     )),
                                 ),
@@ -927,31 +913,10 @@ impl Render for MarkdownPane {
                                                     "delete" | "backspace"
                                                 ) && pane.editing_drawer_annotation_id.is_none()
                                                     && pane.annotation_list_focus.is_focused(window)
+                                                    && let Some(id) = pane.selected_annotation_id
                                                 {
-                                                    if let Some(id) =
-                                                        pane.selected_annotation_id.take()
-                                                    {
-                                                        pane.annotations
-                                                            .retain(|item| item.id != id);
-                                                        if pane.active_annotation_id == Some(id) {
-                                                            pane.active_annotation_id = None;
-                                                        }
-                                                        if pane.editing_drawer_annotation_id
-                                                            == Some(id)
-                                                        {
-                                                            pane.editing_drawer_annotation_id =
-                                                                None;
-                                                        }
-                                                        annotations::save_annotations(
-                                                            &pane.path,
-                                                            &pane.annotations,
-                                                        )
-                                                        .expect(
-                                                            "failed to save annotation deletion",
-                                                        );
-                                                        cx.stop_propagation();
-                                                        cx.notify();
-                                                    }
+                                                    cx.stop_propagation();
+                                                    cx.emit(MarkdownEvent::DeleteAnnotation(id));
                                                 }
                                             },
                                         ))
