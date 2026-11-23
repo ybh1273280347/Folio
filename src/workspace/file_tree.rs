@@ -913,7 +913,7 @@ impl Workspace {
         Ok(())
     }
     fn delete_file(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.confirm_trash(vec![path.to_owned()], window, cx);
+        self.confirm_trash(vec![path.to_owned()], None, window, cx);
     }
 
     fn delete_folder(&mut self, folder: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -926,37 +926,42 @@ impl Workspace {
             .filter(|file| file.path.starts_with(&prefix))
             .map(|file| file.path.clone())
             .collect();
-        self.confirm_trash(paths, window, cx);
+        self.confirm_trash(paths, Some(folder.to_owned()), window, cx);
     }
 
     pub(super) fn delete_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tree.selected_files.is_empty() || self.build.is_running() {
             return;
         }
-        self.confirm_trash(self.tree.selected_files.iter().cloned().collect(), window, cx);
+        self.confirm_trash(self.tree.selected_files.iter().cloned().collect(), None, window, cx);
     }
 
-    fn confirm_trash(&mut self, paths: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
-        if paths.is_empty() || self.build.is_running() { return; }
+    fn confirm_trash(&mut self, paths: Vec<String>, folder: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if (paths.is_empty() && folder.is_none()) || self.build.is_running() { return; }
         let retry = paths.clone();
+        let retry_folder = folder.clone();
+        use crate::i18n::workspace as text;
+        let (title, body, confirm) = if folder.is_some() {
+            (text::DIALOG_TRASH_FOLDER_TITLE.get().into(), text::DIALOG_TRASH_FOLDER_BODY.get(),
+                crate::i18n::common::DELETE.get())
+        } else {
+            (text::dialog_trash_title(paths.len()), text::DIALOG_TRASH_BODY.get(), text::DIALOG_TRASH_CONFIRM.get())
+        };
         if self.ask(
             Dialog::DeleteSelected,
-            crate::i18n::workspace::dialog_trash_title(paths.len()),
-            crate::i18n::workspace::DIALOG_TRASH_BODY.get().into(),
-            DialogButtons::Confirm(crate::i18n::workspace::DIALOG_TRASH_CONFIRM.get().into()),
+            title,
+            body.into(),
+            DialogButtons::Confirm(confirm.into()),
             cx,
-            move |app, window, cx| app.confirm_trash(retry, window, cx),
+            move |app, window, cx| app.confirm_trash(retry, retry_folder, window, cx),
         ) != Some(rfd::MessageDialogResult::Ok)
         {
             return;
         }
-        self.delete_paths(paths, window, cx);
+        self.delete_paths(paths, folder.as_deref(), window, cx);
     }
 
-    fn delete_paths(&mut self, paths: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
-        if paths.is_empty() {
-            return;
-        }
+    fn delete_paths(&mut self, paths: Vec<String>, folder: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
         for path in &paths {
             if self.documents.needs_save_before_removal(path) {
                 match self.save_file(path, false, cx) {
@@ -992,7 +997,34 @@ impl Workspace {
                 self.tree.focused_file = None;
             }
         }
-        if deleted.is_empty() {
+        let mut removed_folder = false;
+        if !failed && let Some(folder) = folder {
+            let result = dunce::canonicalize(root).and_then(|root| {
+                let target = files::project_path(&root, folder)?;
+                // The sidebar lists real directories. A replacement link must
+                // not redirect removal, even to another directory in the project.
+                if target == root || target != root.join(folder) {
+                    return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+                        crate::i18n::workspace::ERR_OUTSIDE_PROJECT.get()));
+                }
+                // The filesystem checks emptiness at removal time, including
+                // entries hidden from the sidebar and newly created files.
+                std::fs::remove_dir(target)
+            });
+            match result {
+                Ok(()) => {
+                    removed_folder = true;
+                    self.tree.collapsed_folders.remove(folder);
+                    self.tree.folder_folds.remove(folder);
+                }
+                Err(error) if matches!(error.kind(), io::ErrorKind::DirectoryNotEmpty | io::ErrorKind::NotFound) => {}
+                Err(error) => {
+                    failed = true;
+                    self.report(error, cx);
+                }
+            }
+        }
+        if deleted.is_empty() && !removed_folder {
             return;
         }
         self.documents.select_last_tab_if_closed();
@@ -1009,7 +1041,9 @@ impl Workspace {
             self.report(error, cx);
         }
         self.tree.file_tree_focus.focus(window, cx);
-        if !failed {
+        if removed_folder && deleted.is_empty() {
+            self.report(crate::i18n::workspace::REPORT_REMOVED_EMPTY_FOLDER.get(), cx);
+        } else if !failed {
             self.report(crate::i18n::workspace::REPORT_MOVED_TO_TRASH.get(), cx);
         }
         cx.notify();
@@ -1238,7 +1272,7 @@ impl Workspace {
                 match choice {
                     rfd::MessageDialogResult::Yes => {
                         if self.projects.directory().is_some_and(|project| project.id == entry.project_id && Path::new(&project.folder) == entry.project_root) {
-                            self.delete_paths(vec![entry.relative.clone()], window, cx);
+                            self.delete_paths(vec![entry.relative.clone()], None, window, cx);
                             if target.exists() { return; }
                         } else {
                             let batch = uuid::Uuid::new_v4().to_string();
@@ -2500,14 +2534,13 @@ impl Workspace {
                         if Some(project.id.as_str()) != dragged.1.as_deref() { app.report(crate::i18n::workspace::ERR_SOURCE_PROJECT_CHANGED.get(), cx); return; }
                         let root = PathBuf::from(&project.folder);
                         let paths: Vec<String> = dragged.0.iter().filter_map(|path| path.strip_prefix(&root).ok().map(|path| path.to_string_lossy().replace('\\', "/"))).collect();
-                        if paths.len() == dragged.0.len() { app.confirm_trash(paths, window, cx); }
+                        if paths.len() == dragged.0.len() { app.confirm_trash(paths, None, window, cx); }
                     }))
                     .on_drop(cx.listener(|app, dragged: &crate::terminal::DraggedFolder, window, cx| {
                         if app.projects.directory().is_none_or(|project| project.id != dragged.1) {
                             app.report(crate::i18n::workspace::ERR_SOURCE_PROJECT_CHANGED.get(), cx);
                             return;
                         }
-                        // A folder is a projection of supported files; its other contents remain in place.
                         app.delete_folder(&dragged.0, window, cx);
                     }))
             })

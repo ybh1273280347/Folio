@@ -214,11 +214,17 @@ pub fn dialog_trash_title(count: usize) -> String {
     }
 }
 pub const DIALOG_TRASH_BODY: BiText = BiText::new(
-    "文件保留 7 天，可在废纸篓恢复。文件夹内仅处理受支持的项目文件。",
-    "Files are kept for 7 days and can be restored from Trash. Folders only process supported project files.",
+    "文件保留 7 天，可在废纸篓恢复。",
+    "Files are kept for 7 days and can be restored from Trash.",
+);
+pub const DIALOG_TRASH_FOLDER_TITLE: BiText = BiText::new("删除此文件夹？", "Delete this folder?");
+pub const DIALOG_TRASH_FOLDER_BODY: BiText = BiText::new(
+    "受支持的项目文件会移入废纸篓并保留 7 天。文件夹仅在磁盘上完全为空时移除。",
+    "Supported project files move to Trash for 7 days. The folder is removed only if it is completely empty on disk.",
 );
 pub const DIALOG_TRASH_CONFIRM: BiText = BiText::new("移入废纸篓", "Move to Trash");
 pub const REPORT_MOVED_TO_TRASH: BiText = BiText::new("已移入废纸篓，按 Ctrl+Z 撤销。", "Moved to Trash. Press Ctrl+Z to undo.");
+pub const REPORT_REMOVED_EMPTY_FOLDER: BiText = BiText::new("已移除空文件夹。", "Empty folder removed.");
 pub const REPORT_COPIED_PATH: BiText = BiText::new("已复制完整路径。", "Copied full path.");
 pub const REPORT_COPIED_FOLDER_PATH: BiText = BiText::new("已复制文件夹完整路径。", "Copied folder full path.");
 pub fn report_copied_paths(count: usize) -> String {
