@@ -390,7 +390,6 @@ impl Workspace {
             }
         }
 
-        let dir_label = crate::i18n::canvas::picker_target_dir_label(source_folder);
         Some(
             div()
                 .id("canvas-target-picker-backdrop")
@@ -464,42 +463,22 @@ impl Workspace {
                                 .border_t_1()
                                 .border_color(rgb(palette.border))
                                 .flex()
-                                .flex_col()
-                                .gap_1p5()
+                                .items_center()
+                                .gap_2()
                                 .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(palette.muted))
-                                        .child(dir_label),
+                                    div().flex_1().min_w_0().child(
+                                        gpui_kit::component::input::Input::new(&pending.name_input),
+                                    ),
                                 )
                                 .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(
-                                            div().flex_1().min_w_0().child(
-                                                gpui_kit::component::input::Input::new(
-                                                    &pending.name_input,
-                                                ),
-                                            ),
-                                        )
-                                        .child(
-                                            Button::new("canvas-picker-create")
-                                                .primary()
-                                                .compact()
-                                                .h(px(28.))
-                                                .px_3()
-                                                .label(
-                                                    crate::i18n::canvas::PICKER_BTN_CREATE_AND_ADD
-                                                        .get(),
-                                                )
-                                                .on_click(cx.listener(|app, _, window, cx| {
-                                                    app.create_and_insert_pending_canvas(
-                                                        window, cx,
-                                                    );
-                                                })),
-                                        ),
+                                    crate::ui::button_primary(
+                                        "canvas-picker-create",
+                                        crate::i18n::canvas::PICKER_BTN_CREATE_AND_ADD.get(),
+                                    )
+                                    .h(px(28.))
+                                    .on_click(cx.listener(|app, _, window, cx| {
+                                        app.create_and_insert_pending_canvas(window, cx);
+                                    })),
                                 ),
                         ),
                 )

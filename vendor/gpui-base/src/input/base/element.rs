@@ -919,6 +919,10 @@ impl<M: InputModeKind> TextElement<M> {
             let top = line_height * state.display_map.buffer_line_to_display_row(row);
             let line_origin = point(px(0.), top);
 
+            if state.text.len() == 0 {
+                return point(last_layout.alignment_offset(px(0.)), top);
+            }
+
             if let Some(vi) = visible_buffer_lines.iter().position(|&bl| bl == row) {
                 let line = &lines[vi];
                 let line_start = last_layout.visible_line_byte_offsets[vi];

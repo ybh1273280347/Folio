@@ -21,3 +21,4 @@ Mermaid 适配保留编辑器原有的 `code_ui` 模块、投影缓存和折叠�
 
 字体沿用 `resources/fonts`，中文公式缺字时才读取系统微软雅黑。Markdown PDF 使用 `krilla` 写入上述绘制操作；整篇 `.tex` 编译保持 `latexmk` 流程。
 - `gpui-pdf`：新增 `PdfView::flash_to_page`，用于从知识库或外部定位跳转至目标页顶部并触发 1.4 秒临时高亮边框（冷打开时由 `pending_reveal` 复用该闪烁高亮）。
+- `gpui-base 0.9.1`：放开非代码编辑器多行输入框（`Textarea`）的 `set_text_align` 限制，并在空文本状态下按 `alignment_offset` 对齐光标水平位置，供知识画布居中编辑使用。

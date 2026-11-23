@@ -148,7 +148,6 @@ impl CanvasPane {
             TextareaState::new(window, cx)
                 .auto_grow(1, 10)
                 .submit_on_enter(true)
-                .placeholder(i18n_canvas::NODE_INPUT_PLACEHOLDER.get())
         });
         let sub = cx.subscribe_in(&edit_input, window, |pane, _, event: &InputEvent, window, cx| {
             match event {
@@ -2033,13 +2032,6 @@ impl Render for CanvasPane {
         let can_redo = self.history.can_redo();
         let default_is_hierarchy = self.default_edge_kind == EdgeKind::Hierarchy;
 
-        let export_scope_label: String = if !self.selection.is_empty() {
-            i18n_canvas::export_scope_selected(self.selection.len())
-        } else if self.selected_edge.is_some() {
-            i18n_canvas::export_scope_selected(1)
-        } else {
-            i18n_canvas::EXPORT_SCOPE_ALL.get().to_owned()
-        };
         let pane_entity = cx.entity();
 
         let left_group = div()
@@ -2225,16 +2217,14 @@ impl Render for CanvasPane {
                         let p_pdf = pane_entity.clone();
                         let p_svg = pane_entity.clone();
                         let p_png = pane_entity.clone();
-                        menu.item(PopupMenuItem::label(export_scope_label.clone()))
-                            .separator()
-                            .item(
-                                PopupMenuItem::new(crate::i18n::media::DRAWIO_EXPORT_PDF.get())
-                                    .on_click(move |_, _, cx| {
-                                        p_pdf.update(cx, |pane, cx| {
-                                            pane.export_to(ExportFormat::Pdf, cx);
-                                        });
-                                    }),
-                            )
+                        menu.item(
+                            PopupMenuItem::new(crate::i18n::media::DRAWIO_EXPORT_PDF.get())
+                                .on_click(move |_, _, cx| {
+                                    p_pdf.update(cx, |pane, cx| {
+                                        pane.export_to(ExportFormat::Pdf, cx);
+                                    });
+                                }),
+                        )
                             .item(
                                 PopupMenuItem::new(crate::i18n::media::DRAWIO_EXPORT_SVG.get())
                                     .on_click(move |_, _, cx| {
