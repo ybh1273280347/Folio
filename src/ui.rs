@@ -3,7 +3,7 @@ use crate::theme::color as rgb;
 use gpui_kit::{
     assets::{IconName, icon_assets},
     base::StyledExt,
-    component::{Icon, button::{Button, ButtonVariants}},
+    component::{Icon, Sizable, button::{Button, ButtonCustomVariant, ButtonVariants}},
     prelude::FluentBuilder,
     *,
 };
@@ -424,6 +424,27 @@ impl AssetSource for Assets {
 
 pub fn icon(name: IconName) -> Icon {
     Icon::new(name).w(px(14.)).h(px(14.))
+}
+
+pub(crate) fn panel_toolbar_button(
+    id: impl Into<ElementId>,
+    palette: crate::theme::Palette,
+    cx: &App,
+) -> Button {
+    let foreground: Hsla = gpui_kit::rgb(palette.text).into();
+    // Tint the local surface so feedback stays visible even when the toolbar itself uses palette.hover.
+    Button::new(id)
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .foreground(foreground)
+                .hover(Hsla { a: 0.08, ..foreground })
+                .active(Hsla { a: 0.14, ..foreground }),
+        )
+        .compact()
+        .with_size(px(16.))
+        .w(px(22.))
+        .h(px(22.))
+        .rounded(px(6.))
 }
 
 // ---------------------------------------------------------------------------

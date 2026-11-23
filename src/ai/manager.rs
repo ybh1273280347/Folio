@@ -1,5 +1,6 @@
 //! Project-scoped tab ownership. Conversation entities stay alive while their tasks run off screen.
 use super::*;
+use gpui_kit::base::Selectable;
 use gpui_kit::component::Sizable;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -866,23 +867,15 @@ impl Render for AiPane {
                     .border_b_1()
                     .border_color(gpui_kit::rgb(palette.border))
                     .child(
-                        Button::new("ai-back-to-hub")
-                            .ghost()
-                            .compact()
-                            .with_size(px(16.))
-                            .w(px(22.))
-                            .h(px(22.))
+                        crate::ui::panel_toolbar_button("ai-back-to-hub", palette, cx)
                             .icon(crate::ui::icon(IconName::ChevronLeft))
                             .tooltip(crate::i18n::common::BACK_TO_HUB.get())
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(AiPaneEvent::BackToHub))),
                     )
                     .child(
-                        Button::new("ai-history")
-                            .ghost()
-                            .compact()
-                            .with_size(px(16.))
-                            .w(px(22.))
-                            .h(px(22.))
+                        crate::ui::panel_toolbar_button("ai-history", palette, cx)
+                            .selected(self.drawer)
+                            .toggled(self.drawer)
                             .icon(crate::ui::icon(IconName::Clock))
                             .tooltip(crate::i18n::ai::SESSION_HISTORY.get())
                             .on_click(cx.listener(|pane, _, _, cx| {
@@ -981,10 +974,11 @@ impl Render for AiPane {
                                             .child(title),
                                     )
                                     .child(
-                                        Button::new(SharedString::from(format!("close-{id}")))
-                                            .ghost()
-                                            .compact()
-                                            .with_size(px(16.))
+                                        crate::ui::panel_toolbar_button(
+                                            SharedString::from(format!("close-{id}")),
+                                            palette,
+                                            cx,
+                                        )
                                             .w(px(18.))
                                             .h(px(18.))
                                             .flex_shrink_0()
@@ -998,12 +992,7 @@ impl Render for AiPane {
                                 tab.into_any_element()
                             }))
                             .child(
-                                Button::new("ai-add-tab")
-                                    .ghost()
-                                    .compact()
-                                    .with_size(px(16.))
-                                    .w(px(22.))
-                                    .h(px(22.))
+                                crate::ui::panel_toolbar_button("ai-add-tab", palette, cx)
                                     .flex_shrink_0()
                                     .ml_1()
                                     .icon(crate::ui::icon(IconName::Plus))
@@ -1012,12 +1001,7 @@ impl Render for AiPane {
                             ),
                     )
                     .child(
-                        Button::new("ai-maximize")
-                            .ghost()
-                            .compact()
-                            .with_size(px(16.))
-                            .w(px(22.))
-                            .h(px(22.))
+                        crate::ui::panel_toolbar_button("ai-maximize", palette, cx)
                             .icon(crate::ui::icon(IconName::Maximize2))
                             .tooltip(crate::i18n::ai::MAXIMIZE_RESTORE.get())
                             .on_click(

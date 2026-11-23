@@ -712,12 +712,7 @@ impl Workspace {
                     .gap_1p5()
                     .min_w_0()
                     .child(
-                        Button::new("kb-back-to-hub")
-                            .ghost()
-                            .compact()
-                            .with_size(px(16.))
-                            .w(px(22.))
-                            .h(px(22.))
+                        crate::ui::panel_toolbar_button("kb-back-to-hub", palette, cx)
                             .icon(crate::ui::icon(IconName::ChevronLeft))
                             .tooltip(crate::i18n::common::BACK_TO_HUB.get())
                             .on_click(cx.listener(|app, _, window, cx| {
@@ -777,47 +772,22 @@ impl Workspace {
                             crate::ui::icon(IconName::BookOpenText).into_any_element()
                         };
                         bar.child(
-                            div()
-                                .id("kb-sync-now")
-                                .size(px(22.))
-                                .rounded(px(6.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .when(!syncing, |el| {
-                                    el.cursor_pointer()
-                                        .hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
-                                        .on_click(cx.listener(|app, _, _, cx| {
-                                            app.run_kb_sync(false, None, Vec::new(), cx);
-                                        }))
+                            crate::ui::panel_toolbar_button("kb-sync-now", palette, cx)
+                                .disabled(syncing)
+                                .tooltip(if syncing {
+                                    rp::BADGE_SYNCING.get()
+                                } else {
+                                    rp::KB_SYNC_TOOLTIP.get()
                                 })
-                                .tooltip(move |window, cx| {
-                                    gpui_kit::component::tooltip::Tooltip::new(if syncing {
-                                        rp::BADGE_SYNCING.get()
-                                    } else {
-                                        rp::KB_SYNC_TOOLTIP.get()
-                                    })
-                                    .build(window, cx)
-                                })
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.run_kb_sync(false, None, Vec::new(), cx);
+                                }))
                                 .child(sync_icon),
                         )
                         .child(
-                            div()
-                                .id("kb-open-pdf-manager")
+                            crate::ui::panel_toolbar_button("kb-open-pdf-manager", palette, cx)
                                 .relative()
-                                .size(px(22.))
-                                .rounded(px(6.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
-                                .tooltip(move |window, cx| {
-                                    gpui_kit::component::tooltip::Tooltip::new(
-                                        rp::KB_PDF_MANAGER_TOOLTIP.get(),
-                                    )
-                                    .build(window, cx)
-                                })
+                                .tooltip(rp::KB_PDF_MANAGER_TOOLTIP.get())
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.right_panel.kb.pdf_manager_open = true;
                                     app.refresh_kb_snapshot(cx);
@@ -838,12 +808,7 @@ impl Workspace {
                                 }),
                         )
                         .child(
-                            Button::new("kb-more-menu")
-                                .ghost()
-                                .compact()
-                                .with_size(px(16.))
-                                .w(px(22.))
-                                .h(px(22.))
+                            crate::ui::panel_toolbar_button("kb-more-menu", palette, cx)
                                 .disabled(syncing)
                                 .icon(crate::ui::icon(IconName::Ellipsis))
                                 .tooltip(rp::KB_MENU_TOOLTIP.get())
@@ -877,12 +842,7 @@ impl Workspace {
                         )
                     })
                     .child(
-                        Button::new("kb-maximize")
-                            .ghost()
-                            .compact()
-                            .with_size(px(16.))
-                            .w(px(22.))
-                            .h(px(22.))
+                        crate::ui::panel_toolbar_button("kb-maximize", palette, cx)
                             .icon(crate::ui::icon(IconName::Maximize2))
                             .tooltip(crate::i18n::ai::MAXIMIZE_RESTORE.get())
                             .on_click(cx.listener(|app, _, _, cx| {
@@ -1915,12 +1875,7 @@ impl Workspace {
                     .gap_1p5()
                     .min_w_0()
                     .child(
-                        Button::new("kb-pdf-mgr-back")
-                            .ghost()
-                            .compact()
-                            .with_size(px(16.))
-                            .w(px(22.))
-                            .h(px(22.))
+                        crate::ui::panel_toolbar_button("kb-pdf-mgr-back", palette, cx)
                             .icon(crate::ui::icon(IconName::ChevronLeft))
                             .tooltip(rp::KB_BACK_TO_SEARCH.get())
                             .on_click(cx.listener(|app, _, _, cx| {
@@ -1951,37 +1906,20 @@ impl Workspace {
                     .gap_1()
                     .flex_shrink_0()
                     .child(
-                        div()
-                            .id("kb-pdf-mgr-sync")
-                            .size(px(22.))
-                            .rounded(px(6.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .when(!syncing, |el| {
-                                el.cursor_pointer()
-                                    .hover(move |s| s.bg(hover_bg))
-                                    .on_click(cx.listener(|app, _, _, cx| {
-                                        app.run_kb_sync(false, None, Vec::new(), cx);
-                                    }))
+                        crate::ui::panel_toolbar_button("kb-pdf-mgr-sync", palette, cx)
+                            .disabled(syncing)
+                            .tooltip(if syncing {
+                                rp::BADGE_SYNCING.get()
+                            } else {
+                                rp::KB_SYNC_TOOLTIP.get()
                             })
-                            .tooltip(move |window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(if syncing {
-                                    rp::BADGE_SYNCING.get()
-                                } else {
-                                    rp::KB_SYNC_TOOLTIP.get()
-                                })
-                                .build(window, cx)
-                            })
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.run_kb_sync(false, None, Vec::new(), cx);
+                            }))
                             .child(sync_icon),
                     )
                     .child(
-                        Button::new("kb-pdf-mgr-maximize")
-                            .ghost()
-                            .compact()
-                            .with_size(px(16.))
-                            .w(px(22.))
-                            .h(px(22.))
+                        crate::ui::panel_toolbar_button("kb-pdf-mgr-maximize", palette, cx)
                             .icon(crate::ui::icon(IconName::Maximize2))
                             .tooltip(crate::i18n::ai::MAXIMIZE_RESTORE.get())
                             .on_click(cx.listener(|app, _, _, cx| {
