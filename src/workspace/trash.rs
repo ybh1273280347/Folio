@@ -4,7 +4,6 @@
 use super::*;
 use crate::i18n::workspace as text;
 use crate::theme::Palette;
-use gpui_kit::base::Disableable;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -571,18 +570,29 @@ impl Workspace {
                     text::TRASH_NO_MATCHES.get().to_owned(),
                     None,
                     Some(
-                        Button::new("trash-clear-filter")
-                            .ghost()
-                            .compact()
+                        div()
+                            .id("trash-clear-filter")
                             .h(px(28.))
                             .px_3()
-                            .label(text::TRASH_CLEAR_FILTER.get())
+                            .rounded(px(7.))
+                            .bg(palette.paper_surface())
+                            .border_1()
+                            .border_color(palette.paper_border())
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .text_size(px(t.meta))
+                            .font_medium()
+                            .text_color(gpui_kit::rgb(palette.text))
+                            .hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
                             .on_click(cx.listener(|app, _, window, cx| {
                                 app.trash
                                     .search_input
                                     .update(cx, |input, cx| input.set_value("", window, cx));
                                 cx.notify();
                             }))
+                            .child(text::TRASH_CLEAR_FILTER.get())
                             .into_any_element(),
                     ),
                 )
@@ -594,16 +604,26 @@ impl Workspace {
                     text::TRASH_EMPTY_PROJECT.get().to_owned(),
                     Some(text::trash_other_projects_hint(total_count)),
                     Some(
-                        Button::new("trash-view-all-projects")
-                            .primary()
-                            .compact()
+                        div()
+                            .id("trash-view-all-projects")
                             .h(px(28.))
                             .px_3()
-                            .label(text::TRASH_VIEW_ALL_PROJECTS.get())
+                            .rounded(px(7.))
+                            .bg(gpui_kit::rgb(palette.accent))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .text_size(px(t.meta))
+                            .font_medium()
+                            .text_color(gpui_kit::rgb(palette.on_accent))
+                            .hover(|s| s.opacity(0.90))
+                            .active(|s| s.opacity(0.82))
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.trash.scope = TrashScope::AllProjects;
                                 cx.notify();
                             }))
+                            .child(text::TRASH_VIEW_ALL_PROJECTS.get())
                             .into_any_element(),
                     ),
                 )
@@ -1605,21 +1625,36 @@ impl Workspace {
                     )
                     .child(div().w(px(1.)).h(px(16.)).bg(palette.paper_border()))
                     .child(
-                        Button::new("trash-batch-restore")
-                            .primary()
-                            .compact()
+                        div()
+                            .id("trash-batch-restore")
                             .h(px(26.))
                             .px_2p5()
-                            .disabled(!can_restore)
-                            .icon(
+                            .rounded(px(6.))
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .text_size(px(t.meta))
+                            .font_medium()
+                            .when(can_restore, |el| {
+                                el.cursor_pointer()
+                                    .bg(gpui_kit::rgb(palette.accent))
+                                    .text_color(gpui_kit::rgb(palette.on_accent))
+                                    .hover(|s| s.opacity(0.90))
+                                    .active(|s| s.opacity(0.82))
+                                    .on_click(cx.listener(move |app, _, window, cx| {
+                                        app.restore_trash(restorable_ids.clone(), window, cx);
+                                    }))
+                            })
+                            .when(!can_restore, |el| {
+                                el.bg(fg_alpha(palette.text, 0.06))
+                                    .text_color(fg_alpha(palette.muted, 0.55))
+                            })
+                            .child(
                                 crate::ui::icon(IconName::RotateCcw)
                                     .w(px(12.))
                                     .h(px(12.)),
                             )
-                            .label(text::TRASH_RESTORE_SELECTED.get())
-                            .on_click(cx.listener(move |app, _, window, cx| {
-                                app.restore_trash(restorable_ids.clone(), window, cx);
-                            })),
+                            .child(text::TRASH_RESTORE_SELECTED.get()),
                     )
                     .child(
                         div()
