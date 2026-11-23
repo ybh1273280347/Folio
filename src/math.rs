@@ -5,6 +5,7 @@ use crate::{
     model::{AppSettings, MathFont},
 };
 use gpui_kit::{
+    base::{ScrollableMask, Scrollbar, ScrollbarMode},
     component::text::{
         InlineElement, InlineRenderContext, MarkdownNode, MarkdownParseContext, MarkdownPlugin,
     },
@@ -406,7 +407,7 @@ impl MarkdownPlugin for MathPlugin {
             ),
         )
     }
-    fn render(&self, node: &MarkdownNode, _: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(&self, node: &MarkdownNode, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let content = node.data::<MathContent>().expect("math content");
         // Block plugins lack the inline text context, so each surface selects
         // its own body size while sharing the typeset formula and scale setting.
@@ -416,6 +417,42 @@ impl MarkdownPlugin for MathPlugin {
             MathDisplaySize::Ai => appearance.ai_display_size,
         };
         let (element, _) = self.formula_element(content, size / 10.);
+        if matches!(self.display_size, MathDisplaySize::Ai) {
+            let start = node.source_range().expect("parsed math has a span").start;
+            let scroll = window
+                .use_keyed_state(("ai-formula-scroll", start), cx, |_, _| ScrollHandle::new())
+                .read(cx)
+                .clone();
+            return div()
+                .id(("ai-formula", start))
+                .relative()
+                .w_full()
+                .child(
+                    div()
+                        .id("viewport")
+                        .w_full()
+                        .flex()
+                        .py_2()
+                        .overflow_hidden()
+                        .track_scroll(&scroll)
+                        // Auto margins center short formulas and leave the start
+                        // of an overflowing formula at the viewport's left edge.
+                        .child(div().mx_auto().flex_shrink_0().child(element)),
+                )
+                // Only horizontal gestures belong to the formula. Vertical wheel
+                // events continue through to the conversation scroller.
+                .child(ScrollableMask::new(Axis::Horizontal, &scroll))
+                .child(
+                    Scrollbar::horizontal(&scroll)
+                        .mode(ScrollbarMode::Always)
+                        .styles(|styles| {
+                            styles
+                                .track(|track| track.width(px(8.)))
+                                .thumb(|thumb| thumb.width(px(3.)).inset(px(2.)))
+                        }),
+                )
+                .into_any_element();
+        }
         self.editable(
             content,
             div()
@@ -425,6 +462,7 @@ impl MarkdownPlugin for MathPlugin {
                 .child(element)
                 .into_any_element(),
         )
+        .into_any_element()
     }
     fn render_inline(
         &self,
