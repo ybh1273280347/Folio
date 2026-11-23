@@ -2163,7 +2163,14 @@ impl MarkdownPane {
 
     fn insert_visual_markdown(&mut self, markdown: &str, cx: &mut Context<Self>) {
         self.visual_editor.update(cx, |editor, cx| {
-            if let Ok(mut range) = editor.capture_selection() {
+            let Ok(mut range) = editor.capture_selection() else {
+                return;
+            };
+            let revision = editor.revision();
+            // Import the reference as an image node where the selection accepts Markdown.
+            editor.replace_selected_markdown(markdown, cx);
+            if editor.revision() == revision {
+                // Code and table cells keep the existing text insertion behavior.
                 let _ = editor.replace_captured(&mut range, markdown, cx);
             }
         });
