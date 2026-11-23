@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, OpenOptions},
+    fs,
     io::Write,
     path::{Component, Path, PathBuf},
 };
@@ -39,7 +39,12 @@ impl Failure {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "operation", content = "params", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(
+    tag = "operation",
+    content = "params",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 enum CanvasToolRequest {
     Read {
         path: String,
@@ -65,6 +70,8 @@ enum CanvasToolRequest {
     Layout {
         path: String,
         #[serde(default)]
+        expected_revision: Option<String>,
+        #[serde(default)]
         view_mode: Option<CanvasViewMode>,
         #[serde(default)]
         root_id: Option<String>,
@@ -84,7 +91,11 @@ enum ReadMode {
 }
 
 impl Workspace {
-    pub(super) fn canvas_request(&mut self, request: &WorkspaceToolRequest, cx: &mut Context<Self>) {
+    pub(super) fn canvas_request(
+        &mut self,
+        request: &WorkspaceToolRequest,
+        cx: &mut Context<Self>,
+    ) {
         if request.action == WorkspaceToolAction::Cancel {
             return;
         }
@@ -114,7 +125,7 @@ impl Workspace {
         }
 
         match parsed {
-            CanvasToolRequest::Read { path, mode } => self.tool_canvas_read(&root, &path, mode, cx),
+            CanvasToolRequest::Read { path, mode } => self.tool_canvas_read(&root, &path, mode),
             CanvasToolRequest::GetSelection {} => self.tool_canvas_get_selection(cx),
             CanvasToolRequest::Create {
                 path,
@@ -129,6 +140,7 @@ impl Workspace {
             } => self.tool_canvas_apply_ops(&root, &path, expected_revision.as_deref(), &ops, cx),
             CanvasToolRequest::Layout {
                 path,
+                expected_revision,
                 view_mode,
                 root_id,
                 mode,
@@ -136,6 +148,7 @@ impl Workspace {
             } => self.tool_canvas_layout(
                 &root,
                 &path,
+                expected_revision.as_deref(),
                 view_mode,
                 root_id.as_deref(),
                 mode,
@@ -150,22 +163,26 @@ impl Workspace {
         root: &Path,
         raw_path: &str,
         mode: ReadMode,
-        _cx: &Context<Self>,
     ) -> Result<Value, Failure> {
-        let rel = normalize_canvas_rel_path(raw_path)?;
-        let (text, is_open, dirty) = if let Some(buffer) = self.documents.open_buffer(&rel) {
-            if buffer.deleted {
-                return Err(Failure::new("file_deleted", "画布文件已被删除。"));
-            }
-            (buffer.text.clone(), true, buffer.is_dirty())
-        } else {
-            let full = existing_canvas_path(root, &rel)?;
-            let disk = files::read_document_at(&full)
-                .map_err(|e| Failure::new("read_failed", e.to_string()))?;
-            (disk.text, false, false)
-        };
-        let revision = sha256_hex(text.as_bytes());
-        let doc = CanvasDocument::from_json_str(&text)
+        let (rel, full) = self.canvas_tool_target(root, raw_path)?;
+        let disk;
+        let (text, revision, is_open, dirty) =
+            if let Some(buffer) = self.documents.open_buffer(&rel) {
+                if buffer.deleted {
+                    return Err(Failure::new("file_deleted", "画布文件已被删除。"));
+                }
+                (
+                    buffer.text.as_str(),
+                    sha256_hex(buffer.text.as_bytes()),
+                    true,
+                    buffer.is_dirty(),
+                )
+            } else {
+                disk = files::read_document_at(&full)
+                    .map_err(|e| Failure::new("read_failed", e.to_string()))?;
+                (disk.text.as_str(), disk.revision, false, false)
+            };
+        let doc = CanvasDocument::from_json_str(text)
             .map_err(|e| Failure::new("parse_error", format!("画布 JSON 解析失败：{e}")))?;
 
         Ok(json!({
@@ -196,16 +213,30 @@ impl Workspace {
                 "当前没有打开或处于活动状态的 .canvas 画布。",
             ));
         };
-        let selected_ids = pane.read(cx).selected_ids();
-        let doc = pane.read(cx).document().clone();
-        let revision = self
+        let pane = pane.read(cx);
+        let buffer = self
             .documents
             .open_buffer(&path)
-            .map(|b| sha256_hex(b.text.as_bytes()))
-            .unwrap_or_default();
+            .expect("canvas pane has an open buffer");
+        if buffer.deleted {
+            return Err(Failure::new("file_deleted", "画布文件已被删除。"));
+        }
+        let revision = sha256_hex(buffer.text.as_bytes());
+        let selected_ids = pane.selected_ids();
+        let draft;
+        let doc = if let Some(doc) = pane.document_at(&buffer.text) {
+            doc
+        } else {
+            draft = CanvasDocument::from_json_str(&buffer.text)
+                .map_err(|e| Failure::new("parse_error", e.to_string()))?;
+            &draft
+        };
         let selected_nodes: Vec<Value> = selected_ids
             .iter()
-            .filter_map(|id| doc.node(id).map(|n| serialize_node_summary(n, ReadMode::Full)))
+            .filter_map(|id| {
+                doc.node(id)
+                    .map(|n| serialize_node_summary(n, ReadMode::Full))
+            })
             .collect();
         Ok(json!({
             "status": "ok",
@@ -213,7 +244,7 @@ impl Workspace {
             "revision": revision,
             "view_mode": doc.view_mode(),
             "tree_mode": doc.tree_mode(),
-            "selected_ids": selected_ids,
+            "selected_ids": selected_nodes.iter().map(|node| &node["id"]).collect::<Vec<_>>(),
             "selected_nodes": selected_nodes,
             "next_free_origin": doc.next_free_origin(),
         }))
@@ -229,7 +260,6 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Result<Value, Failure> {
         let rel = normalize_canvas_rel_path(raw_path)?;
-        let full = new_canvas_path(root, &rel)?;
         let mut doc = CanvasDocument::default();
         let report = if ops.is_empty() {
             None
@@ -241,28 +271,34 @@ impl Workspace {
         };
         if view_mode.is_some() || tree_mode.is_some() {
             let target_view = view_mode.unwrap_or(CanvasViewMode::Tree);
-            doc.apply_view_or_layout(Some(target_view), None, tree_mode, true);
+            doc.apply_view_or_layout(Some(target_view), None, tree_mode, false);
         }
         let text = doc
             .to_json_pretty()
             .map_err(|e| Failure::new("serialize_error", e.to_string()))?;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&full)
-            .map_err(|error| {
-                let code = if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    "file_exists"
-                } else {
-                    "write_failed"
-                };
-                Failure::new(code, error.to_string())
-            })?;
-        file.write_all(text.as_bytes())
+        let full = new_canvas_path(root, &rel)?;
+        // Publish a complete file in one step and retain create-only semantics on retry.
+        let mut staged =
+            tempfile::NamedTempFile::new_in(full.parent().expect("canvas path has a parent"))
+                .map_err(|error| Failure::new("write_failed", error.to_string()))?;
+        staged
+            .write_all(text.as_bytes())
             .map_err(|error| Failure::new("write_failed", error.to_string()))?;
+        staged.persist_noclobber(&full).map_err(|error| {
+            let error = error.error;
+            let code = if error.kind() == std::io::ErrorKind::AlreadyExists {
+                "file_exists"
+            } else {
+                "write_failed"
+            };
+            Failure::new(code, error.to_string())
+        })?;
+        let rel = project_relative_canvas_path(root, &full);
         let revision = sha256_hex(text.as_bytes());
-        self.sync_canvas_index_from_text(&rel, &text);
-        let _ = self.tree.reload_files(root);
+        self.sync_canvas_index_from_text(&rel, &text, cx);
+        if let Err(error) = self.tree.reload_files(root) {
+            self.report(error, cx);
+        }
         self.expand_ancestors(&rel);
         cx.notify();
         Ok(json!({
@@ -286,38 +322,17 @@ impl Workspace {
         if ops.is_empty() {
             return Err(Failure::new("invalid_request", "ops 不能为空。"));
         }
-        let rel = normalize_canvas_rel_path(raw_path)?;
+        let (rel, full) = self.canvas_tool_target(root, raw_path)?;
 
         if let Some(pane) = self.documents.canvas_pane(&rel).cloned() {
-            let buffer = self
-                .documents
-                .open_buffer(&rel)
-                .ok_or_else(|| Failure::new("canvas_not_ready", "画布缓冲不可用。"))?;
-            if buffer.conflict.is_some() || buffer.deleted {
-                return Err(Failure::new(
-                    "document_conflict",
-                    "画布存在未解决的磁盘冲突或已被删除，请先处理后再由 AI 修改。",
-                ));
-            }
-            let current_rev = sha256_hex(buffer.text.as_bytes());
-            if let Some(expected) = expected_revision
-                && expected != current_rev
-            {
-                return Err(Failure::new(
-                    "canvas_changed",
-                    "画布已被修改，请先重新调用 folio_canvas_read 获取最新 revision。",
-                ));
-            }
-            let report = pane
-                .update(cx, |pane, cx| pane.apply_ops_transaction(ops, cx))
+            let buffer = self.checked_canvas_draft(&rel, expected_revision, cx)?;
+            let (report, next_text) = pane
+                .update(cx, |pane, cx| {
+                    pane.sync_text(buffer, cx);
+                    pane.apply_ops_transaction(ops, cx)
+                })
                 .map_err(|msg| Failure::new("invalid_ops", msg))?;
-            let next_text = self
-                .documents
-                .open_buffer(&rel)
-                .map(|b| b.text.clone())
-                .unwrap_or_default();
-            let next_rev = sha256_hex(next_text.as_bytes());
-            self.sync_canvas_index_from_text(&rel, &next_text);
+            let next_rev = self.publish_canvas_draft(&rel, next_text, cx);
             return Ok(json!({
                 "status": "ok",
                 "path": rel,
@@ -327,17 +342,9 @@ impl Workspace {
             }));
         }
 
-        let full = existing_canvas_path(root, &rel)?;
         let disk = files::read_document_at(&full)
             .map_err(|e| Failure::new("read_failed", e.to_string()))?;
-        if let Some(expected) = expected_revision
-            && expected != disk.revision
-        {
-            return Err(Failure::new(
-                "canvas_changed",
-                "画布文件已变化，请先重新读取最新 revision。",
-            ));
-        }
+        check_revision(expected_revision, &disk.revision)?;
         let mut doc = CanvasDocument::from_json_str(&disk.text)
             .map_err(|e| Failure::new("parse_error", e.to_string()))?;
         let report = doc
@@ -357,7 +364,7 @@ impl Workspace {
                 ));
             }
         };
-        self.sync_canvas_index_from_text(&rel, &saved.text);
+        self.sync_canvas_index_from_text(&rel, &saved.text, cx);
         Ok(json!({
             "status": "ok",
             "path": rel,
@@ -372,55 +379,58 @@ impl Workspace {
         &mut self,
         root: &Path,
         raw_path: &str,
+        expected_revision: Option<&str>,
         view_mode: Option<CanvasViewMode>,
         root_id: Option<&str>,
         mode: Option<TreeLayoutMode>,
         unpin_subtree: bool,
         cx: &mut Context<Self>,
     ) -> Result<Value, Failure> {
-        let rel = normalize_canvas_rel_path(raw_path)?;
+        let (rel, full) = self.canvas_tool_target(root, raw_path)?;
         if let Some(pane) = self.documents.canvas_pane(&rel).cloned() {
-            let (moved, final_view, final_tree) = pane.update(cx, |pane, cx| {
-                let moved =
-                    pane.apply_view_or_layout_transaction(view_mode, root_id, mode, unpin_subtree, cx);
-                (
-                    moved,
-                    pane.document().view_mode(),
-                    pane.document().tree_mode(),
-                )
-            });
-            let next_rev = self
-                .documents
-                .open_buffer(&rel)
-                .map(|b| sha256_hex(b.text.as_bytes()))
-                .unwrap_or_default();
+            let buffer = self.checked_canvas_draft(&rel, expected_revision, cx)?;
+            let (moved, next_text) = pane
+                .update(cx, |pane, cx| {
+                    pane.sync_text(buffer, cx);
+                    pane.apply_view_or_layout_transaction(
+                        view_mode,
+                        root_id,
+                        mode,
+                        unpin_subtree,
+                        cx,
+                    )
+                })
+                .map_err(|msg| Failure::new("invalid_layout", msg))?;
+            let next_rev = self.publish_canvas_draft(&rel, next_text, cx);
+            let doc = pane.read(cx).document();
             return Ok(json!({
                 "status": "ok",
                 "path": rel,
                 "moved_nodes": moved,
-                "view_mode": final_view,
-                "tree_mode": final_tree,
+                "view_mode": doc.view_mode(),
+                "tree_mode": doc.tree_mode(),
                 "revision": next_rev,
                 "is_open": true,
             }));
         }
 
-        let full = existing_canvas_path(root, &rel)?;
         let disk = files::read_document_at(&full)
             .map_err(|e| Failure::new("read_failed", e.to_string()))?;
+        check_revision(expected_revision, &disk.revision)?;
         let mut doc = CanvasDocument::from_json_str(&disk.text)
             .map_err(|e| Failure::new("parse_error", e.to_string()))?;
-        let prev_view = doc.view_mode();
-        let prev_tree = doc.tree_mode();
-        let moved = doc.apply_view_or_layout(view_mode, root_id, mode, unpin_subtree);
-        if moved > 0 || doc.view_mode() != prev_view || doc.tree_mode() != prev_tree {
+        let (moved, changed) = doc.apply_view_or_layout(view_mode, root_id, mode, unpin_subtree);
+        if changed {
             let next_text = doc
                 .to_json_pretty()
                 .map_err(|e| Failure::new("serialize_error", e.to_string()))?;
             let Ok(saved) = files::save_document_at(&full, &next_text, &disk.revision)
                 .map_err(|e| Failure::new("write_failed", e.to_string()))?
             else {
-                return Err(Failure::new("canvas_changed", "写入前磁盘画布已被外部修改。"));
+                return Err(Failure::new(
+                    "canvas_changed",
+                    "写入前磁盘画布已被外部修改。",
+                ));
             };
             return Ok(json!({
                 "status": "ok",
@@ -441,6 +451,77 @@ impl Workspace {
             "revision": disk.revision,
             "is_open": false,
         }))
+    }
+
+    fn canvas_tool_target(
+        &self,
+        root: &Path,
+        raw_path: &str,
+    ) -> Result<(String, PathBuf), Failure> {
+        let rel = normalize_canvas_rel_path(raw_path)?;
+        if self.documents.open_buffer(&rel).is_some() {
+            return Ok((rel.clone(), root.join(rel)));
+        }
+        // Resolve case and filesystem aliases before looking up the open draft on Windows.
+        let full = existing_canvas_path(root, &rel)?;
+        let rel = project_relative_canvas_path(root, &full);
+        if !Self::is_canvas_path(&rel) {
+            return Err(Failure::new(
+                "unsupported_format",
+                "画布工具只支持 .canvas 文件。",
+            ));
+        }
+        Ok((rel, full))
+    }
+
+    fn checked_canvas_draft(
+        &self,
+        rel: &str,
+        expected_revision: Option<&str>,
+        cx: &Context<Self>,
+    ) -> Result<&str, Failure> {
+        let buffer = self
+            .documents
+            .open_buffer(rel)
+            .expect("canvas pane has an open buffer");
+        if buffer.conflict.is_some() || buffer.deleted {
+            return Err(Failure::new(
+                "document_conflict",
+                "画布存在未解决的磁盘冲突或已被删除，请先处理后再由 AI 修改。",
+            ));
+        }
+        if self.documents.canvas_gesture_in_progress(rel, cx) {
+            return Err(Failure::new(
+                "canvas_busy",
+                "画布正在编辑或拖动，请在当前操作结束后重试。",
+            ));
+        }
+        if expected_revision.is_some() {
+            check_revision(expected_revision, &sha256_hex(buffer.text.as_bytes()))?;
+        }
+        Ok(&buffer.text)
+    }
+
+    fn publish_canvas_draft(
+        &mut self,
+        rel: &str,
+        next_text: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> String {
+        // GPUI events are deferred past this request. Publish directly so the revision
+        // in the reply identifies the same draft that the next request will read.
+        if let Some(text) = next_text {
+            let revision = sha256_hex(text.as_bytes());
+            self.edit_canvas_document(rel, text, cx);
+            cx.notify();
+            revision
+        } else {
+            let buffer = self
+                .documents
+                .open_buffer(rel)
+                .expect("canvas pane has an open buffer");
+            sha256_hex(buffer.text.as_bytes())
+        }
     }
 }
 
@@ -473,6 +554,16 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+fn check_revision(expected: Option<&str>, current: &str) -> Result<(), Failure> {
+    if expected.is_some_and(|expected| expected != current) {
+        return Err(Failure::new(
+            "canvas_changed",
+            "画布已被修改，请先重新调用 folio_canvas_read 获取最新 revision。",
+        ));
+    }
+    Ok(())
+}
+
 fn normalize_canvas_rel_path(raw: &str) -> Result<String, Failure> {
     let trimmed = raw.trim().replace('\\', "/");
     let path = Path::new(&trimmed);
@@ -500,7 +591,21 @@ fn normalize_canvas_rel_path(raw: &str) -> Result<String, Failure> {
             "画布工具只支持 .canvas 文件。",
         ));
     }
-    Ok(trimmed)
+    Ok(path
+        .components()
+        .filter_map(|part| match part {
+            Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
+fn project_relative_canvas_path(root: &Path, full: &Path) -> String {
+    full.strip_prefix(root)
+        .expect("validated project path")
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 fn existing_canvas_path(root: &Path, rel: &str) -> Result<PathBuf, Failure> {
@@ -515,29 +620,46 @@ fn existing_canvas_path(root: &Path, rel: &str) -> Result<PathBuf, Failure> {
         Failure::new(code, error.to_string())
     })?;
     if !path.is_file() {
-        return Err(Failure::new("file_not_found", "指定的 .canvas 文件不存在。"));
+        return Err(Failure::new(
+            "file_not_found",
+            "指定的 .canvas 文件不存在。",
+        ));
     }
     Ok(path)
 }
 
 fn new_canvas_path(root: &Path, rel: &str) -> Result<PathBuf, Failure> {
     let rel_path = Path::new(rel);
-    let parent = rel_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map_or_else(
-            || Ok(dunce::canonicalize(root).map_err(|e| Failure::new("project_unavailable", e.to_string()))?),
-            |p| {
-                let target = root.join(p);
-                fs::create_dir_all(&target).map_err(|e| Failure::new("write_failed", e.to_string()))?;
-                files::project_path(root, &p.to_string_lossy())
-                    .map_err(|e| Failure::new("outside_project", e.to_string()))
-            },
-        )?;
     let name = rel_path
         .file_name()
         .and_then(|n| n.to_str())
         .filter(|n| !n.is_empty() && !n.chars().any(|c| "<>:\"|?*".contains(c)))
         .ok_or_else(|| Failure::new("invalid_path", "无效的 .canvas 文件名。"))?;
+    let mut parent = root.to_path_buf();
+    // Resolve each existing ancestor before creating the next directory.
+    for part in rel_path
+        .parent()
+        .expect("relative filename has a parent")
+        .components()
+    {
+        let next = parent.join(part);
+        match fs::symlink_metadata(&next) {
+            Ok(_) => {
+                parent = dunce::canonicalize(&next)
+                    .map_err(|e| Failure::new("invalid_path", e.to_string()))?;
+                if !parent.starts_with(root) {
+                    return Err(Failure::new(
+                        "outside_project",
+                        "路径必须是当前项目内的相对路径。",
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&next).map_err(|e| Failure::new("write_failed", e.to_string()))?;
+                parent = next;
+            }
+            Err(error) => return Err(Failure::new("invalid_path", error.to_string())),
+        }
+    }
     Ok(parent.join(name))
 }

@@ -14,7 +14,6 @@ pub struct LayoutOptions {
     pub mode: TreeLayoutMode,
     pub h_gap: f32,
     pub v_gap: f32,
-    pub ignore_pinned: bool,
 }
 
 impl Default for LayoutOptions {
@@ -23,7 +22,6 @@ impl Default for LayoutOptions {
             mode: TreeLayoutMode::MindmapRight,
             h_gap: HORIZONTAL_GAP,
             v_gap: VERTICAL_GAP,
-            ignore_pinned: false,
         }
     }
 }
@@ -36,397 +34,139 @@ pub fn compute_tree_layout(
 ) -> HashMap<String, (f32, f32)> {
     let mut children_map: HashMap<&str, Vec<&CanvasNode>> = HashMap::new();
     for node in &doc.nodes {
-        if let Some(pid) = node.parent_id() {
-            children_map.entry(pid).or_default().push(node);
+        if let Some(parent) = node.parent_id() {
+            children_map.entry(parent).or_default().push(node);
         }
     }
-
-    let roots: Vec<&CanvasNode> = if let Some(rid) = root_id {
-        doc.node(rid).into_iter().collect()
+    let children_of = |node: &CanvasNode| -> &[&CanvasNode] {
+        if node.is_collapsed() {
+            &[]
+        } else {
+            children_map
+                .get(node.id.as_str())
+                .map_or(&[], Vec::as_slice)
+        }
+    };
+    let roots: Vec<_> = if let Some(id) = root_id {
+        doc.node(id).into_iter().collect()
     } else {
         doc.nodes
             .iter()
-            .filter(|n| n.parent_id().is_none())
+            .filter(|node| node.parent_id().is_none())
             .collect()
     };
-
     let mut positions = HashMap::new();
-    if roots.is_empty() {
+    let Some(first) = roots.first() else {
         return positions;
-    }
+    };
 
-    // When laying out the full forest (`root_id.is_none()`), stack roots along the cross axis without overlap.
-    let forest_mode = root_id.is_none();
-    let base_x = roots.first().map_or(80.0, |r| r.x);
-    let base_y = roots.first().map_or(80.0, |r| r.y);
-    let mut next_x = base_x;
-    let mut next_y = base_y;
-    let forest_gap = 44.0;
+    let vertical = options.mode == TreeLayoutMode::TreeDown;
+    // Cross-axis spans pack siblings vertically in a mind map and horizontally in a down tree.
+    let cross_size = |node: &CanvasNode| if vertical { node.width } else { node.height };
+    let cross_gap = if vertical {
+        SIBLING_X_GAP
+    } else {
+        options.v_gap
+    };
+    let cross_origin = |x, y| if vertical { x } else { y };
+    let mut next_cross = cross_origin(first.x, first.y);
+    let direction = if options.mode == TreeLayoutMode::MindmapLeft {
+        -1.0
+    } else {
+        1.0
+    };
 
-    for (idx, root) in roots.into_iter().enumerate() {
-        let mut visited = HashSet::new();
-        let mut tree_positions = HashMap::new();
-
-        let (root_x, root_y) = if forest_mode && idx > 0 {
-            if options.mode == TreeLayoutMode::TreeDown {
-                let mut seen = HashSet::new();
-                let span = measure_vertical_span(root, &children_map, SIBLING_X_GAP, &mut seen);
-                let centered_x = next_x + span * 0.5 - root.width * 0.5;
-                if options.ignore_pinned || !root.is_pinned() {
-                    tree_positions.insert(root.id.clone(), (centered_x, base_y));
-                }
-                (centered_x, base_y)
-            } else {
-                let mut seen = HashSet::new();
-                let span = measure_horizontal_span(root, &children_map, options.v_gap, &mut seen);
-                let centered_y = next_y + span * 0.5 - root.height * 0.5;
-                if options.ignore_pinned || !root.is_pinned() {
-                    tree_positions.insert(root.id.clone(), (base_x, centered_y));
-                }
-                (base_x, centered_y)
+    for (index, root) in roots.iter().copied().enumerate() {
+        // Measure each visible subtree once, in reverse traversal order. Both passes use
+        // explicit stacks so imported deep trees do not exhaust the desktop thread stack.
+        let mut order = Vec::new();
+        let mut pending = vec![root];
+        let mut seen = HashSet::new();
+        while let Some(node) = pending.pop() {
+            if seen.insert(node.id.as_str()) {
+                order.push(node);
+                pending.extend(children_of(node));
             }
-        } else {
+        }
+        let mut spans = HashMap::with_capacity(order.len());
+        for node in order.into_iter().rev() {
+            let mut child_span = 0.0;
+            for (index, child) in children_of(node).iter().enumerate() {
+                if index > 0 {
+                    child_span += cross_gap;
+                }
+                child_span += spans
+                    .get(child.id.as_str())
+                    .copied()
+                    .unwrap_or_else(|| cross_size(child));
+            }
+            spans.insert(node.id.as_str(), child_span.max(cross_size(node)));
+        }
+
+        let reposition_root = index > 0 && !root.is_pinned();
+        let root_center = next_cross + (spans[root.id.as_str()] - cross_size(root)) * 0.5;
+        let (root_x, root_y) = if !reposition_root {
             (root.x, root.y)
+        } else if vertical {
+            (root_center, first.y)
+        } else {
+            (first.x, root_center)
         };
-
-        let mut virtual_root = root.clone();
-        virtual_root.x = root_x;
-        virtual_root.y = root_y;
-
-        match options.mode {
-            TreeLayoutMode::MindmapRight => {
-                layout_horizontal_branch(
-                    &virtual_root,
-                    virtual_root.x,
-                    virtual_root.y + virtual_root.height * 0.5,
-                    1.0,
-                    true,
-                    &children_map,
-                    &options,
-                    &mut visited,
-                    &mut tree_positions,
-                );
-            }
-            TreeLayoutMode::MindmapLeft => {
-                layout_horizontal_branch(
-                    &virtual_root,
-                    virtual_root.x + virtual_root.width,
-                    virtual_root.y + virtual_root.height * 0.5,
-                    -1.0,
-                    true,
-                    &children_map,
-                    &options,
-                    &mut visited,
-                    &mut tree_positions,
-                );
-            }
-            TreeLayoutMode::MindmapBalanced => {
-                layout_balanced_root(
-                    &virtual_root,
-                    &children_map,
-                    &options,
-                    &mut visited,
-                    &mut tree_positions,
-                );
-            }
-            TreeLayoutMode::TreeDown => {
-                layout_vertical_branch(
-                    &virtual_root,
-                    virtual_root.x + virtual_root.width * 0.5,
-                    virtual_root.y,
-                    true,
-                    &children_map,
-                    &options,
-                    &mut visited,
-                    &mut tree_positions,
-                );
-            }
+        if reposition_root {
+            positions.insert(root.id.clone(), (root_x, root_y));
         }
 
-        if forest_mode {
-            let mut max_x = root_x + root.width;
-            let mut max_y = root_y + root.height;
-            for (nid, (nx, ny)) in &tree_positions {
-                if let Some(node) = doc.node(nid) {
-                    max_x = max_x.max(nx + node.width);
-                    max_y = max_y.max(ny + node.height);
+        let mut last_cross = cross_origin(root_x, root_y) + cross_size(root);
+        let mut pending = vec![(root, root_x, root_y, direction)];
+        seen.clear();
+        while let Some((node, proposed_x, proposed_y, direction)) = pending.pop() {
+            if !seen.insert(node.id.as_str()) {
+                continue;
+            }
+            let pinned = node.is_pinned();
+            let (x, y) = if pinned {
+                (node.x, node.y)
+            } else {
+                (proposed_x, proposed_y)
+            };
+            if node.id != root.id && !pinned {
+                positions.insert(node.id.clone(), (x, y));
+            }
+            last_cross = last_cross.max(cross_origin(x, y) + cross_size(node));
+
+            let children = children_of(node);
+            let balanced = node.id == root.id && options.mode == TreeLayoutMode::MindmapBalanced;
+            let side_count = if balanced { 2 } else { 1 };
+            for side in 0..side_count {
+                let direction = if side == 0 { direction } else { -1.0 };
+                let children = children.iter().skip(side).step_by(side_count);
+                let mut span = 0.0;
+                for (index, child) in children.clone().enumerate() {
+                    if index > 0 {
+                        span += cross_gap;
+                    }
+                    span += spans[child.id.as_str()];
+                }
+                let center = cross_origin(x, y) + cross_size(node) * 0.5;
+                let mut cursor = center - span * 0.5;
+                for &child in children {
+                    let child_span = spans[child.id.as_str()];
+                    let cross = cursor + (child_span - cross_size(child)) * 0.5;
+                    let (child_x, child_y) = if vertical {
+                        (cross, y + node.height + LEVEL_Y_GAP)
+                    } else if direction > 0.0 {
+                        (x + node.width + options.h_gap, cross)
+                    } else {
+                        (x - options.h_gap - child.width, cross)
+                    };
+                    pending.push((child, child_x, child_y, direction));
+                    cursor += child_span + cross_gap;
                 }
             }
-            next_x = max_x + forest_gap;
-            next_y = max_y + forest_gap;
         }
-        positions.extend(tree_positions);
+        next_cross = next_cross.max(last_cross + 44.0);
     }
     positions
-}
-
-fn measure_horizontal_span<'a>(
-    node: &'a CanvasNode,
-    children_map: &HashMap<&'a str, Vec<&'a CanvasNode>>,
-    v_gap: f32,
-    visited: &mut HashSet<&'a str>,
-) -> f32 {
-    if !visited.insert(node.id.as_str()) {
-        return node.height;
-    }
-    if node.is_collapsed() {
-        return node.height;
-    }
-    let Some(children) = children_map.get(node.id.as_str()) else {
-        return node.height;
-    };
-    if children.is_empty() {
-        return node.height;
-    }
-    let mut sum = 0.0;
-    for (i, child) in children.iter().enumerate() {
-        if i > 0 {
-            sum += v_gap;
-        }
-        sum += measure_horizontal_span(child, children_map, v_gap, visited);
-    }
-    sum.max(node.height)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn layout_horizontal_branch<'a>(
-    node: &'a CanvasNode,
-    anchor_x: f32,
-    center_y: f32,
-    dir_x: f32,
-    is_root: bool,
-    children_map: &HashMap<&'a str, Vec<&'a CanvasNode>>,
-    options: &LayoutOptions,
-    visited: &mut HashSet<&'a str>,
-    out: &mut HashMap<String, (f32, f32)>,
-) {
-    if !visited.insert(node.id.as_str()) {
-        return;
-    }
-    let nx = if dir_x >= 0.0 {
-        anchor_x
-    } else {
-        anchor_x - node.width
-    };
-    let ny = center_y - node.height * 0.5;
-    let locked = !options.ignore_pinned && node.is_pinned();
-    if !is_root && !locked {
-        out.insert(node.id.clone(), (nx, ny));
-    }
-    let effective_x = if is_root || locked { node.x } else { nx };
-    let effective_cy = if is_root || locked {
-        node.y + node.height * 0.5
-    } else {
-        center_y
-    };
-
-    if node.is_collapsed() {
-        return;
-    }
-    let Some(children) = children_map.get(node.id.as_str()) else {
-        return;
-    };
-    if children.is_empty() {
-        return;
-    }
-
-    let mut spans = Vec::with_capacity(children.len());
-    let mut total_span = 0.0;
-    for (i, child) in children.iter().enumerate() {
-        if i > 0 {
-            total_span += options.v_gap;
-        }
-        let mut measure_seen = visited.clone();
-        let span = measure_horizontal_span(child, children_map, options.v_gap, &mut measure_seen);
-        total_span += span;
-        spans.push(span);
-    }
-
-    let child_anchor_x = if dir_x >= 0.0 {
-        effective_x + node.width + options.h_gap
-    } else {
-        effective_x - options.h_gap
-    };
-    let mut cursor_y = effective_cy - total_span * 0.5;
-    for (child, span) in children.iter().zip(spans) {
-        let child_cy = cursor_y + span * 0.5;
-        layout_horizontal_branch(
-            child,
-            child_anchor_x,
-            child_cy,
-            dir_x,
-            false,
-            children_map,
-            options,
-            visited,
-            out,
-        );
-        cursor_y += span + options.v_gap;
-    }
-}
-
-fn layout_balanced_root<'a>(
-    root: &'a CanvasNode,
-    children_map: &HashMap<&'a str, Vec<&'a CanvasNode>>,
-    options: &LayoutOptions,
-    visited: &mut HashSet<&'a str>,
-    out: &mut HashMap<String, (f32, f32)>,
-) {
-    visited.insert(root.id.as_str());
-    if root.is_collapsed() {
-        return;
-    }
-    let Some(children) = children_map.get(root.id.as_str()) else {
-        return;
-    };
-    if children.is_empty() {
-        return;
-    }
-
-    let mut right_children = Vec::new();
-    let mut left_children = Vec::new();
-    for (idx, child) in children.iter().enumerate() {
-        if idx % 2 == 0 {
-            right_children.push(*child);
-        } else {
-            left_children.push(*child);
-        }
-    }
-
-    let root_cy = root.y + root.height * 0.5;
-    let place_side = |side_children: Vec<&'a CanvasNode>,
-                      dir_x: f32,
-                      anchor_x: f32,
-                      visited: &mut HashSet<&'a str>,
-                      out: &mut HashMap<String, (f32, f32)>| {
-        if side_children.is_empty() {
-            return;
-        }
-        let mut spans = Vec::with_capacity(side_children.len());
-        let mut total = 0.0;
-        for (i, child) in side_children.iter().enumerate() {
-            if i > 0 {
-                total += options.v_gap;
-            }
-            let mut seen = visited.clone();
-            let span = measure_horizontal_span(child, children_map, options.v_gap, &mut seen);
-            total += span;
-            spans.push(span);
-        }
-        let mut cursor_y = root_cy - total * 0.5;
-        for (child, span) in side_children.into_iter().zip(spans) {
-            layout_horizontal_branch(
-                child,
-                anchor_x,
-                cursor_y + span * 0.5,
-                dir_x,
-                false,
-                children_map,
-                options,
-                visited,
-                out,
-            );
-            cursor_y += span + options.v_gap;
-        }
-    };
-
-    place_side(
-        right_children,
-        1.0,
-        root.x + root.width + options.h_gap,
-        visited,
-        out,
-    );
-    place_side(left_children, -1.0, root.x - options.h_gap, visited, out);
-}
-
-fn measure_vertical_span<'a>(
-    node: &'a CanvasNode,
-    children_map: &HashMap<&'a str, Vec<&'a CanvasNode>>,
-    h_gap: f32,
-    visited: &mut HashSet<&'a str>,
-) -> f32 {
-    if !visited.insert(node.id.as_str()) || node.is_collapsed() {
-        return node.width;
-    }
-    let Some(children) = children_map.get(node.id.as_str()) else {
-        return node.width;
-    };
-    if children.is_empty() {
-        return node.width;
-    }
-    let mut sum = 0.0;
-    for (i, child) in children.iter().enumerate() {
-        if i > 0 {
-            sum += h_gap;
-        }
-        sum += measure_vertical_span(child, children_map, h_gap, visited);
-    }
-    sum.max(node.width)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn layout_vertical_branch<'a>(
-    node: &'a CanvasNode,
-    center_x: f32,
-    top_y: f32,
-    is_root: bool,
-    children_map: &HashMap<&'a str, Vec<&'a CanvasNode>>,
-    options: &LayoutOptions,
-    visited: &mut HashSet<&'a str>,
-    out: &mut HashMap<String, (f32, f32)>,
-) {
-    if !visited.insert(node.id.as_str()) {
-        return;
-    }
-    let nx = center_x - node.width * 0.5;
-    let locked = !options.ignore_pinned && node.is_pinned();
-    if !is_root && !locked {
-        out.insert(node.id.clone(), (nx, top_y));
-    }
-    let effective_cx = if is_root || locked {
-        node.x + node.width * 0.5
-    } else {
-        center_x
-    };
-    let effective_y = if is_root || locked { node.y } else { top_y };
-
-    if node.is_collapsed() {
-        return;
-    }
-    let Some(children) = children_map.get(node.id.as_str()) else {
-        return;
-    };
-    if children.is_empty() {
-        return;
-    }
-
-    let mut spans = Vec::with_capacity(children.len());
-    let mut total = 0.0;
-    for (i, child) in children.iter().enumerate() {
-        if i > 0 {
-            total += SIBLING_X_GAP;
-        }
-        let mut seen = visited.clone();
-        let span = measure_vertical_span(child, children_map, SIBLING_X_GAP, &mut seen);
-        total += span;
-        spans.push(span);
-    }
-    let child_top_y = effective_y + node.height + LEVEL_Y_GAP;
-    let mut cursor_x = effective_cx - total * 0.5;
-    for (child, span) in children.iter().zip(spans) {
-        layout_vertical_branch(
-            child,
-            cursor_x + span * 0.5,
-            child_top_y,
-            false,
-            children_map,
-            options,
-            visited,
-            out,
-        );
-        cursor_x += span + SIBLING_X_GAP;
-    }
 }
 
 #[cfg(test)]
@@ -524,16 +264,15 @@ mod tests {
         ])
         .unwrap();
 
-        let updates = compute_tree_layout(
-            &doc,
-            None,
-            LayoutOptions {
-                ignore_pinned: true,
-                ..Default::default()
-            },
-        );
-        let y1 = updates.get("r1").map(|(_, y)| *y).unwrap_or(doc.node("r1").unwrap().y);
-        let y2 = updates.get("r2").map(|(_, y)| *y).unwrap_or(doc.node("r2").unwrap().y);
+        let updates = compute_tree_layout(&doc, None, LayoutOptions::default());
+        let y1 = updates
+            .get("r1")
+            .map(|(_, y)| *y)
+            .unwrap_or(doc.node("r1").unwrap().y);
+        let y2 = updates
+            .get("r2")
+            .map(|(_, y)| *y)
+            .unwrap_or(doc.node("r2").unwrap().y);
         assert!((y2 - y1).abs() >= 100.0);
     }
 
@@ -577,12 +316,17 @@ mod tests {
             None,
             LayoutOptions {
                 mode: TreeLayoutMode::TreeDown,
-                ignore_pinned: true,
                 ..Default::default()
             },
         );
-        let x1 = updates.get("r1").map(|(x, _)| *x).unwrap_or(doc.node("r1").unwrap().x);
-        let x2 = updates.get("r2").map(|(x, _)| *x).unwrap_or(doc.node("r2").unwrap().x);
+        let x1 = updates
+            .get("r1")
+            .map(|(x, _)| *x)
+            .unwrap_or(doc.node("r1").unwrap().x);
+        let x2 = updates
+            .get("r2")
+            .map(|(x, _)| *x)
+            .unwrap_or(doc.node("r2").unwrap().x);
         assert!((x2 - x1).abs() >= 240.0);
     }
 }

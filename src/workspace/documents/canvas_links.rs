@@ -14,25 +14,34 @@ impl Workspace {
         canvas_index::metadata_db_path(root.as_deref()).ok()
     }
 
-    pub(in crate::workspace) fn sync_canvas_index_from_text(&mut self, rel_path: &str, text: &str) {
+    pub(in crate::workspace) fn sync_canvas_index_from_text(
+        &mut self, rel_path: &str, text: &str, cx: &mut Context<Self>,
+    ) {
         if !Self::is_canvas_path(rel_path) {
             return;
         }
         let Some(db_path) = self.canvas_metadata_db_path() else {
             return;
         };
-        if let Ok(doc) = CanvasDocument::from_json_str(text) {
-            let _ = canvas_index::sync_canvas_links(&db_path, rel_path, &doc);
+        // The backlink index reflects the persisted canvas, including external edits.
+        let result = match CanvasDocument::from_json_str(text) {
+            Ok(doc) => canvas_index::sync_canvas_links(&db_path, rel_path, &doc),
+            Err(_) => canvas_index::remove_canvas_links(&db_path, rel_path),
+        };
+        if let Err(error) = result {
+            self.report(error, cx);
         }
         self.refresh_active_canvas_backlinks();
     }
 
-    pub(in crate::workspace) fn remove_canvas_index(&mut self, rel_path: &str) {
+    pub(in crate::workspace) fn remove_canvas_index(&mut self, rel_path: &str, cx: &mut Context<Self>) {
         if !Self::is_canvas_path(rel_path) {
             return;
         }
-        if let Some(db_path) = self.canvas_metadata_db_path() {
-            let _ = canvas_index::remove_canvas_links(&db_path, rel_path);
+        if let Some(db_path) = self.canvas_metadata_db_path()
+            && let Err(error) = canvas_index::remove_canvas_links(&db_path, rel_path)
+        {
+            self.report(error, cx);
         }
         self.refresh_active_canvas_backlinks();
     }
@@ -244,10 +253,6 @@ impl Workspace {
         canvas_pane.update(cx, |pane, cx| {
             pane.add_anchor_node(preview, anchor, cx);
         });
-        if let Some(doc) = self.documents.open.get(&file.path) {
-            let text = doc.buffer.text.clone();
-            self.sync_canvas_index_from_text(&file.path, &text);
-        }
         let canvas_name = Path::new(&file.path)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -688,11 +693,23 @@ impl Workspace {
         if moves.is_empty() {
             return;
         }
-        let mut updated_open = std::collections::HashSet::new();
-        for (key, pane) in &self.documents.canvas_panes {
-            let changed = pane.update(cx, |pane, cx| pane.relocate_paths(moves, is_folder, cx));
-            if changed {
-                updated_open.insert(key.path.clone());
+        if let Some(db_path) = self.canvas_metadata_db_path()
+            && let Err(error) = canvas_index::relocate_canvas_paths(&db_path, moves, is_folder)
+        {
+            self.report(error, cx);
+        }
+        // One buffer can have two views. Patch its current draft once and let the
+        // normal buffer synchronization update the other view.
+        let open_canvases: BTreeSet<_> = self.documents.canvas_panes.keys().map(|key| key.path.clone()).collect();
+        for path in &open_canvases {
+            let pane = self.documents.canvas_pane(path).expect("open canvas has a pane").clone();
+            let buffer = self.documents.open_buffer(path).expect("canvas pane has an open buffer");
+            let text = pane.update(cx, |pane, cx| {
+                pane.sync_text(&buffer.text, cx);
+                pane.relocate_paths(moves, is_folder, cx)
+            });
+            if let Some(text) = text {
+                self.edit_canvas_document(path, text, cx);
             }
         }
         if let Some(project) = self.projects.directory() {
@@ -701,7 +718,7 @@ impl Workspace {
                 .tree
                 .files()
                 .iter()
-                .filter(|f| Self::is_canvas_path(&f.path) && !updated_open.contains(&f.path))
+                .filter(|f| Self::is_canvas_path(&f.path) && !open_canvases.contains(&f.path))
                 .map(|f| f.path.clone())
                 .collect();
             for rel_path in canvas_files {
@@ -710,12 +727,13 @@ impl Workspace {
                     && doc.relocate_paths(moves, is_folder)
                     && let Ok(next_text) = doc.to_json_pretty()
                 {
-                    let _ = files::save_document(&root, &rel_path, &next_text, &disk.revision);
+                    match files::save_document(&root, &rel_path, &next_text, &disk.revision) {
+                        Ok(Ok(saved)) => self.sync_canvas_index_from_text(&rel_path, &saved.text, cx),
+                        Ok(Err(_)) => self.report(format!("画布文件已被外部修改，未更新引用：{rel_path}"), cx),
+                        Err(error) => self.report(error, cx),
+                    }
                 }
             }
-        }
-        if let Some(db_path) = self.canvas_metadata_db_path() {
-            let _ = canvas_index::relocate_index_paths(&db_path, moves, is_folder);
         }
         self.refresh_active_canvas_backlinks();
     }

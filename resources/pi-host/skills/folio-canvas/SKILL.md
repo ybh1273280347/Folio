@@ -16,6 +16,6 @@ Folio 的 `.canvas` 画布是双视图原生白板（支持 `freeform` 自由画
    - **整图切入树视图**：调用 `folio_canvas_layout` 且 `view_mode: "tree"`（或整图 `layout`）前，画布会自动快照 `free_pos`，用户切回自由视图时原手摆坐标可无损恢复。
 3. **节点类型与内容规范**：
    - 优先使用简洁短句作为文本卡片标题/要点（画布卡片采用居中排版，长段落应放在对应笔记文档并用 `anchor` 挂载引用，而不是整段塞进卡片）。
-   - 插入项目内图片或本地附件卡片时使用 `node_type: "file"` 并提供项目相对路径 `file`（可附带简短说明 `text`）。
+   - 插入图片或附件卡片时使用 `node_type: "file"`，可用 `text` 附带简短说明。图片的 `file` 从画布所在目录计算，例如 `maps/topic.canvas` 引用 `assets/diagram.png` 时填 `../assets/diagram.png`。其他项目文件使用项目相对路径。
    - 仅当明确需要引用笔记/PDF 原文时附带 `anchor`；没有对应工具动作的纯外部网址不要虚构节点类型。
 4. **单事务批量提交**：尽量将同一轮创建的父子节点、分支连线打包进单次 `folio_canvas_apply_ops`（附带 `expected_revision`），这样用户的 `Ctrl+Z` 可以单步完整撤销。

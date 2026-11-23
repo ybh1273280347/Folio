@@ -152,7 +152,8 @@ pub fn backlinks_for(db_path: &Path, target_path: &str) -> Vec<CanvasBacklink> {
     rows.filter_map(Result::ok).collect()
 }
 
-pub fn relocate_index_paths(
+/// Moves index keys when canvas files move. Target paths follow the saved canvas contents.
+pub fn relocate_canvas_paths(
     db_path: &Path,
     moves: &[(String, String)],
     is_folder: bool,
@@ -166,27 +167,20 @@ pub fn relocate_index_paths(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
-    let rows: Vec<(String, String, String)> = {
+    let paths = {
         let mut stmt = tx
-            .prepare("SELECT canvas_path, node_id, target_path FROM canvas_links")
+            .prepare("SELECT DISTINCT canvas_path FROM canvas_links")
             .map_err(|e| e.to_string())?;
         let mapped = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .query_map([], |row| row.get::<_, String>(0))
             .map_err(|e| e.to_string())?;
-        mapped.filter_map(Result::ok).collect()
+        mapped.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
     };
-    for (canvas_path, node_id, target_path) in rows {
-        let next_canvas = remap_rel_path(&canvas_path, moves, is_folder);
-        let next_target = remap_rel_path(&target_path, moves, is_folder);
-        if next_canvas.is_some() || next_target.is_some() {
+    for path in paths {
+        if let Some(next) = remap_rel_path(&path, moves, is_folder) {
             tx.execute(
-                "UPDATE canvas_links SET canvas_path = ?1, target_path = ?2 WHERE canvas_path = ?3 AND node_id = ?4",
-                params![
-                    next_canvas.unwrap_or_else(|| canvas_path.clone()),
-                    next_target.unwrap_or(target_path),
-                    canvas_path,
-                    node_id
-                ],
+                "UPDATE canvas_links SET canvas_path = ?1 WHERE canvas_path = ?2",
+                params![next, path],
             )
             .map_err(|e| e.to_string())?;
         }
@@ -223,7 +217,10 @@ mod tests {
         assert_eq!(links[0].canvas_path, "maps/overview.canvas");
         assert_eq!(links[0].label, "核心结论");
 
-        relocate_index_paths(&db, &[("notes/a.md".into(), "notes/b.md".into())], false).unwrap();
+        relocate_canvas_paths(&db, &[("maps/overview.canvas".into(), "maps/renamed.canvas".into())], false).unwrap();
+        assert_eq!(backlinks_for(&db, "notes/a.md")[0].canvas_path, "maps/renamed.canvas");
+        doc.relocate_paths(&[("notes/a.md".into(), "notes/b.md".into())], false);
+        sync_canvas_links(&db, "maps/renamed.canvas", &doc).unwrap();
         assert!(backlinks_for(&db, "notes/a.md").is_empty());
         assert_eq!(backlinks_for(&db, "notes/b.md").len(), 1);
 
@@ -238,7 +235,7 @@ mod tests {
             },
         ));
         sync_canvas_links(&db, "maps/other.canvas", &other).unwrap();
-        remove_canvas_links(&db, "maps/overview.canvas").unwrap();
+        remove_canvas_links(&db, "maps/renamed.canvas").unwrap();
         let remaining = backlinks_for(&db, "notes/b.md");
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].canvas_path, "maps/other.canvas");
