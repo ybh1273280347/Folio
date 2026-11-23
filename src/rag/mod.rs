@@ -56,7 +56,7 @@ fn default_limit() -> usize {
     8
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DirtyDocument {
     pub rel_path: String,
     pub text: String,

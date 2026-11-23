@@ -11,11 +11,14 @@ use super::{
 };
 use crate::{annotations::AnnotationItem, storage};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     fs,
     io::ErrorKind,
     path::Path,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::UNIX_EPOCH,
 };
 
@@ -645,9 +648,48 @@ pub struct KbSearchSnapshots {
     pub pdf: Vec<SearchHit>,
 }
 
+/// Recent searches for one workspace and one index/draft snapshot.
+#[derive(Clone, Default)]
+pub struct KbSearchCache {
+    revision: Option<String>,
+    dirty_docs: Arc<[DirtyDocument]>,
+    entries: VecDeque<(String, Arc<KbSearchSnapshots>)>,
+}
+
+impl KbSearchCache {
+    pub fn search(
+        &mut self,
+        store: &RagStore,
+        query: String,
+        dirty_docs: Vec<DirtyDocument>,
+    ) -> Result<Arc<KbSearchSnapshots>, String> {
+        const MAX_CACHED_QUERIES: usize = 8;
+        store.with_read_snapshot(|store| {
+            let revision = store.kb_search_revision()?;
+            if self.revision != revision || self.dirty_docs.as_ref() != dirty_docs.as_slice() {
+                self.entries.clear();
+                self.revision = revision;
+                self.dirty_docs = dirty_docs.into();
+            }
+            if let Some(index) = self.entries.iter().position(|(cached, _)| *cached == query) {
+                let entry = self.entries.remove(index).unwrap();
+                let snapshots = entry.1.clone();
+                self.entries.push_front(entry);
+                return Ok(snapshots);
+            }
+            let snapshots = Arc::new(
+                search_kb_snapshots(store, &query, &self.dirty_docs, 20).map_err(|err| err.message)?,
+            );
+            self.entries.push_front((query, snapshots.clone()));
+            self.entries.truncate(MAX_CACHED_QUERIES);
+            Ok(snapshots)
+        })
+    }
+}
+
 /// Runs one lexical KB query under the caller's read snapshot and materializes
 /// `all`, `notes`, and `pdf` hit lists from that single pass.
-pub fn search_kb_snapshots(
+fn search_kb_snapshots(
     store: &RagStore,
     query: &str,
     dirty_docs: &[DirtyDocument],
@@ -1325,6 +1367,71 @@ mod tests {
     use super::*;
     use crate::rag::{SubSearch, chunker::ChunkDraft};
     use tempfile::tempdir;
+
+    #[test]
+    fn kb_search_reuses_empty_hits_until_pdf_text_changes() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("rag.sqlite3");
+        let mut writer = RagStore::open(&db_path, "test-embed", 2).unwrap();
+        let reader = RagStore::open_readonly_for_search(&db_path, "test-embed", 2).unwrap();
+        let mut cache = KbSearchCache::default();
+        let query = "gradient";
+        let initial = cache.search(&reader, query.into(), vec![]).unwrap();
+        assert!(initial.all.is_empty());
+
+        let mut chunk = ChunkDraft {
+            seq: 0,
+            heading_path: "scan.pdf".into(),
+            line_start: None,
+            line_end: None,
+            page_num: Some(1),
+            chunk_text: "draft scan".into(),
+        };
+        writer
+            .upsert_document(
+                "scan.pdf", "pdf", "pdf-hash", 1, 10, "needs_ocr",
+                Some(&chunk.chunk_text), Some("fast_pdf"), Some(std::slice::from_ref(&chunk)),
+            )
+            .unwrap();
+        let before_ocr = cache.search(&reader, query.into(), vec![]).unwrap();
+        assert!(before_ocr.all.is_empty());
+        assert!(!Arc::ptr_eq(&initial, &before_ocr));
+        cache.search(&reader, "draft".into(), vec![]).unwrap();
+        let chunk_id = writer.pending_vector_chunks(0, 1).unwrap()[0].chunk_id;
+        writer.insert_chunk_vectors(&[(chunk_id, vec![1.0, 0.0])]).unwrap();
+        let after_vectors = cache.search(&reader, query.into(), vec![]).unwrap();
+        assert!(Arc::ptr_eq(&before_ocr, &after_vectors));
+
+        chunk.chunk_text = "gradient descent".into();
+        writer
+            .upgrade_pdf_content(
+                "pdf-hash", &chunk.chunk_text, "accurate", "indexed", std::slice::from_ref(&chunk),
+            )
+            .unwrap();
+        let after_ocr = cache.search(&reader, query.into(), vec![]).unwrap();
+        assert_eq!(after_ocr.pdf[0].path, "scan.pdf");
+
+        writer.deactivate_missing(&HashSet::new()).unwrap();
+        let after_delete = cache.search(&reader, query.into(), vec![]).unwrap();
+        assert!(after_delete.all.is_empty());
+    }
+
+    #[test]
+    fn kb_search_refreshes_hits_when_an_unsaved_draft_changes() {
+        let dir = tempdir().unwrap();
+        let store = RagStore::open(&dir.path().join("rag.sqlite3"), "test-embed", 2).unwrap();
+        let mut cache = KbSearchCache::default();
+        let mut draft = DirtyDocument {
+            rel_path: "note.md".into(),
+            text: "A note about gradient descent.".into(),
+        };
+        let initial = cache.search(&store, "gradient".into(), vec![draft.clone()]).unwrap();
+        assert!(initial.notes[0].dirty_buffer);
+
+        draft.text = "A note about eigenvalues.".into();
+        let updated = cache.search(&store, "gradient".into(), vec![draft]).unwrap();
+        assert!(updated.all.is_empty());
+    }
 
     #[test]
     fn rrf_rewards_multi_list_and_collapses_same_file() {

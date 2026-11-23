@@ -13,6 +13,7 @@ use std::{
 const SCHEMA_VERSION: &str = "1";
 const CHUNKER_VERSION: &str = "2";
 const FTS_TOKENIZER: &str = "trigram";
+const KB_SEARCH_REVISION: &str = "kb_search_revision";
 
 static REGISTER_VEC: Once = Once::new();
 
@@ -314,7 +315,20 @@ impl RagStore {
         Self::set_meta(&tx, "fts_tokenizer", FTS_TOKENIZER)?;
         Self::set_meta(&tx, "embed_model", embed_model)?;
         Self::set_meta(&tx, "embed_dim", &embed_dim.to_string())?;
+        if rebuild_all {
+            Self::bump_kb_search_revision(&tx)?;
+        }
         tx.commit().map_err(|e| e.to_string())
+    }
+
+    /// Read inside the same snapshot as the lexical query. Older indexes have
+    /// no revision until the first lexical write.
+    pub fn kb_search_revision(&self) -> Result<Option<String>, String> {
+        Self::get_meta(&self.conn, KB_SEARCH_REVISION)
+    }
+
+    fn bump_kb_search_revision(tx: &Transaction<'_>) -> Result<(), String> {
+        Self::set_meta(tx, KB_SEARCH_REVISION, &uuid::Uuid::new_v4().to_string())
     }
 
     fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>, String> {
@@ -390,6 +404,7 @@ impl RagStore {
         chunks: Option<&[ChunkDraft]>,
     ) -> Result<(), String> {
         let tx = self.conn.transaction().map_err(|e| e.to_string())?;
+        let mut chunks_changed = false;
         if let (Some(raw), Some(tier), Some(chunk_list)) = (raw_text, parse_tier, chunks) {
             let now = unix_secs();
             tx.execute(
@@ -407,6 +422,7 @@ impl RagStore {
                 )
                 .map_err(|e| e.to_string())?;
             if existing_chunks == 0 {
+                chunks_changed = !chunk_list.is_empty();
                 let mut stmt = tx
                     .prepare(
                         "INSERT INTO chunks(content_hash, seq, heading_path, line_start, line_end, page_num, chunk_text)
@@ -428,6 +444,17 @@ impl RagStore {
             }
         }
 
+        let lexical_changed = chunks_changed
+            || !tx
+                .query_row(
+                    "SELECT EXISTS (
+                        SELECT 1 FROM documents
+                        WHERE rel_path = ?1 AND kind = ?2 AND content_hash = ?3 AND active = 1
+                    )",
+                    params![rel_path, kind, content_hash],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(|e| e.to_string())?;
         let docid = allocate_docid(&tx, rel_path, content_hash)?;
         tx.execute(
             "INSERT INTO documents(docid, rel_path, kind, content_hash, mtime_ns, file_size, status, active)
@@ -443,6 +470,9 @@ impl RagStore {
         )
         .map_err(|e| e.to_string())?;
 
+        if lexical_changed {
+            Self::bump_kb_search_revision(&tx)?;
+        }
         tx.commit().map_err(|e| e.to_string())
     }
 
@@ -472,7 +502,9 @@ impl RagStore {
         }
         // A save can orphan the previous hash without removing a path. Sweep after every
         // document has been linked so a rename or another copy can still reuse its chunks.
-        prune_orphans(&tx)?;
+        if prune_orphans(&tx)? || !missing.is_empty() {
+            Self::bump_kb_search_revision(&tx)?;
+        }
         tx.commit().map_err(|e| e.to_string())?;
         Ok(missing.len())
     }
@@ -1023,6 +1055,7 @@ impl RagStore {
             .map_err(|e| e.to_string())?;
         }
         drop(stmt);
+        Self::bump_kb_search_revision(&tx)?;
         tx.commit().map_err(|e| e.to_string())
     }
 
@@ -1128,7 +1161,7 @@ fn allocate_docid(tx: &Transaction<'_>, rel_path: &str, content_hash: &str) -> R
     Ok(super::sha256_hex(rel_path.as_bytes())[..12].to_owned())
 }
 
-fn prune_orphans(tx: &Transaction<'_>) -> Result<(), String> {
+fn prune_orphans(tx: &Transaction<'_>) -> Result<bool, String> {
     let mut stmt = tx.prepare(
         "SELECT content_hash FROM contents c
          WHERE NOT EXISTS (SELECT 1 FROM documents d WHERE d.content_hash = c.content_hash)",
@@ -1138,7 +1171,7 @@ fn prune_orphans(tx: &Transaction<'_>) -> Result<(), String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     if orphan_hashes.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     let mut delete_vectors = tx.prepare_cached(
         "DELETE FROM chunks_vec WHERE chunk_id IN (SELECT id FROM chunks WHERE content_hash = ?1)",
@@ -1147,12 +1180,13 @@ fn prune_orphans(tx: &Transaction<'_>) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let mut delete_content = tx.prepare_cached("DELETE FROM contents WHERE content_hash = ?1")
         .map_err(|e| e.to_string())?;
+    let mut deleted_chunks = 0;
     for hash in orphan_hashes {
         delete_vectors.execute([&hash]).map_err(|e| e.to_string())?;
-        delete_chunks.execute([&hash]).map_err(|e| e.to_string())?;
+        deleted_chunks += delete_chunks.execute([&hash]).map_err(|e| e.to_string())?;
         delete_content.execute([&hash]).map_err(|e| e.to_string())?;
     }
-    Ok(())
+    Ok(deleted_chunks > 0)
 }
 
 pub fn is_pdf_path(rel_path: &str) -> bool {

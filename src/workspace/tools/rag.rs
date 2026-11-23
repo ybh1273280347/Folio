@@ -8,7 +8,7 @@ use crate::{
         DirtyDocument, RagError, SearchRequest,
         client::{EmbeddingClient, RerankClient, reap_idle_servers},
         collect_eligible_paths, ocr::{self, OcrProgressEvent},
-        pipeline::{SearchServices, SyncOptions, search_kb_snapshots, search_project, sync_project},
+        pipeline::{KbSearchCache, SearchServices, SyncOptions, search_project, sync_project},
         store::{PdfLibraryItem, RagStore, StoreStats},
     },
     tags::Snapshot,
@@ -61,6 +61,7 @@ pub(in crate::workspace) struct RagSyncState {
     pending_deadline: Option<Instant>,
     in_flight: Option<(u64, String, Arc<AtomicBool>)>,
     next_sync_id: u64,
+    kb_search_cache: KbSearchCache,
     ocr_runner: Option<OcrRunnerHandle>,
     last_reap: Instant,
 }
@@ -71,6 +72,7 @@ impl Default for RagSyncState {
             pending_deadline: None,
             in_flight: None,
             next_sync_id: 0,
+            kb_search_cache: KbSearchCache::default(),
             ocr_runner: None,
             last_reap: Instant::now(),
         }
@@ -235,6 +237,7 @@ impl Workspace {
 
     pub(in crate::workspace) fn cancel_rag_sync(&mut self) {
         self.rag_sync.pending_deadline = None;
+        self.rag_sync.kb_search_cache = KbSearchCache::default();
         self.cancel_in_flight_sync();
         self.cancel_all_pdf_ocr_silent();
     }
@@ -750,15 +753,14 @@ impl Workspace {
                 text: buffer.text.clone(),
             })
             .collect();
+        let mut cache = self.rag_sync.kb_search_cache.clone();
         let task = cx.background_spawn(async move {
             let store =
                 RagStore::open_readonly_for_search(&db_path, &config.embed_model, config.embed_dim)
                     .map_err(|e| RagError::new("store_error", e))?;
-            store
-                .with_read_snapshot(|store| {
-                    search_kb_snapshots(store, &query, &dirty_docs, 20).map_err(|e| e.message)
-                })
-                .map_err(|e| RagError::new("store_error", e))
+            let buckets = cache.search(&store, query, dirty_docs)
+                .map_err(|e| RagError::new("store_error", e))?;
+            Ok::<_, RagError>((buckets, cache))
         });
 
         cx.spawn(async move |this, cx| {
@@ -773,9 +775,10 @@ impl Workspace {
                 }
                 app.right_panel.kb.searching = false;
                 match outcome {
-                    Ok(buckets) => {
+                    Ok((buckets, cache)) => {
                         let live = app.live_project_paths();
-                        app.right_panel.kb.snapshot = buckets;
+                        app.right_panel.kb.snapshot = (*buckets).clone();
+                        app.rag_sync.kb_search_cache = cache;
                         app.right_panel.kb.search_error = None;
                         app.right_panel.kb.prune_missing_paths(&live);
                     }
