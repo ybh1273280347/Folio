@@ -542,14 +542,17 @@ impl RagStore {
                 |r| r.get::<_, i64>(0),
             )
             .map_err(|e| e.to_string())? as usize;
-        // Count only live chunks and their vectors, including while a sync still has old
-        // versions awaiting its final prune. Both counts come from the same snapshot.
+        // Scan the vector IDs once. A LEFT JOIN from chunks makes vec0 load each
+        // embedding through its point lookup, even for a count.
         let (total_chunks, vector_chunks): (i64, i64) = self
             .conn
             .query_row(
-                "SELECT COUNT(*), COUNT(v.chunk_id) FROM chunks c
-                 LEFT JOIN chunks_vec v ON v.chunk_id = c.id
-                 WHERE EXISTS (SELECT 1 FROM documents d WHERE d.content_hash = c.content_hash AND d.active = 1)",
+                "SELECT
+                    (SELECT COUNT(*) FROM chunks c
+                     WHERE EXISTS (SELECT 1 FROM documents d WHERE d.content_hash = c.content_hash AND d.active = 1)),
+                    (SELECT COUNT(*) FROM chunks_vec v
+                     CROSS JOIN chunks c ON c.id = v.chunk_id
+                     WHERE EXISTS (SELECT 1 FROM documents d WHERE d.content_hash = c.content_hash AND d.active = 1))",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
