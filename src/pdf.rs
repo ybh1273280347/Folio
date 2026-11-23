@@ -49,6 +49,12 @@ impl PdfPane {
     }
 
     pub fn sync_annotations(&mut self, items: &[AnnotationItem], cx: &mut Context<Self>) {
+        // Close inputs whose record changed so stale text cannot overwrite a tool edit.
+        let unchanged = |id: &u64| items.iter().find(|item| item.id == *id)
+            .is_some_and(|item| self.annotations.iter().any(|old| old == item));
+        self.active_annotation_id = self.active_annotation_id.filter(unchanged);
+        self.editing_drawer_annotation_id = self.editing_drawer_annotation_id.filter(unchanged);
+        self.selected_annotation_id = self.selected_annotation_id.filter(|id| items.iter().any(|item| item.id == *id));
         self.annotations = items.to_vec();
         self.sync_highlights(cx);
         cx.notify();

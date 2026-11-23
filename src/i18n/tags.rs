@@ -247,6 +247,14 @@ pub const ERR_ANN_ALREADY_ANNOTATED: BiText = BiText::new(
     "This location already has a different comment and was not overwritten.",
 );
 pub const ERR_ANN_UNKNOWN_ACTION: BiText = BiText::new("未知批注操作。", "Unknown annotation action.");
+pub const ERR_ANN_ID_NOT_FOUND: BiText = BiText::new(
+    "此文件中没有该 ID 的批注，请重新列出批注。",
+    "This file has no annotation with that ID. List its annotations again.",
+);
+pub const ERR_ANN_REMOVE_HIGHLIGHT_ONLY: BiText = BiText::new(
+    "Markdown 高亮已移除，但批注记录未能删除。",
+    "The Markdown highlight was removed, but the annotation record could not be deleted.",
+);
 pub const ERR_ANN_DOC_CONFLICT: BiText = BiText::new(
     "文档有磁盘冲突或已被删除，请先处理后重试。",
     "Document has a disk conflict or was deleted; resolve it and retry.",

@@ -1083,6 +1083,9 @@ impl BlockEditorState {
         }
     }
 
+}
+
+impl BlockEditorModel {
     /// Expand inline atoms (e.g. inline math `$i$`) into readable plain text,
     /// returning `(expanded_text, raw_starts, raw_ends)` where `raw_starts[i]`
     /// and `raw_ends[i]` map expanded byte offsets back to `inline.text()`.
@@ -1127,7 +1130,9 @@ impl BlockEditorState {
         starts.push(raw.len());
         (out, starts, ends)
     }
+}
 
+impl BlockEditorState {
     /// Text of the current selection, preserving the rows and columns of selected cells.
     pub fn selected_plain_text(&self) -> Option<String> {
         match self.model.selection {
@@ -1135,7 +1140,7 @@ impl BlockEditorState {
                 if anchor.block == head.block {
                     let (lo, hi) = (anchor.offset.min(head.offset), anchor.offset.max(head.offset));
                     if let Some(inline) = self.model.doc.inline(anchor.block) {
-                        let (expanded, _, _) = Self::expand_inline_plain(&inline.slice(lo..hi));
+                        let (expanded, _, _) = BlockEditorModel::expand_inline_plain(&inline.slice(lo..hi));
                         let s = expanded.trim().to_string();
                         return (!s.is_empty()).then_some(s);
                     }
@@ -1169,7 +1174,7 @@ impl BlockEditorState {
             let (quote, range) = if let Some(inline) = self.model.doc.inline(block)
                 && inline.text()[lo..hi].contains(super::inline::ATOM_CHAR)
             {
-                let (expanded, starts, ends) = Self::expand_inline_plain(&inline.slice(lo..hi));
+                let (expanded, starts, ends) = BlockEditorModel::expand_inline_plain(&inline.slice(lo..hi));
                 let trimmed_start = expanded.trim_start();
                 let quote = trimmed_start.trim_end();
                 if quote.is_empty() {
@@ -1186,7 +1191,7 @@ impl BlockEditorState {
                 (quote.to_owned(), start..start + quote.len())
             };
             // Rank the actual selected range with the same overlapping matches as jump.
-            return self
+            return self.model
                 .find_quote_match(&quote, |index, candidate| {
                     (candidate.start == BlockPosition::new(block, range.start)
                         && candidate.end == BlockPosition::new(block, range.end))
@@ -1203,8 +1208,8 @@ impl BlockEditorState {
                 && doc.cmp_positions(candidate.end, selected.end).ok()?.is_le())
                 .then_some(index)
         };
-        let occurrence = self.find_block_quote_match(&quote, within_selection)
-            .or_else(|| self.find_quote_match(&quote, within_selection))
+        let occurrence = self.model.find_block_quote_match(&quote, within_selection)
+            .or_else(|| self.model.find_quote_match(&quote, within_selection))
             // Some clipboard excerpts include unselected cells because Markdown tables
             // serialize whole. Keep the existing default ordinal for those excerpts.
             .unwrap_or(0);
@@ -1219,20 +1224,37 @@ impl BlockEditorState {
         occurrence: usize,
         cx: &mut Context<Self>,
     ) -> bool {
+        let Some(BlockSelection::Text { anchor, head }) = self.model.quote_selection(quote, occurrence, true) else {
+            return false;
+        };
+        self.set_selection(BlockSelection::Text { anchor, head }, cx)
+            .expect("quote match has valid selection endpoints");
+        self.heading_jump.set(Some(head.block));
+        self.reveal_caret(cx);
+        true
+    }
+}
+
+impl BlockEditorModel {
+    /// Resolve a saved quote. Navigation may recover a moved highlight, while a
+    /// write uses the saved ordinal so retrying cannot jump to another mark.
+    pub fn quote_selection(&self, quote: &str, occurrence: usize, recover_moved: bool) -> Option<BlockSelection> {
         let mut ordinal = None;
         let mut marked = None;
         let mut ambiguous_marks = false;
         let mut consider = |index, range: ResolvedSelection| {
             // A substring can split a grapheme even when it is valid UTF-8.
             // Preserve its ordinal without trying to reveal an invalid range.
-            self.model.doc.validate(range.start).ok()?;
-            self.model.doc.validate(range.end).ok()?;
+            self.doc.validate(range.start).ok()?;
+            self.doc.validate(range.end).ok()?;
+            if !recover_moved {
+                return (index == occurrence).then_some(range);
+            }
             let highlighted = self
-                .model
                 .text_ranges(range)
                 .into_iter()
                 .all(|(block, lo, hi)| {
-                    lo == hi || self.model.doc.inline(block).is_some_and(|inline| {
+                    lo == hi || self.doc.inline(block).is_some_and(|inline| {
                         inline.pieces()
                             .filter(|(piece, _, _)| piece.start < hi && lo < piece.end)
                             .all(|(_, marks, _)| marks.highlight.is_some())
@@ -1268,16 +1290,9 @@ impl BlockEditorState {
         } else {
             found
         };
-        let Some(ResolvedSelection { start: anchor, end: head }) =
-            found.or(marked.filter(|_| !ambiguous_marks)).or(ordinal)
-        else {
-            return false;
-        };
-        self.set_selection(BlockSelection::Text { anchor, head }, cx)
-            .expect("quote match has valid selection endpoints");
-        self.heading_jump.set(Some(head.block));
-        self.reveal_caret(cx);
-        true
+        let ResolvedSelection { start: anchor, end: head } =
+            found.or(marked.filter(|_| !ambiguous_marks)).or(ordinal)?;
+        Some(BlockSelection::Text { anchor, head })
     }
 
     /// Visit overlapping matches in leaf order, mapping expanded atom text
@@ -1290,9 +1305,8 @@ impl BlockEditorState {
         let step = quote.chars().next()?.len_utf8();
         let legacy_raw = quote.contains(super::inline::ATOM_CHAR);
         let mut index = 0;
-        for &block in self.model.doc.leaves() {
+        for &block in self.doc.leaves() {
             let expanded = self
-                .model
                 .doc
                 .inline(block)
                 .filter(|inline| !legacy_raw && inline.text().contains(super::inline::ATOM_CHAR))
@@ -1300,7 +1314,7 @@ impl BlockEditorState {
             let Some(text) = expanded
                 .as_ref()
                 .map(|(text, _, _)| text.as_str())
-                .or_else(|| self.model.doc.leaf_text(block))
+                .or_else(|| self.doc.leaf_text(block))
             else {
                 continue;
             };
@@ -1335,7 +1349,7 @@ impl BlockEditorState {
         quote: &str,
         mut find: impl FnMut(usize, ResolvedSelection) -> Option<T>,
     ) -> Option<T> {
-        let doc = &self.model.doc;
+        let doc = &self.doc;
         let excerpt = super::import::parse_document(quote, doc.extensions.clone()).ok()?;
         if excerpt.leaves().len() < 2 {
             return None;
@@ -1399,6 +1413,9 @@ impl BlockEditorState {
         None
     }
 
+}
+
+impl BlockEditorState {
     /// Case-insensitively selects and reveals the wrapped `index`-th match of `query`,
     /// returning `(1_based_index, total_matches)` or `(0, 0)` when no matches exist.
     fn collect_search_matches(
@@ -2794,7 +2811,7 @@ impl BlockEditorState {
             hi += 1;
         }
         let range = pieces[lo].0.start..pieces[hi].0.end;
-        let (expanded, _, _) = Self::expand_inline_plain(&inline.slice(range.clone()));
+        let (expanded, _, _) = BlockEditorModel::expand_inline_plain(&inline.slice(range.clone()));
         let quote = expanded.trim().to_string();
         (!quote.is_empty()).then_some((head.block, range, quote))
     }

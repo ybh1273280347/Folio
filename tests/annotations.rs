@@ -39,6 +39,23 @@ fn annotation_rejects_cross_block_and_code_targets() {
 }
 
 #[test]
+fn deleting_markdown_annotation_keeps_other_highlights_and_formatting() {
+    let source = "<mark>**tail**</mark>\n\n<mark>head</mark> and [link](https://example.com)\n\n<mark>keep</mark>\n";
+    let mut item = prepare_markdown("target", &request("target"), MarkdownExtensions::default()).unwrap().item;
+    item.quote = "**tail**\n\nhead".into();
+
+    let updated = annotations::remove_markdown_highlight(source, &item, MarkdownExtensions::default())
+        .unwrap().unwrap();
+
+    assert!(updated.contains("**tail**\n\nhead and [link](https://example.com)"));
+    assert!(updated.contains("<mark"));
+    assert_eq!(updated.matches("</mark>").count(), 1);
+    assert!(updated.contains(">keep</mark>"));
+    assert!(annotations::remove_markdown_highlight(&updated, &item, MarkdownExtensions::default())
+        .unwrap().is_none());
+}
+
+#[test]
 fn annotation_store_merges_files_and_preserves_existing_comments() {
     let dir = tempfile::tempdir().unwrap();
     let first = dir.path().join("first.md");

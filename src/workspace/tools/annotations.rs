@@ -9,6 +9,13 @@ use gpui_kit::{Context, Window};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
+#[derive(serde::Deserialize)]
+#[serde(tag = "operation", content = "params", rename_all = "snake_case", deny_unknown_fields)]
+enum Mutation {
+    Update { path: String, id: u64, comment: String },
+    Delete { path: String, id: u64 },
+}
+
 #[derive(Clone)]
 enum Snapshot {
     Markdown { text: String, revision: String },
@@ -27,20 +34,27 @@ impl Workspace {
         }
     }
 
-    fn annotation_path(&self, request: &WorkspaceToolRequest, params: &Params) -> Result<PathBuf, Failure> {
+    fn annotation_path(&self, request: &WorkspaceToolRequest, path: &str) -> Result<PathBuf, Failure> {
         let project = self.projects.directory().ok_or_else(||
             Failure::new("project_not_active", crate::i18n::tags::ERR_AGENT_SWITCH_PROJECT_RETRY.get()))?;
         let root = dunce::canonicalize(&project.folder)?;
         if request.project_key != crate::ai::project_key(&root) {
             return Err(Failure::new("project_not_active", crate::i18n::tags::ERR_AGENT_SWITCH_PROJECT_RETRY.get()));
         }
-        annotations::resolve_path(&root, &params.path)
+        annotations::resolve_path(&root, path)
     }
 
     fn start_annotation(&mut self, request: &WorkspaceToolRequest, window: &mut Window, cx: &mut Context<Self>) -> Result<(), Failure> {
+        if matches!(request.arguments["operation"].as_str(), Some("update" | "delete")) {
+            let mutation = serde_json::from_value(request.arguments.clone())
+                .map_err(|e| Failure::new("invalid_request", e.to_string()))?;
+            let result = self.mutate_annotation(request, mutation, window, cx)?;
+            self.ai.read(cx).respond_workspace_tool(request, result);
+            return Ok(());
+        }
         let params: Params = serde_json::from_value(request.arguments["params"].clone())
             .map_err(|e| Failure::new("invalid_request", e.to_string()))?;
-        let path = self.annotation_path(request, &params)?;
+        let path = self.annotation_path(request, &params.path)?;
         if request.arguments["operation"] == "list" {
             self.ai.read(cx).respond_workspace_tool(request, annotations::list(&path)?);
             return Ok(());
@@ -95,7 +109,7 @@ impl Workspace {
     fn commit_annotation(&mut self, request: &WorkspaceToolRequest, params: &Params, path: &Path, snapshot: &Snapshot,
         mut prepared: Prepared, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, Failure>
     {
-        if self.annotation_path(request, params)? != path {
+        if self.annotation_path(request, &params.path)? != path {
             return Err(Failure::new("document_changed", crate::i18n::tags::ERR_ANN_PATH_CHANGED.get()));
         }
         let (open_key, expected_revision) = match snapshot {
@@ -138,5 +152,63 @@ impl Workspace {
         self.sync_document_annotations(path, &items, cx);
         cx.notify();
         Ok(json!({"status":"ok", "created":true, "annotation":annotations::item_json(&prepared.item, path)}))
+    }
+
+    fn mutate_annotation(&mut self, request: &WorkspaceToolRequest, mutation: Mutation,
+        window: &mut Window, cx: &mut Context<Self>) -> Result<Value, Failure>
+    {
+        let (path, id, comment) = match mutation {
+            Mutation::Update { path, id, comment } => (path, id, Some(comment)),
+            Mutation::Delete { path, id } => (path, id, None),
+        };
+        let path = self.annotation_path(request, &path)?;
+        // Keep lookup, document write and sidecar write in one GPUI dispatch so
+        // another session or a manual edit cannot interleave between them.
+        let mut items = annotations::try_load_annotations(&path)?;
+        let index = items.iter().position(|item| item.id == id)
+            .ok_or_else(|| Failure::new("annotation_not_found", crate::i18n::tags::ERR_ANN_ID_NOT_FOUND.get()))?;
+        let mut markdown_saved = false;
+        let result = if let Some(comment) = comment {
+            items[index].comment = comment;
+            json!({"status":"ok", "annotation":annotations::item_json(&items[index], &path)})
+        } else {
+            let item = items.remove(index);
+            if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("md")) {
+                let disk;
+                let (open_key, source, revision) = if let Some((key, buffer)) = self.documents.open_buffer_at(&path) {
+                    if buffer.conflict.is_some() || buffer.deleted {
+                        return Err(Failure::new("document_conflict", crate::i18n::tags::ERR_ANN_DOC_CONFLICT.get()));
+                    }
+                    (Some(key.to_owned()), &buffer.text, &buffer.revision)
+                } else {
+                    disk = files::read_document_at(&path)?;
+                    (None, &disk.text, &disk.revision)
+                };
+                let extensions = crate::markdown::extensions::markdown_extensions(
+                    &self.math, crate::math::MathDisplaySize::Markdown, cx,
+                );
+                if let Some(text) = annotations::remove_markdown_highlight(source, &item, extensions)? {
+                    let revision = revision.clone();
+                    if !self.save_markdown_snapshot(&path, open_key.as_deref(), &text, &revision, window, cx)? {
+                        return Err(Failure::new("document_changed", crate::i18n::tags::ERR_ANN_DISK_CHANGED.get()));
+                    }
+                    markdown_saved = true;
+                }
+            }
+            json!({"status":"ok", "deleted":true, "id":id})
+        };
+        if let Err(error) = annotations::save_annotations(&path, &items) {
+            let prefix = if markdown_saved {
+                cx.notify();
+                crate::i18n::tags::ERR_ANN_REMOVE_HIGHLIGHT_ONLY.get()
+            } else {
+                crate::i18n::tags::ERR_ANN_SAVE_RECORD.get()
+            };
+            return Err(Failure::new("save_failed", format!("{prefix}: {error}")));
+        }
+        self.sync_document_annotations(&path, &items, cx);
+        self.schedule_rag_sync();
+        cx.notify();
+        Ok(result)
     }
 }

@@ -6,7 +6,7 @@ pub use sidecar::{load_annotations, relocate_annotations, save_annotations, try_
 
 use crate::files;
 use gpui_kit::base::text::MarkdownExtensions;
-use markdown_editor::{BlockEditorModel, BlockKind, BlockPosition, BlockSelection, EditorCommand, MarkChange};
+use markdown_editor::{BlockEditorModel, BlockKind, BlockPosition, BlockSelection, EditorCommand, MarkChange, MarkKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{io, path::Path, sync::Arc};
@@ -79,7 +79,7 @@ pub struct Prepared {
     pub markdown: Option<String>,
 }
 
-/// Canonical paths enforce the same project boundary for both read and create operations.
+/// Canonical paths enforce the same project boundary for all annotation operations.
 pub fn resolve_path(root: &Path, path: &str) -> Result<std::path::PathBuf, Failure> {
     let root = dunce::canonicalize(root)?;
     let target = if Path::new(path).is_absolute() {
@@ -173,6 +173,21 @@ pub fn item_json(item: &AnnotationItem, path: &Path) -> Value {
     json!({"id":item.id, "path":path, "quote":item.quote, "comment":item.comment, "color":item.color,
         "occurrence":item.occurrence+1,
         "page": if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) { Some(item.page+1) } else { None }})
+}
+
+/// Remove only the inline highlight at the saved quote, keeping text and other marks.
+pub fn remove_markdown_highlight(
+    source: &str, item: &AnnotationItem, extensions: MarkdownExtensions,
+) -> Result<Option<String>, Failure> {
+    let mut model = BlockEditorModel::from_markdown(source, extensions)
+        .map_err(|e| Failure::new("parse_error", e.to_string()))?;
+    let selection = model.quote_selection(&item.quote, item.occurrence, false)
+        .ok_or_else(|| Failure::new("quote_not_found", crate::i18n::tags::ERR_ANN_QUOTE_NOT_FOUND.get()))?;
+    model.set_selection(selection)
+        .map_err(|e| Failure::new("placement_error", format!("{e:?}")))?;
+    let changed = model.run(EditorCommand::ApplyMark(MarkChange::new().clear(MarkKind::Highlight)))
+        .map_err(|e| Failure::new("placement_error", format!("{e:?}")))?;
+    Ok(changed.then(|| model.source()))
 }
 
 /// Runs on the UI thread: callers merge a fresh store and refresh all panes before the next request commits.
