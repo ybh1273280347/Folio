@@ -5,7 +5,7 @@ use crate::{
     ai::{WorkspaceToolAction, WorkspaceToolRequest},
     canvas::{
         TreeLayoutMode,
-        model::{CanvasDocument, CanvasNode, CanvasOp},
+        model::{CanvasDocument, CanvasNode, CanvasOp, CanvasViewMode},
     },
     files,
 };
@@ -50,6 +50,10 @@ enum CanvasToolRequest {
     Create {
         path: String,
         #[serde(default)]
+        view_mode: Option<CanvasViewMode>,
+        #[serde(default)]
+        tree_mode: Option<TreeLayoutMode>,
+        #[serde(default)]
         ops: Vec<CanvasOp>,
     },
     ApplyOps {
@@ -60,6 +64,8 @@ enum CanvasToolRequest {
     },
     Layout {
         path: String,
+        #[serde(default)]
+        view_mode: Option<CanvasViewMode>,
         #[serde(default)]
         root_id: Option<String>,
         #[serde(default)]
@@ -110,7 +116,12 @@ impl Workspace {
         match parsed {
             CanvasToolRequest::Read { path, mode } => self.tool_canvas_read(&root, &path, mode, cx),
             CanvasToolRequest::GetSelection {} => self.tool_canvas_get_selection(cx),
-            CanvasToolRequest::Create { path, ops } => self.tool_canvas_create(&root, &path, &ops, cx),
+            CanvasToolRequest::Create {
+                path,
+                view_mode,
+                tree_mode,
+                ops,
+            } => self.tool_canvas_create(&root, &path, view_mode, tree_mode, &ops, cx),
             CanvasToolRequest::ApplyOps {
                 path,
                 expected_revision,
@@ -118,14 +129,16 @@ impl Workspace {
             } => self.tool_canvas_apply_ops(&root, &path, expected_revision.as_deref(), &ops, cx),
             CanvasToolRequest::Layout {
                 path,
+                view_mode,
                 root_id,
                 mode,
                 unpin_subtree,
             } => self.tool_canvas_layout(
                 &root,
                 &path,
+                view_mode,
                 root_id.as_deref(),
-                mode.unwrap_or_default(),
+                mode,
                 unpin_subtree,
                 cx,
             ),
@@ -161,6 +174,8 @@ impl Workspace {
             "revision": revision,
             "is_open": is_open,
             "dirty": dirty,
+            "view_mode": doc.view_mode(),
+            "tree_mode": doc.tree_mode(),
             "node_count": doc.nodes.len(),
             "edge_count": doc.edges.len(),
             "nodes": doc.nodes.iter().map(|n| serialize_node_summary(n, mode)).collect::<Vec<_>>(),
@@ -196,6 +211,8 @@ impl Workspace {
             "status": "ok",
             "path": path,
             "revision": revision,
+            "view_mode": doc.view_mode(),
+            "tree_mode": doc.tree_mode(),
             "selected_ids": selected_ids,
             "selected_nodes": selected_nodes,
             "next_free_origin": doc.next_free_origin(),
@@ -206,6 +223,8 @@ impl Workspace {
         &mut self,
         root: &Path,
         raw_path: &str,
+        view_mode: Option<CanvasViewMode>,
+        tree_mode: Option<TreeLayoutMode>,
         ops: &[CanvasOp],
         cx: &mut Context<Self>,
     ) -> Result<Value, Failure> {
@@ -220,6 +239,10 @@ impl Workspace {
                     .map_err(|msg| Failure::new("invalid_ops", msg))?,
             )
         };
+        if view_mode.is_some() || tree_mode.is_some() {
+            let target_view = view_mode.unwrap_or(CanvasViewMode::Tree);
+            doc.apply_view_or_layout(Some(target_view), None, tree_mode, true);
+        }
         let text = doc
             .to_json_pretty()
             .map_err(|e| Failure::new("serialize_error", e.to_string()))?;
@@ -246,6 +269,8 @@ impl Workspace {
             "status": "ok",
             "path": rel,
             "revision": revision,
+            "view_mode": doc.view_mode(),
+            "tree_mode": doc.tree_mode(),
             "report": report,
         }))
     }
@@ -342,19 +367,27 @@ impl Workspace {
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn tool_canvas_layout(
         &mut self,
         root: &Path,
         raw_path: &str,
+        view_mode: Option<CanvasViewMode>,
         root_id: Option<&str>,
-        mode: TreeLayoutMode,
+        mode: Option<TreeLayoutMode>,
         unpin_subtree: bool,
         cx: &mut Context<Self>,
     ) -> Result<Value, Failure> {
         let rel = normalize_canvas_rel_path(raw_path)?;
         if let Some(pane) = self.documents.canvas_pane(&rel).cloned() {
-            let moved = pane.update(cx, |pane, cx| {
-                pane.layout_tree_transaction(root_id, mode, unpin_subtree, cx)
+            let (moved, final_view, final_tree) = pane.update(cx, |pane, cx| {
+                let moved =
+                    pane.apply_view_or_layout_transaction(view_mode, root_id, mode, unpin_subtree, cx);
+                (
+                    moved,
+                    pane.document().view_mode(),
+                    pane.document().tree_mode(),
+                )
             });
             let next_rev = self
                 .documents
@@ -365,6 +398,8 @@ impl Workspace {
                 "status": "ok",
                 "path": rel,
                 "moved_nodes": moved,
+                "view_mode": final_view,
+                "tree_mode": final_tree,
                 "revision": next_rev,
                 "is_open": true,
             }));
@@ -375,8 +410,10 @@ impl Workspace {
             .map_err(|e| Failure::new("read_failed", e.to_string()))?;
         let mut doc = CanvasDocument::from_json_str(&disk.text)
             .map_err(|e| Failure::new("parse_error", e.to_string()))?;
-        let moved = doc.apply_tree_layout(root_id, mode, unpin_subtree);
-        if moved > 0 {
+        let prev_view = doc.view_mode();
+        let prev_tree = doc.tree_mode();
+        let moved = doc.apply_view_or_layout(view_mode, root_id, mode, unpin_subtree);
+        if moved > 0 || doc.view_mode() != prev_view || doc.tree_mode() != prev_tree {
             let next_text = doc
                 .to_json_pretty()
                 .map_err(|e| Failure::new("serialize_error", e.to_string()))?;
@@ -389,6 +426,8 @@ impl Workspace {
                 "status": "ok",
                 "path": rel,
                 "moved_nodes": moved,
+                "view_mode": doc.view_mode(),
+                "tree_mode": doc.tree_mode(),
                 "revision": saved.revision,
                 "is_open": false,
             }));
@@ -397,6 +436,8 @@ impl Workspace {
             "status": "ok",
             "path": rel,
             "moved_nodes": 0,
+            "view_mode": doc.view_mode(),
+            "tree_mode": doc.tree_mode(),
             "revision": disk.revision,
             "is_open": false,
         }))

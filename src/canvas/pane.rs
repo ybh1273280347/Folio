@@ -275,16 +275,25 @@ impl CanvasPane {
         Ok(report)
     }
 
-    pub fn layout_tree_transaction(
+    pub fn apply_view_or_layout_transaction(
         &mut self,
+        view_mode: Option<CanvasViewMode>,
         root_id: Option<&str>,
-        mode: super::model::TreeLayoutMode,
+        mode: Option<TreeLayoutMode>,
         unpin_subtree: bool,
         cx: &mut Context<Self>,
     ) -> usize {
         let before = self.document.clone();
-        let moved = self.document.apply_tree_layout(root_id, mode, unpin_subtree);
-        if moved > 0 {
+        let prev_view = before.view_mode();
+        let prev_tree = before.tree_mode();
+        let moved = self
+            .document
+            .apply_view_or_layout(view_mode, root_id, mode, unpin_subtree);
+        if moved > 0
+            || self.document.view_mode() != prev_view
+            || self.document.tree_mode() != prev_tree
+        {
+            self.notice_error = None;
             self.history.record(before);
             self.emit_change(cx);
             cx.notify();

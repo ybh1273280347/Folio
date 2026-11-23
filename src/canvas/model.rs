@@ -644,6 +644,46 @@ impl CanvasDocument {
         }
     }
 
+    /// Dual-view-aware layout transition shared by live panes and AI tools.
+    pub fn apply_view_or_layout(
+        &mut self,
+        view_mode: Option<CanvasViewMode>,
+        root_id: Option<&str>,
+        mode: Option<TreeLayoutMode>,
+        unpin_subtree: bool,
+    ) -> usize {
+        let before_coords: HashMap<String, (f32, f32)> = self
+            .nodes
+            .iter()
+            .map(|n| (n.id.clone(), (n.x, n.y)))
+            .collect();
+
+        if view_mode == Some(CanvasViewMode::Freeform) {
+            self.switch_view_mode(CanvasViewMode::Freeform);
+        } else if view_mode.is_none()
+            && root_id.is_some()
+            && self.view_mode() == CanvasViewMode::Freeform
+        {
+            let target_mode = mode.unwrap_or_else(|| self.tree_mode());
+            self.apply_tree_layout(root_id, target_mode, unpin_subtree);
+        } else if let Some(target_mode) = mode {
+            self.set_tree_mode(target_mode);
+        } else if self.view_mode() == CanvasViewMode::Freeform {
+            self.switch_view_mode(CanvasViewMode::Tree);
+        } else {
+            self.layout_forest(!unpin_subtree);
+        }
+
+        self.nodes
+            .iter()
+            .filter(|n| {
+                before_coords
+                    .get(&n.id)
+                    .is_some_and(|&(bx, by)| (n.x - bx).abs() > 0.5 || (n.y - by).abs() > 0.5)
+            })
+            .count()
+    }
+
     pub fn layout_forest(&mut self, ignore_pinned: bool) -> usize {
         let mode = self.tree_mode();
         let options = super::layout::LayoutOptions {
@@ -942,6 +982,7 @@ impl CanvasDocument {
                 id,
                 node_type,
                 text,
+                file,
                 x,
                 y,
                 width,
@@ -972,6 +1013,12 @@ impl CanvasDocument {
                 };
                 let mut node = if let Some(anchor) = anchor.clone() {
                     CanvasNode::new_anchor(node_id.clone(), px, py, text.clone().unwrap_or_default(), anchor)
+                } else if let Some(file_path) = file.as_deref().filter(|s| !s.trim().is_empty()) {
+                    let mut n = CanvasNode::new_image(node_id.clone(), px, py, file_path);
+                    if let Some(note) = text.as_deref().filter(|s| !s.is_empty()) {
+                        n.text = Some(note.to_owned());
+                    }
+                    n
                 } else {
                     let mut n = CanvasNode::new_text(node_id.clone(), px, py, text.clone().unwrap_or_default());
                     if let Some(nt) = node_type {
@@ -1244,6 +1291,8 @@ pub enum CanvasOp {
         #[serde(default)]
         text: Option<String>,
         #[serde(default)]
+        file: Option<String>,
+        #[serde(default)]
         x: Option<f32>,
         #[serde(default)]
         y: Option<f32>,
@@ -1345,6 +1394,7 @@ mod tests {
                 id: Some("a".into()),
                 node_type: None,
                 text: Some("Root".into()),
+                file: None,
                 x: Some(0.0),
                 y: Some(0.0),
                 width: None,
@@ -1358,6 +1408,7 @@ mod tests {
                 id: Some("b".into()),
                 node_type: None,
                 text: Some("Child".into()),
+                file: None,
                 x: None,
                 y: None,
                 width: None,
@@ -1405,6 +1456,7 @@ mod tests {
                 id: Some("r".into()),
                 node_type: None,
                 text: Some("Root".into()),
+                file: None,
                 x: Some(40.0),
                 y: Some(60.0),
                 width: None,
@@ -1418,6 +1470,7 @@ mod tests {
                 id: Some("c".into()),
                 node_type: None,
                 text: Some("Child".into()),
+                file: None,
                 x: Some(820.0),
                 y: Some(540.0),
                 width: None,
@@ -1533,5 +1586,94 @@ mod tests {
         doc.switch_view_mode(CanvasViewMode::Freeform);
         assert!((doc.node("c").unwrap().x - 500.0).abs() < 0.01);
         assert!((doc.node("c").unwrap().y - 400.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn apply_view_or_layout_and_add_node_file_work_with_dual_view() {
+        let mut doc = CanvasDocument::default();
+        doc.apply_ops(&[
+            CanvasOp::AddNode {
+                id: Some("root".into()),
+                node_type: Some(CanvasNodeType::Text),
+                text: Some("Root".into()),
+                file: None,
+                x: Some(120.0),
+                y: Some(80.0),
+                width: None,
+                height: None,
+                color: None,
+                parent_id: None,
+                pinned: None,
+                anchor: None,
+            },
+            CanvasOp::AddNode {
+                id: Some("img".into()),
+                node_type: Some(CanvasNodeType::File),
+                text: Some("Architecture".into()),
+                file: Some("assets/arch.png".into()),
+                x: Some(600.0),
+                y: Some(500.0),
+                width: None,
+                height: None,
+                color: None,
+                parent_id: Some("root".into()),
+                pinned: None,
+                anchor: None,
+            },
+            CanvasOp::AddNode {
+                id: Some("isolated".into()),
+                node_type: Some(CanvasNodeType::Text),
+                text: Some("Keep me".into()),
+                file: None,
+                x: Some(950.0),
+                y: Some(720.0),
+                width: None,
+                height: None,
+                color: None,
+                parent_id: None,
+                pinned: None,
+                anchor: None,
+            },
+        ])
+        .unwrap();
+
+        let img = doc.node("img").unwrap();
+        assert_eq!(img.node_type, CanvasNodeType::File);
+        assert_eq!(img.file.as_deref(), Some("assets/arch.png"));
+        assert_eq!(img.text.as_deref(), Some("Architecture"));
+
+        // Local subtree layout in freeform preserves isolated freeform nodes.
+        let moved = doc.apply_view_or_layout(
+            None,
+            Some("root"),
+            Some(TreeLayoutMode::TreeDown),
+            false,
+        );
+        assert!(moved >= 1);
+        assert_eq!(doc.view_mode(), CanvasViewMode::Freeform);
+        assert!((doc.node("isolated").unwrap().x - 950.0).abs() < 0.01);
+        assert!((doc.node("isolated").unwrap().y - 720.0).abs() < 0.01);
+
+        // Switching to tree preserves free_pos for lossless roundtrip back to freeform.
+        doc.apply_view_or_layout(
+            Some(CanvasViewMode::Tree),
+            None,
+            Some(TreeLayoutMode::MindmapRight),
+            false,
+        );
+        assert_eq!(doc.view_mode(), CanvasViewMode::Tree);
+        assert_eq!(doc.tree_mode(), TreeLayoutMode::MindmapRight);
+        assert!(doc
+            .node("isolated")
+            .unwrap()
+            .folio
+            .as_ref()
+            .and_then(|f| f.free_pos)
+            .is_some());
+
+        doc.apply_view_or_layout(Some(CanvasViewMode::Freeform), None, None, false);
+        assert_eq!(doc.view_mode(), CanvasViewMode::Freeform);
+        assert!((doc.node("isolated").unwrap().x - 950.0).abs() < 0.01);
+        assert!((doc.node("isolated").unwrap().y - 720.0).abs() < 0.01);
     }
 }
