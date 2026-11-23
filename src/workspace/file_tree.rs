@@ -468,6 +468,7 @@ impl Workspace {
         self.tree.folders = files::list_folders(&root)?;
         self.relocate_tags(&relocated, false, cx);
         self.relocate_rag_paths(&relocated, false, cx);
+        self.relocate_canvas_links(&relocated, false, cx);
         self.projects.save()?;
         self.remember_session()?;
         cx.notify();
@@ -496,6 +497,7 @@ impl Workspace {
         let relocated = [(dragged.0.clone(), renamed.clone())];
         self.relocate_tags(&relocated, true, cx);
         self.relocate_rag_paths(&relocated, true, cx);
+        self.relocate_canvas_links(&relocated, true, cx);
         self.projects.save()?;
         self.remember_session()?;
         if !cx.reduce_motion() {
@@ -907,6 +909,7 @@ impl Workspace {
                     let relocated = [(folder_path, renamed)];
                     self.relocate_tags(&relocated, true, cx);
                     self.relocate_rag_paths(&relocated, true, cx);
+                    self.relocate_canvas_links(&relocated, true, cx);
                     self.projects.save()?;
                 }
             }

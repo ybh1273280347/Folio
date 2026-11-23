@@ -194,6 +194,22 @@ impl CanvasPane {
         self.selection.iter().cloned().collect()
     }
 
+    pub fn focus_node(&mut self, node_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(node) = self.document.node(node_id).cloned() {
+            self.selection.clear();
+            self.selection.insert(node_id.to_owned());
+            self.selected_edge = None;
+            let viewport = self.viewport_bounds.get();
+            if f32::from(viewport.size.width) > 10.0 && f32::from(viewport.size.height) > 10.0 {
+                let (cx_w, cy_w) = node.center();
+                self.camera.pan_x = f32::from(viewport.size.width) * 0.5 - cx_w * self.camera.zoom;
+                self.camera.pan_y = f32::from(viewport.size.height) * 0.5 - cy_w * self.camera.zoom;
+            }
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+        }
+    }
+
     pub fn sync_text(&mut self, text: &str, _window: &mut Window, cx: &mut Context<Self>) {
         if text == self.last_synced_json {
             return;

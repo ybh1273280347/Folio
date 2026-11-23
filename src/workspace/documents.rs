@@ -1,5 +1,6 @@
 //! Live document buffers and their editor/reader projections.
 
+mod canvas_links;
 mod links;
 mod view;
 
@@ -71,6 +72,7 @@ pub(super) struct Documents {
     image_panes: BTreeMap<PaneKey, Entity<crate::image::ImagePane>>,
     markdown_changed: BTreeSet<String>,
     canvas_changed: BTreeSet<String>,
+    active_canvas_backlinks: Vec<crate::canvas::CanvasBacklink>,
     source_version: u64,
     document_watch: DocumentWatch,
 }
@@ -596,6 +598,7 @@ impl Workspace {
             self.documents.tabs.push(file.path.clone());
         }
         self.documents.active = file.path.clone();
+        self.refresh_active_canvas_backlinks();
         if focus_editor {
             if let Some(pane) = self.documents.markdown_panes.get(&tab) {
                 pane.update(cx, |pane, cx| pane.focus(window, cx));
@@ -841,8 +844,19 @@ impl Workspace {
                 CanvasEvent::Focus => {
                     app.documents.focused_markdown = None;
                 }
-                CanvasEvent::JumpToAnchor { .. } => {
-                    // Stage 2 wires anchor navigation into Markdown and PDF panes.
+                CanvasEvent::JumpToAnchor {
+                    anchor,
+                    fallback_file,
+                    fallback_subpath,
+                } => {
+                    app.jump_from_canvas_anchor(
+                        &full,
+                        anchor.as_ref(),
+                        fallback_file.as_deref(),
+                        fallback_subpath.as_deref(),
+                        _window,
+                        cx,
+                    );
                 }
             }
             cx.notify();
@@ -852,6 +866,7 @@ impl Workspace {
             PaneKey::new(path, if reading { PaneRole::Reading } else { PaneRole::Tab }),
             pane,
         );
+        self.sync_canvas_index_from_text(path, &text);
     }
 
     fn add_markdown_pane(
@@ -906,6 +921,22 @@ impl Workspace {
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| file.clone());
                     app.open_ai_with_selection(source, Some(full.clone()), text.clone(), window, cx);
+                }
+                MarkdownEvent::SendToCanvas {
+                    quote,
+                    occurrence,
+                    heading_path,
+                    line_hint,
+                } => {
+                    app.send_markdown_selection_to_canvas(
+                        &file,
+                        quote.clone(),
+                        *occurrence,
+                        heading_path.clone(),
+                        *line_hint,
+                        window,
+                        cx,
+                    );
                 }
                 MarkdownEvent::FilesChanged => {
                     if let Err(error) = app.refresh_files(window, cx) {
@@ -962,10 +993,12 @@ impl Workspace {
         };
         match result {
             Ok(saved) => {
+                let saved_text = saved.text.clone();
                 document.buffer.saved_text = saved.text;
                 document.buffer.dirty = false;
                 document.buffer.revision = saved.revision;
                 document.buffer.conflict = None;
+                self.sync_canvas_index_from_text(path, &saved_text);
                 self.schedule_rag_sync();
                 cx.notify();
                 Ok(true)
@@ -1071,6 +1104,7 @@ impl Workspace {
 
     pub(super) fn select_tab_from_tree(&mut self, path: &str, focus_editor: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.documents.active = path.to_owned();
+        self.refresh_active_canvas_backlinks();
         if focus_editor {
             self.focus_document_tab(path, window, cx);
         } else {
@@ -1089,6 +1123,7 @@ impl Workspace {
         self.tree.dismiss_trash();
         self.documents.focused_markdown = None;
         self.documents.active = path.to_owned();
+        self.refresh_active_canvas_backlinks();
         self.focus_document_tab(path, window, cx);
         if let Err(error) = self.remember_session() {
             self.report(error, cx);
@@ -1148,6 +1183,7 @@ impl Workspace {
                     .update(cx, |editor, cx| editor.focus(window, cx));
             }
         }
+        self.refresh_active_canvas_backlinks();
         if let Err(error) = self.remember_session() {
             self.report(error, cx);
         }
@@ -1447,6 +1483,7 @@ impl Workspace {
         let relocated = [(key.to_owned(), renamed.clone())];
         self.relocate_tags(&relocated, false, cx);
         self.relocate_rag_paths(&relocated, false, cx);
+        self.relocate_canvas_links(&relocated, false, cx);
         if let Some(workspace) = self.projects.directory() {
             let root = PathBuf::from(&workspace.folder);
             self.tree.reload_files(&root)?;

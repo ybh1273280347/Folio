@@ -179,6 +179,48 @@ impl Workspace {
                 }),
         );
 
+        if !trash_open && !self.documents.active_canvas_backlinks.is_empty() {
+            let backlinks = self.documents.active_canvas_backlinks.clone();
+            let count = backlinks.len();
+            let app = cx.entity();
+            bar = bar.child(
+                Button::new("canvas-backlinks-pill")
+                    .ghost()
+                    .compact()
+                    .with_size(px(14.))
+                    .h(px(22.))
+                    .px_2()
+                    .icon(crate::ui::icon(IconName::ListTree))
+                    .label(format!("{count}"))
+                    .tooltip("查看引用此文档的知识画布")
+                    .dropdown_menu(move |menu, _, _| {
+                        backlinks.iter().fold(
+                            menu.item(PopupMenuItem::label("画布反向引用")),
+                            |menu, link| {
+                                let app = app.clone();
+                                let item = link.clone();
+                                let canvas_name = Path::new(&link.canvas_path)
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| link.canvas_path.clone());
+                                let title = if link.label.is_empty() {
+                                    canvas_name
+                                } else {
+                                    format!("{canvas_name} · {}", link.label)
+                                };
+                                menu.item(PopupMenuItem::new(title).on_click(
+                                    move |_, window, cx| {
+                                        app.update(cx, |app, cx| {
+                                            app.open_canvas_backlink(&item, window, cx);
+                                        });
+                                    },
+                                ))
+                            },
+                        )
+                    }),
+            );
+        }
+
         if !trash_open
             && let Some(md_pane) = self.documents.markdown_panes.get(&PaneKey::tab(&self.documents.active))
         {
