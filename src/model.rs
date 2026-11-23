@@ -409,6 +409,66 @@ impl Default for AiSettings {
     }
 }
 
+pub const MAX_TEXT_COLOR_PRESETS: usize = 10;
+
+pub const DEFAULT_TEXT_COLOR_PRESETS: &[&str] = &[
+    "#dc2626", // Red
+    "#ea580c", // Orange
+    "#16a34a", // Green
+    "#0d9488", // Teal
+    "#2563eb", // Blue
+    "#7c3aed", // Purple
+];
+
+pub fn default_text_color_presets() -> Vec<String> {
+    DEFAULT_TEXT_COLOR_PRESETS
+        .iter()
+        .map(|hex| (*hex).to_owned())
+        .collect()
+}
+
+pub fn normalize_hex_color(raw: &str) -> Option<String> {
+    let hex = raw.trim().strip_prefix('#').unwrap_or_else(|| raw.trim());
+    let expanded = match hex.len() {
+        3 => {
+            let mut chars = hex.chars();
+            let (r, g, b) = (chars.next()?, chars.next()?, chars.next()?);
+            if !r.is_ascii_hexdigit() || !g.is_ascii_hexdigit() || !b.is_ascii_hexdigit() {
+                return None;
+            }
+            format!("{r}{r}{g}{g}{b}{b}")
+        }
+        6 => {
+            if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return None;
+            }
+            hex.to_owned()
+        }
+        _ => return None,
+    };
+    Some(format!("#{}", expanded.to_ascii_lowercase()))
+}
+
+pub fn parse_rgb_hex(raw: &str) -> Option<u32> {
+    let normalized = normalize_hex_color(raw)?;
+    u32::from_str_radix(&normalized[1..], 16).ok()
+}
+
+pub fn sanitize_text_color_presets(list: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for item in list {
+        if let Some(normalized) = normalize_hex_color(&item)
+            && !out.contains(&normalized)
+        {
+            out.push(normalized);
+            if out.len() >= MAX_TEXT_COLOR_PRESETS {
+                break;
+            }
+        }
+    }
+    out
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
@@ -458,6 +518,9 @@ pub struct AppSettings {
     pub ai: AiSettings,
     pub rag: RagConfig,
     pub keybindings: BTreeMap<String, String>,
+    /// User-editable foreground text color presets for the Markdown floating toolbar.
+    #[serde(default = "default_text_color_presets")]
+    pub text_color_presets: Vec<String>,
 }
 
 impl AppSettings {
@@ -531,6 +594,40 @@ impl Default for AppSettings {
             ai: AiSettings::default(),
             rag: RagConfig::default(),
             keybindings: BTreeMap::new(),
+            text_color_presets: default_text_color_presets(),
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_color_normalization_and_parsing() {
+        assert_eq!(normalize_hex_color("DC2626").as_deref(), Some("#dc2626"));
+        assert_eq!(normalize_hex_color(" #f0a ").as_deref(), Some("#ff00aa"));
+        assert_eq!(normalize_hex_color("#12345"), None);
+        assert_eq!(normalize_hex_color("#zzzzzz"), None);
+        assert_eq!(parse_rgb_hex("#2563EB"), Some(0x2563eb));
+    }
+
+    #[test]
+    fn preset_sanitization_dedups_and_enforces_cap() {
+        let input: Vec<String> = (0..15)
+            .map(|i| format!("#{i:02x}1122"))
+            .chain(["invalid".to_owned(), "#001122".to_owned()])
+            .collect();
+        let sanitized = sanitize_text_color_presets(input);
+        assert_eq!(sanitized.len(), MAX_TEXT_COLOR_PRESETS);
+        assert_eq!(sanitized[0], "#001122");
+        assert_eq!(sanitized[MAX_TEXT_COLOR_PRESETS - 1], "#091122");
+    }
+
+    #[test]
+    fn missing_presets_in_json_use_defaults() {
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.text_color_presets, default_text_color_presets());
+    }
+}
+

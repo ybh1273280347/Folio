@@ -47,6 +47,7 @@ pub enum MarkdownEvent {
     OpenLink(String),
     AskAi(String),
     FilesChanged,
+    UpdateTextColorPresets(Vec<String>),
 }
 
 enum PendingVisualJump {
@@ -281,6 +282,17 @@ fn hsla_for_color_name(name: &str) -> Hsla {
     }
 }
 
+fn hsla_to_hex(color: Hsla) -> String {
+    let rgba = gpui::Rgba::from(color);
+    let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        byte(rgba.r),
+        byte(rgba.g),
+        byte(rgba.b)
+    )
+}
+
 struct OutlineHeading {
     range: Range<usize>,
     line: usize,
@@ -350,6 +362,10 @@ pub struct MarkdownPane {
     show_turn_into: bool,
     show_color_picker: bool,
     active_highlight_color: String,
+    color_preset_editing: bool,
+    color_hex_editing: Option<Option<usize>>,
+    color_hex_input: Entity<InputState>,
+    color_hex_error: Option<String>,
     link_editing: bool,
     link_input: Entity<InputState>,
     hovered_link: Option<SharedString>,
@@ -662,6 +678,27 @@ impl MarkdownPane {
             },
         )
         .detach();
+        let color_hex_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(crate::i18n::markdown::COLOR_HEX_PLACEHOLDER.get())
+        });
+        cx.subscribe_in(
+            &color_hex_input,
+            window,
+            |pane: &mut Self, _, event: &InputEvent, _, cx| match event {
+                InputEvent::Change => {
+                    if pane.color_hex_error.take().is_some() {
+                        cx.notify();
+                    }
+                }
+                InputEvent::PressEnter { .. } => {
+                    if pane.color_hex_editing.is_some() {
+                        pane.commit_color_preset_input(cx);
+                    }
+                }
+                _ => {}
+            },
+        )
+        .detach();
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::markdown::SEARCH_DOC_PLACEHOLDER.get()));
         cx.subscribe_in(
             &search_input,
@@ -780,7 +817,7 @@ impl MarkdownPane {
                 }
                 BlockEditorEvent::SelectionChanged => {
                     pane.show_turn_into = false;
-                    pane.show_color_picker = false;
+                    pane.close_color_picker();
                     pane.block_menu_for = None;
                     if editor.read(cx).selection_window_bounds().is_none() {
                         pane.link_editing = false;
@@ -934,6 +971,10 @@ impl MarkdownPane {
             show_turn_into: false,
             show_color_picker: false,
             active_highlight_color: "yellow".to_owned(),
+            color_preset_editing: false,
+            color_hex_editing: None,
+            color_hex_input,
+            color_hex_error: None,
             link_editing: false,
             link_input,
             hovered_link: None,
@@ -1634,6 +1675,9 @@ impl MarkdownPane {
         self.link_input.update(cx, |input, cx| {
             input.set_placeholder(crate::i18n::markdown::LINK_INPUT_PLACEHOLDER.get(), window, cx);
         });
+        self.color_hex_input.update(cx, |input, cx| {
+            input.set_placeholder(crate::i18n::markdown::COLOR_HEX_PLACEHOLDER.get(), window, cx);
+        });
         self.search_input.update(cx, |input, cx| {
             input.set_placeholder(crate::i18n::markdown::SEARCH_DOC_PLACEHOLDER.get(), window, cx);
         });
@@ -1863,6 +1907,109 @@ impl MarkdownPane {
         });
     }
 
+    fn close_color_picker(&mut self) {
+        self.show_color_picker = false;
+        self.color_preset_editing = false;
+        self.color_hex_editing = None;
+        self.color_hex_error = None;
+    }
+
+    fn apply_text_color(&mut self, hex: &str, cx: &mut Context<Self>) {
+        let Some(rgb_val) = crate::model::parse_rgb_hex(hex) else {
+            return;
+        };
+        let hsla: Hsla = gpui_kit::rgb(rgb_val).into();
+        self.visual_editor.update(cx, |editor, cx| {
+            let _ = editor.run(
+                EditorCommand::ApplyMark(MarkChange::new().with_color(hsla)),
+                cx,
+            );
+        });
+        self.close_color_picker();
+        cx.notify();
+    }
+
+    fn clear_text_color(&mut self, cx: &mut Context<Self>) {
+        self.visual_editor.update(cx, |editor, cx| {
+            let _ = editor.run(
+                EditorCommand::ApplyMark(MarkChange::new().clear(MarkKind::Color)),
+                cx,
+            );
+        });
+        self.close_color_picker();
+        cx.notify();
+    }
+
+    fn save_text_color_presets(&mut self, presets: Vec<String>, cx: &mut Context<Self>) {
+        let sanitized = crate::model::sanitize_text_color_presets(presets);
+        self.settings.text_color_presets = sanitized.clone();
+        cx.emit(MarkdownEvent::UpdateTextColorPresets(sanitized));
+        cx.notify();
+    }
+
+    fn open_color_hex_editor(
+        &mut self,
+        target: Option<usize>,
+        initial: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.color_hex_editing = Some(target);
+        self.color_hex_error = None;
+        let color_hex_input = self.color_hex_input.clone();
+        window.defer(cx, move |window, cx| {
+            color_hex_input.update(cx, |input, cx| {
+                input.set_value(initial, window, cx);
+                input.focus(window, cx);
+            });
+        });
+        cx.notify();
+    }
+
+    fn commit_color_preset_input(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.color_hex_editing else {
+            return;
+        };
+        let raw = self.color_hex_input.read(cx).value().to_string();
+        let Some(normalized) = crate::model::normalize_hex_color(&raw) else {
+            self.color_hex_error = Some(crate::i18n::markdown::COLOR_HEX_INVALID.get().to_owned());
+            cx.notify();
+            return;
+        };
+        let mut presets = self.settings.text_color_presets.clone();
+        match target {
+            Some(ix) if ix < presets.len() => {
+                presets[ix] = normalized;
+            }
+            _ => {
+                if !presets.contains(&normalized)
+                    && presets.len() < crate::model::MAX_TEXT_COLOR_PRESETS
+                {
+                    presets.push(normalized);
+                }
+            }
+        }
+        self.color_hex_editing = None;
+        self.color_hex_error = None;
+        self.save_text_color_presets(presets, cx);
+    }
+
+    fn delete_color_preset(&mut self, index: usize, cx: &mut Context<Self>) {
+        let mut presets = self.settings.text_color_presets.clone();
+        if index < presets.len() {
+            presets.remove(index);
+            self.color_hex_editing = None;
+            self.color_hex_error = None;
+            self.save_text_color_presets(presets, cx);
+        }
+    }
+
+    fn reset_color_presets(&mut self, cx: &mut Context<Self>) {
+        self.color_hex_editing = None;
+        self.color_hex_error = None;
+        self.save_text_color_presets(crate::model::default_text_color_presets(), cx);
+    }
+
     fn apply_highlight_color(&mut self, color_name: &str, cx: &mut Context<Self>) {
         self.active_highlight_color = color_name.to_owned();
         let hsla = hsla_for_color_name(color_name);
@@ -1872,7 +2019,7 @@ impl MarkdownPane {
                 cx,
             );
         });
-        self.show_color_picker = false;
+        self.close_color_picker();
         cx.notify();
     }
 
@@ -1891,7 +2038,7 @@ impl MarkdownPane {
                 cx,
             );
         });
-        self.show_color_picker = false;
+        self.close_color_picker();
         cx.notify();
     }
 
@@ -2194,7 +2341,7 @@ impl MarkdownPane {
                     .child(block_badge)
                     .on_click(cx.listener(|pane, _, _, cx| {
                         pane.show_turn_into = !pane.show_turn_into;
-                        pane.show_color_picker = false;
+                        pane.close_color_picker();
                         cx.notify();
                     })),
             )
@@ -2292,14 +2439,18 @@ impl MarkdownPane {
                 })),
             ))
             .child(sep())
-            // 4. 'A' Highlight / Fluorescent Picker
+            // 4. 'A' Text Color & Highlight Picker
             .child(
                 div()
                     .id("ft-highlight-a")
                     .w(px(28.))
                     .h(px(26.))
                     .rounded(px(5.))
-                    .bg(rgb(0xe8f3ff))
+                    .bg(if self.show_color_picker || marks.color().is_some() || marks.highlight().is_some() {
+                        rgb(0xe8f3ff)
+                    } else {
+                        rgb(0xf2f3f5)
+                    })
                     .hover(|s| s.bg(rgb(0xd0e6ff)))
                     .active(|s| s.bg(rgb(0xb9d8fb)))
                     .flex()
@@ -2311,7 +2462,7 @@ impl MarkdownPane {
                         div()
                             .text_xs()
                             .font_semibold()
-                            .text_color(rgb(0x165dff))
+                            .text_color(marks.color().unwrap_or_else(|| rgb(0x165dff).into()))
                             .child("A"),
                     )
                     .child(
@@ -2319,10 +2470,14 @@ impl MarkdownPane {
                             .w(px(14.))
                             .h(px(3.))
                             .rounded(px(1.5))
-                            .bg(rgb(active_hl_rgb)),
+                            .bg(marks.highlight().unwrap_or_else(|| rgb(active_hl_rgb).into())),
                     )
                     .on_click(cx.listener(|pane, _, _, cx| {
-                        pane.show_color_picker = !pane.show_color_picker;
+                        if pane.show_color_picker {
+                            pane.close_color_picker();
+                        } else {
+                            pane.show_color_picker = true;
+                        }
                         pane.show_turn_into = false;
                         cx.notify();
                     })),
@@ -2500,7 +2655,75 @@ impl MarkdownPane {
         }
 
         if self.show_color_picker {
-            let swatches = HIGHLIGHT_COLORS.iter().map(|(name, _, hex)| {
+            let current_text_hex = marks.color().map(hsla_to_hex);
+            let presets = &self.settings.text_color_presets;
+            let preset_count = presets.len();
+            let at_limit = preset_count >= crate::model::MAX_TEXT_COLOR_PRESETS;
+
+            let text_swatches = presets.iter().enumerate().map(|(ix, hex)| {
+                let hex_owned = hex.clone();
+                let rgb_val = crate::model::parse_rgb_hex(hex).unwrap_or(0x1f2328);
+                let selected = current_text_hex.as_deref() == Some(hex.as_str());
+                let editing_this = self.color_hex_editing == Some(Some(ix));
+                let ring = if editing_this {
+                    rgb(0x165dff)
+                } else if selected {
+                    rgb(0x1f2328)
+                } else {
+                    rgb(0xffffff)
+                };
+                div()
+                    .id(SharedString::from(format!("md-text-color-swatch-{ix}")))
+                    .relative()
+                    .w(px(22.))
+                    .h(px(22.))
+                    .rounded(px(11.))
+                    .bg(gpui_kit::rgb(rgb_val))
+                    .border_2()
+                    .border_color(ring)
+                    .cursor_pointer()
+                    .when(self.color_preset_editing, |el| {
+                        let delete_ix = ix;
+                        el.child(
+                            div()
+                                .id(SharedString::from(format!("md-text-color-del-{ix}")))
+                                .absolute()
+                                .top(px(-4.))
+                                .right(px(-4.))
+                                .w(px(13.))
+                                .h(px(13.))
+                                .rounded(px(7.))
+                                .bg(rgb(0x1f2328))
+                                .border_1()
+                                .border_color(rgb(0xffffff))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .child(
+                                    crate::ui::icon(IconName::Close)
+                                        .w(px(8.))
+                                        .h(px(8.))
+                                        .text_color(rgb(0xffffff)),
+                                )
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(cx.listener(move |pane, _, _, cx| {
+                                    cx.stop_propagation();
+                                    pane.delete_color_preset(delete_ix, cx);
+                                })),
+                        )
+                    })
+                    .on_click(cx.listener(move |pane, _, window, cx| {
+                        if pane.color_preset_editing {
+                            pane.open_color_hex_editor(Some(ix), hex_owned.clone(), window, cx);
+                        } else {
+                            pane.apply_text_color(&hex_owned, cx);
+                            pane.defer_focus_visual(window, cx);
+                        }
+                    }))
+            });
+
+            let hl_swatches = HIGHLIGHT_COLORS.iter().map(|(name, _, hex)| {
                 let cname = (*name).to_owned();
                 let selected = self.active_highlight_color == *name;
                 div()
@@ -2521,37 +2744,288 @@ impl MarkdownPane {
                         pane.defer_focus_visual(window, cx);
                     }))
             });
+
+            let preview_rgb =
+                crate::model::parse_rgb_hex(self.color_hex_input.read(cx).value().as_ref());
+
             stack = stack.child(
                 div()
+                    .w(px(284.))
                     .px_3()
-                    .py_2()
+                    .py_2p5()
                     .rounded(px(10.))
                     .bg(rgb(0xffffff))
                     .border_1()
                     .border_color(rgb(0xe2e4e8))
                     .shadow_md()
                     .flex()
-                    .items_center()
+                    .flex_col()
                     .gap_2()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(div().text_xs().text_color(rgb(0x787774)).child(crate::i18n::markdown::HIGHLIGHTER_LABEL.get()))
-                    .children(swatches)
+                    // Section 1: Text Foreground Color
                     .child(
                         div()
-                            .id("md-hl-clear")
-                            .px_2()
-                            .py_0p5()
-                            .rounded(px(4.))
-                            .text_xs()
-                            .text_color(rgb(0x57606a))
-                            .hover(|s| s.bg(rgb(0xf2f3f5)))
-                            .active(|s| s.bg(rgb(crate::ui::PRESSED_BG)))
-                            .cursor_pointer()
-                            .child(crate::i18n::common::CLEAR.get())
-                            .on_click(cx.listener(|pane, _, window, cx| {
-                                pane.clear_highlight(cx);
-                                pane.defer_focus_visual(window, cx);
-                            })),
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_medium()
+                                            .text_color(rgb(0x57606a))
+                                            .child(crate::i18n::markdown::TEXT_COLOR_LABEL.get()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0x8c959f))
+                                            .child(format!(
+                                                "{}/{}",
+                                                preset_count,
+                                                crate::model::MAX_TEXT_COLOR_PRESETS
+                                            )),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .when(self.color_preset_editing, |el| {
+                                        el.child(
+                                            div()
+                                                .id("md-tc-reset")
+                                                .px_1p5()
+                                                .py_0p5()
+                                                .rounded(px(4.))
+                                                .text_xs()
+                                                .text_color(rgb(0x57606a))
+                                                .hover(|s| s.bg(rgb(0xf2f3f5)))
+                                                .active(|s| s.bg(rgb(crate::ui::PRESSED_BG)))
+                                                .cursor_pointer()
+                                                .child(crate::i18n::markdown::COLOR_PRESET_RESET.get())
+                                                .on_click(cx.listener(|pane, _, _, cx| {
+                                                    pane.reset_color_presets(cx);
+                                                })),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .id("md-tc-edit-toggle")
+                                            .px_1p5()
+                                            .py_0p5()
+                                            .rounded(px(4.))
+                                            .text_xs()
+                                            .text_color(if self.color_preset_editing {
+                                                rgb(0x165dff)
+                                            } else {
+                                                rgb(0x57606a)
+                                            })
+                                            .hover(|s| s.bg(rgb(0xf2f3f5)))
+                                            .active(|s| s.bg(rgb(crate::ui::PRESSED_BG)))
+                                            .cursor_pointer()
+                                            .child(if self.color_preset_editing {
+                                                crate::i18n::markdown::COLOR_PRESETS_DONE.get()
+                                            } else {
+                                                crate::i18n::markdown::COLOR_PRESETS_EDIT.get()
+                                            })
+                                            .on_click(cx.listener(|pane, _, _, cx| {
+                                                pane.color_preset_editing = !pane.color_preset_editing;
+                                                if !pane.color_preset_editing {
+                                                    pane.color_hex_editing = None;
+                                                    pane.color_hex_error = None;
+                                                }
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("md-tc-clear")
+                                            .px_1p5()
+                                            .py_0p5()
+                                            .rounded(px(4.))
+                                            .text_xs()
+                                            .text_color(rgb(0x57606a))
+                                            .hover(|s| s.bg(rgb(0xf2f3f5)))
+                                            .active(|s| s.bg(rgb(crate::ui::PRESSED_BG)))
+                                            .cursor_pointer()
+                                            .child(crate::i18n::common::CLEAR.get())
+                                            .on_click(cx.listener(|pane, _, window, cx| {
+                                                pane.clear_text_color(cx);
+                                                pane.defer_focus_visual(window, cx);
+                                            })),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_1p5()
+                            .children(text_swatches)
+                            .when(!at_limit, |el| {
+                                el.child(
+                                    div()
+                                        .id("md-tc-add")
+                                        .w(px(22.))
+                                        .h(px(22.))
+                                        .rounded(px(11.))
+                                        .border_1()
+                                        .border_color(rgb(0xd0d7de))
+                                        .bg(rgb(0xf8f9fa))
+                                        .hover(|s| s.bg(rgb(0xeeeeec)))
+                                        .active(|s| s.bg(rgb(crate::ui::PRESSED_BG)))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .child(
+                                            crate::ui::icon(IconName::Plus)
+                                                .w(px(12.))
+                                                .h(px(12.))
+                                                .text_color(rgb(0x57606a)),
+                                        )
+                                        .tooltip(|window, cx| {
+                                            Tooltip::new(crate::i18n::markdown::COLOR_PRESET_ADD.get())
+                                                .build(window, cx)
+                                        })
+                                        .on_click(cx.listener(|pane, _, window, cx| {
+                                            pane.open_color_hex_editor(
+                                                None,
+                                                "#".to_owned(),
+                                                window,
+                                                cx,
+                                            );
+                                        })),
+                                )
+                            }),
+                    )
+                    .when(self.color_hex_editing.is_some(), |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .pt_1()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .child(
+                                            div()
+                                                .w(px(18.))
+                                                .h(px(18.))
+                                                .rounded(px(9.))
+                                                .bg(gpui_kit::rgb(preview_rgb.unwrap_or(0xf2f3f5)))
+                                                .border_1()
+                                                .border_color(if preview_rgb.is_some() {
+                                                    rgb(0xd0d7de)
+                                                } else {
+                                                    rgb(0xdc2626)
+                                                }),
+                                        )
+                                        .child(Input::new(&self.color_hex_input).flex_1().min_w_0())
+                                        .child(
+                                            div()
+                                                .id("md-tc-hex-save")
+                                                .w(px(24.))
+                                                .h(px(24.))
+                                                .rounded(px(5.))
+                                                .bg(rgb(0x165dff))
+                                                .hover(|s| s.bg(rgb(0x0e4ad9)))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .cursor_pointer()
+                                                .child(
+                                                    crate::ui::icon(IconName::Check)
+                                                        .w(px(13.))
+                                                        .h(px(13.))
+                                                        .text_color(rgb(0xffffff)),
+                                                )
+                                                .on_click(cx.listener(|pane, _, _, cx| {
+                                                    pane.commit_color_preset_input(cx);
+                                                })),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("md-tc-hex-cancel")
+                                                .w(px(24.))
+                                                .h(px(24.))
+                                                .rounded(px(5.))
+                                                .hover(|s| s.bg(rgb(0xf2f3f5)))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .cursor_pointer()
+                                                .child(
+                                                    crate::ui::icon(IconName::Close)
+                                                        .w(px(13.))
+                                                        .h(px(13.))
+                                                        .text_color(rgb(0x57606a)),
+                                                )
+                                                .on_click(cx.listener(|pane, _, _, cx| {
+                                                    pane.color_hex_editing = None;
+                                                    pane.color_hex_error = None;
+                                                    cx.notify();
+                                                })),
+                                        ),
+                                )
+                                .when_some(self.color_hex_error.clone(), |col, err| {
+                                    col.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0xdc2626))
+                                            .child(err),
+                                    )
+                                }),
+                        )
+                    })
+                    .child(div().h(px(1.)).bg(rgb(0xeeeeec)))
+                    // Section 2: Highlight Background
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_medium()
+                                    .text_color(rgb(0x57606a))
+                                    .child(crate::i18n::markdown::HIGHLIGHTER_LABEL.get()),
+                            )
+                            .child(
+                                div()
+                                    .id("md-hl-clear")
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded(px(4.))
+                                    .text_xs()
+                                    .text_color(rgb(0x57606a))
+                                    .hover(|s| s.bg(rgb(0xf2f3f5)))
+                                    .active(|s| s.bg(rgb(crate::ui::PRESSED_BG)))
+                                    .cursor_pointer()
+                                    .child(crate::i18n::common::CLEAR.get())
+                                    .on_click(cx.listener(|pane, _, window, cx| {
+                                        pane.clear_highlight(cx);
+                                        pane.defer_focus_visual(window, cx);
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .children(hl_swatches),
                     ),
             );
         }
@@ -3219,4 +3693,48 @@ mod tests {
         assert_eq!(match_heading_index(&headings, "Quick Start Guide"), Some(1));
         assert_eq!(match_heading_index(&headings, "missing"), None);
     }
+
+    #[test]
+    fn text_color_round_trips_and_toggles_in_editor_model() {
+        use super::{
+            BlockEditorModel, BlockPosition, BlockSelection, EditorCommand, MarkChange, MarkKind,
+            MarkdownExtensions, hsla_to_hex,
+        };
+        let src = r##"a <span style="color: #dc2626">red</span> b"##;
+        let model = BlockEditorModel::from_markdown(src, MarkdownExtensions::default()).unwrap();
+        assert_eq!(model.source(), src);
+
+        let named = BlockEditorModel::from_markdown(
+            r##"<span style="color: red">x</span>"##,
+            MarkdownExtensions::default(),
+        )
+        .unwrap();
+        assert_eq!(named.source(), r##"<span style="color: #ef4444">x</span>"##);
+
+        let mut editable =
+            BlockEditorModel::from_markdown("hello world", MarkdownExtensions::default()).unwrap();
+        let leaf = editable.document().leaves().next().unwrap().id();
+        editable
+            .set_selection(BlockSelection::Text {
+                anchor: BlockPosition::new(leaf, 0),
+                head: BlockPosition::new(leaf, 5),
+            })
+            .unwrap();
+        let blue: gpui_kit::Hsla = gpui_kit::rgb(0x2563eb).into();
+        editable
+            .run(EditorCommand::ApplyMark(MarkChange::new().with_color(blue)))
+            .unwrap();
+        assert_eq!(
+            editable.source(),
+            r##"<span style="color: #2563eb">hello</span> world"##
+        );
+        assert_eq!(editable.active_marks().color().map(hsla_to_hex).as_deref(), Some("#2563eb"));
+
+        editable
+            .run(EditorCommand::ApplyMark(MarkChange::new().clear(MarkKind::Color)))
+            .unwrap();
+        assert_eq!(editable.source(), "hello world");
+        assert!(!editable.active_marks().has(MarkKind::Color));
+    }
 }
+

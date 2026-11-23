@@ -1090,7 +1090,7 @@ impl Render for MarkdownPane {
                     {
                         let was_search = pane.search_open;
                         pane.show_turn_into = false;
-                        pane.show_color_picker = false;
+                        pane.close_color_picker();
                         pane.link_editing = false;
                         pane.block_menu_for = None;
                         pane.active_annotation_id = None;
@@ -1109,7 +1109,7 @@ impl Render for MarkdownPane {
                 MouseButton::Left,
                 cx.listener(|pane, _, _, cx| {
                     pane.show_turn_into = false;
-                    pane.show_color_picker = false;
+                    pane.close_color_picker();
                     pane.block_menu_for = None;
                     if pane.translate.is_open() {
                         pane.translate.dismiss();

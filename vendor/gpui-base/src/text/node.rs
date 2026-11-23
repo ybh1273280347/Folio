@@ -843,6 +843,8 @@ pub struct TextMark {
     ///
     /// `None` means the text is not highlighted.
     pub highlight: Option<Hsla>,
+    /// Explicit foreground text color (`<span style="color: ...">`).
+    pub color: Option<Hsla>,
     pub link: Option<LinkMark>,
 }
 
@@ -878,6 +880,12 @@ impl TextMark {
         self
     }
 
+    /// Set the foreground text color.
+    pub fn color(mut self, color: Hsla) -> Self {
+        self.color = Some(color);
+        self
+    }
+
     pub fn link(mut self, link: impl Into<LinkMark>) -> Self {
         self.link = Some(link.into());
         self
@@ -891,6 +899,9 @@ impl TextMark {
         self.code |= other.code;
         if other.highlight.is_some() {
             self.highlight = other.highlight;
+        }
+        if other.color.is_some() {
+            self.color = other.color;
         }
         if let Some(link) = other.link {
             self.link = Some(link);
@@ -1098,6 +1109,17 @@ fn set_leaf_key(state: &mut Arc<Mutex<InlineState>>, key: u64) {
     }));
 }
 
+fn format_hex_color(color: Hsla) -> String {
+    let rgba = gpui::Rgba::from(color);
+    let byte = |value: f32| (value.clamp(0., 1.) * 255.).round() as u8;
+    let (r, g, b, a) = (byte(rgba.r), byte(rgba.g), byte(rgba.b), byte(rgba.a));
+    if a == 255 {
+        format!("#{r:02x}{g:02x}{b:02x}")
+    } else {
+        format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
+    }
+}
+
 /// Wrap `text` with the Markdown syntax implied by `mark`.
 ///
 /// This mirrors the per-mark formatting in [`Paragraph::to_markdown`] but
@@ -1126,6 +1148,9 @@ pub(crate) fn wrap_with_mark(text: &str, mark: &TextMark) -> String {
         // Markdown has no underline syntax, and `__` reads as bold to most
         // parsers, so fall back to the inline HTML `<u>` parses from.
         out = format!("<u>{}</u>", out);
+    }
+    if let Some(color) = mark.color {
+        out = format!("<span style=\"color: {}\">{}</span>", format_hex_color(color), out);
     }
     if mark.highlight.is_some() {
         out = format!("=={}==", out);
@@ -1171,6 +1196,12 @@ impl MarkdownSource {
         if let Some(highlight) = mark.highlight {
             layers.push(TextMark {
                 highlight: Some(highlight),
+                ..Default::default()
+            });
+        }
+        if let Some(color) = mark.color {
+            layers.push(TextMark {
+                color: Some(color),
                 ..Default::default()
             });
         }
@@ -1732,7 +1763,9 @@ impl Paragraph {
                 let inner_range = (offset + range.start)..(offset + range.end);
                 let mut highlight = mark_highlight(style, node_cx, cx);
                 if let Some(link_mark) = style.link.clone() {
-                    highlight.style.color = Some(node_cx.style.link());
+                    if style.color.is_none() {
+                        highlight.style.color = Some(node_cx.style.link());
+                    }
                     highlight.style.underline = Some(link_underline(&node_cx.style));
                     links.push((inner_range.clone(), link_mark));
                 }
@@ -2896,6 +2929,9 @@ fn mark_highlight(mark: &TextMark, node_cx: &NodeContext, cx: &App) -> InlineHig
             highlight.color = Some(mark_text_color(color, cx.theme().tokens.colors.background));
         }
     }
+    if let Some(color) = mark.color {
+        highlight.color = Some(color);
+    }
     InlineHighlight {
         style: highlight,
         font_family,
@@ -3095,7 +3131,9 @@ impl Paragraph {
                     let mut highlight = mark_highlight(style, node_cx, cx);
 
                     if let Some(mut link_mark) = style.link.clone() {
+                        if style.color.is_none() {
                         highlight.style.color = Some(node_cx.style.link());
+                    }
                         highlight.style.underline = Some(link_underline(&node_cx.style));
 
                         // convert link references, replace link
@@ -3305,7 +3343,9 @@ impl Paragraph {
                     let mut highlight = mark_highlight(style, node_cx, cx);
 
                     if let Some(mut link_mark) = style.link.clone() {
+                        if style.color.is_none() {
                         highlight.style.color = Some(node_cx.style.link());
+                    }
                         highlight.style.underline = Some(link_underline(&node_cx.style));
 
                         if let Some(identifier) = link_mark.identifier.as_ref()
@@ -6566,6 +6606,10 @@ mod tests {
         );
         // No Markdown syntax for underline, so it keeps the tag it came from.
         assert_eq!(wrap(TextMark::default().underline()), "<u>x</u>");
+        assert_eq!(
+            wrap(TextMark::default().color(gpui::rgb(0xdc2626).into())),
+            r##"<span style="color: #dc2626">x</span>"##
+        );
 
         // A link keeps its title, which Markdown carries after the URL.
         assert_eq!(

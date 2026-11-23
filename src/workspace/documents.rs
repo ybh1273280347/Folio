@@ -131,6 +131,7 @@ impl Documents {
             || previous.interface_font != settings.interface_font
             || previous.inline_code_font != settings.inline_code_font || previous.block_code_font != settings.block_code_font
             || previous.inline_code_scale != settings.inline_code_scale || previous.block_code_scale != settings.block_code_scale
+            || previous.text_color_presets != settings.text_color_presets
         {
             for pane in self.markdown_panes.values() {
                 pane.update(cx, |pane, cx| pane.apply_settings(settings, window, cx));
@@ -847,6 +848,12 @@ impl Workspace {
                     if let Err(error) = app.refresh_files(window, cx) {
                         app.report(error, cx);
                     }
+                }
+                MarkdownEvent::UpdateTextColorPresets(presets) => {
+                    let mut settings = app.settings.clone();
+                    settings.text_color_presets =
+                        crate::model::sanitize_text_color_presets(presets.clone());
+                    app.apply_settings(settings, window, cx);
                 }
             }
             cx.notify();

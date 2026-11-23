@@ -12,6 +12,7 @@ pub enum MarkKind {
     Underline,
     Code,
     Highlight,
+    Color,
     Link,
 }
 
@@ -24,6 +25,7 @@ impl MarkKind {
             Self::Underline => mark.underline,
             Self::Code => mark.code,
             Self::Highlight => mark.highlight.is_some(),
+            Self::Color => mark.color.is_some(),
             Self::Link => mark.link.is_some(),
         }
     }
@@ -45,6 +47,10 @@ impl MarkSet {
 
     pub fn highlight(&self) -> Option<Hsla> {
         self.0.highlight
+    }
+
+    pub fn color(&self) -> Option<Hsla> {
+        self.0.color
     }
 
     pub fn link_url(&self) -> Option<&SharedString> {
@@ -71,6 +77,7 @@ pub struct MarkChange {
     clear: Vec<MarkKind>,
     link: Option<LinkMark>,
     highlight: Option<Hsla>,
+    color: Option<Hsla>,
 }
 
 /// The highlight colour `<mark>` gets without a colour attribute.
@@ -109,10 +116,15 @@ impl MarkChange {
         self.set(MarkKind::Highlight)
     }
 
+    pub fn with_color(mut self, color: Hsla) -> Self {
+        self.color = Some(color);
+        self.set(MarkKind::Color)
+    }
+
     pub(crate) fn apply(&self, mark: &TextMark) -> TextMark {
         let mut out = self.apply_raw(mark);
-        // Inline code holds literal text. Links and highlights can wrap it;
-        // emphasis marks still have no meaning inside a code span.
+        // Inline code holds literal text. Links, highlights and foreground
+        // colors can wrap it; emphasis marks still have no meaning inside a code span.
         if out.code {
             out.bold = false;
             out.italic = false;
@@ -132,6 +144,7 @@ impl MarkChange {
                 MarkKind::Underline => out.underline = false,
                 MarkKind::Code => out.code = false,
                 MarkKind::Highlight => out.highlight = None,
+                MarkKind::Color => out.color = None,
                 MarkKind::Link => out.link = None,
             }
         }
@@ -144,6 +157,11 @@ impl MarkChange {
                 MarkKind::Code => out.code = true,
                 MarkKind::Highlight => {
                     out.highlight = Some(self.highlight.unwrap_or_else(default_highlight))
+                }
+                MarkKind::Color => {
+                    if let Some(color) = self.color {
+                        out.color = Some(color);
+                    }
                 }
                 MarkKind::Link => {
                     if let Some(link) = &self.link {

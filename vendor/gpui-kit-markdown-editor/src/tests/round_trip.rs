@@ -582,3 +582,49 @@ fn code_content_is_not_unescaped() {
     let reloaded = model(&code.source());
     assert_eq!(only_text(&reloaded), content);
 }
+
+#[test]
+fn text_color_round_trips_and_clears() {
+    let source = r##"a <span style="color: #dc2626">red</span> b"##;
+    assert_eq!(round_trip(source), source);
+
+    let named = r##"<span style="color: red">x</span>"##;
+    assert_eq!(round_trip(named), r##"<span style="color: #ef4444">x</span>"##);
+
+    let short_hex = r##"<span style="color: #f00">x</span>"##;
+    assert_eq!(round_trip(short_hex), r##"<span style="color: #ff0000">x</span>"##);
+
+    let mut m = model("hello world");
+    let leaf = m.document().leaves().next().unwrap().id();
+    m.set_selection(BlockSelection::Text {
+        anchor: BlockPosition::new(leaf, 0),
+        head: BlockPosition::new(leaf, 5),
+    })
+    .unwrap();
+    m.run(EditorCommand::ApplyMark(
+        MarkChange::new().with_color(gpui::rgb(0x2563eb).into()),
+    ))
+    .unwrap();
+    assert_eq!(m.source(), r##"<span style="color: #2563eb">hello</span> world"##);
+    assert!(m.active_marks().has(MarkKind::Color));
+
+    m.run(EditorCommand::ApplyMark(
+        MarkChange::new().clear(MarkKind::Color),
+    ))
+    .unwrap();
+    assert_eq!(m.source(), "hello world");
+    assert!(!m.active_marks().has(MarkKind::Color));
+}
+
+#[test]
+fn text_color_combines_with_highlight_and_emphasis() {
+    let source = r##"<mark color="#fef08a"><span style="color: #dc2626">**bold**</span></mark>"##;
+    let reloaded = model(source);
+    let leaf = reloaded.document().leaves().next().unwrap().id();
+    let (_, mark, _) = reloaded.doc().inline(leaf).unwrap().pieces().next().unwrap();
+    assert!(mark.bold);
+    assert!(mark.highlight.is_some());
+    assert!(mark.color.is_some());
+    assert_eq!(only_text(&reloaded), "bold");
+}
+

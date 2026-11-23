@@ -163,23 +163,84 @@ fn mark_color(attrs: &RefCell<Vec<html5ever::Attribute>>) -> Option<Hsla> {
 /// `style="background-color: …"`.
 pub(super) fn mark_color_from_values(color: Option<&str>, style: Option<&str>) -> Option<Hsla> {
     if let Some(value) = color
-        && let Some(color) = parse_mark_color(value.trim())
+        && let Some(color) = parse_css_color(value.trim())
     {
         return Some(color);
     }
 
-    style.and_then(|css_text| parse_mark_color(style_attrs(css_text).get("background-color")?))
+    style.and_then(|css_text| parse_css_color(style_attrs(css_text).get("background-color")?))
 }
 
-fn parse_mark_color(value: &str) -> Option<Hsla> {
-    if value.starts_with('#') {
-        return gpui::Rgba::try_from(value).ok().map(Into::into);
+/// Resolve foreground text color from raw `style` attribute values (`color: ...`).
+pub(super) fn span_text_color_from_style(style: Option<&str>) -> Option<Hsla> {
+    style.and_then(|css_text| parse_css_color(style_attrs(css_text).get("color")?))
+}
+
+fn span_text_color(attrs: &RefCell<Vec<html5ever::Attribute>>) -> Option<Hsla> {
+    span_text_color_from_style(attr_value(attrs, local_name!("style")).as_deref())
+}
+
+pub(super) fn parse_css_color(value: &str) -> Option<Hsla> {
+    let value = value.trim();
+    if let Some(hex) = value.strip_prefix('#') {
+        match hex.len() {
+            3 => {
+                let mut chars = hex.chars();
+                let (r, g, b) = (chars.next()?, chars.next()?, chars.next()?);
+                let expanded = format!("#{r}{r}{g}{g}{b}{b}");
+                return gpui::Rgba::try_from(expanded.as_str()).ok().map(Into::into);
+            }
+            4 => {
+                let mut chars = hex.chars();
+                let (r, g, b, a) = (chars.next()?, chars.next()?, chars.next()?, chars.next()?);
+                let expanded = format!("#{r}{r}{g}{g}{b}{b}{a}{a}");
+                return gpui::Rgba::try_from(expanded.as_str()).ok().map(Into::into);
+            }
+            _ => return gpui::Rgba::try_from(value).ok().map(Into::into),
+        }
     }
-    match value.to_ascii_lowercase().as_str() {
+    let lower = value.to_ascii_lowercase();
+    if let Some(inner) = lower
+        .strip_prefix("rgb(")
+        .or_else(|| lower.strip_prefix("rgba("))
+        .and_then(|s| s.strip_suffix(')'))
+    {
+        let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+        if parts.len() == 3 || parts.len() == 4 {
+            let r = parts[0].parse::<u8>().ok()? as f32 / 255.0;
+            let g = parts[1].parse::<u8>().ok()? as f32 / 255.0;
+            let b = parts[2].parse::<u8>().ok()? as f32 / 255.0;
+            let a = if parts.len() == 4 {
+                parts[3].parse::<f32>().ok()?.clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            return Some(gpui::Rgba { r, g, b, a }.into());
+        }
+    }
+    match lower.as_str() {
         "black" => Some(gpui::rgb(0x000000).into()),
         "white" => Some(gpui::rgb(0xffffff).into()),
-        "blue" => Some(gpui::rgb(0x3b82f6).into()),
+        "red" => Some(gpui::rgb(0xef4444).into()),
+        "orange" => Some(gpui::rgb(0xf97316).into()),
+        "amber" => Some(gpui::rgb(0xd97706).into()),
         "yellow" => Some(gpui::rgb(0xfacc15).into()),
+        "lime" => Some(gpui::rgb(0x84cc16).into()),
+        "green" => Some(gpui::rgb(0x22c55e).into()),
+        "teal" => Some(gpui::rgb(0x14b8a6).into()),
+        "cyan" | "aqua" => Some(gpui::rgb(0x06b6d4).into()),
+        "blue" => Some(gpui::rgb(0x3b82f6).into()),
+        "indigo" => Some(gpui::rgb(0x6366f1).into()),
+        "purple" => Some(gpui::rgb(0xa855f7).into()),
+        "violet" => Some(gpui::rgb(0x8b5cf6).into()),
+        "pink" => Some(gpui::rgb(0xec4899).into()),
+        "magenta" | "fuchsia" => Some(gpui::rgb(0xd946ef).into()),
+        "brown" => Some(gpui::rgb(0x92400e).into()),
+        "gray" | "grey" => Some(gpui::rgb(0x6b7280).into()),
+        "silver" => Some(gpui::rgb(0x9ca3af).into()),
+        "maroon" => Some(gpui::rgb(0x991b1b).into()),
+        "navy" => Some(gpui::rgb(0x1e3a8a).into()),
+        "olive" => Some(gpui::rgb(0x65a30d).into()),
         _ => None,
     }
 }
@@ -417,6 +478,16 @@ fn parse_paragraph(paragraph: &mut HtmlParagraph, node: &Rc<Node>) {
                     paragraph,
                     Some(TextMark::default().highlight(color)),
                 );
+            }
+            local_name!("span") => {
+                let mark = span_text_color(&attrs).map(|color| TextMark::default().color(color));
+                merge_children_with_mark(node, paragraph, mark);
+            }
+            local_name!("font") => {
+                let mark = attr_value(&attrs, local_name!("color"))
+                    .and_then(|value| parse_css_color(value.trim()))
+                    .map(|color| TextMark::default().color(color));
+                merge_children_with_mark(node, paragraph, mark);
             }
             local_name!("a") => {
                 let link_mark = LinkMark {

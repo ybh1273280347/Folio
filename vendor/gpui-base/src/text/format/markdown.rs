@@ -227,6 +227,15 @@ fn inline_html_mark(name: &str, attrs: &str) -> Option<TextMark> {
             .unwrap_or_else(super::html::default_mark_color);
             TextMark::default().highlight(color)
         }
+        "span" => {
+            let color = super::html::span_text_color_from_style(inline_html_attr(attrs, "style"))?;
+            TextMark::default().color(color)
+        }
+        "font" => {
+            let color = inline_html_attr(attrs, "color")
+                .and_then(super::html::parse_css_color)?;
+            TextMark::default().color(color)
+        }
         _ => return None,
     })
 }

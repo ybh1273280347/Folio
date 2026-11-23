@@ -67,6 +67,8 @@ pub fn load_settings() -> io::Result<AppSettings> {
     }
     let mut settings: AppSettings = serde_json::from_value(values.into()).map_err(io::Error::other)?;
     settings.background_image_opacity = settings.background_image_opacity.min(100);
+    settings.text_color_presets =
+        crate::model::sanitize_text_color_presets(std::mem::take(&mut settings.text_color_presets));
     Ok(settings)
 }
 

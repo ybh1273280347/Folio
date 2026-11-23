@@ -52,6 +52,13 @@ pub const BLOCK_TODO: BiText = BiText::new("任务列表", "To-do list");
 pub const BLOCK_QUOTE: BiText = BiText::new("引用块", "Quote");
 pub const BLOCK_CODE: BiText = BiText::new("代码块", "Code block");
 pub const HIGHLIGHTER_LABEL: BiText = BiText::new("荧光笔", "Highlight");
+pub const TEXT_COLOR_LABEL: BiText = BiText::new("字体颜色", "Text color");
+pub const COLOR_PRESETS_EDIT: BiText = BiText::new("编辑", "Edit");
+pub const COLOR_PRESETS_DONE: BiText = BiText::new("完成", "Done");
+pub const COLOR_PRESET_ADD: BiText = BiText::new("添加色号", "Add color");
+pub const COLOR_PRESET_RESET: BiText = BiText::new("恢复默认", "Reset");
+pub const COLOR_HEX_PLACEHOLDER: BiText = BiText::new("#rrggbb 如 #dc2626", "#rrggbb e.g. #dc2626");
+pub const COLOR_HEX_INVALID: BiText = BiText::new("请输入 3 或 6 位十六进制色号", "Enter 3 or 6 hex digits");
 
 pub const EMOJI_HEADER_EMPTY: BiText = BiText::new("表情符号 · 输入中文或英文搜索", "Emoji · Type to search");
 pub fn emoji_header_query(query: &str) -> String {
