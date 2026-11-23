@@ -114,6 +114,18 @@ pub fn sync_canvas_links(
     tx.commit().map_err(|e| e.to_string())
 }
 
+pub fn remove_canvas_links(db_path: &Path, canvas_path: &str) -> Result<(), String> {
+    let Some(conn) = open_links_db(db_path, false)? else {
+        return Ok(());
+    };
+    conn.execute(
+        "DELETE FROM canvas_links WHERE canvas_path = ?1",
+        [canvas_path.replace('\\', "/")],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn backlinks_for(db_path: &Path, target_path: &str) -> Vec<CanvasBacklink> {
     let Ok(Some(conn)) = open_links_db(db_path, false) else {
         return Vec::new();
@@ -214,5 +226,21 @@ mod tests {
         relocate_index_paths(&db, &[("notes/a.md".into(), "notes/b.md".into())], false).unwrap();
         assert!(backlinks_for(&db, "notes/a.md").is_empty());
         assert_eq!(backlinks_for(&db, "notes/b.md").len(), 1);
+
+        let mut other = CanvasDocument::default();
+        other.nodes.push(CanvasNode::new_anchor(
+            "n2",
+            0.0,
+            0.0,
+            "保留引用",
+            KnowledgeAnchor::MarkdownFile {
+                path: "notes/b.md".into(),
+            },
+        ));
+        sync_canvas_links(&db, "maps/other.canvas", &other).unwrap();
+        remove_canvas_links(&db, "maps/overview.canvas").unwrap();
+        let remaining = backlinks_for(&db, "notes/b.md");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].canvas_path, "maps/other.canvas");
     }
 }

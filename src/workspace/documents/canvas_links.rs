@@ -27,6 +27,16 @@ impl Workspace {
         self.refresh_active_canvas_backlinks();
     }
 
+    pub(in crate::workspace) fn remove_canvas_index(&mut self, rel_path: &str) {
+        if !Self::is_canvas_path(rel_path) {
+            return;
+        }
+        if let Some(db_path) = self.canvas_metadata_db_path() {
+            let _ = canvas_index::remove_canvas_links(&db_path, rel_path);
+        }
+        self.refresh_active_canvas_backlinks();
+    }
+
     pub(in crate::workspace) fn refresh_active_canvas_backlinks(&mut self) {
         if self.documents.active.is_empty() || Self::is_canvas_path(&self.documents.active) {
             self.documents.active_canvas_backlinks.clear();

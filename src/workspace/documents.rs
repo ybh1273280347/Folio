@@ -513,9 +513,11 @@ impl Workspace {
         }
         self.documents.reading_panes.retain(|pane| pane != path);
         self.documents.tabs.retain(|tab| tab != path);
+        self.documents.canvas_changed.remove(path);
         if self.documents.focused_markdown.as_deref() == Some(path) {
             self.documents.focused_markdown = None;
         }
+        self.remove_canvas_index(path);
     }
 
     pub(super) fn invalidate_document_tree(&mut self) {
