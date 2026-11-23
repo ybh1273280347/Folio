@@ -16,8 +16,9 @@ use gpui_kit::{
     component::{
         Sizable,
         input::{
-            Editor, EditorState, Input, InputEvent, InputState, Position, RangeDecoration,
-            RangeDecorationCollection, RangeDecorationStyle, Textarea, TextareaState,
+            BufferPoint, Editor, EditorState, Input, InputEvent, InputState, Position,
+            RangeDecoration, RangeDecorationCollection, RangeDecorationStyle, RopeExt, Textarea,
+            TextareaState,
         },
         menu::ContextMenuExt,
         resizable::{h_resizable, resizable_panel},
@@ -31,7 +32,8 @@ use markdown_editor::{
     BlockPosition, BlockSelection, CalloutStyle, ColumnAlign, EditorCommand, MarkChange, MarkKind,
     TableEdit,
 };
-use std::{cell::RefCell, ops::Range, path::PathBuf, rc::Rc};
+use crate::rag::SearchHit;
+use std::{cell::RefCell, cmp::Reverse, ops::Range, path::PathBuf, rc::Rc};
 
 mod emoji;
 mod outline;
@@ -59,11 +61,17 @@ pub enum MarkdownEvent {
 enum PendingVisualJump {
     Heading(String),
     Annotation(u64),
+    KbHit(SearchHit),
     Quote {
         quote: String,
         occurrence: usize,
         fallback_heading: Option<String>,
     },
+}
+
+enum PendingSourceJump {
+    Heading(usize),
+    KbHit(SearchHit),
 }
 
 actions!(
@@ -334,7 +342,7 @@ pub struct MarkdownPane {
     // Each view keeps its editing state until the other view changes the buffer.
     source_needs_sync: bool,
     visual_needs_sync: bool,
-    pending_source_heading: Option<usize>,
+    pending_source_jump: Option<PendingSourceJump>,
     source_heading_highlight: RangeDecorationCollection,
     source_heading_highlight_timer: Task<()>,
     visual_editor: Entity<BlockEditorState>,
@@ -950,7 +958,7 @@ impl MarkdownPane {
             source_editor,
             source_needs_sync: true,
             visual_needs_sync: false,
-            pending_source_heading: None,
+            pending_source_jump: None,
             source_heading_highlight,
             source_heading_highlight_timer: Task::ready(()),
             visual_editor,
@@ -1360,6 +1368,102 @@ impl MarkdownPane {
         self.reveal_anchor(anchor, Some(window), cx);
     }
 
+    pub(crate) fn jump_to_kb_hit(&mut self, hit: &SearchHit, window: &mut Window, cx: &mut Context<Self>) {
+        if self.source {
+            if self.source_editor.read(cx).is_loading_wrapped_value() {
+                self.pending_source_jump = Some(PendingSourceJump::KbHit(hit.clone()));
+                return;
+            }
+            self.pending_source_jump = None;
+            if let Some(range) = hit.source_keyword(&self.text) {
+                self.reveal_source_hit(range, window, cx);
+                return;
+            }
+        } else {
+            if self.loading.is_some() && hit.keyword.is_some() && hit.line_start.is_some() {
+                // The first-paint model can omit the hit and is replaced after the full parse.
+                self.pending_visual_jump = Some(PendingVisualJump::KbHit(hit.clone()));
+                return;
+            }
+            if self.select_kb_keyword(hit, cx) {
+                return;
+            }
+        }
+
+        let heading = crate::rag::pipeline::clean_heading_text(
+            hit.heading.rsplit(" > ").next().unwrap(),
+        );
+        let snippet = (hit.keyword.is_none() || hit.line_start.is_none()).then_some(hit.snippet.as_str());
+        self.jump_to_search_hit(hit.line_start, Some(&heading), snippet, window, cx);
+    }
+
+    fn select_kb_keyword(&mut self, hit: &SearchHit, cx: &mut Context<Self>) -> bool {
+        let Some(range) = hit.source_keyword(&self.text) else {
+            return false;
+        };
+        let section = self.headings.partition_point(|heading| heading.range.start <= range.start);
+        let start_heading = section.checked_sub(1);
+        let start = start_heading.map_or(0, |index| self.headings[index].range.start);
+        let keyword = self.text[range.clone()].to_ascii_lowercase();
+        let occurrence = self.text[start..range.start]
+            .to_ascii_lowercase()
+            .matches(&keyword)
+            .count();
+        self.visual_editor.update(cx, |editor, cx| {
+            let start_block = start_heading.and_then(|index| editor.heading_block_at(index));
+            let end_block = editor.heading_block_at(section);
+            // A snippet can include text from several leaves. Compare the context on each
+            // side of the token and use its section-local ordinal when contexts tie.
+            let selection = editor.model().document().leaves()
+                .skip_while(|block| start_block.is_some_and(|start| block.id() != start))
+                .take_while(|block| end_block != Some(block.id()))
+                .filter_map(|block| Some((block.id(), block.text()?)))
+                .flat_map(|(block, text)| {
+                    hit.keyword_occurrences(text)
+                        .into_iter()
+                        .map(move |(range, score)| (block, range, score))
+                })
+                .enumerate()
+                .max_by_key(|(index, (_, _, score))| (*score, Reverse(index.abs_diff(occurrence))))
+                .map(|(_, (block, range, _))| BlockSelection::Text {
+                    anchor: BlockPosition::new(block, range.start),
+                    head: BlockPosition::new(block, range.end),
+                });
+            if let Some(selection) = selection && editor.set_selection(selection, cx).is_ok() {
+                editor.reveal_caret(cx);
+                return true;
+            }
+            false
+        })
+    }
+
+    fn reveal_source_hit(&mut self, range: Range<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.source_editor.update(cx, |editor, cx| {
+            let point = editor.text().offset_to_point(range.start);
+            editor.set_cursor_position(editor.text().offset_to_position(range.start), window, cx);
+            if let Some(line_height) = editor.line_height() {
+                let row = editor
+                    .display_map()
+                    .buffer_pos_to_display_pos(BufferPoint::new(point.row, point.column))
+                    .row;
+                let mut offset = editor.scroll_offset();
+                offset.y = editor.input_bounds().size.height * 0.25 - line_height * row;
+                editor.set_scroll_offset(offset, cx);
+            }
+        });
+        self.source_heading_highlight.set(
+            vec![RangeDecoration::new(range)
+                .with_style(RangeDecorationStyle::Fill)
+                .with_color(gpui_kit::base::Theme::global(cx).tokens.colors.selection)],
+            cx,
+        );
+        self.source_heading_highlight_timer = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(1400)).await;
+            let _ = this.update(cx, |pane, cx| pane.source_heading_highlight.clear(cx));
+        });
+        cx.notify();
+    }
+
     pub fn jump_to_search_hit(
         &mut self,
         line_1based: Option<usize>,
@@ -1372,35 +1476,9 @@ impl MarkdownPane {
             if let Some(line_num) = line_1based
                 && !self.source_editor.read(cx).is_loading_wrapped_value()
             {
-                let line0 = line_num.saturating_sub(1);
-                let mut highlight_range = None;
-                self.source_editor.update(cx, |editor, cx| {
-                    let text = editor.value().to_string();
-                    highlight_range = crate::workspace::line_byte_range(&text, line0);
-                    editor.set_cursor_position(Position::new(line0 as u32, 0), window, cx);
-                    if let Some(line_height) = editor.line_height() {
-                        let row = editor.display_map().buffer_line_to_display_row(line0);
-                        let mut offset = editor.scroll_offset();
-                        offset.y = editor.input_bounds().size.height * 0.25 - line_height * row;
-                        editor.set_scroll_offset(offset, cx);
-                    }
-                    editor.focus(window, cx);
-                });
-                if let Some(range) = highlight_range {
-                    self.source_heading_highlight.set(
-                        vec![RangeDecoration::new(range)
-                            .with_style(RangeDecorationStyle::Fill)
-                            .with_color(gpui_kit::base::Theme::global(cx).tokens.colors.selection)],
-                        cx,
-                    );
-                    self.source_heading_highlight_timer = cx.spawn(async move |this, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(1400))
-                            .await;
-                        let _ = this.update(cx, |pane, cx| pane.source_heading_highlight.clear(cx));
-                    });
+                if let Some(range) = crate::workspace::line_byte_range(&self.text, line_num.saturating_sub(1)) {
+                    self.reveal_source_hit(range, window, cx);
                 }
-                cx.notify();
                 return;
             }
             if let Some(heading) = heading_title
@@ -1462,6 +1540,14 @@ impl MarkdownPane {
         match self.pending_visual_jump.take() {
             Some(PendingVisualJump::Heading(anchor)) => self.reveal_anchor(&anchor, None, cx),
             Some(PendingVisualJump::Annotation(id)) => self.reveal_annotation(id, cx),
+            Some(PendingVisualJump::KbHit(hit)) => {
+                if !self.select_kb_keyword(&hit, cx) {
+                    let heading = crate::rag::pipeline::clean_heading_text(
+                        hit.heading.rsplit(" > ").next().unwrap(),
+                    );
+                    self.reveal_anchor(&heading, None, cx);
+                }
+            }
             Some(PendingVisualJump::Quote {
                 quote,
                 occurrence,
@@ -1542,7 +1628,7 @@ impl MarkdownPane {
     fn navigate_heading(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.source {
             if self.source_editor.read(cx).is_loading_wrapped_value() {
-                self.pending_source_heading = Some(index);
+                self.pending_source_jump = Some(PendingSourceJump::Heading(index));
                 return;
             }
             let Some(heading) = self.headings.get(index) else {
@@ -1750,7 +1836,7 @@ impl MarkdownPane {
         self.text = text.to_owned();
         self.char_count = crate::model::nonspace_char_count(text);
         self.source_needs_sync = true;
-        self.pending_source_heading = None;
+        self.pending_source_jump = None;
         self.load_visual(cx);
         if self.source {
             self.load_source(window, cx);
@@ -1984,7 +2070,7 @@ impl MarkdownPane {
             self.source_editor.update(cx, |editor, cx| editor.focus(window, cx));
         } else {
             self.source_editor.update(cx, |editor, _| editor.cancel_background_wrap());
-            self.pending_source_heading = None;
+            self.pending_source_jump = None;
             if self.visual_needs_sync {
                 self.load_visual(cx);
             }

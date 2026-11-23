@@ -130,15 +130,18 @@ impl Render for MarkdownPane {
 
         if self.source {
             let loading = self.source_editor.read(cx).is_loading_wrapped_value();
-            if !loading && self.pending_source_heading.is_some() {
+            if !loading && self.pending_source_jump.is_some() {
                 let pane = cx.entity().downgrade();
                 window.on_next_frame(move |window, cx| {
                     let _ = pane.update(cx, |pane, cx| {
                         if pane.source
                             && !pane.source_editor.read(cx).is_loading_wrapped_value()
-                            && let Some(index) = pane.pending_source_heading.take()
+                            && let Some(jump) = pane.pending_source_jump.take()
                         {
-                            pane.navigate_heading(index, window, cx);
+                            match jump {
+                                PendingSourceJump::Heading(index) => pane.navigate_heading(index, window, cx),
+                                PendingSourceJump::KbHit(hit) => pane.jump_to_kb_hit(&hit, window, cx),
+                            }
                         }
                     });
                 });
