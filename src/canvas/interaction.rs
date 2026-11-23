@@ -1,6 +1,8 @@
 //! Camera transforms, spatial hit-testing, and mutually exclusive interaction states.
 
-use super::model::{CanvasDocument, CanvasEdge, CanvasNode, DropPlacement, EdgeKind, EdgeSide};
+use super::model::{
+    CanvasDocument, CanvasEdge, CanvasNode, DropPlacement, EdgeKind, EdgeSide, TreeLayoutMode,
+};
 use gpui_kit::{Bounds, MouseButton, Pixels, Point, point, px};
 
 pub const MIN_ZOOM: f32 = 0.2;
@@ -281,13 +283,24 @@ pub fn compute_drop_target(
             && wy >= node.y
             && wy <= node.y + node.height
     })?;
-    let rel_y = ((wy - target.y) / target.height.max(1.0)).clamp(0.0, 1.0);
-    let placement = if rel_y < 0.25 {
-        DropPlacement::BeforeSibling
-    } else if rel_y > 0.75 {
-        DropPlacement::AfterSibling
+    let placement = if doc.tree_mode() == TreeLayoutMode::TreeDown {
+        let rel_x = ((wx - target.x) / target.width.max(1.0)).clamp(0.0, 1.0);
+        if rel_x < 0.25 {
+            DropPlacement::BeforeSibling
+        } else if rel_x > 0.75 {
+            DropPlacement::AfterSibling
+        } else {
+            DropPlacement::Child
+        }
     } else {
-        DropPlacement::Child
+        let rel_y = ((wy - target.y) / target.height.max(1.0)).clamp(0.0, 1.0);
+        if rel_y < 0.25 {
+            DropPlacement::BeforeSibling
+        } else if rel_y > 0.75 {
+            DropPlacement::AfterSibling
+        } else {
+            DropPlacement::Child
+        }
     };
     Some((target.id.clone(), placement))
 }

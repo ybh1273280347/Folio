@@ -2,14 +2,19 @@ use super::{BiText, Locale, locale};
 
 // View modes
 pub const VIEW_FREEFORM: BiText = BiText::new("自由画布", "Freeform");
-pub const VIEW_TREE: BiText = BiText::new("树状导图", "Tree Map");
+pub const VIEW_TREE_HORIZONTAL: BiText = BiText::new("水平导图", "Horizontal");
+pub const VIEW_TREE_VERTICAL: BiText = BiText::new("垂直导图", "Vertical");
 pub const TOOLTIP_VIEW_FREEFORM: BiText = BiText::new(
     "自由画布：任意拖拽位置；按住 Alt 拖拽节点可重组层级",
     "Freeform view: drag freely; hold Alt while dragging to reparent/reorder",
 );
-pub const TOOLTIP_VIEW_TREE: BiText = BiText::new(
-    "树状导图：自动排版，拖拽节点到目标上/中/下可调序或挂为子节点",
-    "Tree map: auto-layout; drop onto top/middle/bottom of a node to reorder or reparent",
+pub const TOOLTIP_VIEW_TREE_HORIZONTAL: BiText = BiText::new(
+    "水平树状导图：从左向右自动排版，拖拽节点到目标上/中/下可调序或挂为子节点",
+    "Horizontal tree map: left-to-right auto-layout; drop onto top/middle/bottom to reorder or reparent",
+);
+pub const TOOLTIP_VIEW_TREE_VERTICAL: BiText = BiText::new(
+    "垂直树状导图：从上向下自动排版，拖拽节点到目标左/中/右可调序或挂为子节点",
+    "Vertical tree map: top-to-bottom auto-layout; drop onto left/middle/right to reorder or reparent",
 );
 
 // Docked toolbar actions & tooltips
@@ -55,6 +60,7 @@ pub const TOOLTIP_EDGE_DELETE: BiText = BiText::new("删除连线 (Delete)", "De
 pub const TOOLTIP_ZOOM_OUT: BiText = BiText::new("缩小 (Ctrl+-)", "Zoom out (Ctrl+-)");
 pub const TOOLTIP_ZOOM_FIT: BiText = BiText::new("适配内容 (Ctrl+0)", "Fit content (Ctrl+0)");
 pub const TOOLTIP_ZOOM_IN: BiText = BiText::new("放大 (Ctrl+=)", "Zoom in (Ctrl+=)");
+pub const TOOLTIP_ZOOM_100: BiText = BiText::new("一键恢复 100% 缩放", "Reset zoom to 100%");
 
 // Canvas hints & inline placeholders
 pub const NODE_DOUBLE_CLICK_EDIT: BiText = BiText::new("双击编辑内容…", "Double-click to edit…");

@@ -12,7 +12,7 @@ use super::{
     model::{
         ApplyReport, CanvasDocument, CanvasEdge, CanvasNode, CanvasNodeType, CanvasOp,
         CanvasViewMode, DropPlacement, EdgeEnd, EdgeKind, EdgeSide, MIN_NODE_HEIGHT,
-        MIN_NODE_WIDTH, ViewportState,
+        MIN_NODE_WIDTH, TreeLayoutMode, ViewportState,
     },
 };
 use crate::{i18n::canvas as i18n_canvas, theme::palette as active_palette};
@@ -338,6 +338,28 @@ impl CanvasPane {
         self.notice_error = None;
         self.history.record(before);
         self.emit_change(cx);
+        cx.notify();
+    }
+
+    pub fn switch_tree_mode(&mut self, mode: TreeLayoutMode, cx: &mut Context<Self>) {
+        if self.document.view_mode() == CanvasViewMode::Tree && self.document.tree_mode() == mode {
+            return;
+        }
+        let before = self.document.clone();
+        self.document.set_tree_mode(mode);
+        self.notice_error = None;
+        self.history.record(before);
+        self.emit_change(cx);
+        cx.notify();
+    }
+
+    fn reset_zoom_100(&mut self, cx: &mut Context<Self>) {
+        if (self.camera.zoom - 1.0).abs() < 0.001 {
+            return;
+        }
+        let viewport = self.viewport_bounds.get();
+        let factor = 1.0 / self.camera.zoom;
+        self.camera.zoom_at(viewport.center(), viewport, factor);
         cx.notify();
     }
 
@@ -1543,19 +1565,35 @@ impl CanvasPane {
             drop_placement,
             Some(DropPlacement::BeforeSibling | DropPlacement::AfterSibling)
         ) {
-            let bar = div()
-                .absolute()
-                .left(px(4.0))
-                .right(px(4.0))
-                .h(px(3.0))
-                .rounded_full()
-                .bg(gpui_kit::rgb(palette.accent));
-            let positioned = if drop_placement == Some(DropPlacement::BeforeSibling) {
-                bar.top(px(0.0))
+            if self.document.tree_mode() == TreeLayoutMode::TreeDown {
+                let bar = div()
+                    .absolute()
+                    .top(px(4.0))
+                    .bottom(px(4.0))
+                    .w(px(3.0))
+                    .rounded_full()
+                    .bg(gpui_kit::rgb(palette.accent));
+                let positioned = if drop_placement == Some(DropPlacement::BeforeSibling) {
+                    bar.left(px(0.0))
+                } else {
+                    bar.right(px(0.0))
+                };
+                card = card.child(positioned);
             } else {
-                bar.bottom(px(0.0))
-            };
-            card = card.child(positioned);
+                let bar = div()
+                    .absolute()
+                    .left(px(4.0))
+                    .right(px(4.0))
+                    .h(px(3.0))
+                    .rounded_full()
+                    .bg(gpui_kit::rgb(palette.accent));
+                let positioned = if drop_placement == Some(DropPlacement::BeforeSibling) {
+                    bar.top(px(0.0))
+                } else {
+                    bar.bottom(px(0.0))
+                };
+                card = card.child(positioned);
+            }
         }
 
         if has_children {
@@ -2007,6 +2045,10 @@ impl Render for CanvasPane {
 
         // Docked top toolbar strip below tabs matching tab-bar color family.
         let view_mode = self.document.view_mode();
+        let tree_mode = self.document.tree_mode();
+        let is_freeform = view_mode == CanvasViewMode::Freeform;
+        let is_tree_h = view_mode == CanvasViewMode::Tree && tree_mode != TreeLayoutMode::TreeDown;
+        let is_tree_v = view_mode == CanvasViewMode::Tree && tree_mode == TreeLayoutMode::TreeDown;
         let has_selection = !self.selection.is_empty();
         let primary_has_parent = self
             .primary_selected_id()
@@ -2062,11 +2104,11 @@ impl Render for CanvasPane {
                             .gap_1()
                             .cursor_pointer()
                             .text_xs()
-                            .when(view_mode == CanvasViewMode::Freeform, |s| {
+                            .when(is_freeform, |s| {
                                 s.bg(gpui_kit::rgb(palette.selection))
                                     .text_color(gpui_kit::rgb(palette.accent))
                             })
-                            .when(view_mode != CanvasViewMode::Freeform, |s| {
+                            .when(!is_freeform, |s| {
                                 s.text_color(gpui_kit::rgb(palette.muted))
                                     .hover(|h| h.bg(gpui_kit::rgb(palette.hover)))
                             })
@@ -2081,7 +2123,7 @@ impl Render for CanvasPane {
                     )
                     .child(
                         div()
-                            .id("canvas-mode-tree")
+                            .id("canvas-mode-tree-h")
                             .h(px(21.))
                             .px_2()
                             .rounded(px(4.))
@@ -2090,22 +2132,52 @@ impl Render for CanvasPane {
                             .gap_1()
                             .cursor_pointer()
                             .text_xs()
-                            .when(view_mode == CanvasViewMode::Tree, |s| {
+                            .when(is_tree_h, |s| {
                                 s.bg(gpui_kit::rgb(palette.selection))
                                     .text_color(gpui_kit::rgb(palette.accent))
                             })
-                            .when(view_mode != CanvasViewMode::Tree, |s| {
+                            .when(!is_tree_h, |s| {
                                 s.text_color(gpui_kit::rgb(palette.muted))
                                     .hover(|h| h.bg(gpui_kit::rgb(palette.hover)))
                             })
                             .tooltip(|w, cx| {
-                                Tooltip::new(i18n_canvas::TOOLTIP_VIEW_TREE.get()).build(w, cx)
+                                Tooltip::new(i18n_canvas::TOOLTIP_VIEW_TREE_HORIZONTAL.get())
+                                    .build(w, cx)
                             })
                             .on_click(cx.listener(|pane, _, _, cx| {
-                                pane.switch_view_mode(CanvasViewMode::Tree, cx);
+                                pane.switch_tree_mode(TreeLayoutMode::MindmapRight, cx);
                             }))
                             .child(crate::ui::icon(IconName::ListTree).size(px(12.)))
-                            .child(i18n_canvas::VIEW_TREE.get()),
+                            .child(i18n_canvas::VIEW_TREE_HORIZONTAL.get()),
+                    )
+                    .child(
+                        div()
+                            .id("canvas-mode-tree-v")
+                            .h(px(21.))
+                            .px_2()
+                            .rounded(px(4.))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .cursor_pointer()
+                            .text_xs()
+                            .when(is_tree_v, |s| {
+                                s.bg(gpui_kit::rgb(palette.selection))
+                                    .text_color(gpui_kit::rgb(palette.accent))
+                            })
+                            .when(!is_tree_v, |s| {
+                                s.text_color(gpui_kit::rgb(palette.muted))
+                                    .hover(|h| h.bg(gpui_kit::rgb(palette.hover)))
+                            })
+                            .tooltip(|w, cx| {
+                                Tooltip::new(i18n_canvas::TOOLTIP_VIEW_TREE_VERTICAL.get())
+                                    .build(w, cx)
+                            })
+                            .on_click(cx.listener(|pane, _, _, cx| {
+                                pane.switch_tree_mode(TreeLayoutMode::TreeDown, cx);
+                            }))
+                            .child(crate::ui::icon(IconName::Columns2).size(px(12.)))
+                            .child(i18n_canvas::VIEW_TREE_VERTICAL.get()),
                     ),
             )
             .child(div().w(px(1.)).h(px(14.)).mx_0p5().bg(gpui_kit::rgb(palette.border)))
@@ -2562,6 +2634,20 @@ impl Render for CanvasPane {
                             let viewport = pane.viewport_bounds.get();
                             pane.camera.zoom_at(viewport.center(), viewport, ZOOM_STEP);
                             cx.notify();
+                        })),
+                )
+                .child(div().w(px(1.)).h(px(14.)).bg(gpui_kit::rgb(palette.border)))
+                .child(
+                    Button::new("canvas-zoom-100")
+                        .ghost()
+                        .compact()
+                        .h(px(22.))
+                        .px_1p5()
+                        .disabled(percent == 100)
+                        .label("100%")
+                        .tooltip(i18n_canvas::TOOLTIP_ZOOM_100)
+                        .on_click(cx.listener(|pane, _, _, cx| {
+                            pane.reset_zoom_100(cx);
                         })),
                 ),
         );

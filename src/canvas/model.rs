@@ -632,6 +632,18 @@ impl CanvasDocument {
         }
     }
 
+    /// Explicitly switches tree layout orientation (e.g. horizontal vs vertical) and enters Tree view.
+    pub fn set_tree_mode(&mut self, mode: TreeLayoutMode) {
+        let meta = self.folio.get_or_insert_with(CanvasMeta::default);
+        meta.schema_version = FOLIO_CANVAS_SCHEMA_VERSION;
+        meta.tree_mode = mode;
+        if self.view_mode() == CanvasViewMode::Freeform {
+            self.switch_view_mode(CanvasViewMode::Tree);
+        } else {
+            self.layout_forest(true);
+        }
+    }
+
     pub fn layout_forest(&mut self, ignore_pinned: bool) -> usize {
         let mode = self.tree_mode();
         let options = super::layout::LayoutOptions {
@@ -1498,5 +1510,28 @@ mod tests {
         assert_eq!(doc.node("c").unwrap().parent_id(), Some("a"));
         assert_eq!(doc.edge(&edge_id).unwrap().to_node, "c");
         assert_eq!(doc.edge(&edge_id).unwrap().to_side, Some(EdgeSide::Left));
+    }
+
+    #[test]
+    fn set_tree_mode_switches_orientation_and_preserves_free_pos() {
+        let mut doc = CanvasDocument::default();
+        doc.nodes.push(CanvasNode::new_text("r", 20.0, 30.0, "Root"));
+        doc.nodes.push(CanvasNode::new_text("c", 500.0, 400.0, "Child"));
+        doc.connect_hierarchy("r", "c").unwrap();
+
+        doc.set_tree_mode(TreeLayoutMode::TreeDown);
+        assert_eq!(doc.view_mode(), CanvasViewMode::Tree);
+        assert_eq!(doc.tree_mode(), TreeLayoutMode::TreeDown);
+        let child_down = doc.node("c").unwrap();
+        assert!(child_down.y > doc.node("r").unwrap().y + 100.0);
+
+        doc.set_tree_mode(TreeLayoutMode::MindmapRight);
+        assert_eq!(doc.tree_mode(), TreeLayoutMode::MindmapRight);
+        let child_right = doc.node("c").unwrap();
+        assert!(child_right.x > doc.node("r").unwrap().x + 200.0);
+
+        doc.switch_view_mode(CanvasViewMode::Freeform);
+        assert!((doc.node("c").unwrap().x - 500.0).abs() < 0.01);
+        assert!((doc.node("c").unwrap().y - 400.0).abs() < 0.01);
     }
 }
