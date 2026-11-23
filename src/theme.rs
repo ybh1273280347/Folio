@@ -155,6 +155,86 @@ impl Palette {
             rgb(self.get(role))
         }
     }
+
+    /// Warm book-page surface token (#FBF8F1 in default light mode, warm dark paper in dark mode).
+    pub fn paper_surface(self) -> Rgba {
+        if self.is_dark() {
+            mix(self.surface, 0x3a3222, 0.22)
+        } else if self.surface == Self::light().surface {
+            rgb(0xfbf8f1)
+        } else {
+            mix(self.surface, 0xf5ead2, 0.28)
+        }
+    }
+
+    /// Title-page / frontispiece header background token, slightly deeper than the inner page.
+    pub fn paper_header(self) -> Rgba {
+        if self.is_dark() {
+            mix(self.surface, 0x463c28, 0.34)
+        } else if self.surface == Self::light().surface {
+            rgb(0xf3ede0)
+        } else {
+            mix(self.surface, self.background, 0.55)
+        }
+    }
+
+    /// Hover tint on book paper surfaces.
+    pub fn paper_hover(self) -> Rgba {
+        if self.is_dark() {
+            mix(self.surface, self.hover, 0.72)
+        } else if self.surface == Self::light().surface {
+            rgb(0xf5efe2)
+        } else {
+            mix(self.surface, self.hover, 0.55)
+        }
+    }
+
+    /// Back-stacked sheet background token (layer 1 = closer to top page, layer 2 = deeper sheet).
+    pub fn paper_stack(self, layer: usize) -> Rgba {
+        if self.is_dark() {
+            match layer {
+                1 => mix(self.surface, self.background, 0.35),
+                _ => mix(self.surface, self.background, 0.62),
+            }
+        } else if self.surface == Self::light().surface {
+            match layer {
+                1 => rgb(0xf5efe2),
+                _ => rgb(0xede5d5),
+            }
+        } else {
+            let w = if layer == 1 { 0.42 } else { 0.72 };
+            mix(self.surface, self.background, w)
+        }
+    }
+
+    /// Warm cut-paper border token.
+    pub fn paper_border(self) -> Rgba {
+        if self.is_dark() {
+            mix(self.border, 0x524838, 0.32)
+        } else if self.border == Self::light().border {
+            rgb(0xe3dbcc)
+        } else {
+            mix(self.border, 0xd8ccb8, 0.35)
+        }
+    }
+
+    /// Subtle interior rule / divider line on book pages.
+    pub fn paper_divider(self) -> Rgba {
+        let mut c = self.paper_border();
+        c.a = if self.is_dark() { 0.72 } else { 0.78 };
+        c
+    }
+
+    /// Warm brownish-grey ink token for bottom-centered page numbers and folios.
+    pub fn paper_folio(self) -> Rgba {
+        if self.is_dark() {
+            mix(self.muted, 0xb8a68a, 0.35)
+        } else if self.muted == Self::light().muted {
+            rgb(0x9a8b74)
+        } else {
+            mix(self.muted, 0x8c7a5b, 0.38)
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

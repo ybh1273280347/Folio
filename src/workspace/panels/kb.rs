@@ -541,19 +541,88 @@ fn kb_desk_bg(palette: crate::theme::Palette) -> Rgba {
 
 fn kb_paper_shadow(is_dark: bool) -> Vec<BoxShadow> {
     vec![
-        BoxShadow::new(
-            px(0.),
-            px(2.),
-            hsla(0., 0., 0., if is_dark { 0.34 } else { 0.065 }),
-        )
-        .blur_radius(px(8.)),
+        // Contact shadow: tight and close to the desk surface
         BoxShadow::new(
             px(0.),
             px(1.),
-            hsla(0., 0., 0., if is_dark { 0.22 } else { 0.03 }),
+            hsla(0., 0., 0., if is_dark { 0.38 } else { 0.085 }),
         )
-        .blur_radius(px(2.)),
+        .blur_radius(px(1.5)),
+        // Subtle directional ambient shadow without wide blur
+        BoxShadow::new(
+            px(1.),
+            px(2.5),
+            hsla(0., 0., 0., if is_dark { 0.22 } else { 0.042 }),
+        )
+        .blur_radius(px(4.)),
     ]
+}
+
+fn kb_paper_noise_texture() -> Arc<RenderImage> {
+    use std::sync::OnceLock;
+    static NOISE: OnceLock<Arc<RenderImage>> = OnceLock::new();
+    NOISE
+        .get_or_init(|| {
+            const SIZE: u32 = 96;
+            let mut bytes = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+            for y in 0..SIZE {
+                for x in 0..SIZE {
+                    let mut h = (x.wrapping_mul(374761393))
+                        .wrapping_add(y.wrapping_mul(668265263))
+                        ^ 0x9e3779b9;
+                    h = (h ^ (h >> 13)).wrapping_mul(1274126177);
+                    h ^= h >> 16;
+                    let v = (h & 0xff) as u8;
+                    // Low-contrast warm fiber grain at ~3.5% opacity (BGRA byte order for RenderImage)
+                    let (b, g, r, a) = if v < 96 {
+                        (38, 48, 58, 9)
+                    } else if v > 176 {
+                        (215, 232, 245, 8)
+                    } else {
+                        (0, 0, 0, 0)
+                    };
+                    bytes.extend_from_slice(&[b, g, r, a]);
+                }
+            }
+            let img = image::RgbaImage::from_raw(SIZE, SIZE, bytes)
+                .expect("valid static 96x96 paper grain buffer");
+            Arc::new(RenderImage::new([image::Frame::new(img)]))
+        })
+        .clone()
+}
+
+fn render_book_spine(spine_hex: u32, is_dark: bool, width_px: f32) -> Div {
+    let dark_edge = mix_color(spine_hex, 0x000000, if is_dark { 0.28 } else { 0.20 });
+    let main_fill = gpui_kit::rgb(spine_hex);
+    let spine_grad = gpui_kit::linear_gradient(
+        90.0,
+        gpui_kit::linear_color_stop(dark_edge, 0.0),
+        gpui_kit::linear_color_stop(main_fill, 1.0),
+    );
+    let ridge_hi = hsla(0., 0., 1., if is_dark { 0.16 } else { 0.26 });
+    let groove_lo = hsla(0., 0., 0., if is_dark { 0.30 } else { 0.15 });
+
+    div()
+        .w(px(width_px))
+        .flex_shrink_0()
+        .relative()
+        .bg(spine_grad)
+        .child(
+            div()
+                .w(px(1.))
+                .h_full()
+                .ml(px(1.5))
+                .bg(ridge_hi),
+        )
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .w(px(1.))
+                .bg(groove_lo),
+        )
 }
 
 fn render_grid_rows(cards: Vec<AnyElement>, cols: usize, gap_px: f32) -> AnyElement {
@@ -1311,14 +1380,21 @@ impl Workspace {
             1
         };
         let palette = self.settings.theme.palette;
+        let is_dark = palette.is_dark();
         let canvas_bg = kb_desk_bg(palette);
-        let card_hover = mix_color(palette.surface, palette.hover, 0.55);
-        let head_bg = mix_color(palette.surface, palette.background, 0.48);
-        let divider_color = fg_alpha(palette.border, 0.65);
-        let badge_bg = fg_alpha(palette.text, 0.05);
+        let paper_bg = palette.paper_surface();
+        let card_hover = palette.paper_hover();
+        let head_bg = palette.paper_header();
+        let paper_border = palette.paper_border();
+        let divider_color = palette.paper_divider();
+        let folio_color = palette.paper_folio();
+        let stack_bg_1 = palette.paper_stack(1);
+        let stack_bg_2 = palette.paper_stack(2);
+        let badge_bg = fg_alpha(palette.text, 0.055);
         let hi_bg = fg_alpha(palette.accent, 0.16).into();
         let hi_fg = gpui_kit::rgb(palette.text).into();
-        let card_shadow = kb_paper_shadow(palette.is_dark());
+        let card_shadow = kb_paper_shadow(is_dark);
+        let noise_tex = kb_paper_noise_texture();
 
         let snippet_max_h = (t.body * 1.5 * 3.0).ceil();
 
@@ -1339,6 +1415,11 @@ impl Workspace {
                 let base_count = total_hits.min(2);
                 let extra_count = total_hits.saturating_sub(base_count);
                 let show_extra = (expanded || collapsing) && extra_count > 0;
+                let stack_layers = if expanded || collapsing {
+                    0
+                } else {
+                    extra_count.min(2)
+                };
                 let first_hit = group.hits[0];
                 let is_tex = group.clean_path.to_ascii_lowercase().ends_with(".tex");
                 let file_icon = if group.is_pdf {
@@ -1349,12 +1430,14 @@ impl Workspace {
                     IconName::FileText
                 };
                 let spine_hex = if group.is_pdf {
-                    if palette.is_dark() { palette.accent } else { 0xb86443 }
+                    if is_dark { palette.accent } else { 0xb86443 }
                 } else if is_tex {
-                    if palette.is_dark() { 0x7e93b8 } else { 0x566b8f }
+                    if is_dark { 0x7e93b8 } else { 0x566b8f }
                 } else {
                     palette.accent
                 };
+                let ribbon_bg = mix_color(spine_hex, 0x000000, if is_dark { 0.08 } else { 0.04 });
+                let ribbon_crease = hsla(0., 0., 1., if is_dark { 0.16 } else { 0.24 });
 
                 let header_open_path = first_hit.path.clone();
                 let header_line = first_hit.line_start;
@@ -1365,15 +1448,26 @@ impl Workspace {
                 let mut body_col = div()
                     .flex_1()
                     .min_w_0()
+                    .relative()
                     .flex()
                     .flex_col()
                     .child(
+                        // P2 Paper grain overlay: low-contrast 3–4% procedural noise clipped by card bounds
+                        img(noise_tex.clone())
+                            .absolute()
+                            .inset_0()
+                            .size_full()
+                            .object_fit(ObjectFit::Cover),
+                    )
+                    .child(
+                        // P1 Title-page header (frontispiece) + P2 Bookmark ribbon
                         div()
                             .id(SharedString::from(format!("kb-book-head-{group_idx}")))
+                            .relative()
                             .cursor_pointer()
                             .bg(head_bg)
                             .border_b_1()
-                            .border_color(divider_color)
+                            .border_color(paper_border)
                             .px_3()
                             .py_2()
                             .hover(move |s| s.bg(card_hover))
@@ -1389,7 +1483,7 @@ impl Workspace {
                                 );
                             }))
                             .flex()
-                            .items_center()
+                            .items_start()
                             .justify_between()
                             .gap_2()
                             .child(
@@ -1424,7 +1518,7 @@ impl Workspace {
                                                 head.child(
                                                     div()
                                                         .text_size(px(t.micro))
-                                                        .text_color(gpui_kit::rgb(palette.muted))
+                                                        .text_color(folio_color)
                                                         .text_ellipsis()
                                                         .child(dir),
                                                 )
@@ -1441,7 +1535,8 @@ impl Workspace {
                                         row.child(
                                             div()
                                                 .id(SharedString::from(format!("kb-acc-{group_idx}")))
-                                                .text_color(gpui_kit::rgb(palette.accent))
+                                                .mt(px(1.))
+                                                .text_color(gpui_kit::rgb(spine_hex))
                                                 .tooltip(|window, cx| {
                                                     gpui_kit::component::tooltip::Tooltip::new(
                                                         rp::KB_ACCURATE_BADGE.get(),
@@ -1456,9 +1551,28 @@ impl Workspace {
                                         )
                                     })
                                     .child(
+                                        // P2 Style 2: Bookmark ribbon hanging from the top edge
                                         div()
+                                            .mt(px(-8.))
+                                            .px(px(6.))
+                                            .pt(px(5.))
+                                            .pb(px(3.))
+                                            .rounded_t(px(0.))
+                                            .rounded_b(px(3.))
+                                            .bg(ribbon_bg)
+                                            .border_b_1()
+                                            .border_color(ribbon_crease)
+                                            .shadow(vec![
+                                                BoxShadow::new(
+                                                    px(0.),
+                                                    px(1.5),
+                                                    hsla(0., 0., 0., if is_dark { 0.36 } else { 0.16 }),
+                                                )
+                                                .blur_radius(px(2.)),
+                                            ])
                                             .text_size(px(t.micro))
-                                            .text_color(fg_alpha(palette.muted, 0.85))
+                                            .font_medium()
+                                            .text_color(gpui_kit::rgb(0xfaf8f3))
                                             .child(rp::kb_hits_pill(total_hits)),
                                     ),
                             ),
@@ -1471,9 +1585,10 @@ impl Workspace {
                             let open_heading = hit.heading.clone();
                             let open_snippet = hit.snippet.clone();
                             let subtitle = section_subtitle(hit, &group.file_name);
-                            let loc = match (hit.page, hit.line_start) {
-                                (Some(page), _) => Some(format!("p.{page}")),
-                                (None, Some(line)) => Some(format!("L{line}")),
+                            // P1 Folio at bottom center: PDF page "— 171 —", Note line with light prefix "— L5406 —"
+                            let folio_label = match (hit.page, hit.line_start) {
+                                (Some(page), _) => Some(format!("— {page} —")),
+                                (None, Some(line)) => Some(format!("— L{line} —")),
                                 _ => None,
                             };
                             let extra_tag = if hit.dirty_buffer {
@@ -1496,7 +1611,8 @@ impl Workspace {
                                     "kb-hit-{group_idx}-{hit_idx}"
                                 )))
                                 .px_3()
-                                .py_2()
+                                .pt_2()
+                                .pb_1p5()
                                 .when(hit_idx > 0, |row| {
                                     row.border_t_1().border_color(divider_color)
                                 })
@@ -1517,9 +1633,7 @@ impl Workspace {
                                 .flex_col()
                                 .gap_1()
                                 .when(
-                                    subtitle.is_some()
-                                        || loc.is_some()
-                                        || extra_tag.is_some(),
+                                    subtitle.is_some() || extra_tag.is_some(),
                                     |row| {
                                         row.child(
                                             div()
@@ -1540,35 +1654,17 @@ impl Workspace {
                                                         .text_ellipsis()
                                                         .children(subtitle),
                                                 )
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap_1p5()
-                                                        .flex_shrink_0()
-                                                        .when_some(extra_tag, |r, tag| {
-                                                            r.child(
-                                                                div()
-                                                                    .px_1()
-                                                                    .rounded(px(3.))
-                                                                    .bg(badge_bg)
-                                                                    .text_size(px(t.micro))
-                                                                    .text_color(gpui_kit::rgb(palette.muted))
-                                                                    .child(tag),
-                                                            )
-                                                        })
-                                                        .when_some(loc, |r, loc| {
-                                                            r.child(
-                                                                div()
-                                                                    .text_size(px(t.micro))
-                                                                    .text_color(fg_alpha(
-                                                                        palette.muted,
-                                                                        0.82,
-                                                                    ))
-                                                                    .child(loc),
-                                                            )
-                                                        }),
-                                                ),
+                                                .when_some(extra_tag, |r, tag| {
+                                                    r.child(
+                                                        div()
+                                                            .px_1()
+                                                            .rounded(px(3.))
+                                                            .bg(badge_bg)
+                                                            .text_size(px(t.micro))
+                                                            .text_color(folio_color)
+                                                            .child(tag),
+                                                    )
+                                                }),
                                         )
                                     },
                                 )
@@ -1580,6 +1676,18 @@ impl Workspace {
                                         .line_height(relative(1.5))
                                         .child(styled_snippet),
                                 )
+                                .when_some(folio_label, |row, folio| {
+                                    row.child(
+                                        div()
+                                            .w_full()
+                                            .pt_0p5()
+                                            .flex()
+                                            .justify_center()
+                                            .text_size(px(t.micro))
+                                            .text_color(folio_color)
+                                            .child(folio),
+                                    )
+                                })
                         };
 
                         let base_rows: Vec<_> = group.hits[..base_count]
@@ -1670,7 +1778,8 @@ impl Workspace {
                             .px_3()
                             .py_1p5()
                             .border_t_1()
-                            .border_color(divider_color)
+                            .border_dashed()
+                            .border_color(paper_border)
                             .bg(head_bg)
                             .flex()
                             .items_center()
@@ -1678,9 +1787,11 @@ impl Workspace {
                             .gap_1()
                             .text_size(px(t.meta))
                             .font_medium()
-                            .text_color(gpui_kit::rgb(palette.accent))
+                            .text_color(folio_color)
                             .cursor_pointer()
-                            .hover(move |s| s.bg(card_hover))
+                            .hover(move |s| {
+                                s.bg(card_hover).text_color(gpui_kit::rgb(palette.text))
+                            })
                             .on_click(cx.listener(move |app, _, _, cx| {
                                 let next_gen = app
                                     .right_panel
@@ -1737,20 +1848,73 @@ impl Workspace {
                     );
                 }
 
-                div()
+                // Main book card with asymmetric corners (2px spine side, 6px fore-edge side) and 7px gradient spine
+                let main_card = div()
                     .id(SharedString::from(format!("kb-book-{group_idx}")))
-                    .flex_1()
-                    .min_w_0()
-                    .when(cols > 1 && !expanded && !collapsing, |el| el.h(px(284.)))
-                    .rounded(px(9.))
+                    .w_full()
+                    .when(cols > 1 && !expanded && !collapsing, |el| el.h(px(292.)))
+                    .rounded_l(px(2.))
+                    .rounded_r(px(6.))
                     .border_1()
-                    .border_color(gpui_kit::rgb(palette.border))
-                    .bg(gpui_kit::rgb(palette.surface))
+                    .border_color(paper_border)
+                    .bg(paper_bg)
                     .shadow(card_shadow.clone())
                     .overflow_hidden()
                     .flex()
-                    .child(div().w(px(3.5)).flex_shrink_0().bg(gpui_kit::rgb(spine_hex)))
-                    .child(body_col)
+                    .child(render_book_spine(spine_hex, is_dark, 7.0))
+                    .child(body_col);
+
+                // P0 Real stacked paper sheets behind the card when collapsed (1 or 2 layers tied to extra_count)
+                let stack_spine_1 = mix_color(spine_hex, 0x000000, if is_dark { 0.25 } else { 0.14 });
+                let stack_spine_2 = mix_color(spine_hex, 0x000000, if is_dark { 0.38 } else { 0.24 });
+
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .relative()
+                    .when(stack_layers == 1, |wrap| wrap.pb(px(3.5)).pr(px(2.5)))
+                    .when(stack_layers >= 2, |wrap| wrap.pb(px(7.0)).pr(px(5.0)))
+                    .when(stack_layers >= 2, |wrap| {
+                        wrap.child(
+                            div()
+                                .absolute()
+                                .top(px(6.0))
+                                .left(px(5.0))
+                                .right(px(0.))
+                                .bottom(px(0.))
+                                .rounded_l(px(2.))
+                                .rounded_r(px(6.))
+                                .border_1()
+                                .border_color(paper_border)
+                                .bg(stack_bg_2)
+                                .shadow(card_shadow.clone())
+                                .overflow_hidden()
+                                .flex()
+                                .child(div().w(px(5.0)).flex_shrink_0().bg(stack_spine_2)),
+                        )
+                    })
+                    .when(stack_layers >= 1, |wrap| {
+                        let inset_r = if stack_layers >= 2 { 2.5 } else { 0.0 };
+                        let inset_b = if stack_layers >= 2 { 3.5 } else { 0.0 };
+                        wrap.child(
+                            div()
+                                .absolute()
+                                .top(px(3.0))
+                                .left(px(2.5))
+                                .right(px(inset_r))
+                                .bottom(px(inset_b))
+                                .rounded_l(px(2.))
+                                .rounded_r(px(6.))
+                                .border_1()
+                                .border_color(paper_border)
+                                .bg(stack_bg_1)
+                                .shadow(card_shadow.clone())
+                                .overflow_hidden()
+                                .flex()
+                                .child(div().w(px(6.0)).flex_shrink_0().bg(stack_spine_1)),
+                        )
+                    })
+                    .child(main_card)
                     .into_any_element()
             })
             .collect();
