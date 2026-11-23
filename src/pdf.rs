@@ -16,6 +16,13 @@ use std::{path::PathBuf, rc::Rc};
 
 pub enum PdfPaneEvent {
     AskAi { path: PathBuf, text: String },
+    SendToCanvas {
+        path: PathBuf,
+        annotation_id: u64,
+        page_1based: usize,
+        quote: String,
+        rects: Vec<AnnotationRect>,
+    },
 }
 impl EventEmitter<PdfPaneEvent> for PdfPane {}
 
@@ -479,6 +486,23 @@ impl PdfPane {
                             div()
                                 .flex()
                                 .gap(px(4.))
+                                .child(
+                                    ui::button("pdf-ann-canvas", "画布").on_click(cx.listener(
+                                        move |this, _, _window, cx| {
+                                            if let Some(item) =
+                                                this.annotations.iter().find(|a| a.id == active_id)
+                                            {
+                                                cx.emit(PdfPaneEvent::SendToCanvas {
+                                                    path: this.path.clone(),
+                                                    annotation_id: item.id,
+                                                    page_1based: item.page + 1,
+                                                    quote: item.quote.clone(),
+                                                    rects: item.rects.clone(),
+                                                });
+                                            }
+                                        },
+                                    )),
+                                )
                                 .child(
                                     ui::button_danger_soft("pdf-ann-delete", crate::i18n::common::DELETE.get())
                                         .on_click(cx.listener(move |this, _, _window, cx| {

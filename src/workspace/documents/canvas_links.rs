@@ -127,6 +127,81 @@ impl Workspace {
         self.report(format!("已添加到画布：{canvas_name}"), cx);
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::workspace) fn send_pdf_annotation_to_canvas(
+        &mut self,
+        pdf_full_path: &Path,
+        annotation_id: u64,
+        page_1based: usize,
+        quote: String,
+        rects: &[crate::annotations::AnnotationRect],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target_canvas) = self.resolve_or_create_target_canvas(cx) else {
+            self.report("无法确定或创建目标画布文件。", cx);
+            return;
+        };
+        let rel_pdf = if let Some(project) = self.projects.directory()
+            && let Ok(root) = dunce::canonicalize(&project.folder)
+            && let Ok(canon_pdf) = dunce::canonicalize(pdf_full_path)
+            && let Ok(rel) = canon_pdf.strip_prefix(&root)
+        {
+            rel.to_string_lossy().replace('\\', "/")
+        } else {
+            pdf_full_path.to_string_lossy().into_owned()
+        };
+        let full = self.document_path(&target_canvas);
+        let file = ProjectFile {
+            kind: Self::file_kind(&full),
+            path: target_canvas.clone(),
+        };
+        let target_key = if self.documents.tabs.contains(&target_canvas)
+            && self.documents.active == target_canvas
+        {
+            PaneKey::tab(&target_canvas)
+        } else {
+            self.open_reading_pane(&file, window, cx);
+            PaneKey::reading(&target_canvas)
+        };
+        let Some(canvas_pane) = self.documents.canvas_panes.get(&target_key).cloned() else {
+            return;
+        };
+        let preview = if quote.trim().is_empty() {
+            format!("PDF 第 {page_1based} 页批注")
+        } else {
+            quote.lines().next().unwrap_or("").chars().take(120).collect()
+        };
+        let norm_rects = rects
+            .iter()
+            .map(|r| crate::canvas::anchor::NormalizedRect {
+                x: r.x,
+                y: r.y,
+                w: r.w,
+                h: r.h,
+            })
+            .collect();
+        let anchor = KnowledgeAnchor::PdfAnnotation {
+            path: rel_pdf,
+            annotation_id,
+            page: page_1based,
+            quote,
+            rects: norm_rects,
+        };
+        canvas_pane.update(cx, |pane, cx| {
+            pane.add_anchor_node(preview, anchor, cx);
+        });
+        if let Some(doc) = self.documents.open.get(&target_canvas) {
+            let text = doc.buffer.text.clone();
+            self.sync_canvas_index_from_text(&target_canvas, &text);
+        }
+        let canvas_name = Path::new(&target_canvas)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or(target_canvas);
+        self.report(format!("已添加到画布：{canvas_name}"), cx);
+    }
+
     fn resolve_or_create_target_canvas(&mut self, cx: &mut Context<Self>) -> Option<String> {
         if let Some(reading) = self
             .documents

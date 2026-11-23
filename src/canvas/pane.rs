@@ -262,6 +262,23 @@ impl CanvasPane {
         Ok(report)
     }
 
+    pub fn layout_tree_transaction(
+        &mut self,
+        root_id: Option<&str>,
+        mode: super::model::TreeLayoutMode,
+        unpin_subtree: bool,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let before = self.document.clone();
+        let moved = self.document.apply_tree_layout(root_id, mode, unpin_subtree);
+        if moved > 0 {
+            self.history.record(before);
+            self.emit_change(cx);
+            cx.notify();
+        }
+        moved
+    }
+
     pub fn add_anchor_node(
         &mut self,
         title_or_note: String,
@@ -1349,6 +1366,25 @@ impl Render for CanvasPane {
                         .tooltip("撤销 (Ctrl+Z)")
                         .on_click(cx.listener(|pane, _, _, cx| {
                             pane.undo(cx);
+                        })),
+                )
+                .child(
+                    Button::new("canvas-tidy-layout")
+                        .ghost()
+                        .compact()
+                        .with_size(px(14.))
+                        .h(px(22.))
+                        .w(px(22.))
+                        .icon(crate::ui::icon(IconName::ListTree))
+                        .tooltip("整理导图树形布局（跳过手动固定节点）")
+                        .on_click(cx.listener(|pane, _, _, cx| {
+                            let root = pane.primary_selected_id();
+                            pane.layout_tree_transaction(
+                                root.as_deref(),
+                                super::model::TreeLayoutMode::MindmapRight,
+                                false,
+                                cx,
+                            );
                         })),
                 )
                 .child(div().w(px(1.)).h(px(14.)).bg(gpui_kit::rgb(palette.border)))

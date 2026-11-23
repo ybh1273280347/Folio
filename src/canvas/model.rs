@@ -467,6 +467,64 @@ impl CanvasDocument {
         changed
     }
 
+    /// Applies deterministic tidy-tree coordinates to unpinned descendants.
+    pub fn apply_tree_layout(
+        &mut self,
+        root_id: Option<&str>,
+        mode: TreeLayoutMode,
+        unpin_subtree: bool,
+    ) -> usize {
+        if unpin_subtree {
+            let targets: Option<HashSet<String>> = root_id.map(|rid| {
+                self.nodes
+                    .iter()
+                    .filter(|n| self.is_descendant_of_root(&n.id, rid))
+                    .map(|n| n.id.clone())
+                    .collect()
+            });
+            for node in &mut self.nodes {
+                if let Some(ext) = node.folio.as_mut()
+                    && ext.pinned
+                    && targets.as_ref().is_none_or(|set| set.contains(&node.id))
+                {
+                    ext.pinned = false;
+                    node.compact_ext();
+                }
+            }
+        }
+        let options = super::layout::LayoutOptions {
+            mode,
+            ..Default::default()
+        };
+        let updates = super::layout::compute_tree_layout(self, root_id, options);
+        let mut count = 0;
+        for (id, (nx, ny)) in updates {
+            if let Some(node) = self.node_mut(&id) {
+                if (node.x - nx).abs() > 0.5 || (node.y - ny).abs() > 0.5 {
+                    node.x = nx;
+                    node.y = ny;
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    fn is_descendant_of_root(&self, node_id: &str, root_id: &str) -> bool {
+        let mut cur = self.node(node_id).and_then(|n| n.parent_id());
+        let mut seen = HashSet::new();
+        while let Some(pid) = cur {
+            if pid == root_id {
+                return true;
+            }
+            if !seen.insert(pid) {
+                break;
+            }
+            cur = self.node(pid).and_then(|n| n.parent_id());
+        }
+        false
+    }
+
     /// Applies an atomic batch of operations. Returns an error without mutating `self` if validation fails.
     pub fn apply_ops(&mut self, ops: &[CanvasOp]) -> Result<ApplyReport, String> {
         let mut working = self.clone();

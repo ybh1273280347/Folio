@@ -1,6 +1,7 @@
 //! Workspace-side tool handlers resolve the active context and route results back to AI.
 
 mod annotations;
+mod canvas;
 mod compile;
 mod drawio;
 mod rag;
@@ -41,6 +42,7 @@ impl Workspace {
     ) {
         match request.channel.as_str() {
             "annotation" => self.annotation_request(request, window, cx),
+            "canvas" => self.canvas_request(request, cx),
             "compile" => self.compile_request(request, window, cx),
             "drawio" => self.drawio_request(request, cx),
             "rag" => self.rag_request(request, cx),

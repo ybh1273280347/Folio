@@ -102,6 +102,27 @@ impl Documents {
         self.drawio_panes.get(&PaneKey::tab(&self.active))
     }
 
+    pub(super) fn open_buffer(&self, path: &str) -> Option<&DocumentBuffer> {
+        self.open.get(path).map(|doc| &doc.buffer)
+    }
+
+    pub(super) fn canvas_pane(&self, path: &str) -> Option<&Entity<CanvasPane>> {
+        self.canvas_panes
+            .get(&PaneKey::tab(path))
+            .or_else(|| self.canvas_panes.get(&PaneKey::reading(path)))
+    }
+
+    pub(super) fn active_canvas(&self) -> Option<(String, &Entity<CanvasPane>)> {
+        if let Some(pane) = self.canvas_panes.get(&PaneKey::tab(&self.active)) {
+            return Some((self.active.clone(), pane));
+        }
+        self.reading_panes.iter().rev().find_map(|path| {
+            self.canvas_panes
+                .get(&PaneKey::reading(path))
+                .map(|pane| (path.clone(), pane))
+        })
+    }
+
     pub(super) fn active_markdown_search_open(&self, cx: &App) -> bool {
         self.markdown_panes.get(&PaneKey::tab(&self.active))
             .is_some_and(|pane| pane.read(cx).is_search_open())
@@ -426,13 +447,31 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Entity<PdfPane> {
         let pane = cx.new(|cx| PdfPane::new(path, window, cx));
-        cx.subscribe_in(&pane, window, |app, _, event: &PdfPaneEvent, window, cx| {
-            let PdfPaneEvent::AskAi { path, text } = event;
-            let source = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "PDF".to_owned());
-            app.open_ai_with_selection(source, Some(path.clone()), text.clone(), window, cx);
+        cx.subscribe_in(&pane, window, |app, _, event: &PdfPaneEvent, window, cx| match event {
+            PdfPaneEvent::AskAi { path, text } => {
+                let source = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "PDF".to_owned());
+                app.open_ai_with_selection(source, Some(path.clone()), text.clone(), window, cx);
+            }
+            PdfPaneEvent::SendToCanvas {
+                path,
+                annotation_id,
+                page_1based,
+                quote,
+                rects,
+            } => {
+                app.send_pdf_annotation_to_canvas(
+                    path,
+                    *annotation_id,
+                    *page_1based,
+                    quote.clone(),
+                    rects,
+                    window,
+                    cx,
+                );
+            }
         })
         .detach();
         pane
