@@ -416,8 +416,8 @@ pub struct BlockEditorState {
     pub(crate) scroll_handle: Option<gpui::ScrollHandle>,
     /// The caret moved and should be scrolled into view after layout.
     pub(crate) reveal: std::cell::Cell<bool>,
-    /// One explicit heading jump, consumed after its destination is laid out.
-    pub(crate) heading_jump: std::cell::Cell<Option<BlockId>>,
+    /// An explicit navigation target stays active until its caret has settled in the viewport.
+    pub(crate) navigation_jump: std::cell::Cell<Option<BlockId>>,
     /// The range highlight and its cancellable reset task.
     pub(crate) heading_highlight: Option<(BlockId, gpui::Task<()>)>,
     marked: Option<Marked>,
@@ -505,7 +505,7 @@ impl BlockEditorState {
             a11y_value: RefCell::default(),
             scroll_handle: Some(gpui::ScrollHandle::new()),
             reveal: Default::default(),
-            heading_jump: Default::default(),
+            navigation_jump: Default::default(),
             heading_highlight: None,
             marked: None,
             composition_open: false,
@@ -995,8 +995,7 @@ impl BlockEditorState {
         block: BlockId,
         cx: &mut Context<Self>,
     ) -> Result<(), super::SelectionError> {
-        self.set_selection(BlockSelection::caret(BlockPosition::new(block, 0)), cx)?;
-        self.heading_jump.set(Some(block));
+        self.navigate_to_selection(BlockSelection::caret(BlockPosition::new(block, 0)), cx)?;
         // Replacing the task gives repeated clicks a full highlight duration.
         self.heading_highlight = Some((block, cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -1257,10 +1256,8 @@ impl BlockEditorState {
         let Some(BlockSelection::Text { anchor, head }) = self.model.quote_selection(quote, occurrence, true) else {
             return false;
         };
-        self.set_selection(BlockSelection::Text { anchor, head }, cx)
+        self.navigate_to_selection(BlockSelection::Text { anchor, head }, cx)
             .expect("quote match has valid selection endpoints");
-        self.heading_jump.set(Some(head.block));
-        self.reveal_caret(cx);
         true
     }
 }
@@ -1851,6 +1848,17 @@ impl BlockEditorState {
         Ok(())
     }
 
+    /// Select a navigation hit and align its caret near the top quarter of the viewport.
+    pub fn navigate_to_selection(
+        &mut self,
+        selection: BlockSelection,
+        cx: &mut Context<Self>,
+    ) -> Result<(), super::SelectionError> {
+        self.set_selection(selection, cx)?;
+        self.navigation_jump.set(self.model.caret().map(|pos| pos.block));
+        Ok(())
+    }
+
     /// Run a model command as one transaction.
     pub fn run(
         &mut self,
@@ -2116,7 +2124,7 @@ impl BlockEditorState {
 
     fn after_edit(&mut self, origin: EditOrigin, cx: &mut Context<Self>) {
         self.image_resize = None;
-        self.heading_jump.set(None);
+        self.navigation_jump.set(None);
         self.sanitize_code_preview_source();
         if self.code_preview_source.is_some() {
             self.code_preview_source = self.selection_preview_block();
@@ -2154,7 +2162,7 @@ impl BlockEditorState {
 
     fn selection_changed(&mut self, cx: &mut Context<Self>) {
         self.image_resize = None;
-        self.heading_jump.set(None);
+        self.navigation_jump.set(None);
         self.sanitize_code_preview_source();
         if let Some(block) = self.selection_preview_block() {
             if self.readonly {

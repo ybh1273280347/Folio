@@ -887,6 +887,55 @@ fn caret_is_scrolled_into_view(cx: &mut TestAppContext) {
     assert!(handle.offset().y < px(0.));
 }
 
+#[gpui::test]
+fn a_single_navigation_selects_a_cold_hit_in_the_upper_viewport(cx: &mut TestAppContext) {
+    cx.update(crate::init_for_tests);
+    let scroll = gpui::ScrollHandle::new();
+    let handle = scroll.clone();
+    let (root, cx) = cx.add_window_view(move |window, cx| {
+        let editor = cx.new(|cx| {
+            let mut state = BlockEditorState::new(window, cx).with_source("Preview");
+            state.set_scroll_handle(scroll.clone());
+            state
+        });
+        Scrolled(editor, scroll)
+    });
+    let editor = root.read_with(cx, |root, _| root.0.clone());
+    draw(cx);
+
+    let before = format!("{}\n\n", "Wrapping text before the hit. ".repeat(60));
+    let text = format!("{}keyword\n\n{}", before.repeat(180), "after\n\n".repeat(80));
+    editor.update(cx, |editor, cx| {
+        let model = crate::BlockEditorModel::from_markdown(&text, Default::default()).unwrap();
+        let hit = model.document().leaves().nth(180).unwrap().id();
+        editor.set_model(model, cx);
+        editor
+            .navigate_to_selection(
+                BlockSelection::Text {
+                    anchor: BlockPosition::new(hit, 0),
+                    head: BlockPosition::new(hit, "keyword".len()),
+                },
+                cx,
+            )
+            .unwrap();
+    });
+    // Deliver frames queued by the editor after the single navigation, while
+    // the destination's neighborhood gets its first measured heights.
+    draw(cx);
+    assert!(cx.update(|window, cx| window.simulate_next_frame(cx)) > 0);
+    draw(cx);
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    draw(cx);
+
+    let (text, selection) = editor.read_with(cx, |editor, _| {
+        (editor.selected_plain_text().unwrap(), editor.selection_window_bounds().unwrap())
+    });
+    let view = handle.bounds();
+    assert_eq!(text, "keyword");
+    assert!((selection.top() - (view.top() + view.size.height * 0.25)).abs() <= px(2.));
+    assert!(selection.bottom() < view.bottom());
+}
+
 /// Phase 5 element-state reuse: a block culled while scrolled away keeps
 /// its projected node and its shaped text, so scrolling back reshapes
 /// nothing and rebuilds no node.

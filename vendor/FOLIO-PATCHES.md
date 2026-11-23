@@ -9,6 +9,7 @@
 - `gpui-pre 0.3.12`：增加 `VectorPaint::Svg` 与 `Window::paint_svg_document`，把图表 SVG 原文连同裁剪区域记录进文档捕获，供 PDF 用 `krilla-svg` 直接写成矢量图形与可选文字；不截图、不引入第二套排版。
 - `gpui-kit-markdown-editor`：可选单语言代码块预览接口只改变视图，保留原代码模型与序列化；源码模式复用原编辑几何，预览保留真实源码长度，完整文档导出强制预览且不带工具栏。
 - `gpui-kit-markdown-editor`：按文档 revision 缓存标题块序列，大纲跳转按标题索引定位，活动标题同步只遍历标题块。
+- `gpui-kit-markdown-editor`：知识库命中选区复用主动导航，在视口四分之一高度附近显示光标。滚动后请求新一帧排版，从新位置复核光标，并按移动后的视口裁剪下一帧。
 - `gpui-kit-markdown-editor`：批注的选区计数和跳转共用引用匹配，跨块引用按已保存的 Markdown 摘录匹配连续叶块。保留 inline atom 的源范围映射，并用唯一的正文高亮恢复位次已变化的批注。
 - `gpui-kit-markdown-editor`：将已保存引文的定位开放给无窗口模型，AI 删除批注时按记录位次移除正文高亮。
 - `gpui-kit-markdown-editor`：公式规范化遇到没有 TeX 起始定界符的文本时跳过预解析，减少 AI 流式渲染和 Markdown 导入的重复解析。
