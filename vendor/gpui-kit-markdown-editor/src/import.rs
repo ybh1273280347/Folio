@@ -780,7 +780,12 @@ pub(crate) fn preserve_source_extensions(extensions: MarkdownExtensions) -> Mark
             } else {
                 String::new()
             };
-            let known_html = matches!(tag.as_str(), "u" | "mark" | "em" | "strong" | "s" | "del" | "br");
+            // The shared HTML importer restores dimensions from the <img>
+            // tags written by the editor after resizing.
+            let known_html = matches!(
+                tag.as_str(),
+                "u" | "mark" | "em" | "strong" | "s" | "del" | "br" | "img"
+            );
             let accepts = if self.block {
                 matches!(node, Node::FootnoteDefinition(_))
                     || (matches!(node, Node::Html(_)) && !known_html)
