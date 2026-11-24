@@ -659,7 +659,7 @@ impl Render for Workspace {
 
         let right_progress = transition_with_status(
             "workspace-right-panel-motion",
-            if right_panel_visible && !self.right_panel.maximized {
+            if right_panel_visible {
                 1.0_f32
             } else {
                 0.0_f32
