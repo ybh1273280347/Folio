@@ -152,6 +152,61 @@ impl RagStore {
         Self::open(db_path, embed_model, embed_dim)
     }
 
+    /// Open an already-initialized RAG store without modifying embedding settings
+    /// or creating a database for projects that have not enabled the knowledge base.
+    pub fn open_existing(db_path: &Path) -> Result<Option<Self>, String> {
+        if !db_path.is_file() {
+            return Ok(None);
+        }
+        register_sqlite_vec();
+        let conn = Connection::open(db_path).map_err(|e| format!("打开 RAG 数据库失败: {e}"))?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|e| e.to_string())?;
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA foreign_keys = ON;",
+        )
+        .map_err(|e| format!("配置 SQLite PRAGMA 失败: {e}"))?;
+
+        let has_tables = conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta')
+                 AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'documents')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !has_tables {
+            return Ok(None);
+        }
+        let schema_ok = Self::get_meta(&conn, "schema_version")?.as_deref() == Some(SCHEMA_VERSION)
+            && Self::get_meta(&conn, "chunker_version")?.as_deref() == Some(CHUNKER_VERSION);
+        if !schema_ok {
+            return Ok(None);
+        }
+        let embed_dim = Self::get_meta(&conn, "embed_dim")?
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
+
+        let mut store = Self {
+            conn,
+            embed_dim,
+            project_root: db_path
+                .parent()
+                .and_then(Path::parent)
+                .expect("RAG database path has a project root")
+                .to_path_buf(),
+        };
+        let tx = store
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        Self::ensure_documents_trash_column(&tx)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(Some(store))
+    }
+
     pub fn project_root(&self) -> &Path {
         &self.project_root
     }
@@ -252,7 +307,8 @@ impl RagStore {
                 mtime_ns     INTEGER NOT NULL,
                 file_size    INTEGER NOT NULL,
                 status       TEXT NOT NULL DEFAULT 'indexed',
-                active       INTEGER NOT NULL DEFAULT 1
+                active       INTEGER NOT NULL DEFAULT 1,
+                trash_id     TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_documents_content ON documents(content_hash, active);
             CREATE TABLE IF NOT EXISTS chunks (
@@ -310,6 +366,7 @@ impl RagStore {
             .execute_batch(&sql)
             .map_err(|e| format!("初始化 RAG 表结构失败: {e}"))?;
 
+        Self::ensure_documents_trash_column(&tx)?;
         Self::set_meta(&tx, "schema_version", SCHEMA_VERSION)?;
         Self::set_meta(&tx, "chunker_version", CHUNKER_VERSION)?;
         Self::set_meta(&tx, "fts_tokenizer", FTS_TOKENIZER)?;
@@ -319,6 +376,29 @@ impl RagStore {
             Self::bump_kb_search_revision(&tx)?;
         }
         tx.commit().map_err(|e| e.to_string())
+    }
+
+    fn ensure_documents_trash_column(conn: &Connection) -> Result<(), String> {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(documents)")
+            .map_err(|e| e.to_string())?;
+        let has_trash_id = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .any(|name| name == "trash_id");
+        if !has_trash_id {
+            conn.execute("ALTER TABLE documents ADD COLUMN trash_id TEXT", [])
+                .map_err(|e| e.to_string())?;
+        }
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_documents_trash ON documents(trash_id) WHERE trash_id IS NOT NULL",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     /// Read inside the same snapshot as the lexical query. Older indexes have
@@ -497,8 +577,11 @@ impl RagStore {
         drop(stmt);
 
         for path in &missing {
-            tx.execute("DELETE FROM documents WHERE rel_path = ?1", [path])
-                .map_err(|e| e.to_string())?;
+            tx.execute(
+                "DELETE FROM documents WHERE rel_path = ?1 AND active = 1 AND trash_id IS NULL",
+                [path],
+            )
+            .map_err(|e| e.to_string())?;
         }
         // A save can orphan the previous hash without removing a path. Sweep after every
         // document has been linked so a rename or another copy can still reuse its chunks.
@@ -507,6 +590,144 @@ impl RagStore {
         }
         tx.commit().map_err(|e| e.to_string())?;
         Ok(missing.len())
+    }
+
+    /// Soft-delete a live document and its sidecar annotations row into the trash state,
+    /// keeping `contents`, `chunks`, `chunks_fts`, and `chunks_vec` intact for instant restore.
+    pub fn trash_document(&mut self, rel_path: &str, trash_id: &str) -> Result<usize, String> {
+        let normalized = rel_path.replace('\\', "/");
+        let ann_path = format!("{normalized}#annotations");
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let mut updated = 0usize;
+        for source_path in [&normalized, &ann_path] {
+            let parked = format!("__folio_trash__/{trash_id}/{source_path}");
+            updated += tx
+                .execute(
+                    "UPDATE documents
+                     SET rel_path = ?1, active = 0, trash_id = ?2
+                     WHERE rel_path = ?3 AND active = 1 AND trash_id IS NULL",
+                    params![parked, trash_id, source_path],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        if updated > 0 {
+            Self::bump_kb_search_revision(&tx)?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(updated)
+    }
+
+    /// Immediately reactivate soft-deleted document rows belonging to `trash_id`.
+    /// Handles conflict-renamed restores by remapping `rel_path` without re-chunking or re-embedding.
+    pub fn restore_document(
+        &mut self,
+        trash_id: &str,
+        restored_rel_path: &str,
+        mtime_ns: i64,
+        file_size: i64,
+    ) -> Result<usize, String> {
+        let restored_rel = restored_rel_path.replace('\\', "/");
+        let restored_ann = format!("{restored_rel}#annotations");
+        let prefix = format!("__folio_trash__/{trash_id}/");
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+
+        let mut stmt = tx
+            .prepare("SELECT id, rel_path, kind FROM documents WHERE trash_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([trash_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        drop(stmt);
+
+        if rows.is_empty() {
+            tx.commit().map_err(|e| e.to_string())?;
+            return Ok(0);
+        }
+
+        let mut restored = 0usize;
+        let mut removed_stale = false;
+        for (id, parked_path, kind) in rows {
+            let is_ann = kind == "annotation" || parked_path.ends_with("#annotations");
+            let orig_path = parked_path.strip_prefix(&prefix);
+            if is_ann && orig_path != Some(restored_ann.as_str()) {
+                // Annotations in `.folio/annotations.json` still reference the original path;
+                // do not attach them to a conflict-renamed copy (`foo (1).md`).
+                tx.execute("DELETE FROM documents WHERE id = ?1", [id])
+                    .map_err(|e| e.to_string())?;
+                removed_stale = true;
+                continue;
+            }
+            let target_rel = if is_ann {
+                restored_ann.as_str()
+            } else {
+                restored_rel.as_str()
+            };
+            let cleared = tx
+                .execute(
+                    "DELETE FROM documents WHERE rel_path = ?1 AND id != ?2 AND trash_id IS NULL",
+                    params![target_rel, id],
+                )
+                .map_err(|e| e.to_string())?;
+            if cleared > 0 {
+                removed_stale = true;
+            }
+            if is_ann {
+                tx.execute(
+                    "UPDATE documents
+                     SET rel_path = ?1, active = 1, trash_id = NULL
+                     WHERE id = ?2",
+                    params![target_rel, id],
+                )
+                .map_err(|e| e.to_string())?;
+            } else {
+                tx.execute(
+                    "UPDATE documents
+                     SET rel_path = ?1, mtime_ns = ?2, file_size = ?3, active = 1, trash_id = NULL
+                     WHERE id = ?4",
+                    params![target_rel, mtime_ns, file_size, id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            restored += 1;
+        }
+
+        let pruned = if removed_stale { prune_orphans(&tx)? } else { false };
+        if restored > 0 || pruned {
+            Self::bump_kb_search_revision(&tx)?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(restored)
+    }
+
+    /// Permanently delete soft-deleted rows for a purged trash entry and prune orphaned content/vectors.
+    pub fn purge_trashed_document(&mut self, trash_id: &str) -> Result<usize, String> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let deleted = tx
+            .execute("DELETE FROM documents WHERE trash_id = ?1", [trash_id])
+            .map_err(|e| e.to_string())?;
+        let pruned = prune_orphans(&tx)?;
+        if deleted > 0 || pruned {
+            Self::bump_kb_search_revision(&tx)?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(deleted)
     }
 
     pub fn pending_vector_chunks(&self, after_chunk_id: i64, limit: usize) -> Result<Vec<PendingChunk>, String> {
@@ -1710,5 +1931,194 @@ mod tests {
         assert!(!buckets.pdf.is_empty());
         assert!(buckets.pdf.iter().all(|h| is_pdf_path(&h.rel_path)));
         assert!(buckets.pdf.iter().any(|h| h.rel_path == "pdf_0.pdf#annotations"));
+    }
+
+    #[test]
+    fn trash_soft_delete_hides_immediately_survives_sync_and_restores_without_reembedding() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("rag.sqlite3");
+        let mut store = RagStore::open(&db, "test-embed", 2).unwrap();
+        let doc_chunk = ChunkDraft {
+            seq: 0,
+            heading_path: "note.md".into(),
+            line_start: Some(1),
+            line_end: Some(2),
+            page_num: None,
+            chunk_text: "[note.md]\n量子力学与波函数演化".into(),
+        };
+        let ann_chunk = ChunkDraft {
+            seq: 0,
+            heading_path: "note.md#annotations".into(),
+            line_start: None,
+            line_end: None,
+            page_num: None,
+            chunk_text: "[note.md#annotations]\n批注：波函数坍缩".into(),
+        };
+        store
+            .upsert_document(
+                "note.md",
+                "md",
+                "hash-note",
+                100,
+                32,
+                "indexed",
+                Some("量子力学与波函数演化"),
+                Some("source"),
+                Some(&[doc_chunk]),
+            )
+            .unwrap();
+        store
+            .upsert_document(
+                "note.md#annotations",
+                "annotation",
+                "hash-ann:annotation",
+                100,
+                20,
+                "indexed",
+                Some("批注：波函数坍缩"),
+                Some("annotation"),
+                Some(&[ann_chunk]),
+            )
+            .unwrap();
+        let pending = store.pending_vector_chunks(0, 10).unwrap();
+        assert_eq!(pending.len(), 2);
+        let original_chunk_ids: Vec<i64> = pending.iter().map(|c| c.chunk_id).collect();
+        store
+            .insert_chunk_vectors(&[
+                (pending[0].chunk_id, vec![1.0, 0.0]),
+                (pending[1].chunk_id, vec![0.9, 0.1]),
+            ])
+            .unwrap();
+        let rev_before = store.kb_search_revision().unwrap();
+
+        // Moving to trash hides both document and annotations immediately.
+        assert_eq!(store.trash_document("note.md", "trash-1").unwrap(), 2);
+        let rev_trashed = store.kb_search_revision().unwrap();
+        assert_ne!(rev_before, rev_trashed);
+
+        let stats_trashed = store.stats().unwrap();
+        assert_eq!(stats_trashed.indexed_files, 0);
+        assert_eq!(stats_trashed.total_chunks, 0);
+        assert_eq!(stats_trashed.vector_chunks, 0);
+        assert!(store.search_fts("波函数", None, None, &[], 5).unwrap().is_empty());
+        assert!(store.search_vec(&[1.0, 0.0], None, None, &[], 5).unwrap().is_empty());
+
+        // Subsequent sync `deactivate_missing` must NOT prune trashed rows or their vectors.
+        assert_eq!(store.deactivate_missing(&HashSet::new()).unwrap(), 0);
+
+        // Restoring reactivates both rows with the exact same chunk IDs & vectors intact.
+        assert_eq!(store.restore_document("trash-1", "note.md", 200, 32).unwrap(), 2);
+        let rev_restored = store.kb_search_revision().unwrap();
+        assert_ne!(rev_trashed, rev_restored);
+
+        let stats_restored = store.stats().unwrap();
+        assert_eq!(stats_restored.indexed_files, 2);
+        assert_eq!(stats_restored.total_chunks, 2);
+        assert_eq!(stats_restored.vector_chunks, 2);
+        assert_eq!(stats_restored.pending_vectors, 0);
+        assert!(store.pending_vector_chunks(0, 10).unwrap().is_empty());
+
+        let fts_hits = store.search_fts("波函数", None, None, &[], 5).unwrap();
+        assert_eq!(fts_hits.len(), 2);
+        let vec_hits = store.search_vec(&[1.0, 0.0], None, None, &[], 5).unwrap();
+        assert_eq!(vec_hits.len(), 2);
+        assert!(original_chunk_ids.contains(&vec_hits[0].chunk_id));
+    }
+
+    #[test]
+    fn trash_collision_with_same_path_and_conflict_rename_restore_and_purge() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("rag.sqlite3");
+        let mut store = RagStore::open(&db, "test-embed", 2).unwrap();
+
+        let chunk1 = ChunkDraft {
+            seq: 0,
+            heading_path: "note.md".into(),
+            line_start: None,
+            line_end: None,
+            page_num: None,
+            chunk_text: "first archived draft".into(),
+        };
+        let ann1 = ChunkDraft {
+            seq: 0,
+            heading_path: "note.md#annotations".into(),
+            line_start: None,
+            line_end: None,
+            page_num: None,
+            chunk_text: "unique_ann_token".into(),
+        };
+        store
+            .upsert_document("note.md", "md", "hash-1", 1, 10, "indexed", Some("first archived draft"), Some("source"), Some(&[chunk1]))
+            .unwrap();
+        store
+            .upsert_document("note.md#annotations", "annotation", "hash-ann-1", 1, 10, "indexed", Some("unique_ann_token"), Some("annotation"), Some(&[ann1]))
+            .unwrap();
+        let p1 = store.pending_vector_chunks(0, 10).unwrap();
+        store.insert_chunk_vectors(&[(p1[0].chunk_id, vec![1.0, 0.0]), (p1[1].chunk_id, vec![1.0, 0.0])]).unwrap();
+
+        store.trash_document("note.md", "trash-a").unwrap();
+
+        // Creating a brand-new file at the same path does not overwrite the trashed entry.
+        let chunk2 = ChunkDraft {
+            seq: 0,
+            heading_path: "note.md".into(),
+            line_start: None,
+            line_end: None,
+            page_num: None,
+            chunk_text: "second live draft".into(),
+        };
+        store
+            .upsert_document("note.md", "md", "hash-2", 2, 10, "indexed", Some("second live draft"), Some("source"), Some(&[chunk2]))
+            .unwrap();
+
+        // Conflict rename restore moves the trashed file to `note (1).md` and drops stale annotations.
+        assert_eq!(store.restore_document("trash-a", "note (1).md", 3, 10).unwrap(), 1);
+        let hits = store.search_fts("archived", None, None, &[], 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rel_path, "note (1).md");
+        assert!(store.search_fts("unique_ann_token", None, None, &[], 5).unwrap().is_empty());
+
+        // Trashing and purging a second entry removes its orphan chunks & vectors completely.
+        store.trash_document("note.md", "trash-b").unwrap();
+        assert_eq!(store.purge_trashed_document("trash-b").unwrap(), 1);
+        let remaining_chunks: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM chunks WHERE content_hash = 'hash-2'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining_chunks, 0);
+    }
+
+    #[test]
+    fn open_existing_migrates_legacy_documents_table_in_place_without_dropping_vectors() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("rag.sqlite3");
+        assert!(RagStore::open_existing(&db).unwrap().is_none());
+
+        let mut store = RagStore::open(&db, "test-embed", 2).unwrap();
+        let draft = ChunkDraft {
+            seq: 0,
+            heading_path: "legacy.md".into(),
+            line_start: None,
+            line_end: None,
+            page_num: None,
+            chunk_text: "legacy vector content".into(),
+        };
+        store
+            .upsert_document("legacy.md", "md", "hash-legacy", 1, 21, "indexed", Some("legacy vector content"), Some("source"), Some(&[draft]))
+            .unwrap();
+        let chunk_id = store.pending_vector_chunks(0, 1).unwrap()[0].chunk_id;
+        store.insert_chunk_vectors(&[(chunk_id, vec![1.0, 0.0])]).unwrap();
+        drop(store);
+
+        // Simulate a pre-migration DB lacking the `trash_id` column.
+        let raw_conn = Connection::open(&db).unwrap();
+        raw_conn.execute_batch("DROP INDEX IF EXISTS idx_documents_trash; ALTER TABLE documents DROP COLUMN trash_id;").unwrap();
+        drop(raw_conn);
+
+        let mut migrated = RagStore::open_existing(&db).unwrap().expect("existing store opens");
+        assert_eq!(migrated.stats().unwrap().vector_chunks, 1);
+        assert_eq!(migrated.trash_document("legacy.md", "trash-legacy").unwrap(), 1);
+        assert_eq!(migrated.restore_document("trash-legacy", "legacy.md", 2, 21).unwrap(), 1);
+        assert_eq!(migrated.stats().unwrap().vector_chunks, 1);
     }
 }

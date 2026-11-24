@@ -203,6 +203,10 @@ pub fn put(
         fs::remove_file(&source)?;
     }
     sync_parent(&source)?;
+    let rag_db = root.join(".folio").join("rag.sqlite3");
+    if let Some(mut rag) = crate::rag::store::RagStore::open_existing(&rag_db)? {
+        rag.trash_document(&entry.relative, &entry.id)?;
+    }
     Ok(entry)
 }
 
@@ -244,6 +248,22 @@ pub fn restore(entry: &TrashEntry, target: &Path) -> crate::tags::Result<()> {
     sync_directory(&directory)?;
     fs::remove_dir_all(&directory)?;
     sync_parent(&directory)?;
+
+    let rag_db = entry.project_root.join(".folio").join("rag.sqlite3");
+    if let Some(mut rag) = crate::rag::store::RagStore::open_existing(&rag_db)? {
+        let relative = target
+            .strip_prefix(&entry.project_root)?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let meta = fs::metadata(target)?;
+        let file_size = meta.len() as i64;
+        let mtime_ns = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos() as i64);
+        rag.restore_document(&entry.id, &relative, mtime_ns, file_size)?;
+    }
     Ok(())
 }
 
@@ -256,6 +276,10 @@ pub fn purge(entry: &TrashEntry) -> crate::tags::Result<()> {
         crate::tags::Store::project(&entry.project_root).purge_file(file_id, &entry.id, remove)?;
     } else {
         remove()?;
+    }
+    let rag_db = entry.project_root.join(".folio").join("rag.sqlite3");
+    if let Some(mut rag) = crate::rag::store::RagStore::open_existing(&rag_db)? {
+        rag.purge_trashed_document(&entry.id)?;
     }
     Ok(())
 }

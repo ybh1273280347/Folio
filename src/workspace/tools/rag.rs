@@ -170,7 +170,7 @@ impl Workspace {
             .collect()
     }
 
-    fn cancel_in_flight_sync(&mut self) {
+    pub(in crate::workspace) fn cancel_in_flight_sync(&mut self) {
         if let Some((_, _, cancelled)) = self.rag_sync.in_flight.take() {
             cancelled.store(true, Ordering::Relaxed);
         }
