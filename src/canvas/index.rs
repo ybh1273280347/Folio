@@ -44,9 +44,55 @@ fn open_links_db(db_path: &Path, create: bool) -> Result<Option<Connection>, Str
             target_path TEXT NOT NULL,
             anchor_kind TEXT NOT NULL,
             label       TEXT NOT NULL,
-            PRIMARY KEY (canvas_path, node_id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_canvas_links_target ON canvas_links(target_path);",
+            trash_id    TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (canvas_path, node_id, trash_id)
+        );",
+    )
+    .map_err(|e| e.to_string())?;
+    let mut has_trash_col = false;
+    let mut trash_in_pk = false;
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(canvas_links)")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?)))
+            .map_err(|e| e.to_string())?;
+        for (name, pk) in rows.filter_map(Result::ok) {
+            if name == "trash_id" {
+                has_trash_col = true;
+                trash_in_pk = pk > 0;
+            }
+        }
+    }
+    if !trash_in_pk {
+        let trash_expr = if has_trash_col {
+            "COALESCE(trash_id, '')"
+        } else {
+            "''"
+        };
+        conn.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE canvas_links_v2 (
+                 canvas_path TEXT NOT NULL,
+                 node_id     TEXT NOT NULL,
+                 target_path TEXT NOT NULL,
+                 anchor_kind TEXT NOT NULL,
+                 label       TEXT NOT NULL,
+                 trash_id    TEXT NOT NULL DEFAULT '',
+                 PRIMARY KEY (canvas_path, node_id, trash_id)
+             );
+             INSERT OR IGNORE INTO canvas_links_v2 (canvas_path, node_id, target_path, anchor_kind, label, trash_id)
+             SELECT canvas_path, node_id, target_path, anchor_kind, label, {trash_expr} FROM canvas_links;
+             DROP TABLE canvas_links;
+             ALTER TABLE canvas_links_v2 RENAME TO canvas_links;
+             COMMIT;"
+        ))
+        .map_err(|e| e.to_string())?;
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_canvas_links_target ON canvas_links(target_path);
+         CREATE INDEX IF NOT EXISTS idx_canvas_links_trash ON canvas_links(trash_id);",
     )
     .map_err(|e| e.to_string())?;
     Ok(Some(conn))
@@ -89,15 +135,15 @@ pub fn sync_canvas_links(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
     tx.execute(
-        "DELETE FROM canvas_links WHERE canvas_path = ?1",
+        "DELETE FROM canvas_links WHERE canvas_path = ?1 AND trash_id = ''",
         [&normalized_canvas],
     )
     .map_err(|e| e.to_string())?;
     if !links.is_empty() {
         let mut stmt = tx
             .prepare(
-                "INSERT INTO canvas_links (canvas_path, node_id, target_path, anchor_kind, label)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO canvas_links (canvas_path, node_id, target_path, anchor_kind, label, trash_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, '')",
             )
             .map_err(|e| e.to_string())?;
         for (node_id, target_path, anchor_kind, label) in links {
@@ -114,15 +160,74 @@ pub fn sync_canvas_links(
     tx.commit().map_err(|e| e.to_string())
 }
 
+/// Removes active (non-trashed) links for a missing or unparseable canvas file.
 pub fn remove_canvas_links(db_path: &Path, canvas_path: &str) -> Result<(), String> {
     let Some(conn) = open_links_db(db_path, false)? else {
         return Ok(());
     };
     conn.execute(
-        "DELETE FROM canvas_links WHERE canvas_path = ?1",
+        "DELETE FROM canvas_links WHERE canvas_path = ?1 AND trash_id = ''",
         [canvas_path.replace('\\', "/")],
     )
     .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Logically hides a canvas's links while it lives in trash so restore can bring them back.
+pub fn trash_canvas_links(db_path: &Path, canvas_path: &str, trash_id: &str) -> Result<(), String> {
+    let Some(conn) = open_links_db(db_path, false)? else {
+        return Ok(());
+    };
+    conn.execute(
+        "UPDATE canvas_links SET trash_id = ?1 WHERE canvas_path = ?2 AND trash_id = ''",
+        params![trash_id, canvas_path.replace('\\', "/")],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Restores logically trashed links to `target_rel_path`, re-syncing from disk if needed.
+pub fn restore_canvas_links(
+    db_path: &Path,
+    trash_id: &str,
+    target_rel_path: &str,
+    target_file: &Path,
+) -> Result<(), String> {
+    let normalized = target_rel_path.replace('\\', "/");
+    if let Some(mut conn) = open_links_db(db_path, false)? {
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM canvas_links WHERE canvas_path = ?1 AND trash_id = ''",
+            [&normalized],
+        )
+        .map_err(|e| e.to_string())?;
+        let restored = tx
+            .execute(
+                "UPDATE canvas_links SET trash_id = '', canvas_path = ?1 WHERE trash_id = ?2",
+                params![normalized, trash_id],
+            )
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        if restored > 0 {
+            return Ok(());
+        }
+    }
+    if let Ok(raw) = fs::read_to_string(target_file)
+        && let Ok(doc) = CanvasDocument::from_json_str(&raw)
+    {
+        sync_canvas_links(db_path, &normalized, &doc)?;
+    }
+    Ok(())
+}
+
+pub fn purge_trashed_canvas_links(db_path: &Path, trash_id: &str) -> Result<(), String> {
+    let Some(conn) = open_links_db(db_path, false)? else {
+        return Ok(());
+    };
+    conn.execute("DELETE FROM canvas_links WHERE trash_id = ?1", [trash_id])
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -134,7 +239,7 @@ pub fn backlinks_for(db_path: &Path, target_path: &str) -> Vec<CanvasBacklink> {
     let Ok(mut stmt) = conn.prepare(
         "SELECT canvas_path, node_id, anchor_kind, label
          FROM canvas_links
-         WHERE target_path = ?1
+         WHERE target_path = ?1 AND trash_id = ''
          ORDER BY canvas_path, node_id",
     ) else {
         return Vec::new();
@@ -169,7 +274,7 @@ pub fn relocate_canvas_paths(
         .map_err(|e| e.to_string())?;
     let paths = {
         let mut stmt = tx
-            .prepare("SELECT DISTINCT canvas_path FROM canvas_links")
+            .prepare("SELECT DISTINCT canvas_path FROM canvas_links WHERE trash_id = ''")
             .map_err(|e| e.to_string())?;
         let mapped = stmt
             .query_map([], |row| row.get::<_, String>(0))
@@ -179,7 +284,7 @@ pub fn relocate_canvas_paths(
     for path in paths {
         if let Some(next) = remap_rel_path(&path, moves, is_folder) {
             tx.execute(
-                "UPDATE canvas_links SET canvas_path = ?1 WHERE canvas_path = ?2",
+                "UPDATE canvas_links SET canvas_path = ?1 WHERE canvas_path = ?2 AND trash_id = ''",
                 params![next, path],
             )
             .map_err(|e| e.to_string())?;
@@ -239,5 +344,51 @@ mod tests {
         let remaining = backlinks_for(&db, "notes/b.md");
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].canvas_path, "maps/other.canvas");
+
+        // Logical trash keeps records hidden until restored, even across same-path recreation.
+        trash_canvas_links(&db, "maps/other.canvas", "trash-1").unwrap();
+        assert!(backlinks_for(&db, "notes/b.md").is_empty());
+        // Physical stale cleanup must not erase trashed entries.
+        remove_canvas_links(&db, "maps/other.canvas").unwrap();
+        // Recreating a file at the same path with the same node_id succeeds without PK collision.
+        sync_canvas_links(&db, "maps/other.canvas", &other).unwrap();
+        assert_eq!(backlinks_for(&db, "notes/b.md").len(), 1);
+
+        let restored_path = temp.path().join("maps/other (1).canvas");
+        restore_canvas_links(&db, "trash-1", "maps/other (1).canvas", &restored_path).unwrap();
+        let restored = backlinks_for(&db, "notes/b.md");
+        assert_eq!(restored.len(), 2);
+        assert!(restored.iter().any(|b| b.canvas_path == "maps/other (1).canvas"));
+
+        trash_canvas_links(&db, "maps/other (1).canvas", "trash-2").unwrap();
+        purge_trashed_canvas_links(&db, "trash-2").unwrap();
+        assert_eq!(backlinks_for(&db, "notes/b.md").len(), 1);
+    }
+
+    #[test]
+    fn migrates_legacy_canvas_links_table_without_trash_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join(".folio").join("metadata.sqlite3");
+        fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE canvas_links (
+                canvas_path TEXT NOT NULL,
+                node_id     TEXT NOT NULL,
+                target_path TEXT NOT NULL,
+                anchor_kind TEXT NOT NULL,
+                label       TEXT NOT NULL,
+                PRIMARY KEY (canvas_path, node_id)
+            );
+            INSERT INTO canvas_links VALUES ('maps/legacy.canvas', 'n1', 'notes/a.md', 'quote', 'old');",
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(backlinks_for(&db, "notes/a.md").len(), 1);
+        trash_canvas_links(&db, "maps/legacy.canvas", "t-legacy").unwrap();
+        assert!(backlinks_for(&db, "notes/a.md").is_empty());
+        restore_canvas_links(&db, "t-legacy", "maps/legacy.canvas", &temp.path().join("maps/legacy.canvas")).unwrap();
+        assert_eq!(backlinks_for(&db, "notes/a.md").len(), 1);
     }
 }

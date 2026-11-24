@@ -55,8 +55,20 @@ impl Workspace {
             self.documents.active_canvas_backlinks.clear();
             return;
         };
-        self.documents.active_canvas_backlinks =
-            canvas_index::backlinks_for(&db_path, &self.documents.active);
+        let entries = canvas_index::backlinks_for(&db_path, &self.documents.active);
+        let mut live = Vec::with_capacity(entries.len());
+        let mut stale = std::collections::BTreeSet::new();
+        for link in entries {
+            if self.document_path(&link.canvas_path).is_file() {
+                live.push(link);
+            } else {
+                stale.insert(link.canvas_path);
+            }
+        }
+        for path in stale {
+            let _ = canvas_index::remove_canvas_links(&db_path, &path);
+        }
+        self.documents.active_canvas_backlinks = live;
     }
 
     pub(in crate::workspace) fn open_canvas_backlink(
@@ -67,6 +79,7 @@ impl Workspace {
     ) {
         let full = self.document_path(&backlink.canvas_path);
         if !full.is_file() {
+            self.remove_canvas_index(&backlink.canvas_path, cx);
             self.report(crate::i18n::workspace::err_file_not_found(&full), cx);
             return;
         }

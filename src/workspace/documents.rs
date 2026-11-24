@@ -543,7 +543,9 @@ impl Workspace {
         if self.documents.focused_markdown.as_deref() == Some(path) {
             self.documents.focused_markdown = None;
         }
-        self.remove_canvas_index(path, cx);
+        if Self::is_canvas_path(path) {
+            self.refresh_active_canvas_backlinks();
+        }
     }
 
     pub(super) fn invalidate_document_tree(&mut self) {

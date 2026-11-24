@@ -441,6 +441,7 @@ impl Workspace {
         if let Err(error) = self.refresh_files(window, cx) {
             self.report(error, cx);
         }
+        self.refresh_active_canvas_backlinks();
         if self.kb_enabled() {
             self.refresh_kb_snapshot(cx);
             if !self.right_panel.kb.last_query.is_empty() {

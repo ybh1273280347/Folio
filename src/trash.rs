@@ -207,6 +207,10 @@ pub fn put(
     if let Some(mut rag) = crate::rag::store::RagStore::open_existing(&rag_db)? {
         rag.trash_document(&entry.relative, &entry.id)?;
     }
+    if entry.relative.to_ascii_lowercase().ends_with(".canvas") {
+        let meta_db = crate::canvas::index::metadata_db_path(Some(root))?;
+        crate::canvas::index::trash_canvas_links(&meta_db, &entry.relative, &entry.id)?;
+    }
     Ok(entry)
 }
 
@@ -249,12 +253,16 @@ pub fn restore(entry: &TrashEntry, target: &Path) -> crate::tags::Result<()> {
     fs::remove_dir_all(&directory)?;
     sync_parent(&directory)?;
 
+    let relative = target
+        .strip_prefix(&entry.project_root)?
+        .to_string_lossy()
+        .replace('\\', "/");
+    if relative.to_ascii_lowercase().ends_with(".canvas") {
+        let meta_db = crate::canvas::index::metadata_db_path(Some(&entry.project_root))?;
+        crate::canvas::index::restore_canvas_links(&meta_db, &entry.id, &relative, target)?;
+    }
     let rag_db = entry.project_root.join(".folio").join("rag.sqlite3");
     if let Some(mut rag) = crate::rag::store::RagStore::open_existing(&rag_db)? {
-        let relative = target
-            .strip_prefix(&entry.project_root)?
-            .to_string_lossy()
-            .replace('\\', "/");
         let meta = fs::metadata(target)?;
         let file_size = meta.len() as i64;
         let mtime_ns = meta
@@ -276,6 +284,10 @@ pub fn purge(entry: &TrashEntry) -> crate::tags::Result<()> {
         crate::tags::Store::project(&entry.project_root).purge_file(file_id, &entry.id, remove)?;
     } else {
         remove()?;
+    }
+    if entry.relative.to_ascii_lowercase().ends_with(".canvas") {
+        let meta_db = crate::canvas::index::metadata_db_path(Some(&entry.project_root))?;
+        crate::canvas::index::purge_trashed_canvas_links(&meta_db, &entry.id)?;
     }
     let rag_db = entry.project_root.join(".folio").join("rag.sqlite3");
     if let Some(mut rag) = crate::rag::store::RagStore::open_existing(&rag_db)? {
