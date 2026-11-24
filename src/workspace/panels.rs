@@ -145,6 +145,7 @@ impl Workspace {
         hub::RightPanelHubProps {
             query: self.right_panel.search.read(cx).value().to_string(),
             selected_index: self.right_panel.selected,
+            panel_width: self.settings.terminal.panel_width.clamp(280., 1600.),
             preview_open: self.build.panels.preview,
             logs_open: self.build.panels.logs,
             zen_mode: self.zen_mode,

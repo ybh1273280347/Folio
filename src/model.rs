@@ -329,7 +329,7 @@ impl Default for TerminalSettings {
             args: vec!["-NoLogo".into()],
             font_family: "Consolas".into(),
             font_size: 14,
-            panel_width: 520.,
+            panel_width: 420.,
         }
     }
 }

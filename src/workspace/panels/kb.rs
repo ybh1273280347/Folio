@@ -1825,6 +1825,8 @@ impl Workspace {
         let use_book_tiles = panel_w >= 340.0;
         let card_w = if panel_w >= 640.0 {
             144.0_f32
+        } else if panel_w >= 380.0 {
+            ((panel_w - 24.0 - 12.0) / 2.0).clamp(144.0, 176.0).floor()
         } else {
             132.0_f32
         };
