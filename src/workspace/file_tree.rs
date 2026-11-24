@@ -382,6 +382,16 @@ impl Workspace {
         )
     }
 
+    pub(super) fn start_rename_project(
+        &mut self,
+        id: String,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_name(NameAction::RenameProject(id), name, window, cx);
+    }
+
     fn start_name(
         &mut self,
         action: NameAction,
@@ -1246,6 +1256,353 @@ impl Workspace {
         cx.notify();
     }
 
+    pub(super) fn render_activity_rail(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if !cx.has_active_drag() {
+            self.tree.dragging_tree_item.store(false, Ordering::Relaxed);
+            self.tree.dragged_folder.borrow_mut().take();
+        }
+        let dragging_tree_item =
+            cx.has_active_drag() && self.tree.dragging_tree_item.load(Ordering::Relaxed);
+        let sidebar_visible = self.is_sidebar_open();
+        let trash_open = self.trash.is_open();
+        let is_default = !trash_open && self.projects.is_default();
+        let is_loose = !trash_open && self.projects.directory().is_none();
+        let loose_count = if self.projects.directory().is_none() {
+            self.documents.tabs().len()
+        } else {
+            self.projects.loose_tab_count()
+        };
+
+        let palette = self.settings.theme.palette;
+        let muted = gpui_kit::rgb(palette.muted);
+        let text = gpui_kit::rgb(palette.text);
+        let hover_bg = gpui_kit::rgb(palette.hover);
+        let active_bg = gpui_kit::rgb(palette.selection);
+        let accent = gpui_kit::rgb(palette.accent);
+
+        let rail_btn = |id: &'static str, icon: IconName, active: bool, indicator: bool| {
+            div()
+                .id(id)
+                .relative()
+                .size(px(32.))
+                .rounded(px(6.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .text_color(if active { text } else { muted })
+                .when(active, |btn| btn.bg(active_bg))
+                .hover(move |s| s.bg(hover_bg).text_color(text))
+                .active(|s| s.bg(rgb(crate::ui::PRESSED_BG)))
+                .when(active && indicator, |btn| {
+                    btn.child(
+                        div()
+                            .absolute()
+                            .left(px(-4.))
+                            .top(px(7.))
+                            .bottom(px(7.))
+                            .w(px(2.))
+                            .rounded_full()
+                            .bg(accent),
+                    )
+                })
+                .child(crate::ui::icon(icon).size(px(16.)))
+        };
+
+        let sidebar_shortcut =
+            AppSettings::format_key_badge(&self.settings.key_for("toggle_sidebar"));
+        let sidebar_tip = if sidebar_visible && !trash_open {
+            format!(
+                "{} · {sidebar_shortcut}",
+                crate::i18n::workspace::TOOLTIP_TOGGLE_SIDEBAR_CLOSE.get()
+            )
+        } else {
+            format!(
+                "{} · {sidebar_shortcut}",
+                crate::i18n::workspace::TOOLTIP_TOGGLE_SIDEBAR_OPEN.get()
+            )
+        };
+        let open_file_tip = format!(
+            "{} · {}",
+            crate::i18n::workspace::OPEN_FILE.get(),
+            AppSettings::format_key_badge(&self.settings.key_for("open_file"))
+        );
+        let zen_tip = format!(
+            "{} · {}",
+            crate::i18n::right_panel::ACTION_ZEN_MODE.get(),
+            AppSettings::format_key_badge(&self.settings.key_for("toggle_zen"))
+        );
+
+        let toggle_sidebar_btn = rail_btn(
+            "rail-toggle-sidebar",
+            if sidebar_visible {
+                IconName::PanelLeftClose
+            } else {
+                IconName::PanelLeftOpen
+            },
+            sidebar_visible && !trash_open,
+            false,
+        )
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(sidebar_tip.clone()).build(window, cx)
+        })
+        .on_click(cx.listener(|app, _, _, cx| {
+            if app.trash.is_open() {
+                app.trash.dismiss();
+                if !app.settings.sidebar_open {
+                    app.settings.sidebar_open = true;
+                    app.persist_settings(cx);
+                }
+                cx.notify();
+            } else {
+                app.toggle_sidebar(cx);
+            }
+        }));
+
+        let default_space_btn = rail_btn("rail-default-space", IconName::NotebookPen, is_default, true)
+            .tooltip(|window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(
+                    crate::i18n::workspace::DEFAULT_SPACE.get(),
+                )
+                .build(window, cx)
+            })
+            .on_click(cx.listener(|app, _, window, cx| {
+                app.trash.dismiss();
+                if !app.settings.sidebar_open {
+                    app.settings.sidebar_open = true;
+                    app.persist_settings(cx);
+                }
+                app.switch_to_default(window, cx);
+                cx.notify();
+            }))
+            .context_menu({
+                let app = cx.entity();
+                move |menu, _, _| {
+                    let app = app.clone();
+                    menu.min_w(px(120.)).item(
+                        compact_menu_icon_item(
+                            IconName::NotebookPen,
+                            crate::i18n::workspace::MENU_NEW_DEFAULT_MD.get(),
+                        )
+                        .on_click(move |_, window, cx| {
+                            app.update(cx, |app, cx| {
+                                app.trash.dismiss();
+                                if let Err(error) = app.new_default_markdown(window, cx) {
+                                    app.report(error, cx);
+                                }
+                            });
+                        }),
+                    )
+                }
+            });
+
+        let loose_badge = if loose_count > 9 {
+            "9+".to_owned()
+        } else {
+            loose_count.to_string()
+        };
+        let loose_files_btn = rail_btn("rail-loose-files", IconName::Files, is_loose, true)
+            .when(loose_count > 0, |btn| {
+                btn.child(
+                    div()
+                        .absolute()
+                        .top(px(2.))
+                        .right(px(2.))
+                        .min_w(px(13.))
+                        .h(px(13.))
+                        .px_1()
+                        .rounded_full()
+                        .bg(if is_loose { accent } else { gpui_kit::rgb(palette.border) })
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(9.))
+                        .line_height(relative(1.))
+                        .text_color(if is_loose {
+                            gpui_kit::rgb(palette.on_accent)
+                        } else {
+                            text
+                        })
+                        .child(loose_badge),
+                )
+            })
+            .tooltip(|window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(
+                    crate::i18n::workspace::LOOSE_FILES.get(),
+                )
+                .build(window, cx)
+            })
+            .on_click(cx.listener(|app, _, window, cx| {
+                app.trash.dismiss();
+                if !app.settings.sidebar_open {
+                    app.settings.sidebar_open = true;
+                    app.persist_settings(cx);
+                }
+                if app.projects.directory().is_none() {
+                    cx.notify();
+                    return;
+                }
+                if app.build.is_busy()
+                    || !app.confirm_drafts(cx, |app, window, cx| {
+                        if let Err(error) = app.select_loose_files(window, cx) {
+                            app.report(error, cx);
+                        }
+                    })
+                {
+                    cx.notify();
+                    return;
+                }
+                if let Err(error) = app.select_loose_files(window, cx) {
+                    app.report(error, cx);
+                }
+            }));
+
+        let open_file_btn = rail_btn("rail-open-file", IconName::FolderOpen, false, false)
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(open_file_tip.clone()).build(window, cx)
+            })
+            .on_click(cx.listener(|app, _, window, cx| {
+                app.open_file_dialog(window, cx);
+            }));
+
+        let zen_btn = rail_btn("rail-zen-mode", IconName::Maximize2, false, false)
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(zen_tip.clone()).build(window, cx)
+            })
+            .on_click(cx.listener(|app, _, window, cx| {
+                app.toggle_zen_mode(window, cx);
+            }));
+
+        let trash_bounds = self.tree.trash_bounds.clone();
+        let trash_btn = div()
+            .id("trash-entry")
+            .relative()
+            .w(px(32.))
+            .h(px(if dragging_tree_item { 72. } else { 32. }))
+            .rounded(px(6.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .text_color(if trash_open { text } else { muted })
+            .when(trash_open, |btn| btn.bg(active_bg))
+            .when(dragging_tree_item, |btn| {
+                btn.bg(rgb(0xf0f4fa))
+                    .border_1()
+                    .border_color(gpui_kit::rgb(palette.accent))
+                    .text_color(accent)
+            })
+            .when(!dragging_tree_item, |btn| {
+                btn.hover(move |s| s.bg(hover_bg).text_color(text))
+            })
+            .drag_over::<crate::terminal::DraggedPaths>(|style, _, _, _| style.bg(rgb(0xdde9f6)))
+            .drag_over::<crate::terminal::DraggedFolder>(|style, _, _, _| style.bg(rgb(0xdde9f6)))
+            .tooltip(|window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(
+                    crate::i18n::workspace::TRASH_LABEL.get(),
+                )
+                .build(window, cx)
+            })
+            .child(crate::ui::icon(IconName::Trash).size(px(16.)))
+            .child(
+                canvas(
+                    move |area, _, _| {
+                        *trash_bounds.lock().expect("trash bounds") = Some(area);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .on_click(cx.listener(|app, _, _, cx| {
+                app.open_trash(cx);
+            }))
+            .on_drop(cx.listener(|app, dragged: &crate::terminal::DraggedPaths, window, cx| {
+                if dragged.1.is_none() {
+                    app.report(crate::i18n::workspace::ERR_LOOSE_FILE_NO_DELETE.get(), cx);
+                    return;
+                }
+                let Some(project) = app.projects.directory() else {
+                    return;
+                };
+                if Some(project.id.as_str()) != dragged.1.as_deref() {
+                    app.report(crate::i18n::workspace::ERR_SOURCE_PROJECT_CHANGED.get(), cx);
+                    return;
+                }
+                let root = PathBuf::from(&project.folder);
+                let paths: Vec<String> = dragged
+                    .0
+                    .iter()
+                    .filter_map(|path| {
+                        path.strip_prefix(&root)
+                            .ok()
+                            .map(|path| path.to_string_lossy().replace('\\', "/"))
+                    })
+                    .collect();
+                if paths.len() == dragged.0.len() {
+                    app.confirm_trash(paths, None, window, cx);
+                }
+            }))
+            .on_drop(cx.listener(|app, dragged: &crate::terminal::DraggedFolder, window, cx| {
+                if app.projects.directory().is_none_or(|project| project.id != dragged.1) {
+                    app.report(crate::i18n::workspace::ERR_SOURCE_PROJECT_CHANGED.get(), cx);
+                    return;
+                }
+                app.delete_folder(&dragged.0, window, cx);
+            }));
+
+        let prefs_btn = rail_btn("preferences", IconName::Settings, self.show_preferences, false)
+            .tooltip(|window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(
+                    crate::i18n::workspace::SETTINGS_LABEL.get(),
+                )
+                .build(window, cx)
+            })
+            .on_click(cx.listener(|app, _, window, cx| {
+                app.preferences
+                    .update(cx, |panel, cx| panel.sync(&app.settings, window, cx));
+                app.show_preferences = true;
+                cx.notify();
+            }));
+
+        div()
+            .id("activity-rail")
+            .w(px(super::RAIL_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_between()
+            .py_2()
+            .bg(rgb(BG))
+            .border_r_1()
+            .border_color(rgb(BORDER))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_1()
+                    .child(toggle_sidebar_btn)
+                    .child(default_space_btn)
+                    .child(loose_files_btn)
+                    .child(div().w(px(18.)).h(px(1.)).my_1p5().bg(rgb(BORDER)))
+                    .child(open_file_btn)
+                    .child(zen_btn),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_1()
+                    .child(trash_btn)
+                    .child(prefs_btn),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if !cx.has_active_drag() {
             self.tree.dragging_tree_item.store(false, Ordering::Relaxed);
@@ -1278,72 +1635,6 @@ impl Workspace {
         }
         let dragging_tree_item = cx.has_active_drag() && self.tree.dragging_tree_item.load(Ordering::Relaxed);
         let user_project = self.projects.active_id().is_some();
-        let projects = self.projects.registered().iter().map(|project| {
-            let id = project.id.clone();
-            let rename_id = id.clone();
-            let name = project.name.clone();
-            let root = PathBuf::from(&project.folder);
-            let app = cx.entity();
-            div()
-                .id(SharedString::from(format!("project-{}", project.id)))
-                .flex()
-                .items_center()
-                .gap_2()
-                .mx_2()
-                .px_2()
-                .h(px(32.))
-                .flex_shrink_0()
-                .rounded(px(4.))
-                .cursor_pointer()
-                .when(!self.trash.is_open() && Some(project.id.as_str()) == self.projects.active_id(), |row| {
-                    row.bg(rgb(0xe8e7e4))
-                })
-                .hover(|style| style.bg(rgb(0xefefed)))
-                .active(|style| style.bg(rgb(crate::ui::PRESSED_BG)))
-                .child(crate::ui::icon(IconName::Folder))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_ellipsis()
-                        .child(project.name.clone()),
-                )
-                .on_click(
-                    cx.listener(move |app, _, window, cx| { app.trash.dismiss(); app.switch_project(&id, window, cx); cx.notify(); }),
-                )
-                .context_menu(move |menu, _, _| {
-                    let root = root.clone();
-                    let name = name.clone();
-                    let id = rename_id.clone();
-                    let app = app.clone();
-                    let remove_app = app.clone();
-                    let remove_id = id.clone();
-                    menu.min_w(px(90.))
-                        .item(
-                            compact_menu_item(crate::i18n::workspace::MENU_REVEAL_IN_EXPLORER.get())
-                                .on_click(move |_, _, cx| reveal_path(&root, cx)),
-                        )
-                        .item(
-                            compact_menu_item(crate::i18n::workspace::MENU_RENAME_PROJECT.get()).on_click(move |_, window, cx| {
-                                app.update(cx, |app, cx| {
-                                    app.start_name(
-                                        NameAction::RenameProject(id.clone()),
-                                        &name,
-                                        window,
-                                        cx,
-                                    )
-                                })
-                            }),
-                        )
-                        .separator()
-                        .item(
-                            compact_menu_item(crate::i18n::workspace::MENU_REMOVE_PROJECT.get()).on_click(move |_, window, cx| {
-                                remove_app
-                                    .update(cx, |app, cx| app.remove_project(&remove_id, window, cx))
-                            }),
-                        )
-                })
-        });
         let query = if self.tree.searching {
             self.tree.search_input.read(cx).value().to_lowercase()
         } else {
@@ -2000,29 +2291,13 @@ impl Workspace {
                 }
             }
         }
-        let default_space = div()
-            .id("default-space")
-            .flex()
-            .items_center()
-            .gap_2()
-            .mx_2()
-            .px_2()
-            .h(px(32.))
-            .rounded(px(4.))
-            .cursor_pointer()
-            .when(!self.trash.is_open() && self.projects.is_default(), |row| row.bg(rgb(0xe8e7e4)))
-            .hover(|style| style.bg(rgb(0xefefed)))
-            .child(crate::ui::icon(IconName::NotebookPen))
-            .child(div().flex_1().child(crate::i18n::workspace::DEFAULT_SPACE.get()))
-            .child(crate::ui::control("default-new-markdown", IconName::Plus)
-                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(crate::i18n::workspace::TOOLTIP_NEW_MD_DEFAULT.get()).build(window, cx))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(|app, _, window, cx| {
-                    cx.stop_propagation();
-                    if let Err(error) = app.new_default_markdown(window, cx) { app.report(error, cx); }
-                })))
-            .on_click(cx.listener(|app, _, window, cx| { app.trash.dismiss(); app.switch_to_default(window, cx); cx.notify(); }));
-        let loose_count = if self.projects.directory().is_none() { self.documents.tabs().len() } else { self.projects.loose_tab_count() };
+        let space_title: SharedString = if let Some(name) = self.active_project_name() {
+            name.into()
+        } else if self.projects.is_default() {
+            crate::i18n::workspace::DEFAULT_SPACE.get().into()
+        } else {
+            crate::i18n::workspace::LOOSE_FILES.get().into()
+        };
         div()
             .w_full()
             .min_w_0()
@@ -2037,30 +2312,18 @@ impl Workspace {
             .text_size(px(self.settings.interface_font_size as f32))
             .border_r_1()
             .border_color(rgb(BORDER))
-            .child(div().pt_2().child(default_space))
-            .child(div().id("loose-files").flex().items_center().gap_2()
-                .mx_2().px_2().h(px(32.)).rounded(px(4.)).cursor_pointer()
-                .when(!self.trash.is_open() && self.projects.directory().is_none(), |row| row.bg(rgb(0xe8e7e4)))
-                .hover(|style| style.bg(rgb(0xefefed)))
-                .child(crate::ui::icon(IconName::Files))
-                .child(div().flex_1().child(crate::i18n::workspace::LOOSE_FILES.get()))
-                .when(loose_count > 0, |row| row.pr_1().child(div().text_xs().text_color(rgb(MUTED)).child(loose_count.to_string())))
-                .on_click(cx.listener(|app, _, window, cx| {
-                app.trash.dismiss();
-                if app.projects.directory().is_none() { return; }
-                if app.build.is_busy() || !app.confirm_drafts(cx, |app, window, cx| {
-                    if let Err(error) = app.select_loose_files(window, cx) { app.report(error, cx); }
-                }) { return; }
-                if let Err(error) = app.select_loose_files(window, cx) { app.report(error, cx); }
-            })))
-            .child(div().pt_5().pb_2().px_4().flex_shrink_0().text_xs().text_color(rgb(MUTED)).child(crate::i18n::workspace::PROJECTS_HEADER.get()))
-            .child(div().id("sidebar-projects-scroll").flex().flex_col().min_h_0().max_h(relative(0.35))
-                .overflow_y_scroll().children(projects))
-            .child(div().id("add-project").flex().flex_shrink_0().items_center().gap_2().mx_2().px_2().h(px(32.))
-                    .rounded(px(4.)).cursor_pointer().text_color(rgb(MUTED))
-                    .hover(|style| style.bg(rgb(0xefefed)))
-                    .child(crate::ui::icon(IconName::Plus)).child(crate::i18n::workspace::ADD_LOCAL_PROJECT.get())
-                .on_click(cx.listener(|app, _, window, cx| app.add_project(&OpenProject, window, cx))))
+            .child(
+                div()
+                    .px_4()
+                    .pt_3()
+                    .pb_1()
+                    .flex_shrink_0()
+                    .text_xs()
+                    .font_semibold()
+                    .text_color(rgb(0x37352f))
+                    .text_ellipsis()
+                    .child(space_title),
+            )
             .child(
                 div()
                     .flex()
@@ -2379,44 +2642,6 @@ impl Workspace {
                             .thumb_hover(|style| style.bg(rgb(0xbcbcb9)).width(px(6.)).inset(px(1.)).radius(px(4.)))
                             .thumb_active(|style| style.bg(rgb(0xa8a8a5)).width(px(6.)).inset(px(1.)).radius(px(4.)))),
                 )))
-            .child(div().mx_4().h(px(1.)).flex_shrink_0().bg(rgb(0xeae9e6)))
-            .child({
-                let bounds = self.tree.trash_bounds.clone();
-                div().id("trash-entry").relative().flex().flex_shrink_0().items_center().gap_2()
-                    .mx_2().my_2().px_2().h(px(32.)).rounded(px(4.)).cursor_pointer()
-                    .when(self.trash.is_open(), |row| row.bg(rgb(0xe8e7e4)))
-                    .when(dragging_tree_item, |row| row.bg(rgb(0xf0f4fa)))
-                    .drag_over::<crate::terminal::DraggedPaths>(|style, _, _, _| style.bg(rgb(0xdde9f6)))
-                    .drag_over::<crate::terminal::DraggedFolder>(|style, _, _, _| style.bg(rgb(0xdde9f6)))
-                    .child(crate::ui::icon(IconName::Trash))
-                    .child(crate::i18n::workspace::TRASH_LABEL.get())
-                    .child(canvas(move |area, _, _| { *bounds.lock().expect("trash bounds") = Some(area); }, |_, _, _, _| {}).absolute().size_full())
-                    .on_click(cx.listener(|app, _, _, cx| { app.open_trash(cx); }))
-                    .on_drop(cx.listener(|app, dragged: &crate::terminal::DraggedPaths, window, cx| {
-                        if dragged.1.is_none() { app.report(crate::i18n::workspace::ERR_LOOSE_FILE_NO_DELETE.get(), cx); return; }
-                        let Some(project) = app.projects.directory() else { return; };
-                        if Some(project.id.as_str()) != dragged.1.as_deref() { app.report(crate::i18n::workspace::ERR_SOURCE_PROJECT_CHANGED.get(), cx); return; }
-                        let root = PathBuf::from(&project.folder);
-                        let paths: Vec<String> = dragged.0.iter().filter_map(|path| path.strip_prefix(&root).ok().map(|path| path.to_string_lossy().replace('\\', "/"))).collect();
-                        if paths.len() == dragged.0.len() { app.confirm_trash(paths, None, window, cx); }
-                    }))
-                    .on_drop(cx.listener(|app, dragged: &crate::terminal::DraggedFolder, window, cx| {
-                        if app.projects.directory().is_none_or(|project| project.id != dragged.1) {
-                            app.report(crate::i18n::workspace::ERR_SOURCE_PROJECT_CHANGED.get(), cx);
-                            return;
-                        }
-                        app.delete_folder(&dragged.0, window, cx);
-                    }))
-            })
-            .child(div().id("preferences").flex().flex_shrink_0().items_center().gap_2()
-                .mx_2().mb_2().px_2().h(px(32.)).rounded(px(4.)).cursor_pointer()
-                .text_color(rgb(MUTED)).hover(|style| style.bg(rgb(0xefefed)))
-                .child(crate::ui::icon(IconName::Settings)).child(crate::i18n::workspace::SETTINGS_LABEL.get())
-                .on_click(cx.listener(|app, _, window, cx| {
-                    app.preferences.update(cx, |panel, cx| panel.sync(&app.settings, window, cx));
-                    app.show_preferences = true;
-                    cx.notify();
-                })))
             .into_any_element()
     }
 }

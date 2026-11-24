@@ -131,6 +131,7 @@ impl Workspace {
         if locale_changed {
             crate::i18n::apply_settings(settings);
             self.right_panel.refresh_locale(window, cx);
+            self.project_menu.refresh_locale(window, cx);
             self.tags.refresh_locale(window, cx);
             self.preferences.update(cx, |pane, cx| pane.refresh_locale(window, cx));
             self.ai.update(cx, |pane, cx| pane.refresh_locale(window, cx));

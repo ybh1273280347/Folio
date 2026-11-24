@@ -666,7 +666,12 @@ impl Workspace {
             } else {
                 0.0
             };
-            (f32::from(window.viewport_size().width) - sidebar).max(360.0)
+            let rail = if self.zen_mode {
+                0.0
+            } else {
+                crate::workspace::RAIL_WIDTH
+            };
+            (f32::from(window.viewport_size().width) - rail - sidebar).max(360.0)
         } else {
             self.settings.terminal.panel_width.clamp(280., 1600.)
         }

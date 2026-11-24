@@ -45,7 +45,6 @@ pub const ERR_TRASH_FILES_ONLY: BiText = BiText::new("只能将文件移入 Foli
 // Workspace UI & dialogs
 pub const DEFAULT_SPACE: BiText = BiText::new("默认空间", "Default Workspace");
 pub const LOOSE_FILES: BiText = BiText::new("独立文件", "Loose Files");
-pub const PROJECTS_HEADER: BiText = BiText::new("项目", "Projects");
 pub const ADD_LOCAL_PROJECT: BiText = BiText::new("添加本地项目", "Add Local Project");
 pub const FILES_HEADER: BiText = BiText::new("文件", "Files");
 pub const OPEN_FILE: BiText = BiText::new("打开文件", "Open File");
@@ -55,6 +54,13 @@ pub const SEARCH_HUB_PLACEHOLDER: BiText = BiText::new("搜索功能、命令或
 pub const BATCH_EDIT_TAGS_TOOLTIP: BiText = BiText::new("批量编辑标签（Alt+T）", "Batch edit tags (Alt+T)");
 pub const TRASH_LABEL: BiText = BiText::new("废纸篓", "Trash");
 pub const SETTINGS_LABEL: BiText = BiText::new("设置", "Settings");
+pub const TOOLTIP_PROJECT_SWITCHER: BiText = BiText::new("切换或管理项目", "Switch or manage projects");
+pub const SEARCH_PROJECTS_PLACEHOLDER: BiText = BiText::new("搜索项目…", "Search projects…");
+pub const NO_MATCHING_PROJECTS: BiText = BiText::new("没有匹配的项目", "No matching projects");
+pub const NO_PROJECTS_YET: BiText = BiText::new("暂无本地项目", "No local projects yet");
+pub const TOOLTIP_TOGGLE_SIDEBAR_OPEN: BiText = BiText::new("展开文件树", "Show file tree");
+pub const TOOLTIP_TOGGLE_SIDEBAR_CLOSE: BiText = BiText::new("收起文件树", "Hide file tree");
+pub const MENU_NEW_DEFAULT_MD: BiText = BiText::new("新建 Markdown", "New Markdown");
 pub const EXPORT_BTN: BiText = BiText::new("导出", "Export");
 pub const NO_MATCHING_FILES: BiText = BiText::new("没有匹配的文件", "No matching files");
 
@@ -335,7 +341,6 @@ pub const MENU_SET_MAIN_FILE: BiText = BiText::new("设为编译主文件", "Set
 pub const MENU_DELETE: BiText = BiText::new("删除…", "Delete…");
 
 // Sidebar & editor area
-pub const TOOLTIP_NEW_MD_DEFAULT: BiText = BiText::new("在默认空间新建 Markdown", "New Markdown in Default Workspace");
 pub const TOOLTIP_COLLAPSE_OUTLINE: BiText = BiText::new("收起文档大纲", "Collapse outline");
 pub const TOOLTIP_EXPAND_OUTLINE: BiText = BiText::new("展开文档大纲", "Expand outline");
 pub const TOOLTIP_CLOSE_TAB: BiText = BiText::new("关闭标签", "Close tab");

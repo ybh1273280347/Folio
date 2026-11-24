@@ -14,7 +14,7 @@ use dialogs::{Dialog, DialogButtons, Dialogs};
 use documents::Documents;
 use file_tree::FileTree;
 use panels::{RightPanel, RightPanelView};
-use projects::Projects;
+use projects::{ProjectMenu, Projects};
 use trash::TrashView;
 use crate::ai::{AiPane, AiPaneEvent};
 use gpui_kit::component::Sizable;
@@ -76,6 +76,7 @@ actions!(
 const BG: u32 = 0xf7f6f5;
 const BORDER: u32 = 0xe8e7e3;
 const MUTED: u32 = 0x787774;
+pub(super) const RAIL_WIDTH: f32 = 40.0;
 
 #[derive(Clone)]
 struct SidebarResizeDrag;
@@ -215,6 +216,7 @@ pub struct Workspace {
     tool_requests: tools::ToolRequests,
     rag_sync: tools::RagSyncState,
     projects: Projects,
+    project_menu: ProjectMenu,
     settings: AppSettings,
     backdrop: appearance::Backdrop,
     preferences: Entity<Preferences>,
@@ -286,6 +288,7 @@ impl Workspace {
         .detach();
         let tree = FileTree::new(window, cx);
         let trash = TrashView::new(window, cx);
+        let project_menu = ProjectMenu::new(window, cx);
         let right_panel = RightPanel::new(window, cx);
         let tags = tags::TagPanel::new(window, cx);
         let entity = cx.entity();
@@ -315,6 +318,11 @@ impl Workspace {
                 let key = event.keystroke.key.as_str();
                 if matches!(key, "escape" | "up" | "down") {
                     let _ = this.update(cx, |app, cx| {
+                        if key == "escape" && app.is_project_menu_open() {
+                            app.close_project_menu(cx);
+                            cx.stop_propagation();
+                            return;
+                        }
                         if key == "escape" && app.tags.is_editing() {
                             app.close_tag_panel(window, cx);
                             cx.stop_propagation();
@@ -334,6 +342,7 @@ impl Workspace {
             tool_requests: tools::ToolRequests::default(),
             rag_sync: tools::RagSyncState::default(),
             projects,
+            project_menu,
             settings,
             backdrop: appearance::Backdrop::default(),
             preferences,
@@ -418,6 +427,7 @@ impl Workspace {
             };
             self.zen_snapshot = Some(snapshot);
             self.zen_mode = true;
+            self.close_project_menu(cx);
             self.trash.dismiss();
             self.settings.sidebar_open = false;
             if self.right_panel.open {
@@ -611,6 +621,7 @@ impl Render for Workspace {
             .collect();
         let trash_open = self.trash.is_open();
         let modal_open = trash_open || self.show_preferences
+            || self.is_project_menu_open()
             || self.tags.is_editing()
             || self.tree.name_dialog_open()
             || self.dialogs.blocks_workspace();
@@ -681,8 +692,9 @@ impl Render for Workspace {
         } else {
             0.0
         };
+        let rail_w = if self.zen_mode { 0.0 } else { RAIL_WIDTH };
         let area_width =
-            (f32::from(window.viewport_size().width) - right_now_w - sidebar_now_w - log_w - 16.)
+            (f32::from(window.viewport_size().width) - rail_w - right_now_w - sidebar_now_w - log_w - 16.)
                 .max(200.0);
         let mut work_area = h_resizable("work-area")
             .on_resize(move |state, _, cx| {
@@ -897,6 +909,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::find_file))
             .on_action(cx.listener(|app, _: &Dismiss, _, cx| {
                 app.show_preferences = false;
+                app.close_project_menu(cx);
                 app.documents.clear_pending_canvas_insert();
                 app.tree.dismiss_overlays();
                 cx.notify();
@@ -916,51 +929,215 @@ impl Render for Workspace {
                 app.toggle_sidebar(cx);
             }))
             .when(!self.zen_mode, |app| {
+                let palette = self.settings.theme.palette;
+                let project_menu_open = self.project_menu.open;
+                let viewport_w = f32::from(window.viewport_size().width);
+                let max_pills = if viewport_w >= 1150.0 {
+                    4
+                } else if viewport_w >= 880.0 {
+                    3
+                } else if viewport_w >= 660.0 {
+                    2
+                } else {
+                    1
+                };
+                let mut recent_projects: Vec<Project> = self
+                    .projects
+                    .recent_projects(max_pills)
+                    .into_iter()
+                    .cloned()
+                    .collect();
+                if let Some(active_id) = self.projects.active_id()
+                    && !recent_projects.iter().any(|p| p.id == active_id)
+                    && let Some(active) = self
+                        .projects
+                        .registered()
+                        .iter()
+                        .find(|p| p.id == active_id)
+                        .cloned()
+                {
+                    if recent_projects.len() >= max_pills && !recent_projects.is_empty() {
+                        recent_projects.pop();
+                    }
+                    recent_projects.push(active);
+                }
+                let active_project_id = if trash_open {
+                    None
+                } else {
+                    self.projects.active_id().map(str::to_owned)
+                };
+                let hover_bg = gpui_kit::rgb(palette.hover);
+                let pill_tray_bg = if palette.is_dark() {
+                    gpui_kit::rgb(palette.surface)
+                } else {
+                    rgb(0xefeeec)
+                };
+                let pill_active_bg = gpui_kit::rgb(palette.surface);
+                let pill_text = gpui_kit::rgb(palette.text);
+                let pill_muted = gpui_kit::rgb(palette.muted);
+                let preview_open = self.build.panels.preview;
+                let logs_open = self.build.panels.logs;
+                let build_failed = self.build.failed();
+
+                let project_pills_area = if recent_projects.is_empty() {
+                    div()
+                        .id("top-add-project")
+                        .h(px(26.))
+                        .px_2p5()
+                        .rounded(px(6.))
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .cursor_pointer()
+                        .text_xs()
+                        .text_color(pill_muted)
+                        .hover(move |s| s.bg(hover_bg).text_color(pill_text))
+                        .on_click(cx.listener(|app, _, window, cx| {
+                            app.add_project(&OpenProject, window, cx);
+                        }))
+                        .child(crate::ui::icon(IconName::Plus).size(px(12.)))
+                        .child(crate::i18n::workspace::ADD_LOCAL_PROJECT.get())
+                        .into_any_element()
+                } else {
+                    let app_entity = cx.entity();
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(2.))
+                        .p(px(2.))
+                        .rounded(px(7.))
+                        .bg(pill_tray_bg)
+                        .border_1()
+                        .border_color(gpui_kit::rgb(palette.border))
+                        .children(recent_projects.into_iter().map(|project| {
+                            let id = project.id.clone();
+                            let rename_id = id.clone();
+                            let remove_id = id.clone();
+                            let name = project.name.clone();
+                            let rename_name = name.clone();
+                            let root = PathBuf::from(&project.folder);
+                            let app = app_entity.clone();
+                            let is_active = active_project_id.as_deref() == Some(id.as_str());
+                            div()
+                                .id(SharedString::from(format!("top-project-{id}")))
+                                .h(px(24.))
+                                .px(px(10.))
+                                .max_w(px(148.))
+                                .rounded(px(5.))
+                                .flex()
+                                .items_center()
+                                .cursor_pointer()
+                                .text_xs()
+                                .text_ellipsis()
+                                .when(is_active, |pill| {
+                                    pill.bg(pill_active_bg)
+                                        .font_medium()
+                                        .text_color(pill_text)
+                                        .shadow_xs()
+                                })
+                                .when(!is_active, |pill| {
+                                    pill.text_color(pill_muted)
+                                        .hover(move |s| s.bg(hover_bg).text_color(pill_text))
+                                })
+                                .child(name)
+                                .on_click(cx.listener(move |app, _, window, cx| {
+                                    app.close_project_menu(cx);
+                                    app.trash.dismiss();
+                                    app.switch_project(&id, window, cx);
+                                }))
+                                .context_menu(move |menu, _, _| {
+                                    let root = root.clone();
+                                    let name = rename_name.clone();
+                                    let id = rename_id.clone();
+                                    let app = app.clone();
+                                    let remove_app = app.clone();
+                                    let remove_id = remove_id.clone();
+                                    menu.min_w(px(90.))
+                                        .item(
+                                            compact_menu_item(
+                                                crate::i18n::workspace::MENU_REVEAL_IN_EXPLORER
+                                                    .get(),
+                                            )
+                                            .on_click(move |_, _, cx| reveal_path(&root, cx)),
+                                        )
+                                        .item(
+                                            compact_menu_item(
+                                                crate::i18n::workspace::MENU_RENAME_PROJECT.get(),
+                                            )
+                                            .on_click(move |_, window, cx| {
+                                                app.update(cx, |app, cx| {
+                                                    app.start_rename_project(
+                                                        id.clone(),
+                                                        &name,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                });
+                                            }),
+                                        )
+                                        .separator()
+                                        .item(
+                                            compact_menu_item(
+                                                crate::i18n::workspace::MENU_REMOVE_PROJECT.get(),
+                                            )
+                                            .on_click(move |_, window, cx| {
+                                                remove_app.update(cx, |app, cx| {
+                                                    app.remove_project(&remove_id, window, cx)
+                                                });
+                                            }),
+                                        )
+                                })
+                        }))
+                        .into_any_element()
+                };
+
                 app.child(
                     div()
                         .flex()
                         .h(px(38.))
                     .flex_shrink_0()
                     .items_center()
-                    .pl_4()
+                    .pl_0()
                     .gap_2()
                     .bg(rgb(BG))
                     .border_b_1()
                     .border_color(rgb(BORDER))
                     .child(
                         div()
+                            .id("project-menu-trigger")
+                            .w(px(RAIL_WIDTH))
+                            .h_full()
+                            .flex_shrink_0()
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .flex_shrink_0()
-                            .w(px(170.))
+                            .justify_center()
+                            .cursor_pointer()
+                            .when(project_menu_open, |btn| btn.bg(gpui_kit::rgb(palette.selection)))
+                            .hover(move |s| s.bg(hover_bg))
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(
+                                    crate::i18n::workspace::TOOLTIP_PROJECT_SWITCHER.get(),
+                                )
+                                .build(window, cx)
+                            })
+                            .on_click(cx.listener(|app, _, window, cx| {
+                                app.toggle_project_menu(window, cx);
+                            }))
                             .child(
                                 div()
                                     .font_family("Georgia")
                                     .italic()
-                                    .text_size(px(24.))
+                                    .text_size(px(21.))
+                                    .line_height(relative(1.))
                                     .child("ƒ"),
-                            )
-                            .child(div().font_semibold().child("Folio")),
+                            ),
                     )
-                    .child(
-                        crate::ui::control(
-                            "toggle-sidebar",
-                            if sidebar_visible {
-                                IconName::PanelLeftClose
-                            } else {
-                                IconName::PanelLeftOpen
-                            },
-                        )
-                        .on_click(cx.listener(|app, _, _, cx| {
-                            app.toggle_sidebar(cx);
-                        })),
-                    )
+                    .child(project_pills_area)
                     .child(
                         div()
                             .id("window-drag")
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(48.))
                             .h_full()
                             .flex()
                             .items_center()
@@ -1065,6 +1242,79 @@ impl Render for Workspace {
                             }),
                     )
                     .child(
+                        crate::ui::control("top-toggle-preview", IconName::Columns2)
+                            .when(preview_open, |c| {
+                                c.bg(if palette.is_dark() {
+                                    gpui_kit::rgb(palette.hover)
+                                } else {
+                                    rgb(0xe8e7e4)
+                                })
+                                .text_color(gpui_kit::rgb(palette.text))
+                            })
+                            .tooltip(move |window, cx| {
+                                let label = if preview_open {
+                                    format!(
+                                        "{} ({})",
+                                        crate::i18n::right_panel::ACTION_PDF_PREVIEW.get(),
+                                        crate::i18n::right_panel::BADGE_OPENED.get()
+                                    )
+                                } else {
+                                    crate::i18n::right_panel::ACTION_PDF_PREVIEW.get().to_owned()
+                                };
+                                gpui_kit::component::tooltip::Tooltip::new(label).build(window, cx)
+                            })
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.build.panels.preview = !app.build.panels.preview;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        crate::ui::control("top-toggle-logs", IconName::ListTree)
+                            .relative()
+                            .when(logs_open, |c| {
+                                c.bg(if palette.is_dark() {
+                                    gpui_kit::rgb(palette.hover)
+                                } else {
+                                    rgb(0xe8e7e4)
+                                })
+                                .text_color(gpui_kit::rgb(palette.text))
+                            })
+                            .when(build_failed && !logs_open, |c| {
+                                c.text_color(gpui_kit::rgb(palette.danger)).child(
+                                    div()
+                                        .absolute()
+                                        .top(px(4.))
+                                        .right(px(4.))
+                                        .size(px(6.))
+                                        .rounded_full()
+                                        .bg(gpui_kit::rgb(palette.danger)),
+                                )
+                            })
+                            .tooltip(move |window, cx| {
+                                let label = if logs_open {
+                                    format!(
+                                        "{} ({})",
+                                        crate::i18n::right_panel::ACTION_BUILD_LOGS.get(),
+                                        crate::i18n::right_panel::BADGE_EXPANDED.get()
+                                    )
+                                } else if build_failed {
+                                    format!(
+                                        "{} ({})",
+                                        crate::i18n::right_panel::ACTION_BUILD_LOGS.get(),
+                                        crate::i18n::right_panel::BADGE_BUILD_FAILED.get()
+                                    )
+                                } else {
+                                    crate::i18n::right_panel::ACTION_BUILD_LOGS.get().to_owned()
+                                };
+                                gpui_kit::component::tooltip::Tooltip::new(label).build(window, cx)
+                            })
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.build.panels.logs = !app.build.panels.logs;
+                                cx.notify();
+                            })),
+                    )
+                    .child(div().w(px(1.)).h(px(14.)).mx_0p5().bg(rgb(BORDER)))
+                    .child(
                         crate::ui::control("toggle-right-panel", IconName::PanelRightOpen)
                             .when(right_panel_visible, |c| {
                                 let palette = self.settings.theme.palette;
@@ -1151,6 +1401,9 @@ impl Render for Workspace {
                                 }
                             },
                         ))
+                        .when(!self.zen_mode, |row| {
+                            row.child(self.render_activity_rail(window, cx))
+                        })
                         .when(sidebar_rendered, |row| {
                             row.child(
                                 div()
@@ -1338,7 +1591,8 @@ impl Render for Workspace {
                 .with_priority(10),
             );
         }
-        app.children(self.render_dialog(cx))
+        app.children(self.render_project_menu_popover(cx))
+            .children(self.render_dialog(cx))
             .children(self.render_canvas_target_picker(cx))
     }
 }
