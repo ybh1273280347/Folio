@@ -112,6 +112,7 @@ pub fn sync_project(
                 return Err(RagError::new("io_error", format!("读取文件失败 ({rel_path}): {err}")));
             }
         };
+        check_cancelled(cancelled)?;
         live_set.insert(rel_path.clone());
         let content_hash = sha256_hex(&bytes);
         if kind == "md"

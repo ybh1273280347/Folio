@@ -342,6 +342,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_in_flight_sync();
         let mut index = 0;
         while let Some(id) = ids.get(index).cloned() {
             let Some(entry) = self
@@ -440,6 +441,12 @@ impl Workspace {
         if let Err(error) = self.refresh_files(window, cx) {
             self.report(error, cx);
         }
+        if self.kb_enabled() {
+            self.refresh_kb_snapshot(cx);
+            if !self.right_panel.kb.last_query.is_empty() {
+                self.submit_kb_search(cx);
+            }
+        }
         cx.notify();
     }
 
@@ -464,6 +471,7 @@ impl Workspace {
         {
             return;
         }
+        self.cancel_in_flight_sync();
         for id in ids {
             if let Some(entry) = self
                 .trash

@@ -961,6 +961,7 @@ impl Workspace {
         }
         let project = self.projects.directory().expect("files have a project").clone();
         let root = Path::new(&project.folder);
+        self.cancel_in_flight_sync();
         let mut deleted = Vec::new();
         let mut failed = false;
         let batch = uuid::Uuid::new_v4().to_string();
@@ -1021,6 +1022,9 @@ impl Workspace {
         }
         if let Err(error) = self.refresh_files(window, cx) {
             self.report(error, cx);
+        }
+        if self.kb_enabled() {
+            self.refresh_kb_snapshot(cx);
         }
         if let Err(error) = self.remember_session() {
             self.report(error, cx);
