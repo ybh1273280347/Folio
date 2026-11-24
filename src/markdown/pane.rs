@@ -1706,7 +1706,7 @@ impl MarkdownPane {
     }
 
     fn scroll_slash_item_into_view(&self, index: usize) {
-        let item_h = 41.0;
+        let item_h = 38.0;
         let viewport_h = 320.0;
         let top_y = index as f32 * item_h;
         let bottom_y = top_y + item_h;
@@ -3284,12 +3284,13 @@ impl MarkdownPane {
         let caret = self.visual_editor.read(cx).caret_window_bounds()?;
         let active_ix = self.slash_index.min(items.len().saturating_sub(1));
 
-        let menu_w = px(300.);
+        let menu_w = px(288.);
         let rel_x = (caret.origin.x - pane_origin.x)
             .max(px(16.))
             .min((pane_size.width - menu_w - px(16.)).max(px(16.)));
         let below_y = caret.bottom() - pane_origin.y + px(6.);
-        let menu_h = px((items.len().min(8) as f32) * 40. + 48.);
+        let header_h = if query.is_empty() { 12. } else { 42. };
+        let menu_h = px((items.len().min(8) as f32) * 38. + header_h);
         let rel_y = if below_y + menu_h > pane_size.height && caret.origin.y - pane_origin.y > menu_h
         {
             caret.origin.y - pane_origin.y - menu_h - px(6.)
@@ -3305,17 +3306,17 @@ impl MarkdownPane {
                 .flex()
                 .items_center()
                 .justify_between()
-                .px_2()
-                .h(px(40.))
-                .rounded(px(6.))
+                .px_2p5()
+                .h(px(36.))
+                .rounded(px(8.))
                 .cursor_pointer()
                 .when(selected, |s| {
-                    s.bg(rgb(0xefefed))
-                        .active(|a| a.bg(rgb(crate::ui::PRESSED_BG)))
+                    s.bg(rgb(0xf2f2f0))
+                        .active(|a| a.bg(rgb(0xeae9e6)))
                 })
                 .when(!selected, |s| {
-                    s.hover(|h| h.bg(rgb(0xf7f6f4)))
-                        .active(|a| a.bg(rgb(crate::ui::PRESSED_BG)))
+                    s.hover(|h| h.bg(rgb(0xf7f7f5)))
+                        .active(|a| a.bg(rgb(0xeae9e6)))
                 })
                 .child(
                     div()
@@ -3324,25 +3325,27 @@ impl MarkdownPane {
                         .gap_2p5()
                         .child(
                             div()
-                                .w(px(28.))
-                                .h(px(28.))
-                                .rounded(px(5.))
-                                .bg(rgb(0xffffff))
-                                .border_1()
-                                .border_color(if selected {
-                                    rgb(0xd3d1cb)
-                                } else {
-                                    rgb(0xe8e7e3)
-                                })
+                                .w(px(20.))
+                                .h(px(20.))
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .text_color(rgb(0x37352f))
-                                .child(if cmd.id.starts_with("emoji:") {
-                                    div().font_family("Segoe UI Emoji").text_size(px(20.))
-                                        .child(cmd.hint).into_any_element()
+                                .text_color(if selected {
+                                    rgb(0x37352f)
                                 } else {
-                                    crate::ui::icon(cmd.icon).w(px(15.)).h(px(15.)).into_any_element()
+                                    rgb(0x5c5b57)
+                                })
+                                .child(if cmd.id.starts_with("emoji:") {
+                                    div()
+                                        .font_family("Segoe UI Emoji")
+                                        .text_size(px(16.))
+                                        .child(cmd.hint)
+                                        .into_any_element()
+                                } else {
+                                    crate::ui::icon(cmd.icon)
+                                        .w(px(15.))
+                                        .h(px(15.))
+                                        .into_any_element()
                                 }),
                         )
                         .child(
@@ -3356,20 +3359,22 @@ impl MarkdownPane {
                     div()
                         .text_size(px(11.))
                         .font_family("Consolas")
-                        .px_1p5()
+                        .min_w(px(24.))
+                        .px_2()
                         .py_0p5()
-                        .rounded(px(4.))
-                        .bg(rgb(0xf7f6f3))
-                        .border_1()
-                        .border_color(if selected {
-                            rgb(0xd3d1cb)
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(if selected {
+                            rgb(0xe6e6e3)
                         } else {
-                            rgb(0xe8e7e3)
+                            rgb(0xf5f5f4)
                         })
                         .text_color(if selected {
-                            rgb(0x37352f)
+                            rgb(0x8c8b87)
                         } else {
-                            rgb(0x787774)
+                            rgb(0xa8a7a3)
                         })
                         .child(cmd.id.strip_prefix("emoji:").unwrap_or(cmd.hint)),
                 )
@@ -3381,14 +3386,14 @@ impl MarkdownPane {
 
         let header_label = if let Some(query) = query.strip_prefix(':') {
             if query.is_empty() {
-                crate::i18n::markdown::EMOJI_HEADER_EMPTY.get().to_owned()
+                Some(crate::i18n::markdown::EMOJI_HEADER_EMPTY.get().to_owned())
             } else {
-                crate::i18n::markdown::emoji_header_query(query)
+                Some(crate::i18n::markdown::emoji_header_query(query))
             }
         } else if query.is_empty() {
-            crate::i18n::markdown::SLASH_HEADER_EMPTY.get().to_owned()
+            None
         } else {
-            crate::i18n::markdown::slash_header_query(&query)
+            Some(crate::i18n::markdown::slash_header_query(&query))
         };
 
         Some(
@@ -3400,26 +3405,28 @@ impl MarkdownPane {
                     .top(rel_y)
                     .w(menu_w)
                     .p_1p5()
-                    .rounded(px(10.))
+                    .rounded(px(12.))
                     .bg(rgb(0xffffff))
                     .border_1()
-                    .border_color(rgb(0xe8e7e3))
+                    .border_color(rgb(0xeae9e5))
                     .shadow_lg()
                     .flex()
                     .flex_col()
                     .gap_1()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
-                        div()
-                            .px_2p5()
-                            .pt_1()
-                            .pb_1p5()
-                            .border_b_1()
-                            .border_color(rgb(0xf1f0eb))
-                            .text_size(px(11.))
-                            .text_color(rgb(0x787774))
-                            .child(header_label),
-                    )
+                    .when_some(header_label, |el, label| {
+                        el.child(
+                            div()
+                                .px_2p5()
+                                .pt_1()
+                                .pb_1p5()
+                                .border_b_1()
+                                .border_color(rgb(0xf1f0eb))
+                                .text_size(px(11.))
+                                .text_color(rgb(0x9b9a97))
+                                .child(label),
+                        )
+                    })
                     .child(
                         div()
                             .id("slash-menu-items")

@@ -67,7 +67,6 @@ pub fn emoji_header_query(query: &str) -> String {
         Locale::En => format!("Emoji: {query} (↑↓ select · Enter)"),
     }
 }
-pub const SLASH_HEADER_EMPTY: BiText = BiText::new("基础与排版块 (↑↓选择 · Enter确认)", "Blocks (↑↓ select · Enter)");
 pub fn slash_header_query(query: &str) -> String {
     match locale() {
         Locale::ZhCn => format!("过滤: /{query}"),
