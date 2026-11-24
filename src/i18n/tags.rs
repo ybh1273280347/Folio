@@ -62,6 +62,13 @@ pub fn dialog_delete_tag_title(name: &str) -> String {
 pub const DIALOG_DELETE_TAG_BODY: BiText = BiText::new("此标签会从所有关联文件上移除。", "This tag will be removed from all associated files.");
 pub const DIALOG_DELETE_TAG_CONFIRM: BiText = BiText::new("删除标签", "Delete Tag");
 
+pub fn dialog_agent_delete_tag_body(name: &str, affected: usize) -> String {
+    match locale() {
+        Locale::ZhCn => format!("「{name}」会从全部 {affected} 个关联文件上移除，删除后无法撤销。"),
+        Locale::En => format!("This permanently removes \"{name}\" from all {affected} associated files."),
+    }
+}
+
 pub const TAGS_TITLE: BiText = BiText::new("标签", "Tags");
 pub fn filter_tag(name: &str) -> String {
     match locale() {

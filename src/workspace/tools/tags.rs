@@ -93,9 +93,14 @@ impl Workspace {
             Request::Discard(_) => unreachable!("discard can run without an active project"),
         };
         let proposal = store.agent_preview(self.tree.files(), edit)?;
-        let Some(confirmation) = proposal.confirmation() else {
+        let mut result = json!({ "status": "ok" });
+        if let Some(prompt) = proposal.delete_prompt() {
+            result["delete_prompt"] = prompt;
+        } else if let Some(confirmation) = proposal.confirmation() {
+            result["confirmation"] = json!(confirmation);
+        } else {
             return Ok(Some(json!({ "status": "ok", "updated": 0 })));
-        };
+        }
         self.tool_requests.tag_proposals.insert(
             owner(id),
             PendingTagEdit {
@@ -103,9 +108,7 @@ impl Workspace {
                 edit: proposal,
             },
         );
-        Ok(Some(
-            json!({ "status": "ok", "confirmation": confirmation }),
-        ))
+        Ok(Some(result))
     }
 
     pub(in crate::workspace) fn undo_tag_confirmations(

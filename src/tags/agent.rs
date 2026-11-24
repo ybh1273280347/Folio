@@ -124,6 +124,7 @@ struct RequestedColor {
 pub enum DefinitionEdit {
     Rename { tag: String, new_name: String },
     SetColor { tag: String, color: Color },
+    Delete { tag: String },
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -167,6 +168,7 @@ enum Plan {
 enum DefinitionChange {
     Name(String),
     Color(Color),
+    Delete,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -327,6 +329,23 @@ impl TagConfirmation {
 }
 
 impl Proposal {
+    /// Global deletion also removes associations outside the live tree, so it
+    /// uses the same explicit confirmation as the sidebar instead of an undo receipt.
+    pub(crate) fn delete_prompt(&self) -> Option<Value> {
+        let Plan::Definition {
+            tag,
+            change: DefinitionChange::Delete,
+            members,
+        } = &self.plan
+        else {
+            return None;
+        };
+        Some(json!({
+            "title": crate::i18n::tags::DIALOG_DELETE_TAG_CONFIRM.get(),
+            "message": crate::i18n::tags::dialog_agent_delete_tag_body(&tag.name, members.len()),
+        }))
+    }
+
     pub fn confirmation(&self) -> Option<TagConfirmation> {
         match &self.plan {
             Plan::Files { files, colors } => {
@@ -801,9 +820,10 @@ impl Store {
                     DefinitionEdit::SetColor { tag, color } => {
                         (tag, DefinitionChange::Color(*color))
                     }
+                    DefinitionEdit::Delete { tag } => (tag, DefinitionChange::Delete),
                 };
                 let tag = tag_named(&data, name)?.clone();
-                // Renaming a definition affects references in the trash and in
+                // Editing a definition affects references in the trash and in
                 // missing-file records as well as references in the live tree.
                 let members =
                     tag_members(db.expect("tag definitions come from the database"), &tag.id)?;
@@ -895,15 +915,21 @@ impl Store {
                 change,
                 members,
             } => {
+                let deleted = matches!(change, DefinitionChange::Delete);
                 let change = match change {
                     DefinitionChange::Name(name) => Change::Rename { tag: &tag.id, name },
                     DefinitionChange::Color(color) => Change::Color {
                         tag: &tag.id,
                         color: *color as u8,
                     },
+                    DefinitionChange::Delete => Change::Delete(&tag.id),
                 };
                 self.apply_change(db, change)?;
-                Ok(json!({ "status": "ok", "definition_changed": true, "updated": members.len() }))
+                let mut result = json!({ "status": "ok", "definition_changed": true, "updated": members.len() });
+                if deleted {
+                    result["deleted_tag"] = json!(tag.name);
+                }
+                Ok(result)
             }
         }
     }
@@ -1382,5 +1408,58 @@ mod tests {
         assert_eq!(tag_named(&current, "待回顾").unwrap().id, *tag);
         assert!(current.has("a.md", tag));
         assert!(current.has("b.pdf", tag));
+    }
+
+    #[test]
+    fn delete_checks_confirmed_members_and_clears_tags_from_live_and_trashed_files() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("live.md"), "live").unwrap();
+        fs::write(root.path().join("trashed.md"), "trashed").unwrap();
+        let store = Store::project(root.path());
+        let data = store
+            .change(Change::Create {
+                name: "Review",
+                paths: &["live.md".into()],
+            })
+            .unwrap();
+        let tag = &data.tags[0].id;
+        store
+            .change(Change::Create {
+                name: "Keep",
+                paths: &["trashed.md".into()],
+            })
+            .unwrap();
+        let edit = || {
+            Edit::Definition(
+                serde_json::from_value(json!({ "operation": "delete", "tag": "review" })).unwrap(),
+            )
+        };
+        let preview = store.agent_preview(&[], edit()).unwrap();
+        store
+            .change(Change::Assign {
+                tag,
+                paths: &["trashed.md".into()],
+                add: true,
+            })
+            .unwrap();
+        let trashed_id = store.tracked_id("trashed.md").unwrap().unwrap();
+        store.trash_file(&trashed_id, "trash-item", || Ok(())).unwrap();
+        assert_eq!(
+            store.agent_commit(&[], preview).unwrap_err().code,
+            "stale_preview"
+        );
+
+        let preview = store.agent_preview(&[], edit()).unwrap();
+        let (current, result) = store.agent_commit(&[], preview).unwrap();
+        assert_eq!(result["deleted_tag"], "Review");
+        assert_eq!(result["updated"], 2);
+        assert!(!current.has("live.md", tag));
+        assert_eq!(current.tags.len(), 1);
+        assert!(root.path().join("live.md").is_file());
+
+        store.restore_file(&trashed_id, "trashed.md").unwrap();
+        let restored = store.snapshot().unwrap();
+        assert!(!restored.has("trashed.md", tag));
+        assert!(restored.has("trashed.md", &restored.tags[0].id));
     }
 }
