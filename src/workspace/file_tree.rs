@@ -64,6 +64,7 @@ pub(super) struct FileTree {
     searching: bool,
     search_input: Entity<InputState>,
     collapsed_folders: BTreeSet<String>,
+    tag_collapsed_folders: BTreeSet<String>,
     folder_folds: BTreeMap<String, FolderFold>,
     dragged_folder: Rc<RefCell<Option<String>>>,
     drop_hover: Rc<RefCell<Option<TreeDropHover>>>,
@@ -104,6 +105,7 @@ impl FileTree {
             searching: false,
             search_input,
             collapsed_folders: BTreeSet::new(),
+            tag_collapsed_folders: BTreeSet::new(),
             folder_folds: BTreeMap::new(),
             dragged_folder: Rc::default(),
             drop_hover: Rc::default(),
@@ -187,6 +189,7 @@ impl FileTree {
         self.files.clear();
         self.folders.clear();
         self.collapsed_folders.clear();
+        self.tag_collapsed_folders.clear();
         self.folder_folds.clear();
         self.folder_landing = None;
         self.reset_selection();
@@ -194,6 +197,7 @@ impl FileTree {
 
     pub(super) fn restore_collapsed_folders(&mut self, saved: Option<BTreeSet<String>>) {
         self.collapsed_folders = saved.unwrap_or_else(|| self.folders.iter().cloned().collect());
+        self.tag_collapsed_folders.clear();
         self.folder_folds.clear();
         self.folder_landing = None;
     }
@@ -273,6 +277,8 @@ impl Workspace {
     pub(super) fn apply_tree_filter(&mut self, cx: &App) {
         self.tree.tree_drag = None;
         self.tree.focused_folder = None;
+        self.tree.tag_collapsed_folders.clear();
+        self.tree.folder_folds.clear();
         self.prune_tag_selection(cx);
     }
 
@@ -1617,7 +1623,7 @@ impl Workspace {
         let mut folds = BTreeMap::new();
         self.tree.folder_folds.retain(|path, fold| {
             let (progress, moving) = fold.sample(now);
-            let moving = moving && !self.tree.searching && self.tags.filter.is_none() && !cx.reduce_motion();
+            let moving = moving && !self.tree.searching && !cx.reduce_motion();
             if moving {
                 folds.insert(path.clone(), (progress, fold.opening));
             }
@@ -1716,15 +1722,20 @@ impl Workspace {
             key
         });
         self.tree.tree_row_bounds.lock().expect("tree bounds").clear();
+        let active_collapsed = if self.tags.filter.is_some() {
+            &self.tree.tag_collapsed_folders
+        } else {
+            &self.tree.collapsed_folders
+        };
         let mut rows = entries
             .into_iter()
             .filter(|(path, _)| {
-                !query.is_empty() || self.tags.filter.is_some()
+                !query.is_empty()
                     || !path
                         .match_indices('/')
                         .any(|(index, _)| {
                             let ancestor = &path[..index];
-                            self.tree.collapsed_folders.contains(ancestor) && !folds.contains_key(ancestor)
+                            active_collapsed.contains(ancestor) && !folds.contains_key(ancestor)
                         })
             })
             .peekable();
@@ -1864,12 +1875,12 @@ impl Workspace {
                             |row, (_, strength)| row.child(div().absolute().inset_0()
                                 .bg(gpui_kit::rgb(drag_palette.accent).opacity(0.24 * strength))),
                         )
-                        .child(crate::ui::icon(if self.tags.filter.is_none() && self.tree.collapsed_folders.contains(path) {
+                        .child(crate::ui::icon(if active_collapsed.contains(path) {
                             IconName::ChevronRight
                         } else {
                             IconName::ChevronDown
                         }))
-                        .child(crate::ui::icon(if self.tags.filter.is_none() && self.tree.collapsed_folders.contains(path) {
+                        .child(crate::ui::icon(if active_collapsed.contains(path) {
                             IconName::Folder
                         } else {
                             IconName::FolderOpen
@@ -1888,23 +1899,29 @@ impl Workspace {
                             app.trash.dismiss();
                             app.tree.focused_folder = Some(toggled.clone());
                             app.tree.focused_file = None;
-                            if app.tags.filter.is_none() {
-                                let opening = app.tree.collapsed_folders.remove(&toggled);
-                                if !opening {
-                                    app.tree.collapsed_folders.insert(toggled.clone());
-                                }
-                                if !app.tree.searching && !cx.reduce_motion() {
-                                    let now = Instant::now();
-                                    let from = app.tree.folder_folds.get(&toggled)
-                                        .map_or(if opening { 0. } else { 1. }, |fold| fold.sample(now).0);
-                                    // A subtree has one moving clip. An overlapping fold settles
-                                    // to its logical state, while sibling transitions can continue.
-                                    app.tree.folder_folds.retain(|path, _| {
-                                        !Path::new(path).starts_with(&toggled)
-                                            && !Path::new(&toggled).starts_with(path)
-                                    });
-                                    app.tree.folder_folds.insert(toggled.clone(), FolderFold { from, opening, started: now });
-                                }
+                            let tag_filtered = app.tags.filter.is_some();
+                            let collapsed = if tag_filtered {
+                                &mut app.tree.tag_collapsed_folders
+                            } else {
+                                &mut app.tree.collapsed_folders
+                            };
+                            let opening = collapsed.remove(&toggled);
+                            if !opening {
+                                collapsed.insert(toggled.clone());
+                            }
+                            if !app.tree.searching && !cx.reduce_motion() {
+                                let now = Instant::now();
+                                let from = app.tree.folder_folds.get(&toggled)
+                                    .map_or(if opening { 0. } else { 1. }, |fold| fold.sample(now).0);
+                                // A subtree has one moving clip. An overlapping fold settles
+                                // to its logical state, while sibling transitions can continue.
+                                app.tree.folder_folds.retain(|path, _| {
+                                    !Path::new(path).starts_with(&toggled)
+                                        && !Path::new(&toggled).starts_with(path)
+                                });
+                                app.tree.folder_folds.insert(toggled.clone(), FolderFold { from, opening, started: now });
+                            }
+                            if !tag_filtered {
                                 let _ = app.remember_session();
                             }
                             app.tree.file_tree_focus.focus(window, cx);
