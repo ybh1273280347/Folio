@@ -249,6 +249,24 @@ impl Render for ScrollbarDrag {
 }
 
 #[derive(Clone)]
+struct ThumbnailScrollbarDrag;
+
+impl Render for ThumbnailScrollbarDrag {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+#[derive(Clone)]
+struct TocScrollbarDrag;
+
+impl Render for TocScrollbarDrag {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+#[derive(Clone)]
 struct TocResizeDrag;
 
 impl Render for TocResizeDrag {
@@ -591,6 +609,7 @@ pub struct PdfView {
     thumbnails: Vec<Option<Arc<RenderImage>>>,
     thumbnail_loading: Vec<bool>,
     thumbnail_scroll: ScrollHandle,
+    thumbnail_scrollbar_drag: Option<f32>,
     thumbnails_open: bool,
     document_generation: u64,
     scroll: ScrollHandle,
@@ -623,6 +642,10 @@ pub struct PdfView {
     outline: Vec<OutlineItem>,
     /// Whether the table-of-contents panel is open.
     toc_open: bool,
+    /// Scroll handle for the table-of-contents panel.
+    toc_scroll: ScrollHandle,
+    /// Active drag grab offset for the table-of-contents scrollbar thumb.
+    toc_scrollbar_drag: Option<f32>,
     /// Current width of the table-of-contents panel in logical pixels.
     toc_width: f32,
     /// Active drag state `(start_x, start_width)` while resizing the TOC panel.
@@ -805,6 +828,7 @@ impl PdfView {
             thumbnails: Vec::new(),
             thumbnail_loading: Vec::new(),
             thumbnail_scroll: ScrollHandle::new(),
+            thumbnail_scrollbar_drag: None,
             thumbnails_open: false,
             document_generation: 0,
             scroll: ScrollHandle::new(),
@@ -819,6 +843,8 @@ impl PdfView {
             focus: cx.focus_handle(),
             outline: Vec::new(),
             toc_open: false,
+            toc_scroll: ScrollHandle::new(),
+            toc_scrollbar_drag: None,
             toc_width: 280.0,
             toc_drag: None,
             links: Vec::new(),
@@ -1914,6 +1940,125 @@ impl PdfView {
         })
     }
 
+    /// Derive scrollbar geometry from a `ScrollHandle` whose scrollable range is
+    /// already tracked by GPUI (`max_offset().y`).
+    fn scroll_handle_metrics(handle: &ScrollHandle) -> Option<ScrollbarMetrics> {
+        let bounds = handle.bounds();
+        let viewport_h = f32::from(bounds.size.height);
+        if viewport_h < 1.0 {
+            return None;
+        }
+        let max_scroll = f32::from(handle.max_offset().y).max(0.0);
+        if max_scroll <= 1.0 {
+            return None;
+        }
+        let content_h = viewport_h + max_scroll;
+        let scroll_y = f32::from(-handle.offset().y).clamp(0.0, max_scroll);
+        let track_h = viewport_h;
+        let thumb_h = (viewport_h / content_h * track_h)
+            .max(MIN_THUMB_H)
+            .min(track_h);
+        let thumb_max_travel = (track_h - thumb_h).max(0.0);
+        let thumb_top = if max_scroll > 0.0 {
+            scroll_y / max_scroll * thumb_max_travel
+        } else {
+            0.0
+        };
+        Some(ScrollbarMetrics {
+            track_top: f32::from(bounds.origin.y),
+            track_h,
+            thumb_h,
+            thumb_top,
+            max_scroll,
+            thumb_max_travel,
+        })
+    }
+
+    /// Render a draggable overlay scrollbar for a sidebar `ScrollHandle`.
+    fn render_overlay_scrollbar<D: Clone + Render + 'static>(
+        &self,
+        id: &'static str,
+        style: &PdfStyle,
+        drag_payload: D,
+        handle: ScrollHandle,
+        get_drag: fn(&Self) -> Option<f32>,
+        set_drag: fn(&mut Self, Option<f32>),
+        on_scroll_update: Option<fn(&mut Self, &mut Context<Self>)>,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<D>> {
+        let m = Self::scroll_handle_metrics(&handle)?;
+        let thumb_bg = Hsla {
+            a: 0.45,
+            ..style.header_muted
+        };
+        let thumb_hover = Hsla {
+            a: 0.75,
+            ..style.header_muted
+        };
+        let handle_down = handle.clone();
+        let handle_move = handle;
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .w(px(SCROLLBAR_W))
+                .h(px(m.track_h))
+                .child(
+                    div()
+                        .id(id)
+                        .absolute()
+                        .top(px(m.thumb_top))
+                        .right(px(2.0))
+                        .w(px(SCROLLBAR_W - 4.0))
+                        .h(px(m.thumb_h))
+                        .rounded(px((SCROLLBAR_W - 4.0) / 2.0))
+                        .bg(thumb_bg)
+                        .hover(|h| h.bg(thumb_hover))
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                                if let Some(m) = Self::scroll_handle_metrics(&handle_down) {
+                                    window.focus(&this.focus, cx);
+                                    set_drag(
+                                        this,
+                                        Some(f32::from(ev.position.y) - m.track_top - m.thumb_top),
+                                    );
+                                }
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .on_drag(drag_payload, |d, _, _, cx| {
+                            cx.stop_propagation();
+                            cx.new(|_| d.clone())
+                        })
+                        .on_drag_move(cx.listener(
+                            move |this, e: &gpui::DragMoveEvent<D>, _window, cx| {
+                                let Some(grab) = get_drag(this) else {
+                                    return;
+                                };
+                                let Some(m) = Self::scroll_handle_metrics(&handle_move) else {
+                                    return;
+                                };
+                                if m.thumb_max_travel <= 0.0 {
+                                    return;
+                                }
+                                let pointer = f32::from(e.event.position.y);
+                                let thumb_top =
+                                    (pointer - m.track_top - grab).clamp(0.0, m.thumb_max_travel);
+                                let scroll_y = thumb_top / m.thumb_max_travel * m.max_scroll;
+                                handle_move.set_offset(point(px(0.0), px(-scroll_y)));
+                                if let Some(cb) = on_scroll_update {
+                                    cb(this, cx);
+                                }
+                                cx.notify();
+                            },
+                        )),
+                ),
+        )
+    }
+
     /// The topmost visible page index for the current scroll position.
     fn current_page_index(&self) -> usize {
         let scroll_y = f32::from(-self.scroll.offset().y);
@@ -2526,11 +2671,10 @@ impl Render for PdfView {
             slots.push(slot.into_any_element());
         }
 
-        // Click-to-edit page counter: shows "N / total", or the typed digits while
-        // editing (Enter jumps, Esc cancels — handled in `on_key_down`).
+        // Click-to-edit page counter: shows "N / total", or the typed digits with a
+        // visible cursor while editing (Enter jumps, Esc or outside click cancels).
         let counter_label = match &self.page_input {
-            Some(buf) if !buf.is_empty() => format!("{buf} / {total}"),
-            Some(_) => format!("⌷ / {total}"),
+            Some(buf) => format!("{buf}| / {total}"),
             None => format!("{} / {total}", current + 1),
         };
         let editing = self.page_input.is_some();
@@ -2549,16 +2693,31 @@ impl Render for PdfView {
             } else {
                 style.border
             })
-            .text_color(style.header_muted)
+            .bg(if editing {
+                style.placeholder_bg
+            } else {
+                Hsla { a: 0.0, ..style.bg }
+            })
+            .text_color(if editing {
+                style.header_fg
+            } else {
+                style.header_muted
+            })
             .cursor_pointer()
             .hover(|s| s.bg(style.placeholder_bg))
             .child(counter_label)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_this, _ev, _window, cx| {
+                    cx.stop_propagation();
+                }),
+            )
             .on_click(cx.listener(|this, _, window, cx| {
                 this.page_input.get_or_insert_with(String::new);
                 window.focus(&this.focus, cx);
                 cx.notify();
             }))
-            .tooltip(self.tip("Go to page (⌘⌥G)"));
+            .tooltip(self.tip("点击输入页码跳转 (Enter 确认，Esc 取消)"));
 
         // The table-of-contents toggle sits at the left, next to the title, since the
         // panel opens on that side. Only shown when the PDF has an outline.
@@ -2821,6 +2980,10 @@ impl Render for PdfView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _ev: &MouseDownEvent, window, cx| {
+                    if this.page_input.is_some() {
+                        this.page_input = None;
+                        cx.notify();
+                    }
                     #[cfg(feature = "markup")]
                     {
                         this.text_sel = None;
@@ -2967,6 +3130,9 @@ impl Render for PdfView {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _ev, window, cx| {
+                    this.scrollbar_drag = None;
+                    this.thumbnail_scrollbar_drag = None;
+                    this.toc_scrollbar_drag = None;
                     let Some((pg, a, b)) = this.sel_drag.take() else {
                         return;
                     };
@@ -3219,7 +3385,18 @@ impl Render for PdfView {
                             .child(format!("{}", index + 1)),
                     )
                     .on_click(cx.listener(move |this, _, _window, cx| this.go_to_page(index, cx)))
-            });
+            })
+            .collect::<Vec<_>>();
+            let thumbnail_scrollbar = self.render_overlay_scrollbar(
+                "pdf-thumbnail-scrollbar-thumb",
+                &style,
+                ThumbnailScrollbarDrag,
+                self.thumbnail_scroll.clone(),
+                |this| this.thumbnail_scrollbar_drag,
+                |this, v| this.thumbnail_scrollbar_drag = v,
+                Some(|this, cx| this.ensure_thumbnails(cx)),
+                cx,
+            );
             div()
                 .w(px(132.0))
                 .h_full()
@@ -3242,26 +3419,44 @@ impl Render for PdfView {
                 )
                 .child(
                     div()
-                        .id("pdf-thumbnail-scroll")
+                        .relative()
                         .flex_1()
                         .min_h_0()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.thumbnail_scroll)
-                        .on_scroll(cx.listener(|this, _event, _window, cx| {
-                            this.ensure_thumbnails(cx);
-                            cx.notify();
-                        }))
-                        .children(rows),
+                        .child(
+                            div()
+                                .id("pdf-thumbnail-scroll")
+                                .size_full()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.thumbnail_scroll)
+                                .on_scroll(cx.listener(|this, _event, _window, cx| {
+                                    this.ensure_thumbnails(cx);
+                                    cx.notify();
+                                }))
+                                .children(rows),
+                        )
+                        .children(thumbnail_scrollbar),
                 )
         });
 
         let toc_panel = (self.toc_open && self.has_outline()).then(|| {
+            let toc_scrollbar = self.render_overlay_scrollbar(
+                "pdf-toc-scrollbar-thumb",
+                &style,
+                TocScrollbarDrag,
+                self.toc_scroll.clone(),
+                |this| this.toc_scrollbar_drag,
+                |this, v| this.toc_scrollbar_drag = v,
+                None,
+                cx,
+            );
             let mut col = div()
                 .id("pdf-toc")
-                .flex_shrink_0()
-                .w(px(self.toc_width))
-                .h_full()
+                .size_full()
                 .overflow_y_scroll()
+                .track_scroll(&self.toc_scroll)
+                .on_scroll(cx.listener(|_this, _event, _window, cx| {
+                    cx.notify();
+                }))
                 .bg(style.bg)
                 .py(px(6.0));
             for (i, item) in self.outline.iter().enumerate() {
@@ -3294,7 +3489,13 @@ impl Render for PdfView {
                 }
                 col = col.child(row);
             }
-            col
+            div()
+                .relative()
+                .flex_shrink_0()
+                .w(px(self.toc_width))
+                .h_full()
+                .child(col)
+                .children(toc_scrollbar)
         });
 
         let toc_resize_handle = (self.toc_open && self.has_outline()).then(|| {
