@@ -188,6 +188,36 @@ test('the tag tool commits its exact preview directly in the originating SDK ses
   assert.deepEqual(receipt.details.tagApproval, confirmation);
 });
 
+test('global tag deletion requests confirmation in the originating session', {timeout:45000}, async t => {
+  const args = {operation:'delete', tag:'待复习'};
+  const {client, project, sessionId, run} = await runWorkspaceTool(t, {
+    name:'folio_tags_manage', args, message:'删除待复习标签',
+  });
+  const owner = {...project, sessionId};
+  const preview = await client.event(sessionId, 'workspace_tool_request', 'preview_definition');
+  assert.deepEqual(preview.params.edit, args);
+  const delete_prompt = {title:'删除标签', message:'「待复习」会从全部 2 个关联文件上移除，删除后无法撤销。'};
+  assert.equal((await client.request({...owner, type:'workspace_tool_response', channel:'tag', id:preview.id,
+    result:{status:'ok', delete_prompt}})).success, true);
+
+  const card = await client.event(sessionId, 'extension_ui_request');
+  assert.equal(card.method, 'confirm');
+  assert.equal(card.title, delete_prompt.title);
+  assert.equal(card.message, delete_prompt.message);
+  assert.equal(card.commandApproval, undefined);
+  assert.equal((await client.request({...owner, type:'extension_ui_response', id:card.id, confirmed:true})).success, true);
+
+  const commit = await client.event(sessionId, 'workspace_tool_request', 'commit');
+  assert.equal(commit.params.proposal_id, preview.params.proposal_id);
+  const result = {status:'ok', definition_changed:true, deleted_tag:'待复习', updated:2};
+  assert.equal((await client.request({...owner, type:'workspace_tool_response', channel:'tag', id:commit.id, result})).success, true);
+  const discard = await client.event(sessionId, 'workspace_tool_request', 'discard');
+  assert.equal((await client.request({...owner, type:'workspace_tool_response', channel:'tag', id:discard.id, result:{status:'ok'}})).success, true);
+  const ended = await client.event(sessionId, 'tool_execution_end');
+  assert.deepEqual(ended.result.details, result);
+  assert.equal((await run).success, true);
+});
+
 test('Python source approved in Folio reaches the project interpreter verbatim', { timeout: 45000 }, async t => {
   const literal = '中文 `backtick` $(echo untouched) $HOME C:\\new\\test';
   const source = ['from pathlib import Path', `print(r'${literal}')`, 'print(Path.cwd())'].join('\r\n');

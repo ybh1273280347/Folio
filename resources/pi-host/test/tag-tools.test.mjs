@@ -18,3 +18,17 @@ test('tag updates commit the preview directly and discard the proposal receipt',
   assert.equal(request.mock.calls[0].arguments[1].proposal_id, request.mock.calls[1].arguments[1].proposal_id);
   assert.equal(request.mock.calls[1].arguments[1].proposal_id, request.mock.calls[2].arguments[1].proposal_id);
 });
+
+test('declining global tag deletion discards the proposal without committing', async t => {
+  const request = t.mock.fn(async () => ({ status: 'ok' }));
+  request.mock.mockImplementationOnce(async () => ({
+    status: 'ok',
+    delete_prompt: { title: 'Delete Tag', message: 'This permanently removes "Review".' },
+  }));
+  const tool = tagTools(request, async () => false).find(tool => tool.name === 'folio_tags_manage');
+
+  const result = await tool.execute('call', { operation: 'delete', tag: 'Review' });
+
+  assert.equal(result.details.status, 'cancelled');
+  assert.deepEqual(request.mock.calls.map(call => call.arguments[0]), ['preview_definition', 'discard']);
+});

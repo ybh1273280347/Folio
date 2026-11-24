@@ -1,6 +1,7 @@
-/** Folio prepares an exact change set and commits it directly without blocking for approval. */
+/** Folio prepares an exact change set before committing tag edits. */
 import { randomUUID } from 'node:crypto';
 import { Type } from '@sinclair/typebox';
+import { cancelled } from './bridge.mjs';
 
 const text = Type.String({ minLength: 1 });
 const paths = Type.Array(text, { minItems: 1, maxItems: 100,
@@ -22,12 +23,17 @@ const resultForModel = (result, tagApproval) => ({
   isError: result.status !== 'ok',
 });
 
-export function tagTools(request) {
+export function tagTools(request, confirm) {
   const read = operation => async (_id, params, signal) => resultForModel(await request(operation, params, signal));
   const write = operation => async (_toolCallId, params, signal) => {
     const proposal_id = randomUUID();
     try {
       const preview = await request(operation, { proposal_id, edit: params }, signal);
+      if (preview.status === 'ok' && preview.delete_prompt) {
+        const { title, message } = preview.delete_prompt;
+        if (!await confirm(title, message, { signal })) return resultForModel(cancelled());
+        return resultForModel(await request('commit', { proposal_id }, signal));
+      }
       if (preview.status !== 'ok' || !preview.confirmation) return resultForModel(preview);
       return resultForModel(await request('commit', { proposal_id }, signal), preview.confirmation);
     } finally {
@@ -56,9 +62,9 @@ export function tagTools(request) {
         })),
         create_missing: Type.Optional(Type.Boolean()) }), execute: write('preview_files') },
     { name: 'folio_tags_manage', label: '管理 Folio 标签',
-      description: '全局重命名标签或更改标签颜色，影响当前项目或默认空间内所有引用。rename 传 new_name，set_color 传 color。更改少数文件的标签请调用 folio_file_tags_update。',
+      description: '在当前项目或默认空间全局管理标签。rename 传 new_name，set_color 传 color。delete 只传 tag，用户确认后删除标签及其全部关联。更改少数文件的标签请调用 folio_file_tags_update。',
       parameters: schema({
-        operation: Type.Union([Type.Literal('rename'), Type.Literal('set_color')]), tag: text,
+        operation: Type.Union([Type.Literal('rename'), Type.Literal('set_color'), Type.Literal('delete')]), tag: text,
         new_name: Type.Optional(text),
         color: Type.Optional(color),
       }), execute: write('preview_definition') },

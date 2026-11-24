@@ -88,7 +88,7 @@ const workspaceToolChannels = [
   },
   {
     channel: 'tag',
-    factory: tagTools,
+    factory: (request, record) => tagTools(request, uiContext(record).confirm),
     timeoutMs: 60_000,
     timeouts: {
       list: 60_000,
@@ -261,7 +261,7 @@ async function createRecord(cwd, manager, replacement) {
   const { session } = await createAgentSession({ cwd, sessionManager: manager, modelRuntime: record.models,
     resourceLoader: loader, customTools: [pythonTool(cwd), ...webTools(() => settings, cwd, root),
       ...workspaceToolChannels.flatMap(({ bridge, factory }) => factory((operation, params, signal) =>
-        bridge.request({ projectKey: project, sessionId: id }, operation, params, signal)))] });
+        bridge.request({ projectKey: project, sessionId: id }, operation, params, signal), record))] });
   record.session = session;
   if (replacement) {
     const { previous, temporary, file } = replacement;
