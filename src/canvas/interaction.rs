@@ -378,18 +378,6 @@ fn corner_cut(
     Some((in_pt, corner, out_pt))
 }
 
-pub fn edge_endpoints<'a>(
-    edge: &CanvasEdge,
-    visible_node: impl Fn(&str) -> Option<&'a CanvasNode>,
-) -> Option<((f32, f32), (f32, f32), EdgeSide, EdgeSide)> {
-    let from = visible_node(&edge.from_node)?;
-    let to = visible_node(&edge.to_node)?;
-    let (auto_from, auto_to) = CanvasDocument::auto_sides(from, to);
-    let from_side = edge.from_side.unwrap_or(auto_from);
-    let to_side = edge.to_side.unwrap_or(auto_to);
-    Some((from.side_point(from_side), to.side_point(to_side), from_side, to_side))
-}
-
 pub fn tree_hierarchy_sides(
     tree_mode: TreeLayoutMode,
     from: &CanvasNode,

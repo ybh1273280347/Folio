@@ -3,8 +3,7 @@
 use super::{
     interaction::{EdgeRoute, route_edge_for_doc},
     model::{
-        CanvasDocument, CanvasEdge, CanvasNode, CanvasNodeType, CanvasViewMode, EdgeEnd, EdgeKind,
-        TreeLayoutMode,
+        CanvasDocument, CanvasEdge, CanvasNode, CanvasNodeType, EdgeEnd, EdgeKind,
     },
 };
 use crate::theme::Palette;
@@ -623,7 +622,7 @@ fn encode_base64(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::canvas::model::CanvasOp;
+    use crate::canvas::model::{CanvasOp, CanvasViewMode, TreeLayoutMode};
 
     #[test]
     fn export_subset_defaults_to_all_and_crops_selection_tightly() {
