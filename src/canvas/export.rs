@@ -1,8 +1,11 @@
 //! Vector SVG, raster PNG, and vector PDF export for canvas selections or full scenes.
 
 use super::{
-    interaction::{edge_bezier_controls, edge_endpoints},
-    model::{CanvasDocument, CanvasEdge, CanvasNode, CanvasNodeType, EdgeEnd, EdgeKind},
+    interaction::{EdgeRoute, route_edge_for_doc},
+    model::{
+        CanvasDocument, CanvasEdge, CanvasNode, CanvasNodeType, CanvasViewMode, EdgeEnd, EdgeKind,
+        TreeLayoutMode,
+    },
 };
 use crate::theme::Palette;
 use krilla::{Document, geom::Size as KrillaSize, page::PageSettings};
@@ -117,9 +120,8 @@ pub fn collect_export_subset<'a>(
     }
 
     for edge in &edges {
-        if let Some((p0, p3, fs, ts)) = edge_endpoints(edge, |id| visible.get(id).copied()) {
-            let (c1, c2) = edge_bezier_controls(p0, p3, fs, ts);
-            for (px, py) in [p0, c1, c2, p3] {
+        if let Some(route) = route_edge_for_doc(doc, edge, |id| visible.get(id).copied()) {
+            for (px, py) in route.control_bounds_points().into_iter().flatten() {
                 min_x = min_x.min(px - 8.0);
                 min_y = min_y.min(py - 8.0);
                 max_x = max_x.max(px + 8.0);
@@ -212,14 +214,14 @@ pub fn render_svg(
         }
     }
 
-    // 2. Vector Bezier edges & arrowheads.
+    // 2. Vector edges & arrowheads (matching canvas view mode routing).
     let nodes_by_id: std::collections::HashMap<_, _> = nodes.iter()
         .map(|&node| (node.id.as_str(), node)).collect();
+    let svg_pt = |pt: (f32, f32)| (pt.0 - bounds.min_x, pt.1 - bounds.min_y);
     for edge in &edges {
-        let Some((p0, p3, fs, ts)) = edge_endpoints(edge, |id| nodes_by_id.get(id).copied()) else {
+        let Some(route) = route_edge_for_doc(doc, edge, |id| nodes_by_id.get(id).copied()) else {
             continue;
         };
-        let (c1, c2) = edge_bezier_controls(p0, p3, fs, ts);
         let is_ref = edge.kind() == EdgeKind::Reference;
         let stroke = if let Some(raw) = edge.color.as_deref() {
             resolve_color_hex(Some(raw), palette.muted)
@@ -234,22 +236,53 @@ pub fn render_svg(
         } else {
             ""
         };
-        let sx0 = p0.0 - bounds.min_x;
-        let sy0 = p0.1 - bounds.min_y;
-        let scx1 = c1.0 - bounds.min_x;
-        let scy1 = c1.1 - bounds.min_y;
-        let scx2 = c2.0 - bounds.min_x;
-        let scy2 = c2.1 - bounds.min_y;
-        let sx3 = p3.0 - bounds.min_x;
-        let sy3 = p3.1 - bounds.min_y;
+        let d = match route {
+            EdgeRoute::Bezier { p0, c1, c2, p3 } => {
+                let (sx0, sy0) = svg_pt(p0);
+                let (scx1, scy1) = svg_pt(c1);
+                let (scx2, scy2) = svg_pt(c2);
+                let (sx3, sy3) = svg_pt(p3);
+                format!(
+                    "M {sx0:.2} {sy0:.2} C {scx1:.2} {scy1:.2}, {scx2:.2} {scy2:.2}, {sx3:.2} {sy3:.2}"
+                )
+            }
+            EdgeRoute::Line { p0, p3 } => {
+                let (sx0, sy0) = svg_pt(p0);
+                let (sx3, sy3) = svg_pt(p3);
+                format!("M {sx0:.2} {sy0:.2} L {sx3:.2} {sy3:.2}")
+            }
+            EdgeRoute::Elbow { points, radius } => {
+                let (sx0, sy0) = svg_pt(points[0]);
+                let mut path = format!("M {sx0:.2} {sy0:.2}");
+                let cuts = EdgeRoute::elbow_corner_cuts(points, radius);
+                for (corner, cut) in [(points[1], cuts[0]), (points[2], cuts[1])] {
+                    if let Some((in_pt, c, out_pt)) = cut {
+                        let (ix, iy) = svg_pt(in_pt);
+                        let (cx, cy) = svg_pt(c);
+                        let (ox, oy) = svg_pt(out_pt);
+                        let _ = write!(path, " L {ix:.2} {iy:.2} Q {cx:.2} {cy:.2} {ox:.2} {oy:.2}");
+                    } else {
+                        let (cx, cy) = svg_pt(corner);
+                        let _ = write!(path, " L {cx:.2} {cy:.2}");
+                    }
+                }
+                let (sx3, sy3) = svg_pt(points[3]);
+                let _ = write!(path, " L {sx3:.2} {sy3:.2}");
+                path
+            }
+        };
 
         let _ = writeln!(
             body,
-            r#"  <path d="M {sx0:.2} {sy0:.2} C {scx1:.2} {scy1:.2}, {scx2:.2} {scy2:.2}, {sx3:.2} {sy3:.2}" fill="none" stroke="{stroke}" stroke-width="{stroke_w}"{dash}/>"#
+            r#"  <path d="{d}" fill="none" stroke="{stroke}" stroke-width="{stroke_w}"{dash}/>"#
         );
         if edge.to_end.unwrap_or(EdgeEnd::Arrow) == EdgeEnd::Arrow {
-            let dx = sx3 - scx2;
-            let dy = sy3 - scy2;
+            let (_, p3) = route.endpoints();
+            let tail = route.arrow_tail();
+            let (sx3, sy3) = svg_pt(p3);
+            let (tx, ty) = svg_pt(tail);
+            let dx = sx3 - tx;
+            let dy = sy3 - ty;
             let len = (dx * dx + dy * dy).sqrt();
             if len > 1e-3 {
                 let ux = dx / len;
@@ -673,5 +706,22 @@ mod tests {
 
         let pdf = svg_to_pdf(&svg).unwrap();
         assert!(pdf.starts_with(b"%PDF-"));
+
+        // Freeform defaults to cubic Bezier (`C`), while aligned single-branch Tree mode exports straight lines (`L`)
+        // and multi-branch Tree mode exports rounded orthogonal elbows (`Q`).
+        assert_eq!(doc.view_mode(), CanvasViewMode::Freeform);
+        assert!(svg.contains(" C "));
+
+        doc.set_tree_mode(TreeLayoutMode::MindmapRight);
+        let aligned_tree_svg = render_svg(&doc, Path::new("."), &empty, None, palette).unwrap();
+        assert!(aligned_tree_svg.contains(" L "));
+        assert!(!aligned_tree_svg.contains(" C "));
+
+        doc.nodes.push(CanvasNode::new_text("c", 320.0, 200.0, "Second Branch"));
+        doc.connect_hierarchy("a", "c").unwrap();
+        doc.set_tree_mode(TreeLayoutMode::MindmapRight);
+        let branched_tree_svg = render_svg(&doc, Path::new("."), &empty, None, palette).unwrap();
+        assert!(branched_tree_svg.contains(" Q "));
+        assert!(!branched_tree_svg.contains(" C "));
     }
 }

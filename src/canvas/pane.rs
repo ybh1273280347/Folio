@@ -5,9 +5,10 @@ use super::{
     export::{ExportFormat, export_canvas_to_file},
     history::CanvasHistory,
     interaction::{
-        Camera, EdgeHandleEnd, InteractionState, WHEEL_ZOOM_STEP, ZOOM_STEP, compute_drop_target,
-        edge_bezier_controls, edge_endpoints, edge_midpoint_local, hit_edge, hit_edge_endpoint,
-        hit_node, hit_port, hit_resize_handle, nearest_side, nodes_in_rect,
+        Camera, EdgeHandleEnd, EdgeRoute, InteractionState, WHEEL_ZOOM_STEP, ZOOM_STEP,
+        compute_drop_target, edge_endpoints_for_doc, edge_midpoint_local, hit_edge,
+        hit_edge_endpoint, hit_node, hit_port, hit_resize_handle, nearest_side, nodes_in_rect,
+        route_edge_for_doc, route_edge_points, tree_hierarchy_sides,
     },
     model::{
         ApplyReport, CanvasDocument, CanvasEdge, CanvasNode, CanvasNodeType, CanvasOp,
@@ -2759,10 +2760,9 @@ fn paint_edges(
     let visible_node = |id: &str| visible.get(id).copied();
 
     for edge in &doc.edges {
-        let Some((p0, p3, fs, ts)) = edge_endpoints(edge, visible_node) else {
+        let Some(route) = route_edge_for_doc(doc, edge, visible_node) else {
             continue;
         };
-        let (c1, c2) = edge_bezier_controls(p0, p3, fs, ts);
         let is_selected = selected_edge == Some(edge.id.as_str());
         let is_ref = edge.kind() == EdgeKind::Reference;
 
@@ -2783,31 +2783,19 @@ fn paint_edges(
         } else {
             2.1 * camera.zoom.clamp(0.7, 1.3)
         };
-        let mut builder = PathBuilder::stroke(px(stroke_w));
-        if is_ref {
-            let dash = px((6.0 * camera.zoom).clamp(3.0, 10.0));
-            let gap = px((4.0 * camera.zoom).clamp(2.0, 8.0));
-            builder = builder.dash_array(&[dash, gap]);
-        }
-        let sp0 = to_screen(p0.0, p0.1);
-        let sc1 = to_screen(c1.0, c1.1);
-        let sc2 = to_screen(c2.0, c2.1);
-        let sp3 = to_screen(p3.0, p3.1);
-        builder.move_to(sp0);
-        builder.cubic_bezier_to(sp3, sc1, sc2);
-        if let Ok(path) = builder.build() {
-            window.paint_path(path, color);
-        }
-        if edge.to_end.unwrap_or(EdgeEnd::Arrow) == EdgeEnd::Arrow {
-            paint_arrowhead(sp3, sc2, color, camera.zoom, window);
-        }
+        let draw_arrow = edge.to_end.unwrap_or(EdgeEnd::Arrow) == EdgeEnd::Arrow;
+        paint_edge_route(&route, bounds, camera, stroke_w, is_ref, color, draw_arrow, window);
+
         let reconnecting_this = matches!(
             interaction,
             InteractionState::ReconnectEdge { edge_id, .. } if edge_id == &edge.id
         );
-        if is_selected && !reconnecting_this {
-            paint_edge_handle(sp0, palette, window);
-            paint_edge_handle(sp3, palette, window);
+        let handles_editable =
+            doc.view_mode() == CanvasViewMode::Freeform || edge.kind() == EdgeKind::Reference;
+        if is_selected && !reconnecting_this && handles_editable {
+            let (p0, p3) = route.endpoints();
+            paint_edge_handle(to_screen(p0.0, p0.1), palette, window);
+            paint_edge_handle(to_screen(p3.0, p3.1), palette, window);
         }
     }
 
@@ -2818,7 +2806,8 @@ fn paint_edges(
         snap,
     } = interaction
         && let Some(edge) = doc.edge(edge_id)
-        && let Some((orig_p0, orig_p3, orig_fs, orig_ts)) = edge_endpoints(edge, visible_node)
+        && let Some((orig_p0, orig_p3, orig_fs, orig_ts)) =
+            edge_endpoints_for_doc(doc, edge, visible_node)
     {
         let drag_pt = snap
             .as_ref()
@@ -2834,26 +2823,18 @@ fn paint_edges(
             EdgeHandleEnd::From => (drag_pt.0, orig_p3, drag_pt.1, orig_ts),
             EdgeHandleEnd::To => (orig_p0, drag_pt.0, orig_fs, drag_pt.1),
         };
-        let (c1, c2) = edge_bezier_controls(p0, p3, fs, ts);
-        let mut builder = PathBuilder::stroke(px(2.4));
-        if edge.kind() == EdgeKind::Reference {
-            let dash = px((6.0 * camera.zoom).clamp(3.0, 10.0));
-            let gap = px((4.0 * camera.zoom).clamp(2.0, 8.0));
-            builder = builder.dash_array(&[dash, gap]);
-        }
-        let sp0 = to_screen(p0.0, p0.1);
-        let sc1 = to_screen(c1.0, c1.1);
-        let sc2 = to_screen(c2.0, c2.1);
-        let sp3 = to_screen(p3.0, p3.1);
-        builder.move_to(sp0);
-        builder.cubic_bezier_to(sp3, sc1, sc2);
-        let preview_color = gpui_kit::rgb(palette.accent);
-        if let Ok(path) = builder.build() {
-            window.paint_path(path, preview_color);
-        }
-        if edge.to_end.unwrap_or(EdgeEnd::Arrow) == EdgeEnd::Arrow {
-            paint_arrowhead(sp3, sc2, preview_color, camera.zoom, window);
-        }
+        let route = route_edge_points(doc, edge.kind(), p0, p3, fs, ts);
+        let draw_arrow = edge.to_end.unwrap_or(EdgeEnd::Arrow) == EdgeEnd::Arrow;
+        paint_edge_route(
+            &route,
+            bounds,
+            camera,
+            2.4,
+            edge.kind() == EdgeKind::Reference,
+            gpui_kit::rgb(palette.accent),
+            draw_arrow,
+            window,
+        );
     }
 
     if let InteractionState::ConnectingEdge {
@@ -2864,25 +2845,29 @@ fn paint_edges(
     } = interaction
         && let Some(node) = doc.node(from_node)
     {
-        let p0 = node.side_point(*from_side);
-        let p3 = *current_world;
-        let to_side = super::interaction::nearest_side(node, p3.0, p3.1);
-        let (c1, c2) = edge_bezier_controls(p0, p3, *from_side, to_side);
-        let mut builder = PathBuilder::stroke(px(2.0));
-        if *kind == EdgeKind::Reference {
-            let dash = px((6.0 * camera.zoom).clamp(3.0, 10.0));
-            let gap = px((4.0 * camera.zoom).clamp(2.0, 8.0));
-            builder = builder.dash_array(&[dash, gap]);
-        }
-        let sp0 = to_screen(p0.0, p0.1);
-        let sc1 = to_screen(c1.0, c1.1);
-        let sc2 = to_screen(c2.0, c2.1);
-        let sp3 = to_screen(p3.0, p3.1);
-        builder.move_to(sp0);
-        builder.cubic_bezier_to(sp3, sc1, sc2);
-        if let Ok(path) = builder.build() {
-            window.paint_path(path, gpui_kit::rgb(palette.accent));
-        }
+        let (fs, ts, p0) = if doc.view_mode() == CanvasViewMode::Tree && *kind == EdgeKind::Hierarchy
+        {
+            let target_dummy = CanvasNode::new_text("_", current_world.0, current_world.1, "");
+            let (fs, ts) = tree_hierarchy_sides(doc.tree_mode(), node, &target_dummy);
+            (fs, ts, node.side_point(fs))
+        } else {
+            (
+                *from_side,
+                nearest_side(node, current_world.0, current_world.1),
+                node.side_point(*from_side),
+            )
+        };
+        let route = route_edge_points(doc, *kind, p0, *current_world, fs, ts);
+        paint_edge_route(
+            &route,
+            bounds,
+            camera,
+            2.0,
+            *kind == EdgeKind::Reference,
+            gpui_kit::rgb(palette.accent),
+            false,
+            window,
+        );
     }
 
     if let InteractionState::ReparentDragging {
@@ -2902,6 +2887,78 @@ fn paint_edges(
             Bounds::new(pt, gpui_kit::size(px(w), px(h))),
             fill_col,
         ));
+    }
+}
+
+fn paint_edge_route(
+    route: &EdgeRoute,
+    bounds: Bounds<Pixels>,
+    camera: &Camera,
+    stroke_w: f32,
+    is_ref: bool,
+    color: gpui::Rgba,
+    draw_arrow: bool,
+    window: &mut Window,
+) {
+    let to_screen = |wx: f32, wy: f32| bounds.origin + camera.world_to_local(wx, wy);
+    let mut builder = PathBuilder::stroke(px(stroke_w));
+    if is_ref {
+        let dash = px((6.0 * camera.zoom).clamp(3.0, 10.0));
+        let gap = px((4.0 * camera.zoom).clamp(2.0, 8.0));
+        builder = builder.dash_array(&[dash, gap]);
+    }
+    match *route {
+        EdgeRoute::Bezier { p0, c1, c2, p3 } => {
+            builder.move_to(to_screen(p0.0, p0.1));
+            builder.cubic_bezier_to(
+                to_screen(p3.0, p3.1),
+                to_screen(c1.0, c1.1),
+                to_screen(c2.0, c2.1),
+            );
+        }
+        EdgeRoute::Line { p0, p3 } => {
+            builder.move_to(to_screen(p0.0, p0.1));
+            builder.line_to(to_screen(p3.0, p3.1));
+        }
+        EdgeRoute::Elbow { points, radius } => {
+            builder.move_to(to_screen(points[0].0, points[0].1));
+            let cuts = EdgeRoute::elbow_corner_cuts(points, radius);
+            for (corner, cut) in [(points[1], cuts[0]), (points[2], cuts[1])] {
+                if let Some((in_pt, c, out_pt)) = cut {
+                    let cp1 = (
+                        in_pt.0 + (c.0 - in_pt.0) * (2.0 / 3.0),
+                        in_pt.1 + (c.1 - in_pt.1) * (2.0 / 3.0),
+                    );
+                    let cp2 = (
+                        out_pt.0 + (c.0 - out_pt.0) * (2.0 / 3.0),
+                        out_pt.1 + (c.1 - out_pt.1) * (2.0 / 3.0),
+                    );
+                    builder.line_to(to_screen(in_pt.0, in_pt.1));
+                    builder.cubic_bezier_to(
+                        to_screen(out_pt.0, out_pt.1),
+                        to_screen(cp1.0, cp1.1),
+                        to_screen(cp2.0, cp2.1),
+                    );
+                } else {
+                    builder.line_to(to_screen(corner.0, corner.1));
+                }
+            }
+            builder.line_to(to_screen(points[3].0, points[3].1));
+        }
+    }
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
+    }
+    if draw_arrow {
+        let (_, p3) = route.endpoints();
+        let tail = route.arrow_tail();
+        paint_arrowhead(
+            to_screen(p3.0, p3.1),
+            to_screen(tail.0, tail.1),
+            color,
+            camera.zoom,
+            window,
+        );
     }
 }
 
