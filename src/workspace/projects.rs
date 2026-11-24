@@ -4,6 +4,61 @@ use super::*;
 use super::documents::DocumentWatch;
 use crate::model::{ProjectConfig, WorkspaceSession};
 
+pub(super) struct ProjectMenu {
+    pub(super) open: bool,
+    pub(super) search: Entity<InputState>,
+}
+
+impl ProjectMenu {
+    pub(super) fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Self {
+        let search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(crate::i18n::workspace::SEARCH_PROJECTS_PLACEHOLDER.get())
+        });
+        cx.subscribe_in(
+            &search,
+            window,
+            |app, input, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => {
+                    if !app.project_menu.open {
+                        return;
+                    }
+                    let query = input.read(cx).value().trim().to_lowercase();
+                    let matched_id = app
+                        .projects
+                        .registered()
+                        .iter()
+                        .find(|project| {
+                            query.is_empty() || project.name.to_lowercase().contains(&query)
+                        })
+                        .map(|project| project.id.clone());
+                    if let Some(id) = matched_id {
+                        app.close_project_menu(cx);
+                        app.trash.dismiss();
+                        app.switch_project(&id, window, cx);
+                    }
+                }
+                _ => {}
+            },
+        )
+        .detach();
+        Self { open: false, search }
+    }
+
+    pub(super) fn refresh_locale(&self, window: &mut Window, cx: &mut App) {
+        self.search.update(cx, |input, cx| {
+            input.set_placeholder(
+                crate::i18n::workspace::SEARCH_PROJECTS_PLACEHOLDER.get(),
+                window,
+                cx,
+            );
+        });
+    }
+}
+
 /// Project registration and saved navigation. The session key is set only after
 /// selection preflight succeeds, so startup never saves an empty window into a session.
 pub(super) struct Projects {
@@ -69,6 +124,44 @@ impl Projects {
 
     pub(super) fn registered(&self) -> &[Project] {
         &self.config.projects
+    }
+
+    /// Moves `id` to the front of recent projects and prunes IDs no longer registered.
+    pub(super) fn touch_recent_project(&mut self, id: &str) {
+        if !self.config.projects.iter().any(|project| project.id == id) {
+            return;
+        }
+        self.config
+            .recent_project_ids
+            .retain(|existing| existing != id && self.config.projects.iter().any(|p| p.id == *existing));
+        self.config.recent_project_ids.insert(0, id.to_owned());
+    }
+
+    /// Returns up to `limit` recently visited projects, backfilling from registration order.
+    pub(super) fn recent_projects(&self, limit: usize) -> Vec<&Project> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let mut ordered = Vec::with_capacity(limit.min(self.config.projects.len()));
+        for id in &self.config.recent_project_ids {
+            if let Some(project) = self.config.projects.iter().find(|project| &project.id == id)
+                && !ordered.iter().any(|added: &&Project| added.id == project.id)
+            {
+                ordered.push(project);
+                if ordered.len() >= limit {
+                    return ordered;
+                }
+            }
+        }
+        for project in &self.config.projects {
+            if !ordered.iter().any(|added| added.id == project.id) {
+                ordered.push(project);
+                if ordered.len() >= limit {
+                    break;
+                }
+            }
+        }
+        ordered
     }
 
     pub(super) fn loose_tab_count(&self) -> usize {
@@ -266,6 +359,7 @@ impl Workspace {
         } else {
             self.projects.config.active_id = Some(id.to_owned());
             self.projects.config.active_workspace = Some(WorkspaceLocation::Project(id.to_owned()));
+            self.projects.touch_recent_project(id);
         }
         self.documents.replace_watch(watcher);
         self.tree.replace_listing(files, folders);
@@ -546,6 +640,7 @@ impl Workspace {
             return;
         }
         self.projects.config.projects.retain(|project| project.id != id);
+        self.projects.config.recent_project_ids.retain(|recent_id| recent_id != id);
         self.projects.workspace_sessions.remove(id);
         if self.projects.config.active_id.as_deref() == Some(id) {
             self.projects.config.active_id = None;
@@ -563,5 +658,420 @@ impl Workspace {
             self.report(error, cx);
         }
         cx.notify();
+    }
+
+    pub(super) fn is_project_menu_open(&self) -> bool {
+        self.project_menu.open
+    }
+
+    pub(super) fn toggle_project_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project_menu.open {
+            self.close_project_menu(cx);
+        } else {
+            self.open_project_menu(window, cx);
+        }
+    }
+
+    pub(super) fn open_project_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.project_menu.open = true;
+        let search = self.project_menu.search.clone();
+        search.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+        });
+        window.defer(cx, move |window, cx| {
+            search.update(cx, |input, cx| input.focus(window, cx));
+        });
+        cx.notify();
+    }
+
+    pub(super) fn close_project_menu(&mut self, cx: &mut Context<Self>) {
+        if self.project_menu.open {
+            self.project_menu.open = false;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn render_project_menu_popover(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.project_menu.open || self.zen_mode {
+            return None;
+        }
+        let palette = self.settings.theme.palette;
+        let query = self
+            .project_menu
+            .search
+            .read(cx)
+            .value()
+            .trim()
+            .to_lowercase();
+        let all_projects = self.projects.registered();
+        let filtered: Vec<&Project> = all_projects
+            .iter()
+            .filter(|project| query.is_empty() || project.name.to_lowercase().contains(&query))
+            .collect();
+        let active_id = if self.trash.is_open() {
+            None
+        } else {
+            self.projects.active_id()
+        };
+
+        let hover_bg = gpui_kit::rgb(palette.hover);
+        let active_bg = gpui_kit::rgb(palette.selection);
+        let muted = gpui_kit::rgb(palette.muted);
+        let text = gpui_kit::rgb(palette.text);
+        let accent = gpui_kit::rgb(palette.accent);
+        let danger = gpui_kit::rgb(palette.danger);
+
+        let list_body = if all_projects.is_empty() {
+            div()
+                .px_3()
+                .py_4()
+                .text_xs()
+                .text_color(muted)
+                .child(crate::i18n::workspace::NO_PROJECTS_YET.get())
+                .into_any_element()
+        } else if filtered.is_empty() {
+            div()
+                .px_3()
+                .py_4()
+                .text_xs()
+                .text_color(muted)
+                .child(crate::i18n::workspace::NO_MATCHING_PROJECTS.get())
+                .into_any_element()
+        } else {
+            div()
+                .id("project-menu-scroll")
+                .max_h(px(280.))
+                .overflow_y_scroll()
+                .px_1p5()
+                .py_1()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .children(filtered.into_iter().map(|project| {
+                    let id = project.id.clone();
+                    let rename_id = id.clone();
+                    let remove_id = id.clone();
+                    let name = project.name.clone();
+                    let rename_name = name.clone();
+                    let root = PathBuf::from(&project.folder);
+                    let is_active = active_id == Some(project.id.as_str());
+
+                    let action_btn = |btn_id: SharedString, icon: IconName, hover_fg: Rgba| {
+                        div()
+                            .id(btn_id)
+                            .size(px(22.))
+                            .rounded(px(4.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(muted)
+                            .hover(move |s| s.bg(hover_bg).text_color(hover_fg))
+                            .child(crate::ui::icon(icon).size(px(12.5)))
+                    };
+
+                    div()
+                        .id(SharedString::from(format!("project-menu-item-{}", project.id)))
+                        .h(px(32.))
+                        .px_2()
+                        .rounded(px(6.))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .cursor_pointer()
+                        .when(is_active, |row| row.bg(active_bg))
+                        .hover(move |s| s.bg(hover_bg))
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            app.close_project_menu(cx);
+                            app.trash.dismiss();
+                            app.switch_project(&id, window, cx);
+                        }))
+                        .child(
+                            div()
+                                .w(px(14.))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .when(is_active, |slot| {
+                                    slot.child(
+                                        crate::ui::icon(IconName::Check)
+                                            .size(px(12.))
+                                            .text_color(accent),
+                                    )
+                                }),
+                        )
+                        .child(
+                            crate::ui::icon(IconName::Folder)
+                                .size(px(14.))
+                                .flex_shrink_0()
+                                .text_color(if is_active { text } else { muted }),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_xs()
+                                .when(is_active, |el| el.font_medium())
+                                .text_color(text)
+                                .text_ellipsis()
+                                .child(name),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_0p5()
+                                .flex_shrink_0()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .child(
+                                    action_btn(
+                                        SharedString::from(format!("pm-reveal-{}", project.id)),
+                                        IconName::ExternalLink,
+                                        text,
+                                    )
+                                    .tooltip(|window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(
+                                            crate::i18n::workspace::MENU_REVEAL_IN_EXPLORER.get(),
+                                        )
+                                        .build(window, cx)
+                                    })
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        cx.stop_propagation();
+                                        app.close_project_menu(cx);
+                                        reveal_path(&root, cx);
+                                    })),
+                                )
+                                .child(
+                                    action_btn(
+                                        SharedString::from(format!("pm-rename-{}", project.id)),
+                                        IconName::PencilLine,
+                                        text,
+                                    )
+                                    .tooltip(|window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(
+                                            crate::i18n::workspace::MENU_RENAME_PROJECT.get(),
+                                        )
+                                        .build(window, cx)
+                                    })
+                                    .on_click(cx.listener(move |app, _, window, cx| {
+                                        cx.stop_propagation();
+                                        app.close_project_menu(cx);
+                                        app.start_rename_project(
+                                            rename_id.clone(),
+                                            &rename_name,
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                                )
+                                .child(
+                                    action_btn(
+                                        SharedString::from(format!("pm-remove-{}", project.id)),
+                                        IconName::Trash,
+                                        danger,
+                                    )
+                                    .tooltip(|window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(
+                                            crate::i18n::workspace::MENU_REMOVE_PROJECT.get(),
+                                        )
+                                        .build(window, cx)
+                                    })
+                                    .on_click(cx.listener(move |app, _, window, cx| {
+                                        cx.stop_propagation();
+                                        app.close_project_menu(cx);
+                                        app.remove_project(&remove_id, window, cx);
+                                    })),
+                                ),
+                        )
+                }))
+                .into_any_element()
+        };
+
+        Some(
+            deferred(
+                div()
+                    .id("project-menu-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|app, _, _, cx| {
+                            cx.stop_propagation();
+                            app.close_project_menu(cx);
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|app, _, _, cx| {
+                            cx.stop_propagation();
+                            app.close_project_menu(cx);
+                        }),
+                    )
+                    .child(
+                        div()
+                            .id("project-menu-popover")
+                            .absolute()
+                            .top(px(40.))
+                            .left(px(6.))
+                            .w(px(284.))
+                            .max_h(px(420.))
+                            .rounded(px(10.))
+                            .bg(gpui_kit::rgb(palette.surface))
+                            .border_1()
+                            .border_color(gpui_kit::rgb(palette.border))
+                            .shadow_lg()
+                            .occlude()
+                            .flex()
+                            .flex_col()
+                            .overflow_hidden()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_scroll(|_, _, cx| cx.stop_propagation())
+                            .child(
+                                div()
+                                    .px_2p5()
+                                    .py_2()
+                                    .border_b_1()
+                                    .border_color(gpui_kit::rgb(palette.border))
+                                    .child(
+                                        div()
+                                            .h(px(28.))
+                                            .px_2()
+                                            .rounded(px(6.))
+                                            .bg(gpui_kit::rgb(palette.background))
+                                            .border_1()
+                                            .border_color(gpui_kit::rgb(palette.border))
+                                            .flex()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .child(
+                                                crate::ui::icon(IconName::Search)
+                                                    .size(px(13.))
+                                                    .flex_shrink_0()
+                                                    .text_color(muted),
+                                            )
+                                            .child(
+                                                Input::new(&self.project_menu.search)
+                                                    .appearance(false)
+                                                    .bordered(false)
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .px_0()
+                                                    .py_0()
+                                                    .text_size(px(12.5))
+                                                    .text_color(text),
+                                            ),
+                                    ),
+                            )
+                            .child(list_body)
+                            .child(
+                                div()
+                                    .border_t_1()
+                                    .border_color(gpui_kit::rgb(palette.border))
+                                    .p_1p5()
+                                    .child(
+                                        div()
+                                            .id("project-menu-add")
+                                            .h(px(30.))
+                                            .px_2()
+                                            .rounded(px(6.))
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .cursor_pointer()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .hover(move |s| s.bg(hover_bg).text_color(text))
+                                            .on_click(cx.listener(|app, _, window, cx| {
+                                                app.close_project_menu(cx);
+                                                app.add_project(&OpenProject, window, cx);
+                                            }))
+                                            .child(crate::ui::icon(IconName::Plus).size(px(13.)))
+                                            .child(
+                                                crate::i18n::workspace::ADD_LOCAL_PROJECT.get(),
+                                            ),
+                                    ),
+                            ),
+                    ),
+            )
+            .with_priority(8)
+            .into_any_element(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Projects;
+    use crate::model::{Engine, Project, ProjectConfig};
+    use std::collections::BTreeMap;
+
+    fn sample_project(id: &str) -> Project {
+        Project {
+            id: id.to_owned(),
+            name: format!("Project {id}"),
+            folder: format!("/tmp/{id}"),
+            main_file: String::new(),
+            engine: Engine::default(),
+        }
+    }
+
+    fn sample_projects(ids: &[&str], recent: &[&str]) -> Projects {
+        Projects {
+            default_workspace: sample_project("__folio_default"),
+            config: ProjectConfig {
+                projects: ids.iter().map(|id| sample_project(id)).collect(),
+                active_id: ids.first().map(|id| (*id).to_owned()),
+                active_workspace: None,
+                recent_project_ids: recent.iter().map(|id| (*id).to_owned()).collect(),
+            },
+            workspace_sessions: BTreeMap::new(),
+            active_session: None,
+        }
+    }
+
+    #[test]
+    fn touch_recent_project_moves_to_front_and_prunes_stale_ids() {
+        let mut projects = sample_projects(&["a", "b", "c"], &["b", "stale", "a"]);
+        projects.touch_recent_project("c");
+        assert_eq!(projects.config.recent_project_ids, vec!["c", "b", "a"]);
+
+        projects.touch_recent_project("a");
+        assert_eq!(projects.config.recent_project_ids, vec!["a", "c", "b"]);
+
+        projects.touch_recent_project("missing");
+        assert_eq!(projects.config.recent_project_ids, vec!["a", "c", "b"]);
+    }
+
+    #[test]
+    fn recent_projects_backfills_legacy_config_and_respects_limit() {
+        let projects = sample_projects(&["a", "b", "c", "d"], &[]);
+        let top2: Vec<&str> = projects
+            .recent_projects(2)
+            .into_iter()
+            .map(|project| project.id.as_str())
+            .collect();
+        assert_eq!(top2, vec!["a", "b"]);
+
+        let partial = sample_projects(&["a", "b", "c", "d"], &["c"]);
+        let top3: Vec<&str> = partial
+            .recent_projects(3)
+            .into_iter()
+            .map(|project| project.id.as_str())
+            .collect();
+        assert_eq!(top3, vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn recent_projects_ignores_removed_ids() {
+        let mut projects = sample_projects(&["a", "b", "c"], &["c", "b", "a"]);
+        projects.config.projects.retain(|project| project.id != "b");
+        projects.config.recent_project_ids.retain(|id| id != "b");
+        let ids: Vec<&str> = projects
+            .recent_projects(4)
+            .into_iter()
+            .map(|project| project.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["c", "a"]);
     }
 }

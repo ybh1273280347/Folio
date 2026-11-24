@@ -19,6 +19,7 @@ pub const STATUS_RUNNING: BiText = BiText::new("运行中", "Running");
 pub const STATUS_WAITING: BiText = BiText::new("等待操作", "Waiting");
 pub const STATUS_GENERATING: BiText = BiText::new("生成中", "Generating");
 pub const RUNNING_TASKS: BiText = BiText::new("运行中任务", "Running Tasks");
+pub const HUB_SECTION_OPEN: BiText = BiText::new("打开", "Open");
 pub const BADGE_SYNCING: BiText = BiText::new("整理中", "Syncing");
 
 pub const KB_OPEN_PROJECT_HINT: BiText = BiText::new(

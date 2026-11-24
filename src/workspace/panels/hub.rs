@@ -35,6 +35,7 @@ pub(crate) struct HubActionItem {
 pub(crate) struct RightPanelHubProps {
     pub(crate) query: String,
     pub(crate) selected_index: usize,
+    pub(crate) panel_width: f32,
     pub(crate) preview_open: bool,
     pub(crate) logs_open: bool,
     pub(crate) zen_mode: bool,
@@ -56,17 +57,8 @@ fn fg_alpha(hex: u32, alpha: f32) -> Rgba {
     color
 }
 
-pub(crate) fn filtered_actions(props: &RightPanelHubProps) -> Vec<HubActionItem> {
-    let preview_badge = props.preview_open.then(|| rp::BADGE_OPENED.get().to_string());
-    let logs_badge = if props.logs_open {
-        Some(rp::BADGE_EXPANDED.get().to_string())
-    } else if props.build_failed {
-        Some(rp::BADGE_BUILD_FAILED.get().to_string())
-    } else {
-        None
-    };
-
-    let all = vec![
+pub(crate) fn core_actions(props: &RightPanelHubProps) -> Vec<HubActionItem> {
+    vec![
         HubActionItem {
             action: RightPanelAction::OpenAi,
             icon: IconName::Sparkles,
@@ -94,6 +86,21 @@ pub(crate) fn filtered_actions(props: &RightPanelHubProps) -> Vec<HubActionItem>
             active: false,
             danger: false,
         },
+    ]
+}
+
+fn all_actions(props: &RightPanelHubProps) -> Vec<HubActionItem> {
+    let preview_badge = props.preview_open.then(|| rp::BADGE_OPENED.get().to_string());
+    let logs_badge = if props.logs_open {
+        Some(rp::BADGE_EXPANDED.get().to_string())
+    } else if props.build_failed {
+        Some(rp::BADGE_BUILD_FAILED.get().to_string())
+    } else {
+        None
+    };
+
+    let mut all = core_actions(props);
+    all.extend([
         HubActionItem {
             action: RightPanelAction::TogglePreview,
             icon: IconName::PanelRightOpen,
@@ -139,13 +146,17 @@ pub(crate) fn filtered_actions(props: &RightPanelHubProps) -> Vec<HubActionItem>
             active: false,
             danger: false,
         },
-    ];
+    ]);
+    all
+}
 
+pub(crate) fn filtered_actions(props: &RightPanelHubProps) -> Vec<HubActionItem> {
     let query = props.query.trim().to_lowercase();
     if query.is_empty() {
-        return all;
+        return core_actions(props);
     }
-    all.into_iter()
+    all_actions(props)
+        .into_iter()
         .filter(|item| {
             item.label.to_lowercase().contains(&query)
                 || item.keywords.to_lowercase().contains(&query)
@@ -165,6 +176,9 @@ pub(crate) fn render_hub(
     let items = filtered_actions(props);
     let search_focused = search_input.read(cx).focus_handle(cx).is_focused(window);
     let has_query = !props.query.trim().is_empty();
+    let compact = props.panel_width < 340.0;
+    let h_pad = if compact { 14.0 } else { 20.0 };
+    let top_pad = if has_query { 20.0 } else { 52.0 };
     let selected = if items.is_empty() {
         0
     } else {
@@ -174,12 +188,31 @@ pub(crate) fn render_hub(
     let ring_color = if search_focused {
         fg_alpha(palette.accent, 0.72)
     } else {
-        gpui_kit::rgb(palette.border)
+        fg_alpha(palette.border, if palette.is_dark() { 0.85 } else { 0.95 })
     };
     let outer_halo = fg_alpha(palette.accent, 0.14);
     let row_hover = gpui_kit::rgb(palette.hover);
     let row_selected = fg_alpha(palette.text, 0.06);
     let badge_bg = fg_alpha(palette.text, 0.06);
+    let card_bg = if palette.is_dark() {
+        fg_alpha(palette.text, 0.055)
+    } else {
+        gpui_kit::rgb(0xf4f4f2)
+    };
+    let card_hover = if palette.is_dark() {
+        fg_alpha(palette.text, 0.095)
+    } else {
+        gpui_kit::rgb(0xecebe8)
+    };
+    let card_border = fg_alpha(palette.border, if palette.is_dark() { 0.5 } else { 0.65 });
+    let search_shadow = vec![
+        BoxShadow::new(
+            px(0.),
+            px(1.),
+            hsla(0., 0., 0., if palette.is_dark() { 0.24 } else { 0.04 }),
+        )
+        .blur_radius(px(4.)),
+    ];
 
     let search_bar = div()
         .w_full()
@@ -188,15 +221,16 @@ pub(crate) fn render_hub(
         .child(
             div()
                 .w_full()
-                .h(px(36.))
-                .px(px(14.))
+                .h(px(40.))
+                .px(px(16.))
                 .rounded_full()
                 .bg(gpui_kit::rgb(palette.surface))
                 .border_1()
                 .border_color(ring_color)
+                .shadow(search_shadow)
                 .flex()
                 .items_center()
-                .gap(px(8.))
+                .gap(px(9.))
                 .child(
                     crate::ui::icon(IconName::Search)
                         .w(px(15.))
@@ -234,7 +268,119 @@ pub(crate) fn render_hub(
                 }),
         );
 
-    let feature_rows = if items.is_empty() {
+    let main_section = if !has_query {
+        let card_gap = if compact { 8.0 } else { 10.0 };
+        let cards_row = div()
+            .w_full()
+            .flex()
+            .items_stretch()
+            .gap(px(card_gap))
+            .children(items.into_iter().enumerate().map(|(idx, item)| {
+                let action = item.action.clone();
+                let trigger = on_action.clone();
+                let icon_color = if item.danger {
+                    gpui_kit::rgb(palette.danger)
+                } else if item.active {
+                    gpui_kit::rgb(palette.accent)
+                } else {
+                    gpui_kit::rgb(palette.text)
+                };
+                let status_el = match action {
+                    RightPanelAction::OpenKnowledgeBase => item.badge.map(|badge| {
+                        let color = if item.danger {
+                            gpui_kit::rgb(palette.danger)
+                        } else if item.active {
+                            gpui_kit::rgb(palette.accent)
+                        } else {
+                            gpui_kit::rgb(palette.muted)
+                        };
+                        div()
+                            .text_size(px(11.))
+                            .text_color(color)
+                            .text_ellipsis()
+                            .child(badge)
+                            .into_any_element()
+                    }),
+                    RightPanelAction::OpenAi => (!props.ai_tasks.is_empty()).then(|| {
+                        let any_waiting = props.ai_tasks.iter().any(|(_, _, waiting)| *waiting);
+                        div()
+                            .size(px(7.))
+                            .rounded_full()
+                            .bg(gpui_kit::rgb(if any_waiting {
+                                palette.danger
+                            } else {
+                                palette.accent
+                            }))
+                            .into_any_element()
+                    }),
+                    RightPanelAction::OpenTerminal => (props.terminal_sessions > 0).then(|| {
+                        div()
+                            .size(px(7.))
+                            .rounded_full()
+                            .bg(gpui_kit::rgb(palette.accent))
+                            .into_any_element()
+                    }),
+                    _ => None,
+                };
+
+                div()
+                    .id(SharedString::from(format!("right-hub-card-{idx}")))
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(92.))
+                    .p(px(14.))
+                    .rounded(px(12.))
+                    .bg(card_bg)
+                    .border_1()
+                    .border_color(card_border)
+                    .flex()
+                    .flex_col()
+                    .justify_between()
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(card_hover))
+                    .on_click(move |_, window, cx| trigger(action.clone(), window, cx))
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                crate::ui::icon(item.icon)
+                                    .w(px(18.))
+                                    .h(px(18.))
+                                    .flex_shrink_0()
+                                    .text_color(icon_color),
+                            )
+                            .children(status_el),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .text_size(px(13.5))
+                            .font_medium()
+                            .text_color(gpui_kit::rgb(palette.text))
+                            .text_ellipsis()
+                            .child(item.label),
+                    )
+            }));
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                div()
+                    .px(px(2.))
+                    .text_size(px(12.5))
+                    .font_medium()
+                    .text_color(gpui_kit::rgb(palette.muted))
+                    .child(rp::HUB_SECTION_OPEN.get()),
+            )
+            .child(cards_row)
+            .into_any_element()
+    } else if items.is_empty() {
         div()
             .px(px(10.))
             .py(px(12.))
@@ -250,7 +396,7 @@ pub(crate) fn render_hub(
             .children(items.into_iter().enumerate().map(|(idx, item)| {
                 let action = item.action.clone();
                 let trigger = on_action.clone();
-                let is_selected = has_query && idx == selected;
+                let is_selected = idx == selected;
                 let icon_color = if item.active {
                     gpui_kit::rgb(palette.accent)
                 } else {
@@ -375,14 +521,14 @@ pub(crate) fn render_hub(
         .child(
             div()
                 .w_full()
-                .pt(px(20.))
-                .px(px(20.))
+                .pt(px(top_pad))
+                .px(px(h_pad))
                 .pb(px(24.))
                 .flex()
                 .flex_col()
-                .gap(px(20.))
+                .gap(px(22.))
                 .child(search_bar)
-                .child(feature_rows)
+                .child(main_section)
                 .when(!has_query && task_count > 0, |col| {
                     col.child(
                         div()

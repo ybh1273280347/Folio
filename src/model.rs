@@ -175,6 +175,8 @@ pub struct ProjectConfig {
     pub active_id: Option<String>,
     #[serde(default)]
     pub active_workspace: Option<WorkspaceLocation>,
+    #[serde(default)]
+    pub recent_project_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -200,6 +202,7 @@ impl Default for ProjectConfig {
             projects: Vec::new(),
             active_id: None,
             active_workspace: None,
+            recent_project_ids: Vec::new(),
         }
     }
 }
@@ -326,7 +329,7 @@ impl Default for TerminalSettings {
             args: vec!["-NoLogo".into()],
             font_family: "Consolas".into(),
             font_size: 14,
-            panel_width: 520.,
+            panel_width: 420.,
         }
     }
 }
