@@ -3550,6 +3550,7 @@ const CELL_BORDER_PX: f32 = 1.0; // border_r_1 drawn by every column but the las
 /// shaped with the runs the cell renders with, plus the cell's padding and
 /// border. Never capped: a cap would clip overflowing text *and* leave it
 /// outside the scrollable width, making it unreachable.
+#[allow(dead_code)]
 fn measure_table_columns(
     table: &Table,
     col_count: usize,
@@ -3557,6 +3558,16 @@ fn measure_table_columns(
     window: &mut Window,
     cx: &mut App,
 ) -> Vec<f32> {
+    measure_table_columns_with_floors(table, col_count, node_cx, window, cx).0
+}
+
+fn measure_table_columns_with_floors(
+    table: &Table,
+    col_count: usize,
+    node_cx: &NodeContext,
+    window: &mut Window,
+    cx: &mut App,
+) -> (Vec<f32>, Vec<f32>) {
     let text_styles = TableTextStyles::new(&node_cx.style, window);
     let rem_size = window.rem_size();
     let mono_family = cx.theme().tokens.typography.mono.clone();
@@ -3596,21 +3607,26 @@ fn measure_table_columns(
     // unchanged. Keep callbacks outside the cache lock and do not retain their
     // widths: a loaded image or a plugin can get narrower as well as wider.
     let mut col_w = measured.widths.clone();
+    let mut col_atom_floor = vec![0.0_f32; col_count];
     for &(row_ix, ix) in &measured.custom_cells {
         let cell = &table.children[row_ix].children[ix];
         let items = cell.children.inline_flow_items(None, &[], &[], node_cx, cx);
         let style = text_styles.row_refinement(row_ix).clone();
-        let width = window.with_text_style(Some(style), |window| {
-            super::inline_flow::intrinsic_width(&items, window, cx)
+        let (width, object_width) = window.with_text_style(Some(style), |window| {
+            super::inline_flow::intrinsic_widths(&items, window, cx)
         });
         let border = if ix + 1 < col_count {
             CELL_BORDER_PX
         } else {
             0.
         };
-        col_w[ix] = col_w[ix].max(f32::from(width) + CELL_PAD_PX + border);
+        let pad = CELL_PAD_PX + border;
+        col_w[ix] = col_w[ix].max(f32::from(width) + pad);
+        if object_width > Pixels::ZERO {
+            col_atom_floor[ix] = col_atom_floor[ix].max(f32::from(object_width) + pad);
+        }
     }
-    col_w
+    (col_w, col_atom_floor)
 }
 
 // The first measurement still visits all ordinary cells. This cache avoids
@@ -4198,7 +4214,7 @@ impl BlockNode {
             .map(|row| row.children.len())
             .max()
             .unwrap_or(0);
-        let col_w = measure_table_columns(table, col_count, node_cx, window, cx);
+        let (col_w, col_atom_floor) = measure_table_columns_with_floors(table, col_count, node_cx, window, cx);
         let scroll = matches!(style.table().overflow.x, Some(Overflow::Scroll));
         let nowrap = style.table_cell().text.white_space == Some(WhiteSpace::Nowrap);
         let rem_size = window.rem_size();
@@ -4215,11 +4231,17 @@ impl BlockNode {
             .enumerate()
             .map(|(ix, &w)| {
                 let w = w + padding_delta;
+                let atom_floor = if col_atom_floor[ix] > 0. {
+                    col_atom_floor[ix] + padding_delta
+                } else {
+                    0.
+                };
                 let floor = if scroll && nowrap {
                     w
                 } else if scroll {
                     (w / CELL_WRAP_MAX_LINES)
                         .clamp(CELL_WRAP_MIN_PX, CELL_WRAP_MAX_PX)
+                        .max(atom_floor)
                         .min(w)
                 } else {
                     w.min(wrap_min_px)
@@ -5804,6 +5826,50 @@ mod tests {
                     measure_table_columns(&table, 1, &node_cx, window, cx),
                     vec![100. + CELL_PAD_PX]
                 );
+            });
+        });
+    }
+
+    #[test]
+    fn table_column_atom_floor_tracks_unbreakable_custom_inline_object() {
+        use crate::text::inline::test_draw::in_prepaint;
+        use crate::text::inline::test_fonts::{BODY, WideMonoTextSystem};
+        use crate::text::{InlineElement, MarkdownNode};
+        use gpui::{Refineable as _, TestApp, TextStyle, div};
+
+        let mut paragraph = Paragraph::default();
+        let mut atom = InlineNode::new("");
+        atom.custom = Some(MarkdownNode::new("wide-formula", ()));
+        paragraph.push(atom);
+        let table = Table {
+            children: vec![TableRow {
+                children: vec![TableCell {
+                    children: paragraph,
+                    width: None,
+                }],
+            }],
+            column_aligns: vec![],
+            span: None,
+            table_data_cache: TableDataCache::default(),
+            column_widths_cache: TableColumnWidthsCache::default(),
+        };
+        let extensions = MarkdownExtensions::default().inline_renderer("wide-formula", |_, _, _| {
+            Some(InlineElement::new(div().w(px(520.)).h(px(24.))).with_baseline(px(18.)))
+        });
+        let node_cx = NodeContext::default().with_markdown_extensions(Arc::new(extensions));
+
+        let mut app = TestApp::with_text_system(Arc::new(WideMonoTextSystem));
+        in_prepaint(&mut app, move |window, cx| {
+            let style = TextStyle {
+                font_family: BODY.into(),
+                font_size: px(16.).into(),
+                ..Default::default()
+            };
+            window.with_text_style(Some(style.subtract(&Default::default())), |window| {
+                let (widths, floors) =
+                    measure_table_columns_with_floors(&table, 1, &node_cx, window, cx);
+                assert_eq!(widths, vec![520. + CELL_PAD_PX]);
+                assert_eq!(floors, vec![520. + CELL_PAD_PX]);
             });
         });
     }
