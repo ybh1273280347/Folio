@@ -1914,7 +1914,20 @@ impl Element for EditorRoot {
             });
         });
         let entity = self.state.clone();
-        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            // A host gutter sits above the editor. Continue its drag through capture
+            // even when another element handles the pointer in the bubble phase.
+            if phase == DispatchPhase::Capture
+                && event.pressed_button == Some(MouseButton::Left)
+                && entity.read(cx).block_drag.is_some()
+            {
+                entity.update(cx, |state, cx| {
+                    let was_dragging = state.is_block_dragging();
+                    if state.block_drag_to(event.position, cx) && !was_dragging {
+                        window.focus(&state.focus_handle, cx);
+                    }
+                });
+            }
             if phase != DispatchPhase::Bubble {
                 return;
             }
@@ -1932,7 +1945,7 @@ impl Element for EditorRoot {
                 return;
             }
             entity.update(cx, |state, cx| {
-                if state.move_image_resize(event.position, cx) || state.block_drag_to(event.position, cx) {
+                if state.move_image_resize(event.position, cx) || state.is_block_dragging() {
                     return;
                 }
                 if state.dragging {
@@ -1942,11 +1955,21 @@ impl Element for EditorRoot {
         });
         let entity = self.state.clone();
         window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-            if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
+            if event.button != MouseButton::Left {
+                return;
+            }
+            if phase == DispatchPhase::Capture && entity.read(cx).block_drag.is_some() {
+                // Keep the active flag visible to the host's click handler until dispatch ends.
+                let entity = entity.clone();
+                let position = event.position;
+                cx.defer(move |cx| {
+                    entity.update(cx, |state, cx| state.finish_block_drag(position, cx));
+                });
+            }
+            if phase == DispatchPhase::Bubble {
                 entity.update(cx, |state, cx| {
                     state.finish_image_resize(event.position, cx);
                     state.dragging = false;
-                    state.finish_block_drag(cx);
                 });
             }
         });
