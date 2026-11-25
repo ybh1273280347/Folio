@@ -3,7 +3,7 @@ use instant::Duration;
 use web_time::Instant;
 
 static INTERVAL: Duration = Duration::from_millis(500);
-static PAUSE_DELAY: Duration = Duration::from_millis(300);
+static PAUSE_DELAY: Duration = Duration::from_millis(700);
 
 pub(super) const CURSOR_WIDTH: Pixels = px(1.);
 

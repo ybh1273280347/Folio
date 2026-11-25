@@ -129,7 +129,7 @@ fn clip_offset(text: &str, offset: usize) -> usize {
 // ---- Caret ----
 
 static INTERVAL: Duration = Duration::from_millis(500);
-static PAUSE_DELAY: Duration = Duration::from_millis(300);
+static PAUSE_DELAY: Duration = Duration::from_millis(700);
 
 pub(crate) const CURSOR_WIDTH: Pixels = px(1.);
 
