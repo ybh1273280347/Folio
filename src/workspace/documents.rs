@@ -73,6 +73,7 @@ pub(super) struct Documents {
     tabs: Vec<String>,
     active: String,
     reading_panes: Vec<String>,
+    reading_pane_initial_widths: BTreeMap<String, f32>,
     focused_markdown: Option<String>,
     markdown_panes: BTreeMap<PaneKey, Entity<MarkdownPane>>,
     canvas_panes: BTreeMap<PaneKey, Entity<CanvasPane>>,
@@ -99,6 +100,10 @@ impl Documents {
 
     pub(super) fn reading_panes(&self) -> &[String] {
         &self.reading_panes
+    }
+
+    pub(super) fn reading_pane_initial_width(&self, path: &str) -> Option<f32> {
+        self.reading_pane_initial_widths.get(path).copied()
     }
 
     pub(super) fn focused_markdown(&self) -> Option<&str> {
@@ -538,6 +543,7 @@ impl Workspace {
             self.release_document_pane(&PaneKey::new(path, role), window, cx);
         }
         self.documents.reading_panes.retain(|pane| pane != path);
+        self.documents.reading_pane_initial_widths.remove(path);
         self.documents.tabs.retain(|tab| tab != path);
         self.documents.canvas_changed.remove(path);
         if self.documents.focused_markdown.as_deref() == Some(path) {
@@ -568,6 +574,7 @@ impl Workspace {
         self.documents.tabs.clear();
         self.documents.active.clear();
         self.documents.reading_panes.clear();
+        self.documents.reading_pane_initial_widths.clear();
         self.documents.markdown_panes.clear();
         self.documents.canvas_panes.clear();
         self.documents.focused_markdown = None;
@@ -1734,6 +1741,9 @@ impl Workspace {
         }
         if self.documents.active == key { self.documents.active = renamed.clone(); }
         if self.documents.focused_markdown.as_deref() == Some(key) { self.documents.focused_markdown = Some(renamed.clone()); }
+        if let Some(width) = self.documents.reading_pane_initial_widths.remove(key) {
+            self.documents.reading_pane_initial_widths.insert(renamed.clone(), width);
+        }
         if self.documents.markdown_changed.remove(key) {
             self.documents.markdown_changed.insert(renamed.clone());
         }
@@ -1748,6 +1758,16 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_reading_pane_with_width(file, None, window, cx);
+    }
+
+    pub(super) fn open_reading_pane_with_width(
+        &mut self,
+        file: &ProjectFile,
+        initial_width: Option<f32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.documents.reading_panes.contains(&file.path) {
             return;
         }
@@ -1755,6 +1775,11 @@ impl Workspace {
         if let Err(error) = self.mount_document_pane(&key, file.kind, window, cx) {
             self.report(error, cx);
             return;
+        }
+        if let Some(width) = initial_width {
+            self.documents
+                .reading_pane_initial_widths
+                .insert(file.path.clone(), width);
         }
         self.documents.reading_panes.push(file.path.clone());
         self.documents.focused_markdown = None;
@@ -1779,6 +1804,7 @@ impl Workspace {
                 return;
             }
         }
+        self.documents.reading_pane_initial_widths.remove(path);
         self.release_document_pane(&PaneKey::reading(path), window, cx);
         if self.documents.focused_markdown.as_deref() == Some(path) {
             self.documents.focused_markdown = None;

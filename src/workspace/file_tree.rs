@@ -690,11 +690,12 @@ impl Workspace {
 
     pub(super) fn new_markdown_split(
         &mut self,
+        initial_width: Option<f32>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> io::Result<()> {
-        if !self.ensure_creatable_workspace(window, cx, |app, window, cx| {
-            if let Err(error) = app.new_markdown_split(window, cx) {
+        if !self.ensure_creatable_workspace(window, cx, move |app, window, cx| {
+            if let Err(error) = app.new_markdown_split(initial_width, window, cx) {
                 app.report(error, cx);
             }
         })? {
@@ -705,7 +706,7 @@ impl Workspace {
         let file = files::create_markdown_in(&root, None)?;
         self.tree.files = files::list_files(&root)?;
         self.expand_ancestors(&file.path);
-        self.open_reading_pane(&file, window, cx);
+        self.open_reading_pane_with_width(&file, initial_width, window, cx);
         Ok(())
     }
 

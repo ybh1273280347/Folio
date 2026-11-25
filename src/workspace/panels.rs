@@ -19,6 +19,7 @@ pub(super) enum RightPanelView {
 pub(super) struct RightPanel {
     pub(super) open: bool,
     pub(super) maximized: bool,
+    pub(super) snap_close: bool,
     pub(super) view: RightPanelView,
     search: Entity<InputState>,
     selected: usize,
@@ -58,7 +59,7 @@ impl RightPanel {
             },
         )
         .detach();
-        Self { open: false, maximized: false, view: RightPanelView::Hub, search: right_panel_search, selected: 0, kb }
+        Self { open: false, maximized: false, snap_close: false, view: RightPanelView::Hub, search: right_panel_search, selected: 0, kb }
     }
 
     pub(super) fn refresh_locale(&self, window: &mut Window, cx: &mut App) {
@@ -78,6 +79,7 @@ impl Workspace {
     ) {
         self.right_panel.open = true;
         self.right_panel.maximized = false;
+        self.right_panel.snap_close = false;
         self.right_panel.view = view;
 
         let directory = self.terminal_directory();
@@ -118,11 +120,25 @@ impl Workspace {
     }
 
     pub(super) fn close_right_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_right_panel_with_snap(false, window, cx);
+    }
+
+    pub(super) fn close_right_panel_immediate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_right_panel_with_snap(true, window, cx);
+    }
+
+    fn close_right_panel_with_snap(
+        &mut self,
+        snap_close: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.right_panel.open {
             return;
         }
         self.right_panel.open = false;
         self.right_panel.maximized = false;
+        self.right_panel.snap_close = snap_close;
         self.terminal.update(cx, |pane, _| pane.hide());
         self.focus.focus(window, cx);
         cx.notify();
@@ -182,8 +198,9 @@ impl Workspace {
                 self.open_right_panel(RightPanelView::Terminal, window, cx);
             }
             RightPanelAction::NewSplitPage => {
-                self.close_right_panel(window, cx);
-                if let Err(error) = self.new_markdown_split(window, cx) {
+                let target_width = self.settings.terminal.panel_width.clamp(280., 1600.);
+                self.close_right_panel_immediate(window, cx);
+                if let Err(error) = self.new_markdown_split(Some(target_width), window, cx) {
                     self.report(error, cx);
                 }
             }
