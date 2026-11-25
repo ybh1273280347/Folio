@@ -1,32 +1,63 @@
-# Folio 原生排版与 PDF 导出
+# Folio Vendored Patches 清单
 
-- `latex-rust 3.0.3`：增加宿主字体的字形度量回调，并在数学盒模型保留字形所属字体。回退字形不使用主数学字体的脚本替换与重音度量。Folio 只消费盒模型，不调用该库的图片输出后端。
-- `gpui-pre 0.3.12`：增加文档绘制捕获，保留字形、原始文字簇、字体、图形、图片及裁剪；捕获期间不创建 GPU 字形纹理。独立文档布局可以覆盖视口裁剪，以包含未滚动到的内容。
-- `gpui-pre-windows 0.3.12`：从 DirectWrite 取得实际字体文件和集合索引，供 PDF 字体嵌入及文字复制使用。
-- `gpui-pre-windows 0.3.12`：读取文件剪贴板时将 `CF_HDROP` 句柄直接传给 `DragQueryFileW`，供资源管理器文件粘贴使用。
-- `gpui-kit-markdown-editor`：增加使用同一快照、节点渲染器的完整文档视图，省略编辑选区、光标和视口裁剪，并记录分页使用的块边界。
-- `gpui-kit-markdown-editor`：完整文档视图为每个导出块建立独立的 GPUI 元素作用域，防止块内源偏移相同的行内节点共享排版状态。
-- `gpui-pre 0.3.12`：增加 `VectorPaint::Svg` 与 `Window::paint_svg_document`，把图表 SVG 原文连同裁剪区域记录进文档捕获，供 PDF 用 `krilla-svg` 直接写成矢量图形与可选文字；不截图、不引入第二套排版。
-- `gpui-kit-markdown-editor`：可选单语言代码块预览接口只改变视图，保留原代码模型与序列化；源码模式复用原编辑几何，预览保留真实源码长度，完整文档导出强制预览且不带工具栏。
-- `gpui-kit-markdown-editor`：按文档 revision 缓存标题块序列，大纲跳转按标题索引定位，活动标题同步只遍历标题块。
-- `gpui-kit-markdown-editor`：知识库命中选区复用主动导航，在视口四分之一高度附近显示光标。滚动后请求新一帧排版，从新位置复核光标，并按移动后的视口裁剪下一帧。
-- `gpui-kit-markdown-editor`：批注的选区计数和跳转共用引用匹配，跨块引用按已保存的 Markdown 摘录匹配连续叶块。保留 inline atom 的源范围映射，并用唯一的正文高亮恢复位次已变化的批注。
-- `gpui-kit-markdown-editor`：将已保存引文的定位开放给无窗口模型，AI 删除批注时按记录位次移除正文高亮。
-- `gpui-kit-markdown-editor`：公式规范化遇到没有 TeX 起始定界符的文本时跳过预解析，减少 AI 流式渲染和 Markdown 导入的重复解析。
-- `gpui-base 0.9.1`：为 Folio 的 Markdown 源码编辑器提供后台全文换行。宽度变化时保留现有索引，按实际字体与编辑区几何异步重排。长逻辑行的字形只按视口附近的软换行行整形，原文偏移和折行行号映射保留完整。
-- `gpui-base` 与 `gpui-kit-markdown-editor`：编辑区和 PDF 共享列表分组与相邻容器的留白。透明编辑区同时淡化行内代码的胶囊底色和标记背景。
-- `gpui-base 0.9.1`：在 vendored crate 的 Cargo 清单中关闭该 crate 的编译警告。
-- `gpui-base` 与 `gpui-kit-markdown-editor`：复用行内图片的绘制边界处理选区和以中心为基准的等比缩放。正文栏宽度决定放大上限，独立图片段落在编辑器和 PDF 中居中，松手提交一次可撤销编辑，有尺寸的图片以 HTML 图片属性保存。重新打开时交由共用 HTML 解析器恢复图片与尺寸。
+按 patch 目标 crate 分组记录对 `vendor/` 下本地维护依赖的改动，便于升级对齐与审计。
 
-Mermaid 适配保留编辑器原有的 `code_ui` 模块、投影缓存和折叠按钮 bounds；自定义节点使用 `editor_host::BlockState`。预览点击在编辑器 entity 的 `update` 内设置焦点，避免通过 `read(cx)` 跨越可变 App 借用。
+## `gpui-base 0.9.1`
 
-字体沿用 `resources/fonts`，中文公式缺字时才读取系统微软雅黑。Markdown PDF 使用 `krilla` 写入上述绘制操作；整篇 `.tex` 编译保持 `latexmk` 流程。
-- `gpui-pdf`：新增 `PdfView::flash_to_page`，用于从知识库或外部定位跳转至目标页顶部并触发 1.4 秒临时高亮边框（冷打开时由 `pending_reveal` 复用该闪烁高亮）。
-- `gpui-pdf`：为左侧缩略图栏与目录栏补充悬浮可拖拽滚动条（复用 `ScrollHandle::max_offset()` 计算几何）；修复页码跳转输入框空态缺字（`⌷` 改为光标 `|` 并高亮激活态、点击外部取消）。
-- `gpui-base 0.9.1`：放开非代码编辑器多行输入框（`Textarea`）的 `set_text_align` 限制，并在空文本状态下按 `alignment_offset` 对齐光标水平位置，供知识画布居中编辑使用。
-- `gpui-base 0.9.1`：为 `InlineElement` 增加 `with_fit_to_width` 钩子，允许自定义行内对象（如超宽行内公式）按可用行宽重新排版并等比缩放；在 `horizontal_scroll_area` 中补充横向 `Scrollbar`，并在 `measure_table_columns_with_floors` 中将单个不可折行自定义行内对象的宽度计入可滚动表格的列宽下限。
-- `gpui-kit-markdown-editor`：交互式渲染视图为 Markdown 和 HTML 表格提供横向滚动，并在 `FrameLayout` / `EditorRoot` / `table_ui` 中将编辑装饰约束到表格可见视口内。HTML 表格按跨度分配固有尺寸并裁剪各单元格。完整文档在布局阶段使用页宽，保留跨行区域的分页边界，并在超宽时局部缩放矢量绘制。
-- `gpui-kit-markdown-editor`：HTML 表格单元格使用主文档的选区、输入和撤销事务。行列手柄按逻辑网格增删，保留仍占用其他格的跨格单元格及其标识。写回继续使用原生 HTML，保留外层标签、行组、标签属性和单元格内的原始 HTML 片段。
-- `gpui-base 0.9.1` 与 `gpui-kit-markdown-editor`：新增全局 `SmoothCaretSettings`（`set_smooth_caret` / `smooth_caret_settings`）与 `SmoothCaretMotion` 55ms 帧插值状态机（尊重 `reduce_motion` 与滚动锚点偏移防漂移），在启用时将 Markdown 编辑器与通用 `Input` 的光标绘制为圆角微光样式并平滑滑动。
-- `gpui-kit-markdown-editor`：让 Folio 左侧六点手柄通过 `arm_top_block_drag` 接入顶层块的拖放事务，复用插入线和撤销历史。鼠标事件在捕获阶段跟踪，释放后按实际位置提交，视口外释放取消移动。
-- `gpui-kit-markdown-editor`：顶层块拖动期间保留原块布局并淡化绘制，显示跟随指针的首行预览。插入标记与正文列对齐，回到原位时隐藏。
+- **Markdown 源码编辑器后台全文换行**：为 Folio 的 Markdown 源码编辑器提供后台全文换行。宽度变化时保留现有索引，按实际字体与编辑区几何异步重排；长逻辑行的字形只按视口附近的软换行行整形，原文偏移和折行行号映射保留完整。
+- **Textarea 对齐扩展**：放开非代码编辑器多行输入框（`Textarea`）的 `set_text_align` 限制，并在空文本状态下按 `alignment_offset` 对齐光标水平位置，供知识画布居中编辑使用。
+- **行内对象自适应与可滚动表格下限**：为 `InlineElement` 增加 `with_fit_to_width` 钩子，允许自定义行内对象（如超宽行内公式）按可用行宽重新排版并等比缩放；在 `horizontal_scroll_area` 中补充横向 `Scrollbar`，并在 `measure_table_columns_with_floors` 中将单个不可折行自定义行内对象的宽度计入可滚动表格的列宽下限。
+- **已勾选任务列表删除线**：在 `BlockNode::ListItem` 渲染（`render_list_item_row` 及同项续行块）中，对 `checked == Some(true)` 的任务项在既有柔化前景色基础上叠加 `line_through()` 删除线样式；编辑区、AI 渲染与 PDF 导出共用同一渲染路径，不改动源 Markdown。
+- **关闭 vendored crate 编译警告**：在 vendored crate 的 Cargo 清单中关闭该 crate 的编译警告。
+- **与 `gpui-kit-markdown-editor` 协同项**（详见下节协同说明）：列表分组与容器留白、行内代码与标记底色淡化、行内图片选区与等比缩放、全局平滑光标 `SmoothCaretSettings` / `SmoothCaretMotion`。
+
+## `gpui-kit-markdown-editor`
+
+- **完整文档视图与 PDF 导出**：
+  - 增加使用同一快照、节点渲染器的完整文档视图，省略编辑选区、光标和视口裁剪，并记录分页使用的块边界。
+  - 完整文档视图为每个导出块建立独立的 GPUI 元素作用域，防止块内源偏移相同的行内节点共享排版状态。
+- **代码块预览与 Mermaid 适配**：
+  - 可选单语言代码块预览接口只改变视图，保留原代码模型与序列化；源码模式复用原编辑几何，预览保留真实源码长度，完整文档导出强制预览且不带工具栏。
+  - Mermaid 适配保留编辑器原有的 `code_ui` 模块、投影缓存和折叠按钮 bounds；自定义节点使用 `editor_host::BlockState`。预览点击在编辑器 entity 的 `update` 内设置焦点，避免通过 `read(cx)` 跨越可变 `App` 借用。
+- **大纲缓存与定位跳转**：
+  - 按文档 revision 缓存标题块序列，大纲跳转按标题索引定位，活动标题同步只遍历标题块。
+  - 知识库命中选区复用主动导航，在视口四分之一高度附近显示光标；滚动后请求新一帧排版，从新位置复核光标，并按移动后的视口裁剪下一帧。
+- **批注定位与无窗口模型**：
+  - 批注的选区计数和跳转共用引用匹配，跨块引用按已保存的 Markdown 摘录匹配连续叶块；保留 inline atom 的源范围映射，并用唯一的正文高亮恢复位次已变化的批注。
+  - 将已保存引文的定位开放给无窗口模型，AI 删除批注时按记录位次移除正文高亮。
+- **公式预解析跳过**：公式规范化遇到没有 TeX 起始定界符的文本时跳过预解析，减少 AI 流式渲染和 Markdown 导入的重复解析。
+- **Markdown 与 HTML 表格**：
+  - 交互式渲染视图为 Markdown 和 HTML 表格提供横向滚动，并在 `FrameLayout` / `EditorRoot` / `table_ui` 中将编辑装饰约束到表格可见视口内。
+  - HTML 表格按跨度分配固有尺寸并裁剪各单元格；完整文档在布局阶段使用页宽，保留跨行区域的分页边界，并在超宽时局部缩放矢量绘制。
+  - HTML 表格单元格使用主文档的选区、输入和撤销事务；行列手柄按逻辑网格增删，保留仍占用其他格的跨格单元格及其标识；写回继续使用原生 HTML，保留外层标签、行组、标签属性和单元格内的原始 HTML 片段。
+- **顶层块拖拽**：
+  - 让 Folio 左侧六点手柄通过 `arm_top_block_drag` 接入顶层块的拖放事务，复用插入线和撤销历史；鼠标事件在捕获阶段跟踪，释放后按实际位置提交，视口外释放取消移动。
+  - 顶层块拖动期间保留原块布局并淡化绘制，显示跟随指针的首行预览；插入标记与正文列对齐，回到原位时隐藏。
+- **与 `gpui-base` 协同项**：
+  - **列表留白与透明底色**：编辑区和 PDF 共享列表分组与相邻容器的留白；透明编辑区同时淡化行内代码的胶囊底色和标记背景。
+  - **行内图片选区与缩放**：复用行内图片的绘制边界处理选区和以中心为基准的等比缩放；正文栏宽度决定放大上限，独立图片段落在编辑器和 PDF 中居中，松手提交一次可撤销编辑，有尺寸的图片以 HTML 图片属性保存，重新打开时交由共用 HTML 解析器恢复图片与尺寸。
+  - **平滑光标**：通过 `gpui-base 0.9.1` 的全局 `SmoothCaretSettings`（`set_smooth_caret` / `smooth_caret_settings`）与 `SmoothCaretMotion` 55ms 帧插值状态机（尊重 `reduce_motion` 与滚动锚点偏移防漂移），在启用时将 Markdown 编辑器与通用 `Input` 的光标绘制为圆角微光样式并平滑滑动。
+
+## `gpui-pre 0.3.12`
+
+- **文档绘制捕获**：增加文档绘制捕获，保留字形、原始文字簇、字体、图形、图片及裁剪；捕获期间不创建 GPU 字形纹理。独立文档布局可以覆盖视口裁剪，以包含未滚动到的内容。
+- **矢量 SVG 捕获**：增加 `VectorPaint::Svg` 与 `Window::paint_svg_document`，把图表 SVG 原文连同裁剪区域记录进文档捕获，供 PDF 用 `krilla-svg` 直接写成矢量图形与可选文字；不截图、不引入第二套排版。
+
+## `gpui-pre-windows 0.3.12`
+
+- **DirectWrite 字体检索**：从 DirectWrite 取得实际字体文件和集合索引，供 PDF 字体嵌入及文字复制使用。
+- **文件剪贴板句柄透传**：读取文件剪贴板时将 `CF_HDROP` 句柄直接传给 `DragQueryFileW`，供资源管理器文件粘贴使用。
+
+## `gpui-pdf`
+
+- **页面跳转闪烁高亮**：新增 `PdfView::flash_to_page`，用于从知识库或外部定位跳转至目标页顶部并触发 1.4 秒临时高亮边框（冷打开时由 `pending_reveal` 复用该闪烁高亮）。
+- **导航栏滚动条与页码输入框修复**：为左侧缩略图栏与目录栏补充悬浮可拖拽滚动条（复用 `ScrollHandle::max_offset()` 计算几何）；修复页码跳转输入框空态缺字（`⌷` 改为光标 `|` 并高亮激活态、点击外部取消）。
+
+## `latex-rust 3.0.3`
+
+- **宿主字体度量与字体归属**：增加宿主字体的字形度量回调，并在数学盒模型保留字形所属字体。回退字形不使用主数学字体的脚本替换与重音度量。Folio 只消费盒模型，不调用该库的图片输出后端。
+
+## 宿主字体与 PDF 出口约定
+
+- 字体沿用 `resources/fonts`，中文公式缺字时才读取系统微软雅黑。
+- Markdown PDF 使用 `krilla` 写入上述绘制操作；整篇 `.tex` 编译保持 `latexmk` 流程。

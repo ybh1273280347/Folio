@@ -410,25 +410,13 @@ pub(crate) fn render_hub(
                     )
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.))
+                            .flex_1()
                             .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(px(13.5))
-                                    .font_medium()
-                                    .text_color(gpui_kit::rgb(palette.text))
-                                    .text_ellipsis()
-                                    .child(rp::ACTION_NEW_PAGE.get()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.5))
-                                    .text_color(gpui_kit::rgb(palette.muted))
-                                    .text_ellipsis()
-                                    .child(rp::ACTION_NEW_PAGE_DESC.get()),
-                            ),
+                            .text_size(px(13.5))
+                            .font_medium()
+                            .text_color(gpui_kit::rgb(palette.text))
+                            .text_ellipsis()
+                            .child(rp::ACTION_NEW_PAGE.get()),
                     ),
             )
             .child(
