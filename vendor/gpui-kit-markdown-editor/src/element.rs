@@ -511,12 +511,20 @@ pub struct BlockEditor {
 
 impl BlockEditor {
     /// Use the editor's snapshot and node renderer without selection, caret or viewport culling.
-    pub fn document(state: &Entity<BlockEditorState>, window: &mut Window, cx: &mut App) -> AnyElement {
+    pub fn document(
+        state: &Entity<BlockEditorState>,
+        content_width: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
         let (snapshot, extensions) = state.update(cx, |state, _| {
             (state.snapshot(), state.model.doc.extensions.clone())
         });
         let mut extensions = (*extensions).clone();
         code_preview::register_renderer(&mut extensions);
+        extensions = extensions.block_renderer(super::html_table::NAME, move |node, window, cx| {
+            super::html_table::render_document(node, content_width, window, cx)
+        });
         let theme = gpui_kit::base::Theme::global(cx);
         let editor_state = state.read(cx);
         register_fold_surfaces(&mut extensions, editor_state, None, &theme);
