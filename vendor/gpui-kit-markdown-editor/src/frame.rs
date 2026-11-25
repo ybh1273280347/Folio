@@ -169,6 +169,30 @@ pub(crate) struct FrameLayout {
 }
 
 impl FrameLayout {
+    pub(crate) fn layout_html_tables(&mut self, tables: &HashMap<BlockId, super::html_table::Geometry>) {
+        for (&table, layout) in tables {
+            if layout.viewport.size.width <= px(0.) || layout.viewport.size.height <= px(0.) {
+                continue;
+            }
+            let viewport = layout.viewport;
+            self.tables.push((table, viewport));
+            self.table_viewports.insert(table, viewport);
+            self.grids.push(TableGeom {
+                table,
+                cols: layout.columns.clone(),
+                rows: layout.rows.clone(),
+                bounds: viewport,
+            });
+            for (&cell, bounds) in &layout.cells {
+                self.cell_table.insert(cell, table);
+                let visible = bounds.intersect(&viewport);
+                if visible.size.width > px(0.) && visible.size.height > px(0.) {
+                    self.cell_boxes.insert(cell, visible);
+                }
+            }
+        }
+    }
+
     /// Merge non-text block boxes into the same document order as text geometry.
     /// The renderer has no keyed text layout for rules or display formulas.
     pub(crate) fn insert_atoms(&mut self, leaves: &[LeafInfo], bounds: &HashMap<BlockId, Bounds<Pixels>>) {

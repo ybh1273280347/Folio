@@ -155,6 +155,7 @@ fn block(doc: &EditorDocument, id: BlockId) -> String {
             let fence = delimiter.to_string().repeat(longest.max(2) + 1);
             format!("{fence}{info}\n{code}\n{fence}")
         }
+        (BlockKindData::HtmlTable(source), _) => super::html_table_model::write(doc, id, source),
         (BlockKindData::Table { aligns }, _) => {
             let mut lines = Vec::new();
             for (row_ix, row) in children.iter().enumerate() {

@@ -123,7 +123,7 @@ impl Cut<'_> {
         kind: &BlockKindData,
         children: &[BlockId],
     ) -> Vec<DetachedBlock> {
-        if matches!(kind, BlockKindData::Table { .. }) {
+        if kind.is_table() {
             let doc = self.doc;
             let touched = match (
                 doc.order.rank(doc.first_leaf_in(id).block),

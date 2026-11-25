@@ -201,7 +201,12 @@ impl NodeCache {
                     .collect(),
                 aligns.clone(),
             )),
-            BlockKindData::TableRow | BlockKindData::TableCell => return None,
+            BlockKindData::HtmlTable(_) => BlockNode::Custom {
+                node: super::html_table_model::project(doc, id, self.placeholders),
+                state: BlockState::default(),
+            },
+            BlockKindData::TableRow | BlockKindData::TableCell
+            | BlockKindData::HtmlTableRow(_) | BlockKindData::HtmlTableCell(_) => return None,
             BlockKindData::HorizontalRule => BlockNode::HorizontalRule { span: None },
             BlockKindData::Break { html } => BlockNode::Break {
                 html: *html,

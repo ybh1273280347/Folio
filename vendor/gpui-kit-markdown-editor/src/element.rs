@@ -106,27 +106,9 @@ fn with_live_surfaces(
             Some(super::document::BlockContent::Atom(_))
         )
     {
-        let node = match node {
-            BlockNode::Custom { node, .. }
-                if node.name() == super::html_table::NAME && !state.is_readonly() =>
-            {
-                BlockNode::Custom {
-                    node: gpui_kit::base::text::MarkdownNode::new(
-                        super::html_table::EDITABLE_NAME,
-                        super::html_table::EditableTable {
-                            node: node.clone(),
-                            editor: editor.downgrade(),
-                            block: id,
-                        },
-                    ),
-                    state: BlockState::default(),
-                }
-            }
-            _ => node.clone(),
-        };
         return BlockNode::Surface {
             name: format!("editor-atom-{}", id.as_u64()).into(),
-            children: vec![node],
+            children: vec![node.clone()],
             span: None,
         };
     }
@@ -511,12 +493,20 @@ pub struct BlockEditor {
 
 impl BlockEditor {
     /// Use the editor's snapshot and node renderer without selection, caret or viewport culling.
-    pub fn document(state: &Entity<BlockEditorState>, window: &mut Window, cx: &mut App) -> AnyElement {
+    pub fn document(
+        state: &Entity<BlockEditorState>,
+        content_width: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
         let (snapshot, extensions) = state.update(cx, |state, _| {
             (state.snapshot(), state.model.doc.extensions.clone())
         });
         let mut extensions = (*extensions).clone();
         code_preview::register_renderer(&mut extensions);
+        extensions = extensions.block_renderer(super::html_table::NAME, move |node, window, cx| {
+            super::html_table::render_document(node, content_width, window, cx)
+        });
         let theme = gpui_kit::base::Theme::global(cx);
         let editor_state = state.read(cx);
         register_fold_surfaces(&mut extensions, editor_state, None, &theme);
@@ -746,8 +736,15 @@ impl RenderOnce for BlockEditor {
         let atom_bounds: AtomBounds = Arc::default();
         let fold_bounds: AtomBounds = Arc::default();
         let table_viewports: AtomBounds = Arc::default();
+        let html_tables: super::html_table::Layouts = Arc::default();
         let code_preview_bounds: BoundsMap = Arc::default();
         let mut extensions = (*extensions).clone();
+        let measured_html = html_tables.clone();
+        let state = self.state.read(cx);
+        let reveal = state.reveal.get().then(|| state.model.caret().map(|position| position.block)).flatten();
+        extensions = extensions.block_renderer(super::html_table::NAME, move |node, window, cx| {
+            super::html_table::render_live(node, Some(&measured_html), reveal, window, cx)
+        });
         code_preview::register_renderer(&mut extensions);
         register_code_surfaces(&mut extensions, &self.state, &render_cx, cx);
         register_table_surfaces(&mut extensions, &self.state, cx);
@@ -1066,7 +1063,7 @@ impl RenderOnce for BlockEditor {
                         _ => "•".into(),
                     }
                 }
-                Some(BlockKindData::Table { .. }) => "▦".into(),
+                Some(BlockKindData::Table { .. } | BlockKindData::HtmlTable(_)) => "▦".into(),
                 Some(BlockKindData::CodeBlock { .. }) => "‹/›".into(),
                 Some(BlockKindData::Blockquote | BlockKindData::Alert { .. } | BlockKindData::Fold { .. }) => "❝".into(),
                 _ => String::new(),
@@ -1209,6 +1206,7 @@ impl RenderOnce for BlockEditor {
                 atom_bounds,
                 fold_bounds,
                 table_viewports,
+                html_tables,
                 code_preview_bounds,
                 padding: root_style.padding,
                 typography,
@@ -1293,6 +1291,7 @@ struct EditorRoot {
     atom_bounds: AtomBounds,
     fold_bounds: AtomBounds,
     table_viewports: AtomBounds,
+    html_tables: super::html_table::Layouts,
     code_preview_bounds: BoundsMap,
     snapshot: Rc<Snapshot>,
     style: BlockEditorStyle,
@@ -1592,6 +1591,7 @@ impl Element for EditorRoot {
                 let right = frame.content.map(|c| c.right());
                 let viewports = self.table_viewports.lock().expect("table viewports");
                 frame.layout_tables(&shapes, pad, right, &viewports);
+                frame.layout_html_tables(&self.html_tables.lock().expect("HTML table geometry"));
             }
             let state = self.state.read(cx);
             let dragged_block = state.block_drag.filter(|drag| drag.active).map(|drag| drag.block);
