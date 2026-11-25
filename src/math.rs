@@ -271,7 +271,7 @@ impl MathPlugin {
         content: &MathContent,
         scale: f32,
         max_width: Option<Pixels>,
-    ) -> (AnyElement, f32) {
+    ) -> (AnyElement, Option<Size<Pixels>>, f32) {
         let formula = self
             .assets
             .lock()
@@ -309,6 +309,7 @@ impl MathPlugin {
                     .w(px(width))
                     .h(px(height))
                     .into_any_element(),
+                    Some(size(px(width), px(height))),
                     baseline,
                 )
             }
@@ -318,6 +319,7 @@ impl MathPlugin {
                     .text_color(rgb(0xa16b60))
                     .child(crate::i18n::media::math_layout_failed(&content.latex, &error))
                     .into_any_element(),
+                None,
                 14.,
             ),
             None => (
@@ -326,6 +328,7 @@ impl MathPlugin {
                     .text_color(rgb(0x787774))
                     .child(crate::i18n::media::MATH_PENDING.get())
                     .into_any_element(),
+                None,
                 14.,
             ),
         }
@@ -437,7 +440,7 @@ impl MarkdownPlugin for MathPlugin {
             MathDisplaySize::Markdown => appearance.display_size,
             MathDisplaySize::Ai => appearance.ai_display_size,
         };
-        let (element, _) = self.formula_element(content, size / 10., None);
+        let (element, _, _) = self.formula_element(content, size / 10., None);
         if matches!(self.display_size, MathDisplaySize::Ai) {
             let start = node.source_range().expect("parsed math has a span").start as u64;
             return scrollable_display_formula(
@@ -489,11 +492,11 @@ impl MarkdownPlugin for MathPlugin {
         // Mark highlights are painted at the editor line level using the max
         // vertical extent across text and inline math; record bounds in prepaint.
         Some(
-            inline_formula_element(self, &content, scale, None).with_fit_to_width(
-                move |max_width, _, _| {
+            inline_formula_element(self, &content, scale, None)
+                .expect("natural inline element")
+                .with_fit_to_width(move |max_width| {
                     inline_formula_element(&plugin, &fitted_content, scale, Some(max_width))
-                },
-            ),
+                }),
         )
     }
 }
@@ -545,10 +548,17 @@ fn inline_formula_element(
     content: &MathContent,
     scale: f32,
     max_width: Option<Pixels>,
-) -> InlineElement {
-    let (element, baseline) = plugin.formula_element(content, scale, max_width);
+) -> Option<InlineElement> {
+    let (element, explicit_size, baseline) = plugin.formula_element(content, scale, max_width);
+    if max_width.is_some() && explicit_size.is_none() {
+        return None;
+    }
     let formula = plugin.editable(content, element).into_any_element();
-    InlineElement::new(InlineBoundsRecorder(formula)).with_baseline(px(baseline))
+    let mut inline = InlineElement::new(InlineBoundsRecorder(formula)).with_baseline(px(baseline));
+    if let Some(size) = explicit_size.filter(|_| max_width.is_some()) {
+        inline = inline.with_size(size);
+    }
+    Some(inline)
 }
 
 struct InlineBoundsRecorder(AnyElement);

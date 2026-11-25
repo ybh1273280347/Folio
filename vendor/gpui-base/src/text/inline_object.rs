@@ -43,36 +43,18 @@ impl InlineMetrics {
 pub(super) struct MeasuredInlineObject {
     pub metrics: InlineMetrics,
     content: Option<Rc<RefCell<Option<AnyElement>>>>,
+    content_measured: bool,
     fit_to_width: Option<InlineFitToWidthFn>,
     text: SharedString,
     font_size: Pixels,
     text_style: TextStyle,
 }
 
-fn measure_presentation(
-    presentation: InlineElement,
-    fallback: InlineMetrics,
-    style: &TextStyle,
-    window: &mut Window,
-    cx: &mut App,
-) -> Option<(InlineMetrics, AnyElement, Option<InlineFitToWidthFn>)> {
-    let fit_to_width = presentation.fit_to_width;
+fn wrap_presentation(element: AnyElement, style: &TextStyle) -> AnyElement {
     // The wrapper carries inherited marks into both layout and painting.
-    let mut wrapper = div().child(presentation.element);
+    let mut wrapper = div().child(element);
     wrapper.style().text = style.subtract(&Default::default());
-    let mut element = wrapper.into_any_element();
-    let measured = element.layout_as_root(
-        size(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
-        window,
-        cx,
-    );
-    let metrics = InlineMetrics {
-        size: measured,
-        baseline: presentation.baseline.unwrap_or(
-            (measured.height - (fallback.size.height - fallback.baseline)).max(Pixels::ZERO),
-        ),
-    };
-    metrics.is_valid().then_some((metrics, element, fit_to_width))
+    wrapper.into_any_element()
 }
 
 impl MeasuredInlineObject {
@@ -103,33 +85,63 @@ impl MeasuredInlineObject {
         let mut result = Self {
             metrics: fallback,
             content: None,
+            content_measured: false,
             fit_to_width: None,
             text,
             font_size,
             text_style: style.clone(),
         };
-        if let Some(presentation) = presentation
-            && let Some((metrics, element, fit_to_width)) =
-                measure_presentation(presentation, fallback, style, window, cx)
-        {
-            result.metrics = metrics;
-            result.content = Some(Rc::new(RefCell::new(Some(element))));
-            result.fit_to_width = fit_to_width;
+        if let Some(presentation) = presentation {
+            let fit_to_width = presentation.fit_to_width;
+            let mut element = wrap_presentation(presentation.element, style);
+            let measured = match presentation.size {
+                Some(explicit) => explicit,
+                None => element.layout_as_root(
+                    size(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
+                    window,
+                    cx,
+                ),
+            };
+            let metrics = InlineMetrics {
+                size: measured,
+                baseline: presentation.baseline.unwrap_or(
+                    (measured.height - (fallback.size.height - fallback.baseline))
+                        .max(Pixels::ZERO),
+                ),
+            };
+            if metrics.is_valid() {
+                result.metrics = metrics;
+                result.content = Some(Rc::new(RefCell::new(Some(element))));
+                result.content_measured = presentation.size.is_none();
+                result.fit_to_width = fit_to_width;
+            }
         }
         result
     }
 
-    pub fn fit_text(mut self, width: Option<Pixels>, window: &mut Window, cx: &mut App) -> Self {
+    pub fn fit_text(mut self, width: Option<Pixels>) -> Self {
+        // Must not call `layout_as_root` here because `fit_text` runs inside
+        // GPUI's `request_measured_layout` callback where `layout_engine` is taken.
         if let (Some(max_width), Some(fit)) = (width, self.fit_to_width.clone())
             && self.content.is_some()
             && self.metrics.size.width > max_width
         {
-            let fitted = fit(max_width, window, cx);
-            if let Some((metrics, element, _)) =
-                measure_presentation(fitted, self.metrics, &self.text_style, window, cx)
+            if let Some(fitted) = fit(max_width)
+                && let Some(explicit) = fitted.size
             {
-                self.metrics = metrics;
-                self.content = Some(Rc::new(RefCell::new(Some(element))));
+                let metrics = InlineMetrics {
+                    size: explicit,
+                    baseline: fitted.baseline.unwrap_or(
+                        (explicit.height - (self.metrics.size.height - self.metrics.baseline))
+                            .max(Pixels::ZERO),
+                    ),
+                };
+                if metrics.is_valid() {
+                    let element = wrap_presentation(fitted.element, &self.text_style);
+                    self.metrics = metrics;
+                    self.content = Some(Rc::new(RefCell::new(Some(element))));
+                    self.content_measured = false;
+                }
             }
             return self;
         }
@@ -156,7 +168,7 @@ impl MeasuredInlineObject {
                     .borrow_mut()
                     .take()
                     .expect("inline element painted once per frame"),
-                true,
+                self.content_measured,
             );
         }
         let text = StyledText::new(self.text.clone())
@@ -516,7 +528,7 @@ mod tests {
             );
             assert_eq!(measured.metrics.size, size(px(48.), px(14.)));
             assert_eq!(measured.metrics.baseline, px(10.));
-            let narrow = measured.fit_text(Some(px(20.)), window, cx);
+            let narrow = measured.fit_text(Some(px(20.)));
             assert_eq!(narrow.metrics.size, size(px(48.), px(14.)));
         });
     }
@@ -527,10 +539,14 @@ mod tests {
         in_prepaint(&mut app, |window, cx| {
             let native = InlineElement::new(div().w(px(100.)).h(px(20.)))
                 .with_baseline(px(15.))
-                .with_fit_to_width(|max_w, _, _| {
+                .with_fit_to_width(|max_w| {
                     let ratio = (f32::from(max_w) / 100.).clamp(0.1, 1.);
-                    InlineElement::new(div().w(max_w).h(px(20. * ratio)))
-                        .with_baseline(px(15. * ratio))
+                    let fitted = size(max_w, px(20. * ratio));
+                    Some(
+                        InlineElement::new(div().w(fitted.width).h(fitted.height))
+                            .with_size(fitted)
+                            .with_baseline(px(15. * ratio)),
+                    )
                 });
             let measured = MeasuredInlineObject::measure(
                 "formula",
@@ -540,9 +556,9 @@ mod tests {
                 cx,
             );
             assert_eq!(measured.metrics.size, size(px(100.), px(20.)));
-            let wide = measured.clone().fit_text(Some(px(120.)), window, cx);
+            let wide = measured.clone().fit_text(Some(px(120.)));
             assert_eq!(wide.metrics.size, size(px(100.), px(20.)));
-            let narrow = measured.fit_text(Some(px(50.)), window, cx);
+            let narrow = measured.fit_text(Some(px(50.)));
             assert_eq!(narrow.metrics.size, size(px(50.), px(10.)));
             assert_eq!(narrow.metrics.baseline, px(7.5));
         });
@@ -564,7 +580,7 @@ mod tests {
                 );
                 assert!(measured.content.is_none());
                 assert!(measured.metrics.is_valid());
-                let zero = measured.fit_text(Some(px(0.)), window, cx);
+                let zero = measured.fit_text(Some(px(0.)));
                 assert_eq!(zero.metrics.size, size(px(0.), px(0.)));
                 assert_eq!(zero.metrics.baseline, px(0.));
             }

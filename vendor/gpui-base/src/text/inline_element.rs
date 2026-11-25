@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
-use gpui::{AnyElement, App, IntoElement, Pixels, TextStyle, Window};
+use gpui::{AnyElement, IntoElement, Pixels, Size, TextStyle};
 
-pub(crate) type InlineFitToWidthFn = Rc<dyn Fn(Pixels, &mut Window, &mut App) -> InlineElement>;
+pub(crate) type InlineFitToWidthFn = Rc<dyn Fn(Pixels) -> Option<InlineElement>>;
 
 /// A GPUI element participating as one atomic object in a text line.
 ///
@@ -11,6 +11,7 @@ pub(crate) type InlineFitToWidthFn = Rc<dyn Fn(Pixels, &mut Window, &mut App) ->
 /// elements keep their actual size unless [`Self::with_fit_to_width`] is set.
 pub struct InlineElement {
     pub(crate) element: AnyElement,
+    pub(crate) size: Option<Size<Pixels>>,
     pub(crate) baseline: Option<Pixels>,
     pub(crate) fit_to_width: Option<InlineFitToWidthFn>,
 }
@@ -19,9 +20,16 @@ impl InlineElement {
     pub fn new(element: impl IntoElement) -> Self {
         Self {
             element: element.into_any_element(),
+            size: None,
             baseline: None,
             fit_to_width: None,
         }
+    }
+
+    /// Explicit size for a rebuilt width-fitted element (avoids nested Taffy layout).
+    pub fn with_size(mut self, size: Size<Pixels>) -> Self {
+        self.size = Some(size);
+        self
     }
 
     /// Distance from the top edge to the alphabetic baseline, in logical pixels.
@@ -32,9 +40,10 @@ impl InlineElement {
     }
 
     /// Rebuild this element when the surrounding line is narrower than its natural width.
+    /// The returned [`InlineElement`] must specify [`Self::with_size`].
     pub fn with_fit_to_width(
         mut self,
-        fit: impl Fn(Pixels, &mut Window, &mut App) -> InlineElement + 'static,
+        fit: impl Fn(Pixels) -> Option<InlineElement> + 'static,
     ) -> Self {
         self.fit_to_width = Some(Rc::new(fit));
         self
