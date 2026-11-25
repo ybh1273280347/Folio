@@ -3177,8 +3177,15 @@ impl BlockEditorState {
         (top == block).then_some(block)
     }
 
-    /// D22: the gap between top-level blocks nearest the pointer's `y`.
-    fn drop_gap_at(&self, y: Pixels) -> Option<usize> {
+    /// D22: the gap between top-level blocks nearest the pointer in the editor viewport.
+    fn drop_gap_at(&self, at: Point<Pixels>) -> Option<usize> {
+        // An untracked scroll handle has empty bounds, as in a standalone editor.
+        if let Some(handle) = &self.scroll_handle {
+            let viewport = handle.bounds();
+            if !viewport.is_empty() && !viewport.contains(&at) {
+                return None;
+            }
+        }
         let blocks = self.top_level_bounds();
         let len = self.model.doc.children(self.model.doc.root).len();
         if blocks.is_empty() {
@@ -3187,7 +3194,7 @@ impl BlockEditorState {
         Some(
             blocks
                 .iter()
-                .find(|(_, _, b)| y < b.center().y)
+                .find(|(_, _, b)| at.y < b.center().y)
                 .map_or_else(
                     || blocks.last().map_or(len, |(ix, _, _)| ix + 1),
                     |(ix, _, _)| *ix,
@@ -3198,12 +3205,26 @@ impl BlockEditorState {
     /// D22: mouse-down on a handle arms a drag (the click itself is handled
     /// as before).
     pub(crate) fn arm_block_drag(&mut self, at: Point<Pixels>) {
-        self.block_drag = self.drag_handle_at(at).map(|block| BlockDrag {
-            block,
-            start: at,
-            active: false,
-            drop: None,
-        });
+        self.block_drag = None;
+        if let Some(block) = self.drag_handle_at(at) {
+            self.arm_top_block_drag(block, at);
+        }
+    }
+
+    /// Arm reordering from a host-provided handle for a top-level document block.
+    pub fn arm_top_block_drag(&mut self, block: BlockId, at: Point<Pixels>) {
+        self.block_drag = (!self.readonly && self.model.doc.parent(block) == Some(self.model.doc.root))
+            .then_some(BlockDrag {
+                block,
+                start: at,
+                active: false,
+                drop: None,
+            });
+    }
+
+    /// Whether the armed press has crossed the drag threshold and owns the gesture.
+    pub fn is_block_dragging(&self) -> bool {
+        self.block_drag.is_some_and(|drag| drag.active)
     }
 
     /// D22: pointer moved with the button down. Returns whether a block
@@ -3227,19 +3248,20 @@ impl BlockEditorState {
             });
             self.selection_changed(cx);
         }
-        drag.drop = self.drop_gap_at(at.y);
+        drag.drop = self.drop_gap_at(at);
         self.block_drag = Some(drag);
         cx.notify();
         true
     }
 
     /// D22: button released. Drops an active drag (one undo step).
-    pub(crate) fn finish_block_drag(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn finish_block_drag(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(drag) = self.block_drag.take() else {
             return;
         };
         if drag.active {
-            if let Some(to) = drag.drop {
+            // Resolve against the current layout and release position, including any scroll.
+            if let Some(to) = self.drop_gap_at(at) {
                 self.model.break_coalescing();
                 self.edit(
                     EditOrigin::Command("move_block_to"),

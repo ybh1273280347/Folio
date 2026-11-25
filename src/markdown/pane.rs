@@ -3482,7 +3482,7 @@ impl MarkdownPane {
         let rel_y = bounds.origin.y - pane_origin.y + px(1.);
 
         let handle = div()
-            .id("md-block-gutter-handle")
+            .id(("md-block-gutter-handle", top_id.as_u64()))
             .absolute()
             .left(rel_x)
             .top(rel_y)
@@ -3492,7 +3492,7 @@ impl MarkdownPane {
             .flex()
             .items_center()
             .gap_0p5()
-            .cursor_pointer()
+            .cursor(CursorStyle::OpenHand)
             .text_color(rgb(0x2b6cb0))
             .hover(|s| s.bg(rgb(0xeef4fb)))
             .active(|s| s.bg(rgb(0xdde9f6)))
@@ -3504,8 +3504,17 @@ impl MarkdownPane {
                     .child(badge),
             )
             .child(crate::ui::icon(IconName::GripVertical))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Left, cx.listener(move |pane, event: &MouseDownEvent, _, cx| {
+                // Only arm the drag here. A press below the drag threshold is still a menu click.
+                pane.visual_editor.update(cx, |editor, _| {
+                    editor.arm_top_block_drag(top_id, event.position);
+                });
+                cx.stop_propagation();
+            }))
             .on_click(cx.listener(move |pane, ev: &ClickEvent, _, cx| {
+                if pane.visual_editor.read(cx).is_block_dragging() {
+                    return;
+                }
                 if pane.block_menu_for.is_some_and(|(id, _)| id == top_id) {
                     pane.block_menu_for = None;
                 } else {
