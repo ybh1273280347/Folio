@@ -133,3 +133,47 @@ pub const OUTLINE_TITLE: BiText = BiText::new("文档大纲", "Outline");
 pub const OUTLINE_EMPTY: BiText = BiText::new("暂无标题", "No headings");
 pub const OUTLINE_COLLAPSE: BiText = BiText::new("收起文档大纲", "Collapse outline");
 pub const OUTLINE_EXPAND: BiText = BiText::new("展开文档大纲", "Expand outline");
+
+// Empty-page templates
+pub const UNTITLED_PAGE_PLACEHOLDER: BiText = BiText::new("无标题页", "Untitled");
+pub const TEMPLATE_TODO_LABEL: BiText = BiText::new("待办事项清单", "To-do list");
+pub const TEMPLATE_TODO_TITLE: BiText = BiText::new("学习进度跟踪", "Study Progress Tracker");
+pub const TEMPLATE_TODO_TODAY_FALLBACK: BiText = BiText::new("今天", "Today");
+pub const TEMPLATE_TODO_CH1: BiText = BiText::new("第一章", "Chapter 1");
+pub const TEMPLATE_TODO_CH2: BiText = BiText::new("第二章", "Chapter 2");
+pub const TEMPLATE_TODO_CH3: BiText = BiText::new("第三章", "Chapter 3");
+
+pub fn today_date_or_fallback() -> String {
+    let formatted = chrono::Local::now().format("%Y-%m-%d").to_string();
+    if formatted.trim().is_empty() {
+        TEMPLATE_TODO_TODAY_FALLBACK.get().to_owned()
+    } else {
+        formatted
+    }
+}
+
+pub fn todo_template_markdown() -> String {
+    format!(
+        "# {}\n\n## {}\n\n- [ ] {}\n- [ ] {}\n- [ ] {}\n",
+        TEMPLATE_TODO_TITLE.get(),
+        today_date_or_fallback(),
+        TEMPLATE_TODO_CH1.get(),
+        TEMPLATE_TODO_CH2.get(),
+        TEMPLATE_TODO_CH3.get(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn todo_template_contains_heading_date_and_chapters() {
+        let md = todo_template_markdown();
+        let date = today_date_or_fallback();
+        assert!(md.starts_with(&format!("# {}\n\n## {date}\n\n", TEMPLATE_TODO_TITLE.get())));
+        assert!(md.contains(&format!("- [ ] {}\n", TEMPLATE_TODO_CH1.get())));
+        assert!(md.contains(&format!("- [ ] {}\n", TEMPLATE_TODO_CH2.get())));
+        assert!(md.contains(&format!("- [ ] {}\n", TEMPLATE_TODO_CH3.get())));
+    }
+}

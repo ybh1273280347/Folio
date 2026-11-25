@@ -215,6 +215,115 @@ impl Render for MarkdownPane {
                         &mut this.translate
                     });
 
+            let show_templates = self.show_empty_templates();
+            let template_pills = show_templates.then(|| {
+                div()
+                    .id("md-empty-templates")
+                    .w_full()
+                    .pb_4()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("md-template-todo")
+                            .h(px(30.))
+                            .px_3()
+                            .rounded_full()
+                            .bg(rgb(0xf4f4f2))
+                            .border_1()
+                            .border_color(rgb(0xe8e7e3))
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0xeae9e5)))
+                            .active(|s| s.bg(rgb(0xe2e1dc)))
+                            .on_click(cx.listener(|pane, _, window, cx| {
+                                pane.apply_empty_template("todo", window, cx);
+                            }))
+                            .child(
+                                crate::ui::icon(IconName::ListTodo)
+                                    .size(px(14.))
+                                    .text_color(rgb(0x16a34a)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .text_color(rgb(0x37352f))
+                                    .child(crate::i18n::markdown::TEMPLATE_TODO_LABEL.get()),
+                            ),
+                    )
+            });
+            let template_ghost_preview = show_templates.then(|| {
+                let date_label = crate::i18n::markdown::today_date_or_fallback();
+                let ghost_items = [
+                    crate::i18n::markdown::TEMPLATE_TODO_CH1.get(),
+                    crate::i18n::markdown::TEMPLATE_TODO_CH2.get(),
+                    crate::i18n::markdown::TEMPLATE_TODO_CH3.get(),
+                ];
+                let item_size = px(self.settings.markdown_font_size as f32);
+                div()
+                    .id("md-template-ghost-preview")
+                    .w_full()
+                    .pt_2()
+                    .opacity(0.48)
+                    .cursor_text()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|pane, _, window, cx| {
+                            pane.defer_focus_visual(window, cx);
+                        }),
+                    )
+                    .flex()
+                    .flex_col()
+                    .gap_2p5()
+                    .child(
+                        div()
+                            .text_size(px(24.))
+                            .line_height(relative(1.3))
+                            .font_semibold()
+                            .text_color(rgb(0x787774))
+                            .child(crate::i18n::markdown::TEMPLATE_TODO_TITLE.get()),
+                    )
+                    .child(
+                        div()
+                            .pt_1()
+                            .text_size(px(18.))
+                            .line_height(relative(1.35))
+                            .font_semibold()
+                            .text_color(rgb(0x787774))
+                            .child(date_label),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .children(ghost_items.into_iter().map(|label| {
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2p5()
+                                    .child(
+                                        div()
+                                            .size(px(15.))
+                                            .flex_shrink_0()
+                                            .rounded(px(4.))
+                                            .border_1()
+                                            .border_color(rgb(0xa8a7a2)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(item_size)
+                                            .text_color(rgb(0x787774))
+                                            .child(label),
+                                    )
+                            })),
+                    )
+            });
+
             content = content.child(
                 // Floating controls must be outside the scroll owner: their
                 // screen-relative positions otherwise enlarge its scroll bounds.
@@ -258,9 +367,11 @@ impl Render for MarkdownPane {
                             .pt_6()
                             .pb(trailing_space)
                             .child(document_title)
+                            .children(template_pills)
                             .child(BlockEditor::new(&self.visual_editor).when(self.backdrop_visible, |editor| {
                                 editor.with_content_background_opacity(0.35)
                             }))
+                            .children(template_ghost_preview)
                             .when(self.loading.is_some(), |content| {
                                 content.child(
                                     div().mt_4().text_sm().text_color(rgb(0x787774))

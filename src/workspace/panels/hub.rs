@@ -14,6 +14,7 @@ pub(crate) enum RightPanelAction {
     OpenAi,
     OpenKnowledgeBase,
     OpenTerminal,
+    NewSplitPage,
     TogglePreview,
     ToggleLogs,
     ToggleZen,
@@ -101,6 +102,15 @@ fn all_actions(props: &RightPanelHubProps) -> Vec<HubActionItem> {
 
     let mut all = core_actions(props);
     all.extend([
+        HubActionItem {
+            action: RightPanelAction::NewSplitPage,
+            icon: IconName::NotebookPen,
+            label: rp::ACTION_NEW_PAGE.get(),
+            keywords: "new page split markdown todo 新建 页面 分屏 笔记 待办",
+            badge: None,
+            active: false,
+            danger: false,
+        },
         HubActionItem {
             action: RightPanelAction::TogglePreview,
             icon: IconName::PanelRightOpen,
@@ -366,19 +376,103 @@ pub(crate) fn render_hub(
                     )
             }));
 
+        let new_page_trigger = on_action.clone();
+        let new_page_card = div()
+            .id("right-hub-new-split-page")
+            .w_full()
+            .px(px(14.))
+            .py(px(12.))
+            .rounded(px(12.))
+            .bg(card_bg)
+            .border_1()
+            .border_color(card_border)
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(12.))
+            .cursor_pointer()
+            .hover(move |s| s.bg(card_hover))
+            .on_click(move |_, window, cx| {
+                new_page_trigger(RightPanelAction::NewSplitPage, window, cx)
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .min_w_0()
+                    .child(
+                        crate::ui::icon(IconName::NotebookPen)
+                            .w(px(18.))
+                            .h(px(18.))
+                            .flex_shrink_0()
+                            .text_color(gpui_kit::rgb(palette.accent)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(13.5))
+                                    .font_medium()
+                                    .text_color(gpui_kit::rgb(palette.text))
+                                    .text_ellipsis()
+                                    .child(rp::ACTION_NEW_PAGE.get()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.5))
+                                    .text_color(gpui_kit::rgb(palette.muted))
+                                    .text_ellipsis()
+                                    .child(rp::ACTION_NEW_PAGE_DESC.get()),
+                            ),
+                    ),
+            )
+            .child(
+                crate::ui::icon(IconName::Columns2)
+                    .w(px(15.))
+                    .h(px(15.))
+                    .flex_shrink_0()
+                    .text_color(gpui_kit::rgb(palette.muted)),
+            );
+
         div()
             .flex()
             .flex_col()
-            .gap(px(10.))
+            .gap(px(18.))
             .child(
                 div()
-                    .px(px(2.))
-                    .text_size(px(12.5))
-                    .font_medium()
-                    .text_color(gpui_kit::rgb(palette.muted))
-                    .child(rp::HUB_SECTION_OPEN.get()),
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .px(px(2.))
+                            .text_size(px(12.5))
+                            .font_medium()
+                            .text_color(gpui_kit::rgb(palette.muted))
+                            .child(rp::HUB_SECTION_OPEN.get()),
+                    )
+                    .child(cards_row),
             )
-            .child(cards_row)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .px(px(2.))
+                            .text_size(px(12.5))
+                            .font_medium()
+                            .text_color(gpui_kit::rgb(palette.muted))
+                            .child(rp::HUB_SECTION_CREATE.get()),
+                    )
+                    .child(new_page_card),
+            )
             .into_any_element()
     } else if items.is_empty() {
         div()
