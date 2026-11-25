@@ -1808,7 +1808,7 @@ impl Workspace {
             .flex_col()
             .when(!show_background, |pane| pane.bg(rgb(0xffffff)));
         let mut titlebar = div()
-            .h(px(36.))
+            .h(px(32.))
             .flex_shrink_0()
             .flex()
             .items_center()

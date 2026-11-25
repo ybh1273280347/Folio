@@ -18,7 +18,7 @@ impl Workspace {
             palette.hover
         };
         let mut bar = div()
-            .h(px(36.))
+            .h(px(32.))
             .px_1p5()
             .flex_shrink_0()
             .flex()
