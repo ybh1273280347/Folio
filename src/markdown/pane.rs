@@ -475,10 +475,11 @@ impl MarkdownPane {
                 .child(
                     canvas(
                         move |_, window, cx| {
-                            let content = BlockEditor::document(&editor, window, cx);
+                            let padding = gpui::rems(1.5).to_pixels(window.rem_size());
+                            let content = BlockEditor::document(&editor, width - padding * 2., window, cx);
                             let background: Hsla = gpui_kit::rgb(crate::theme::palette().surface).into();
                             let mut element =
-                                div().w(width).p_6()
+                                div().w(width).p(padding)
                                     .bg(background)
                                     .child(content).into_any_element();
                             let size = element.layout_as_root(

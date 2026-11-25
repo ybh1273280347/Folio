@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use gpui::AppContext as _;
 use gpui::{
-    App, Axis, Div, Focusable as _, FontWeight, InteractiveElement as _, ParentElement as _,
-    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, TextAlign,
-    WeakEntity, Window, div, px,
+    AnyElement, App, AvailableSpace, Axis, Bounds, Div, Element, ElementId, Focusable as _,
+    FontWeight, GlobalElementId, InspectorElementId, InteractiveElement as _, IntoElement as _,
+    LayoutId, ParentElement as _, Pixels, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, TextAlign, WeakEntity, Window, canvas, div, px, size,
 };
 use gpui_kit::{
     base::{
@@ -315,6 +316,51 @@ pub(crate) fn replace_cell(node: &MarkdownNode, index: usize, value: &str) -> Op
 }
 
 pub(crate) fn render(node: &MarkdownNode, window: &mut Window, cx: &mut App) -> Div {
+    let grid = render_grid(node, false, window, cx);
+    let key = node.data::<EditableTable>()
+        .map(|editable| editable.block.as_u64())
+        .unwrap_or_else(|| node.source_range().map_or(0, |span| span.start as u64));
+    let scroll = window
+        .use_keyed_state(("html-table-scroll", key), cx, |_, _| ScrollHandle::new())
+        .read(cx)
+        .clone();
+    div()
+        .relative()
+        .w_full()
+        .child(
+            div()
+                .id(("html-table-viewport", key))
+                .w_full()
+                .overflow_hidden()
+                .track_scroll(&scroll)
+                .child(grid),
+        )
+        .child(ScrollableMask::new(Axis::Horizontal, &scroll).id(("html-table-mask", key)))
+        .child(
+            Scrollbar::horizontal(&scroll)
+                .mode(ScrollbarMode::Always)
+                .styles(|styles| {
+                    styles
+                        .track(|track| track.width(px(8.)))
+                        .thumb(|thumb| thumb.width(px(3.)).inset(px(2.)))
+                }),
+        )
+}
+
+/// The PDF layout runs before the window enters vector paint capture.
+pub(crate) fn render_document(
+    node: &MarkdownNode,
+    width: Pixels,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    DocumentTable {
+        grid: render_grid(node, true, window, cx).into_any_element(),
+        width,
+    }.into_any_element()
+}
+
+fn render_grid(node: &MarkdownNode, document: bool, window: &mut Window, cx: &mut App) -> Div {
     let editable = node.data::<EditableTable>();
     let source = editable.map_or(node, |editable| &editable.node);
     let table = source.data::<HtmlTable>().expect("HTML table preview data");
@@ -322,24 +368,27 @@ pub(crate) fn render(node: &MarkdownNode, window: &mut Window, cx: &mut App) -> 
     let render_context = RenderContext::from_app(cx)
         .with_markdown_extensions(table.extensions.clone())
         .with_body_font_size(window.text_style().font_size.to_pixels(window.rem_size()));
-    let vector_capture = window.is_vector_capture();
-    let grid = div()
+    div()
         .grid()
-        .grid_cols(table.columns)
-        .when(vector_capture, |this| this.w_full())
-        .when(!vector_capture, |this| this.min_w_full())
+        // Min-content tracks ask Taffy to allocate an intrinsic contribution
+        // across all tracks a cell spans. Zero-minimum tracks ignore it.
+        .grid_cols_min_content(table.columns)
+        .when(!document, |this| this.min_w_full())
         .border_t_1()
         .border_l_1()
         .border_color(border)
         .children(table.cells.iter().enumerate().map(|(index, cell)| {
-            let col_span = (cell.columns.end - cell.columns.start).max(1) as f32;
             div()
                 .row_start(cell.rows.start)
                 .row_end(cell.rows.end)
                 .col_start(cell.columns.start)
                 .col_end(cell.columns.end)
-                .when(vector_capture, |this| this.min_w_0())
-                .when(!vector_capture, |this| this.min_w(px(160. * col_span)))
+                .when(!document, |this| {
+                    // A spanning cell contributes its own minimum to the total,
+                    // while individual columns get floors from their own cells.
+                    this.min_w(px(160.))
+                })
+                .overflow_hidden()
                 .px(px(12.))
                 .py(px(7.))
                 .border_b_1()
@@ -348,9 +397,9 @@ pub(crate) fn render(node: &MarkdownNode, window: &mut Window, cx: &mut App) -> 
                 .whitespace_normal()
                 .text_align(cell.align)
                 .when(cell.header, |this| this.font_weight(FontWeight::SEMIBOLD))
-                .children({
-                    cell.blocks.iter().enumerate().map(|(index, block)| {
-                        let nodes: Vec<_> = cell.blocks.iter().collect();
+                .children(window.with_id(("html-cell", index), |window| {
+                    let nodes: Vec<_> = cell.blocks.iter().collect();
+                    nodes.iter().enumerate().map(|(index, block)| {
                         block.render(
                             index,
                             FlowPosition::at(&nodes, index, index + 1 == nodes.len()),
@@ -358,8 +407,8 @@ pub(crate) fn render(node: &MarkdownNode, window: &mut Window, cx: &mut App) -> 
                             window,
                             cx,
                         )
-                    })
-                })
+                    }).collect::<Vec<_>>()
+                }))
                 .id(("html-cell", index))
                 .when_some(editable, |this, editable| {
                     let editor = editable.editor.clone();
@@ -408,36 +457,110 @@ pub(crate) fn render(node: &MarkdownNode, window: &mut Window, cx: &mut App) -> 
                         window.defer(cx, move |window, cx| focus.focus(window, cx));
                     })
                 })
-        }));
-    if vector_capture {
-        return grid;
+        }))
+        .when(document, |grid| {
+            // Use the existing pagination markers for connected row groups.
+            // A boundary is safe only when no cell crosses it.
+            let mut end = 1;
+            let mut start = 1;
+            let mut ranges = Vec::new();
+            for cell in &table.cells {
+                if cell.rows.start >= end && start < end {
+                    ranges.push(start..end);
+                    start = end;
+                }
+                end = end.max(cell.rows.end);
+            }
+            ranges.push(start..end);
+            grid.children(ranges.into_iter().map(|rows| {
+                canvas(|_, _, _| (), |bounds, (), window, _| window.vector_block(bounds))
+                    .row_start(rows.start)
+                    .row_end(rows.end)
+                    .col_start(1)
+                    .col_end(2)
+                    .size_full()
+            }))
+        })
+}
+
+struct DocumentTable {
+    grid: AnyElement,
+    width: Pixels,
+}
+
+impl gpui::IntoElement for DocumentTable {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
     }
-    let key = editable
-        .map(|editable| editable.block.as_u64())
-        .unwrap_or_else(|| node.source_range().map_or(0, |span| span.start as u64));
-    let scroll = window
-        .use_keyed_state(("html-table-scroll", key), cx, |_, _| ScrollHandle::new())
-        .read(cx)
-        .clone();
-    div()
-        .relative()
-        .w_full()
-        .child(
-            div()
-                .id(("html-table-viewport", key))
-                .w_full()
-                .overflow_hidden()
-                .track_scroll(&scroll)
-                .child(grid),
-        )
-        .child(ScrollableMask::new(Axis::Horizontal, &scroll).id(("html-table-mask", key)))
-        .child(
-            Scrollbar::horizontal(&scroll)
-                .mode(ScrollbarMode::Always)
-                .styles(|styles| {
-                    styles
-                        .track(|track| track.width(px(8.)))
-                        .thumb(|thumb| thumb.width(px(3.)).inset(px(2.)))
-                }),
-        )
+}
+
+impl Element for DocumentTable {
+    type RequestLayoutState = (gpui::Size<Pixels>, f32);
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let grid = self.grid.layout_as_root(
+            size(AvailableSpace::MinContent, AvailableSpace::MinContent),
+            window,
+            cx,
+        );
+        let width = self.width.max(px(1.));
+        let target = grid.width.max(width);
+        let natural = self.grid.layout_as_root(
+            size(AvailableSpace::Definite(target), AvailableSpace::MinContent),
+            window,
+            cx,
+        );
+        let scale = f32::from(width) / f32::from(natural.width.max(width));
+        let style = gpui::Style {
+            size: size(natural.width * scale, natural.height * scale).map(Into::into),
+            ..Default::default()
+        };
+        (window.request_layout(style, [], cx), (natural, scale))
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        (natural, _): &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        window.with_document_mask(Bounds::new(bounds.origin, *natural), |window| {
+            self.grid.prepaint_at(bounds.origin, window, cx);
+        });
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        (natural, scale): &mut Self::RequestLayoutState,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        window.with_scaled_vector_paint(bounds, *natural, *scale, |window| {
+            self.grid.paint(window, cx);
+        });
+    }
 }

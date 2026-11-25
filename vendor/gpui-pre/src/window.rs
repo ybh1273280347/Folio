@@ -4459,6 +4459,75 @@ impl Window {
     /// Whether this paint pass writes a vector document.
     pub fn is_vector_capture(&self) -> bool { self.vector_capture.is_some() }
 
+    /// Fit a laid-out vector subtree into its reserved document bounds.
+    /// Retain the subtree's local clips and apply the parent clip after scaling.
+    pub fn with_scaled_vector_paint(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        natural: Size<Pixels>,
+        scale: f32,
+        paint: impl FnOnce(&mut Self),
+    ) {
+        let Some(capture) = &self.vector_capture else {
+            paint(self);
+            return;
+        };
+        let start = capture.len();
+        let clip = self.content_mask().bounds.intersect(&bounds);
+        self.with_document_mask(Bounds::new(bounds.origin, natural), paint);
+        let point = |p: Point<Pixels>| {
+            let offset = p - bounds.origin;
+            bounds.origin + Point::new(offset.x * scale, offset.y * scale)
+        };
+        let rect = |b: Bounds<Pixels>| {
+            Bounds::new(point(b.origin), Size::new(b.size.width * scale, b.size.height * scale))
+        };
+        let mask = |b| rect(b).intersect(&clip);
+        for op in &mut self.vector_capture.as_mut().unwrap()[start..] {
+            match op {
+                VectorPaint::Block(bounds) => *bounds = rect(*bounds),
+                VectorPaint::PendingImage => {}
+                VectorPaint::Glyph { origin, font_size, clip, .. } => {
+                    *origin = point(*origin);
+                    *font_size *= scale;
+                    *clip = mask(*clip);
+                }
+                VectorPaint::Quad { quad, clip } => {
+                    quad.bounds = rect(quad.bounds);
+                    quad.border_widths = quad.border_widths.map(|width| *width * scale);
+                    let radii = &mut quad.corner_radii;
+                    radii.top_left *= scale;
+                    radii.top_right *= scale;
+                    radii.bottom_right *= scale;
+                    radii.bottom_left *= scale;
+                    *clip = mask(*clip);
+                }
+                VectorPaint::Image { bounds, clip, .. } | VectorPaint::Svg { bounds, clip, .. } => {
+                    *bounds = rect(*bounds);
+                    *clip = mask(*clip);
+                }
+                VectorPaint::Path(path) => {
+                    path.bounds = rect(path.bounds);
+                    path.content_mask.bounds = mask(path.content_mask.bounds);
+                    for vertex in &mut path.vertices {
+                        vertex.xy_position = point(vertex.xy_position);
+                        vertex.content_mask.bounds = mask(vertex.content_mask.bounds);
+                    }
+                }
+                VectorPaint::Mask { bounds: image, clip, transformation, .. } => {
+                    *image = rect(*image);
+                    *clip = mask(*clip);
+                    let x = f32::from(bounds.origin.x) * (1. - scale);
+                    let y = f32::from(bounds.origin.y) * (1. - scale);
+                    let m = transformation.rotation_scale;
+                    let t = &mut transformation.translation;
+                    t[0] = t[0] * scale + x - m[0][0] * x - m[0][1] * y;
+                    t[1] = t[1] * scale + y - m[1][0] * x - m[1][1] * y;
+                }
+            }
+        }
+    }
+
     /// Defer document publication until an asynchronous image has loaded.
     pub fn vector_image_pending(&mut self) {
         if let Some(capture) = &mut self.vector_capture { capture.push(VectorPaint::PendingImage); }
