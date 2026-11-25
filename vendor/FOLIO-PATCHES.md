@@ -28,3 +28,4 @@ Mermaid 适配保留编辑器原有的 `code_ui` 模块、投影缓存和折叠�
 - `gpui-kit-markdown-editor`：交互式渲染视图为 Markdown 表格开启 `Overflow::Scroll`、为 HTML 表格包裹横向滚动容器（PDF 导出 `is_vector_capture()` 仍保持完整页面适应宽度），并在 `FrameLayout` / `EditorRoot` / `table_ui` 中将选区、光标、输入法下划线、行列手柄与整表角标约束到表格可见视口内。
 - `gpui-base 0.9.1` 与 `gpui-kit-markdown-editor`：新增全局 `SmoothCaretSettings`（`set_smooth_caret` / `smooth_caret_settings`）与 `SmoothCaretMotion` 55ms 帧插值状态机（尊重 `reduce_motion` 与滚动锚点偏移防漂移），在启用时将 Markdown 编辑器与通用 `Input` 的光标绘制为圆角微光样式并平滑滑动。
 - `gpui-kit-markdown-editor`：让 Folio 左侧六点手柄通过 `arm_top_block_drag` 接入顶层块的拖放事务，复用插入线和撤销历史。鼠标事件在捕获阶段跟踪，释放后按实际位置提交，视口外释放取消移动。
+- `gpui-kit-markdown-editor`：顶层块拖动期间保留原块布局并淡化绘制，显示跟随指针的首行预览。插入标记与正文列对齐，回到原位时隐藏。

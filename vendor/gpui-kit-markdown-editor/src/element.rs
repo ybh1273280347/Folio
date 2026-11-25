@@ -13,18 +13,19 @@ use std::sync::{Arc, Mutex};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Bounds, ContentMask, CursorStyle, DefiniteLength, DispatchPhase, Edges,
+    Anchor, AnyElement, App, Bounds, ContentMask, CursorStyle, DefiniteLength, DispatchPhase, Edges,
     Element, ElementId, ElementInputHandler, Entity, FontWeight, GlobalElementId, Hitbox,
     HitboxBehavior, Hsla, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Overflow, ParentElement, Pixels,
     Refineable, RenderOnce, Role, SharedString, StatefulInteractiveElement, Style, StyleRefinement,
-    Styled, TextStyle, Window, canvas, div, fill, point, px, size,
+    Styled, TextStyle, Window, anchored, canvas, deferred, div, fill, point, px, size,
 };
 
 use super::{
     code_preview::{self, BoundsMap},
     cull::Measured,
     id::BlockId,
+    kind::BlockKindData,
     projection::Snapshot,
     state::*,
     style::BlockEditorStyle,
@@ -42,6 +43,7 @@ use gpui_kit::{
 };
 
 type AtomBounds = Arc<Mutex<HashMap<BlockId, Bounds<Pixels>>>>;
+const DRAG_SOURCE_OPACITY: f32 = 0.35;
 
 fn noop_surface() -> BlockNode {
     BlockNode::Surface {
@@ -773,6 +775,7 @@ impl RenderOnce for BlockEditor {
             let state = self.state.read(cx);
             (state.cull.clone(), state.model.revision())
         };
+        let dragged_block = self.state.read(cx).block_drag.filter(|drag| drag.active).map(|drag| drag.block);
         let mut children: Vec<AnyElement> = Vec::new();
         {
             let mut cull_state = cull.borrow_mut();
@@ -992,6 +995,10 @@ impl RenderOnce for BlockEditor {
                         .id(("block", unit.id.as_u64() as usize))
                         .role(role)
                         .when_some(level, |this, level| this.aria_level(level))
+                        // The projection ID is shared by every rendered chunk of a long list.
+                        .when(dragged_block == Some(snapshot.blocks[unit.block].id), |this| {
+                            this.opacity(DRAG_SOURCE_OPACITY)
+                        })
                         .child(element)
                         .into_any_element(),
                     None => element,
@@ -1047,6 +1054,55 @@ impl RenderOnce for BlockEditor {
         let mut root_style = Style::default();
         root_style.refine(&self.style);
         let s = &self.state;
+        let drag_preview = dragged_block.map(|block| {
+            let doc = &s.read(cx).model.doc;
+            let kind = doc.kind(block);
+            let marker = match kind {
+                Some(BlockKindData::List { ordered: true, start }) => format!("{}.", start.unwrap_or(1)),
+                Some(BlockKindData::List { .. }) => {
+                    match doc.children(block).first().and_then(|item| doc.kind(*item)) {
+                        Some(BlockKindData::ListItem { checked: Some(true), .. }) => "☑".into(),
+                        Some(BlockKindData::ListItem { checked: Some(false), .. }) => "☐".into(),
+                        _ => "•".into(),
+                    }
+                }
+                Some(BlockKindData::Table { .. }) => "▦".into(),
+                Some(BlockKindData::CodeBlock { .. }) => "‹/›".into(),
+                Some(BlockKindData::Blockquote | BlockKindData::Alert { .. } | BlockKindData::Fold { .. }) => "❝".into(),
+                _ => String::new(),
+            };
+            // Shape one representative line. The full rendered block stays in the document.
+            let leaf = doc.first_leaf_in(block).block;
+            let text: String = doc.leaf_text(leaf).unwrap_or_default().trim_start().lines()
+                .next().unwrap_or_default().chars().take(120)
+                .map(|ch| if ch == super::inline::ATOM_CHAR { ' ' } else { ch }).collect();
+            let label = if text.trim().is_empty() && marker.is_empty() { "¶" } else { text.trim() };
+            let colors = &theme.tokens.colors;
+            deferred(
+                anchored()
+                    .anchor(Anchor::BottomLeft)
+                    .attach(Bounds::new(window.mouse_position(), size(px(0.), px(0.))), Anchor::TopRight)
+                    .offset(point(px(12.), px(-8.)))
+                    .snap_to_window_with_margin(px(8.))
+                    .child(
+                        div().flex().items_center().gap_1p5().max_w(px(300.))
+                            .px_2().py_1().rounded(px(6.)).shadow_sm()
+                            .bg(colors.surface).border_1().border_color(colors.border)
+                            .text_color(colors.surface_foreground)
+                            .text_size(typography.font_size.to_pixels(window.rem_size()))
+                            .when(!marker.is_empty(), |this| {
+                                this.child(div().flex_shrink_0().text_color(colors.muted_foreground).child(marker))
+                            })
+                            .when(!label.is_empty(), |this| {
+                                this.child(div().min_w_0().truncate()
+                                    .when(matches!(kind, Some(BlockKindData::Heading { .. })), |label| {
+                                        label.font_weight(FontWeight::BOLD)
+                                    })
+                                    .child(SharedString::from(label.to_owned())))
+                            }),
+                    ),
+            ).with_priority(1)
+        });
         div()
             .id("block-editor")
             // D8: one multi-line text input over the document; the value is
@@ -1057,7 +1113,9 @@ impl RenderOnce for BlockEditor {
             })
             .key_context(self.state.read(cx).key_context())
             .track_focus(&focus)
-            .cursor(if self.state.read(cx).grip_hover {
+            .cursor(if dragged_block.is_some() {
+                CursorStyle::ClosedHand
+            } else if self.state.read(cx).grip_hover {
                 CursorStyle::OpenHand
             } else if self.state.read(cx).pointer_hand {
                 CursorStyle::PointingHand
@@ -1126,6 +1184,7 @@ impl RenderOnce for BlockEditor {
             .on_action(window.listener_for(s, BlockEditorState::on_native_paste))
             .on_action(window.listener_for(s, BlockEditorState::on_paste_plain))
             .children(super::table_ui::render_menu(&self.state, cx))
+            .children(drag_preview)
             .child(EditorRoot {
                 state: self.state.clone(),
                 child: Some(
@@ -1291,6 +1350,7 @@ fn compute_mark_rects(
     frame: &super::frame::FrameLayout,
     highlights: &HashMap<super::id::BlockId, Vec<(Range<usize>, Hsla)>>,
     inline_atoms: &[Bounds<Pixels>],
+    opacity_for: impl Fn(BlockId) -> f32,
 ) -> Vec<(Bounds<Pixels>, Hsla)> {
     let mut out = Vec::new();
     for (&block, ranges) in highlights {
@@ -1301,9 +1361,10 @@ fn compute_mark_rects(
         if leaf_bounds.size.height <= px(0.) {
             continue;
         }
+        let opacity = opacity_for(block);
         if leaf.info.atomic {
             for (_, color) in ranges {
-                out.push((leaf_bounds, *color));
+                out.push((leaf_bounds, color.opacity(opacity)));
             }
             continue;
         }
@@ -1379,7 +1440,7 @@ fn compute_mark_rects(
                 }
                 out.push((
                     Bounds::from_corners(point(row.min_x, top), point(row.max_x, bottom)),
-                    *color,
+                    color.opacity(opacity),
                 ));
             }
         }
@@ -1532,12 +1593,20 @@ impl Element for EditorRoot {
                 let viewports = self.table_viewports.lock().expect("table viewports");
                 frame.layout_tables(&shapes, pad, right, &viewports);
             }
+            let state = self.state.read(cx);
+            let dragged_block = state.block_drag.filter(|drag| drag.active).map(|drag| drag.block);
             mark_rects = compute_mark_rects(
                 &frame,
                 &self.snapshot.mark_highlights,
                 &inline_atoms,
+                // Highlights paint behind the block wrapper, so apply its fade here as well.
+                |leaf| if dragged_block.is_some_and(|id| state.model.doc.path(leaf).get(1) == Some(&id)) {
+                    DRAG_SOURCE_OPACITY
+                } else {
+                    1.
+                },
             );
-            *self.state.read(cx).frame.borrow_mut() = frame;
+            *state.frame.borrow_mut() = frame;
             let mut mask = window.content_mask().bounds;
             let cull = self.state.read(cx).cull.clone();
             let geometry_changed = cull.borrow_mut().set_geometry(
@@ -1594,6 +1663,7 @@ impl Element for EditorRoot {
         cx: &mut App,
     ) {
         let state = self.state.read(cx);
+        let dragging_block = state.is_block_dragging();
         let focus = state.focus_handle.clone();
         let collapsed = state.selection_ranges().is_empty();
         let marked = state.marked_range();
@@ -1708,7 +1778,7 @@ impl Element for EditorRoot {
         }
         // Atomic content is painted before this overlay. Keep it translucent,
         // and let whole-block selection paint once instead of stacking two fills.
-        if selected_area.is_none() {
+        if !dragging_block && selected_area.is_none() {
             for bounds in selected_atoms {
                 window.paint_quad(fill(bounds, style.selection().opacity(0.12)));
             }
@@ -1728,7 +1798,7 @@ impl Element for EditorRoot {
                     && mouse.x >= b.left() - px(24.)
                     && mouse.x < b.right()
             });
-        if let Some(b) = hovered {
+        if !dragging_block && let Some(b) = hovered {
             let grip = Bounds::new(
                 point(b.left() - px(14.), b.top() + px(2.)),
                 size(px(4.), px(16.).min(b.size.height)),
@@ -1738,7 +1808,7 @@ impl Element for EditorRoot {
         // Whole-table handle: a small rounded square with a 2x2 grid glyph
         // at the frame's outer top-left corner, distinct from the thin
         // row / column grips.
-        for (handle, active) in table_handles {
+        for (handle, active) in table_handles.into_iter().filter(|_| !dragging_block) {
             let alpha = if active { 0.9 } else { 0.45 };
             window.paint_quad(gpui::quad(
                 handle,
@@ -1759,12 +1829,12 @@ impl Element for EditorRoot {
         }
         // Table grips (D20): only for the hovered column / row, or the
         // line whose menu is open.
-        for (table, line, grip) in grips {
+        for (table, line, grip) in grips.into_iter().filter(|_| !dragging_block) {
             let open = menu_line == Some((table, line));
             let alpha = if open { 0.8 } else { 0.35 };
             window.paint_quad(fill(grip, style.caret().opacity(alpha)).corner_radii(px(2.)));
         }
-        if let Some(area) = selected_area {
+        if !dragging_block && let Some(area) = selected_area {
             let area = area.dilate(px(4.));
             window.paint_quad(gpui::quad(
                 area,
@@ -1777,7 +1847,11 @@ impl Element for EditorRoot {
         }
         // D22: where a dragged block would drop.
         if let Some(line) = self.state.read(cx).drop_indicator() {
-            window.paint_quad(fill(line, style.caret()).corner_radii(px(1.)));
+            let theme = gpui_kit::base::Theme::global(cx);
+            let colors = &theme.tokens.colors;
+            window.paint_quad(fill(line, colors.primary).corner_radii(px(1.)));
+            let dot = Bounds::new(point(line.left() - px(4.), line.center().y - px(4.)), size(px(8.), px(8.)));
+            window.paint_quad(gpui::quad(dot, px(4.), colors.surface, px(1.5), colors.primary, gpui::BorderStyle::Solid));
         }
         if let Some((block, range)) = marked
             && let Some(leaf) = frame.leaf(block)

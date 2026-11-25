@@ -867,6 +867,7 @@ impl MarkdownPane {
                     }
                     cx.notify();
                 }
+                BlockEditorEvent::BlockDragEnded => cx.notify(),
                 BlockEditorEvent::EditLinkRequested { url } => {
                     pane.link_editing = true;
                     let initial = url.as_ref().map(|u| u.to_string()).unwrap_or_default();
@@ -3451,13 +3452,11 @@ impl MarkdownPane {
         pane_origin: Point<Pixels>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if self.source {
+        let editor = self.visual_editor.read(cx);
+        if self.source || editor.is_block_dragging() {
             return None;
         }
-        let (top_id, kind, bounds) = self
-            .visual_editor
-            .read(cx)
-            .top_block_at_or_active(self.mouse_pos)?;
+        let (top_id, kind, bounds) = editor.top_block_at_or_active(self.mouse_pos)?;
         let badge = match kind {
             BlockKind::Heading { level: 1 } => "H1",
             BlockKind::Heading { level: 2 } => "H2",
