@@ -3996,7 +3996,7 @@ impl BlockNode {
                     .overflow_hidden()
                     // A done task steps back so the open ones stand out.
                     .when(checked == Some(true), |this| {
-                        this.text_color(style.muted_foreground())
+                        this.text_color(style.muted_foreground()).line_through()
                     })
                     .child(content),
             )
@@ -4072,6 +4072,12 @@ impl BlockNode {
                                                         .w_full()
                                                         .pl(indent)
                                                         .overflow_hidden()
+                                                        .when(*checked == Some(true), |this| {
+                                                            this.text_color(
+                                                                node_cx.style.muted_foreground(),
+                                                            )
+                                                            .line_through()
+                                                        })
                                                         .child(text),
                                                 ),
                                             );
@@ -4145,6 +4151,12 @@ impl BlockNode {
                                                 .pl(indent)
                                                 .pt(body * 0.45)
                                                 .overflow_hidden()
+                                                .when(*checked == Some(true), |this| {
+                                                    this.text_color(
+                                                        node_cx.style.muted_foreground(),
+                                                    )
+                                                    .line_through()
+                                                })
                                                 .child(block),
                                         );
                                     }

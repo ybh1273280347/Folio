@@ -11,7 +11,6 @@ pub const ACTION_PDF_PREVIEW: BiText = BiText::new("PDF 预览", "PDF Preview");
 pub const ACTION_BUILD_LOGS: BiText = BiText::new("编译日志", "Build Logs");
 pub const ACTION_OPEN_FILE: BiText = BiText::new("打开文件", "Open File");
 pub const ACTION_NEW_PAGE: BiText = BiText::new("新建页面", "New Page");
-pub const ACTION_NEW_PAGE_DESC: BiText = BiText::new("在右侧分屏中新建 Markdown 页面", "Open a new Markdown page in split view");
 pub const ACTION_ZEN_MODE: BiText = BiText::new("Zen 专注模式", "Zen Mode");
 pub const ACTION_PREFERENCES: BiText = BiText::new("偏好设置", "Preferences");
 
