@@ -303,7 +303,7 @@ impl Workspace {
                 .flex_col()
                 .child(
                     div()
-                        .h(px(36.))
+                        .h(px(32.))
                         .flex_shrink_0()
                         .flex()
                         .items_center()
