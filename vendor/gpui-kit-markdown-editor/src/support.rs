@@ -366,13 +366,13 @@ pub(crate) fn paint_smooth_caret(
     let x = (bounds.origin.x * scale).round() / scale;
     let width = (bounds.size.width.max(px(2.)) * scale).round().max(px(1.)) / scale;
     let pill = Bounds::new(point(x, bounds.origin.y), size(width, bounds.size.height));
-    let glow = accent.unwrap_or(caret_color);
+    let body = accent.unwrap_or(caret_color);
 
     window.paint_quad(
-        gpui::fill(pill.dilate(px(2.)), glow.alpha(0.14)).corner_radii(px(3.)),
+        gpui::fill(pill.dilate(px(2.)), body.alpha(0.14)).corner_radii(px(3.)),
     );
     window.paint_quad(
-        gpui::fill(pill.dilate(px(0.8)), glow.alpha(0.28)).corner_radii(px(1.8)),
+        gpui::fill(pill.dilate(px(0.8)), body.alpha(0.28)).corner_radii(px(1.8)),
     );
-    window.paint_quad(gpui::fill(pill, caret_color).corner_radii(px(1.)));
+    window.paint_quad(gpui::fill(pill, body).corner_radii(px(1.)));
 }
