@@ -190,6 +190,12 @@ impl BlockEditorState {
         let Some(menu) = &self.table_menu else {
             return Err("no menu");
         };
+        if matches!(self.model.doc.kind(menu.table), Some(super::kind::BlockKindData::HtmlTable(_))) {
+            return match item {
+                MenuItem::Edit(TableEdit::SetColumnAlign(_)) => Err("HTML 表格保留单元格的对齐属性"),
+                _ => Ok(()),
+            };
+        }
         match (menu.line, item) {
             (TableLine::Row(0), MenuItem::Edit(TableEdit::RemoveRow)) => {
                 Err("表头行不可删除")
@@ -222,9 +228,13 @@ impl BlockEditorState {
             return;
         }
         // The selection may have moved since the menu opened.
-        let _ = self.model.select_table_line(menu.table, menu.line);
         self.model.break_coalescing();
-        let _ = self.run(super::command::EditorCommand::EditTable(edit), cx);
+        if matches!(self.model.doc.kind(menu.table), Some(super::kind::BlockKindData::HtmlTable(_))) {
+            self.edit_html_table_line(menu.table, menu.line, edit, cx);
+        } else {
+            let _ = self.model.select_table_line(menu.table, menu.line);
+            let _ = self.run(super::command::EditorCommand::EditTable(edit), cx);
+        }
         self.model.break_coalescing();
         if !matches!(edit, TableEdit::SetColumnAlign(_)) {
             self.table_menu = None;

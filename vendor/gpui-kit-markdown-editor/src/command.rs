@@ -166,7 +166,7 @@ fn delete_range(
         )));
     };
     let is_cell =
-        |doc: &EditorDocument, id: BlockId| doc.kind(id) == Some(&BlockKindData::TableCell);
+        |doc: &EditorDocument, id: BlockId| doc.kind(id).is_some_and(BlockKindData::is_table_cell);
     let is_fold_title = |doc: &EditorDocument, id: BlockId| {
         doc.index_in_parent(id).is_some_and(|(parent, index)| {
             index == 0 && matches!(doc.kind(parent), Some(BlockKindData::Fold { .. }))
@@ -734,7 +734,7 @@ impl BlockEditorModel {
                 drop_empty_heading(tx, pos.block)?;
                 return Ok(caret(pos));
             }
-            if doc.kind(pos.block) == Some(&BlockKindData::TableCell) {
+            if doc.kind(pos.block).is_some_and(BlockKindData::is_table_cell) {
                 return Ok(None);
             }
             // At a block edge: join with the neighbouring leaf.
@@ -753,8 +753,8 @@ impl BlockEditorModel {
                     None => return Ok(None),
                 }
             };
-            if doc.kind(first) == Some(&BlockKindData::TableCell)
-                || doc.kind(second) == Some(&BlockKindData::TableCell)
+            if doc.kind(first).is_some_and(BlockKindData::is_table_cell)
+                || doc.kind(second).is_some_and(BlockKindData::is_table_cell)
             {
                 return Ok(None);
             }
@@ -1378,7 +1378,7 @@ impl BlockEditorModel {
         let range = self.resolved()?;
         let editable = |doc: &EditorDocument, pos: BlockPosition| {
             doc.inline(pos.block).is_some()
-                && doc.kind(pos.block) != Some(&BlockKindData::TableCell)
+                && !doc.kind(pos.block).is_some_and(BlockKindData::is_table_cell)
         };
         if !editable(&self.doc, range.start) || !editable(&self.doc, range.end) {
             return Ok(false);
@@ -1495,7 +1495,7 @@ impl BlockEditorModel {
         let Some(len) = self.doc.leaf_len(pos.block) else {
             return Ok(false);
         };
-        if self.doc.kind(pos.block) == Some(&BlockKindData::TableCell)
+        if self.doc.kind(pos.block).is_some_and(BlockKindData::is_table_cell)
             || (forward && pos.offset < len)
             || (!forward && pos.offset > 0)
         {
@@ -1525,14 +1525,7 @@ impl BlockEditorModel {
 
     /// The table containing a cell.
     pub(crate) fn table_of(&self, cell: BlockId) -> Option<BlockId> {
-        if self.doc.kind(cell) != Some(&BlockKindData::TableCell) {
-            return None;
-        }
-        self.doc
-            .path(cell)
-            .into_iter()
-            .rev()
-            .find(|id| matches!(self.doc.kind(*id), Some(BlockKindData::Table { .. })))
+        super::table::table_of(&self.doc, cell)
     }
 
     /// Run an [`EditorCommand`]; returns whether the document or selection changed.
@@ -2116,7 +2109,7 @@ fn split_at(
         return Err(CommandError::NotEditable(pos.block));
     };
     let kind = doc.kind(pos.block).cloned();
-    if kind == Some(BlockKindData::TableCell) {
+    if kind.as_ref().is_some_and(BlockKindData::is_table_cell) {
         return Err(CommandError::NotEditable(pos.block));
     }
     let tail = inline.slice(pos.offset..inline.len());

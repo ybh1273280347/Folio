@@ -54,6 +54,7 @@ mod element;
 mod frame;
 mod host;
 mod html_table;
+mod html_table_model;
 mod id;
 mod import;
 mod inline;

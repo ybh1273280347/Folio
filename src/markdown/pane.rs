@@ -3930,6 +3930,74 @@ mod tests {
     use super::{OutlineHeading, match_heading_index};
 
     #[test]
+    fn html_table_cell_edit_round_trips_markup_and_undo() {
+        use super::{BlockEditorModel, BlockPosition, BlockSelection, MarkdownExtensions};
+        use markdown_editor::{BlockKind, EditOrigin};
+
+        let original = concat!(
+            "<div class=\"wide\"><table data-kind=\"sample\"><thead><tr><th>Title</th></tr></thead>",
+            "<tbody id=\"body\"><tr><td align=\"right\">**alpha** <span title=\"keep\">tag</span> beta</td></tr></tbody>",
+            "<tfoot><tr><td>End</td></tr></tfoot></table></div>"
+        );
+        let mut editor = BlockEditorModel::from_markdown(original, MarkdownExtensions::default()).unwrap();
+        assert_eq!(editor.source(), original);
+        let cell = editor.document().leaves()
+            .filter(|leaf| leaf.kind() == BlockKind::TableCell).nth(1).unwrap().id();
+        editor.set_selection(BlockSelection::caret(BlockPosition::new(cell, 0))).unwrap();
+        editor.insert_text("新增 ", EditOrigin::Typing).unwrap();
+
+        let saved = editor.source();
+        assert!(saved.contains(r#"<td align="right">新增 **alpha** <span title="keep">tag</span> beta</td>"#), "{saved}");
+        assert!(saved.contains(r#"<div class="wide"><table data-kind="sample">"#), "{saved}");
+        assert!(saved.contains(r#"<tbody id="body">"#), "{saved}");
+        assert!(saved.contains("<tfoot><tr><td>End</td></tr></tfoot>"), "{saved}");
+        let reopened = BlockEditorModel::from_markdown(&saved, MarkdownExtensions::default()).unwrap();
+        assert_eq!(reopened.source(), saved);
+        assert!(editor.undo());
+        assert_eq!(editor.source(), original);
+    }
+
+    #[test]
+    fn html_table_removing_first_row_keeps_the_surviving_merged_cell() {
+        use super::{BlockEditorModel, BlockPosition, BlockSelection, EditorCommand, MarkdownExtensions};
+        use markdown_editor::TableEdit;
+
+        let original = concat!(
+            "<table><tbody id=\"body\"><tr><th rowspan=\"2\" data-key=\"total\">合计</th><td>Delete me</td></tr>",
+            "<tr id=\"survives\"><td>Remain</td></tr></tbody></table>"
+        );
+        let mut editor = BlockEditorModel::from_markdown(original, MarkdownExtensions::default()).unwrap();
+        let total = editor.document().leaves().next().unwrap().id();
+        editor.set_selection(BlockSelection::caret(BlockPosition::new(total, 0))).unwrap();
+        assert!(editor.run(EditorCommand::EditTable(TableEdit::RemoveRow)).unwrap());
+
+        let saved = editor.source();
+        assert_eq!(saved, r#"<table><tbody id="body"><tr id="survives"><th data-key="total">合计</th><td>Remain</td></tr></tbody></table>"#);
+        assert_eq!(editor.document().leaves().next().unwrap().id(), total);
+        assert!(editor.undo());
+        assert_eq!(editor.source(), original);
+        assert!(editor.redo());
+        assert_eq!(editor.source(), saved);
+    }
+
+    #[test]
+    fn html_table_inserting_a_column_extends_cells_that_cross_it() {
+        use super::{BlockEditorModel, BlockPosition, BlockSelection, EditorCommand, MarkdownExtensions};
+        use markdown_editor::TableEdit;
+
+        let original = "<table><tr><th colspan=\"2\">Heading</th></tr><tr><td>Left</td><td>Right</td></tr></table>";
+        let mut editor = BlockEditorModel::from_markdown(original, MarkdownExtensions::default()).unwrap();
+        let left = editor.document().leaves().nth(1).unwrap().id();
+        editor.set_selection(BlockSelection::caret(BlockPosition::new(left, 0))).unwrap();
+        assert!(editor.run(EditorCommand::EditTable(TableEdit::AddColumnRight)).unwrap());
+
+        let saved = editor.source();
+        assert_eq!(saved, r#"<table><tr><th colspan="3">Heading</th></tr><tr><td>Left</td><td></td><td>Right</td></tr></table>"#);
+        assert!(editor.undo());
+        assert_eq!(editor.source(), original);
+    }
+
+    #[test]
     fn heading_anchor_matches_exact_slug_and_percent_encoded() {
         let headings = vec![
             OutlineHeading {

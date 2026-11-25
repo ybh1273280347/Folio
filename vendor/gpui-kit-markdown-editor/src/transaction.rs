@@ -267,7 +267,10 @@ impl<'a> TransactionBuilder<'a> {
                 {
                     return Some(Fix::LeadingParagraph(id));
                 }
-                if children.is_empty() && entry.kind != BlockKindData::Root {
+                // A row may be entirely covered by cells starting above it.
+                if children.is_empty()
+                    && !matches!(entry.kind, BlockKindData::Root | BlockKindData::HtmlTableRow(_))
+                {
                     return Some(Fix::RemoveEmpty(id));
                 }
                 if let BlockKindData::List { .. } = entry.kind

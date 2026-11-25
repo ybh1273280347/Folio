@@ -25,13 +25,13 @@ pub(crate) fn grid(doc: &EditorDocument, table: BlockId) -> Vec<Vec<BlockId>> {
 }
 
 pub(crate) fn table_of(doc: &EditorDocument, cell: BlockId) -> Option<BlockId> {
-    if doc.kind(cell) != Some(&BlockKindData::TableCell) {
+    if !doc.kind(cell).is_some_and(BlockKindData::is_table_cell) {
         return None;
     }
     doc.path(cell)
         .into_iter()
         .rev()
-        .find(|id| matches!(doc.kind(*id), Some(BlockKindData::Table { .. })))
+        .find(|id| doc.kind(*id).is_some_and(BlockKindData::is_table))
 }
 
 /// `(row, column)` of a cell in its table's grid.
@@ -40,6 +40,10 @@ pub(crate) fn cell_coords(
     table: BlockId,
     cell: BlockId,
 ) -> Option<(usize, usize)> {
+    if matches!(doc.kind(table), Some(BlockKindData::HtmlTable(_))) {
+        return super::html_table_model::Grid::new(doc, table).cells.iter().find(|entry| entry.id == cell)
+            .map(|entry| (entry.rows.start, entry.columns.start));
+    }
     grid(doc, table)
         .iter()
         .enumerate()
@@ -114,6 +118,13 @@ impl BlockEditorModel {
         let (ar, ac) = cell_coords(&self.doc, table, *anchor)?;
         let (hr, hc) = cell_coords(&self.doc, table, *head)?;
         let grid = grid(&self.doc, table);
+        if matches!(self.doc.kind(table), Some(BlockKindData::HtmlTable(_))) {
+            let grid = super::html_table_model::Grid::new(&self.doc, table);
+            let mut seen = std::collections::HashSet::new();
+            return Some((ar.min(hr)..=ar.max(hr)).map(|r| {
+                (ac.min(hc)..=ac.max(hc)).filter_map(|c| grid.at(r, c)).filter(|id| seen.insert(*id)).collect()
+            }).collect());
+        }
         Some(
             (ar.min(hr)..=ar.max(hr))
                 .map(|r| {
@@ -178,6 +189,28 @@ impl BlockEditorModel {
         let Some(ix) = cells.iter().position(|c| *c == cell) else {
             return Ok(false);
         };
+        if matches!(self.doc.kind(table), Some(BlockKindData::HtmlTable(_))) {
+            if !back && ix + 1 == cells.len() {
+                return self.exit_table();
+            }
+            if back && ix == 0 {
+                let leaves = self.doc.walk_leaves();
+                if let Some(previous) = leaves.iter().position(|id| *id == cell).and_then(|at| at.checked_sub(1)) {
+                    let previous = leaves[previous];
+                    let len = self.doc.leaf_len(previous).expect("previous leaf");
+                    self.set_selection(BlockSelection::caret(BlockPosition::new(previous, len)))?;
+                } else {
+                    let (parent, index) = self.doc.index_in_parent(table).expect("HTML table parent");
+                    let paragraph = empty_paragraph();
+                    let id = paragraph.id;
+                    self.transact(EditOrigin::Command("html_table_exit"), |tx| {
+                        tx.insert(parent, index, vec![paragraph])?;
+                        Ok(Some(BlockSelection::caret(BlockPosition::new(id, 0))))
+                    })?;
+                }
+                return Ok(true);
+            }
+        }
         let target = if back {
             match ix.checked_sub(1) {
                 Some(i) => cells[i],
@@ -294,6 +327,17 @@ impl BlockEditorModel {
         table: BlockId,
         line: TableLine,
     ) -> Result<bool, CommandError> {
+        if matches!(self.doc.kind(table), Some(BlockKindData::HtmlTable(_))) {
+            let grid = super::html_table_model::Grid::new(&self.doc, table);
+            let mut selected = grid.cells.iter().filter(|cell| match line {
+                TableLine::Row(r) => cell.rows.contains(&r),
+                TableLine::Column(c) => cell.columns.contains(&c),
+            });
+            let Some(first) = selected.next() else { return Ok(false) };
+            let last = selected.next_back().unwrap_or(first);
+            self.set_selection(BlockSelection::Cells { anchor: first.id, head: last.id })?;
+            return Ok(true);
+        }
         let grid = grid(&self.doc, table);
         let (anchor, head) = match line {
             TableLine::Row(r) => {
@@ -327,6 +371,16 @@ impl BlockEditorModel {
             return Err(CommandError::Unsupported("caret is not in a table"));
         };
         let (r0, r1, c0, c1) = (*rsel.start(), *rsel.end(), *csel.start(), *csel.end());
+        if matches!(self.doc.kind(table), Some(BlockKindData::HtmlTable(_))) {
+            let line = match edit {
+                TableEdit::AddRowAbove | TableEdit::RemoveRow => TableLine::Row(r0),
+                TableEdit::AddRowBelow => TableLine::Row(r1),
+                TableEdit::AddColumnLeft | TableEdit::RemoveColumn => TableLine::Column(c0),
+                TableEdit::AddColumnRight => TableLine::Column(c1),
+                TableEdit::SetColumnAlign(_) => return Ok(false),
+            };
+            return self.edit_html_table(table, line, edit);
+        }
         let grid = grid(&self.doc, table);
         let rows = grid.len();
         let cols = grid.iter().map(Vec::len).max().unwrap_or(0);
@@ -445,6 +499,9 @@ impl BlockEditorModel {
         let Some((table, cell)) = self.current_cell() else {
             return Ok(false);
         };
+        if matches!(self.doc.kind(table), Some(BlockKindData::HtmlTable(_))) {
+            return self.cell_soft_break();
+        }
         let Some((r, c)) = cell_coords(&self.doc, table, cell) else {
             return Ok(false);
         };

@@ -2031,7 +2031,7 @@ impl BlockEditorState {
         let doc = &self.model.doc;
         match doc.kind(leaf)? {
             super::kind::BlockKindData::CodeBlock { .. } => Some(leaf),
-            super::kind::BlockKindData::TableCell => {
+            super::kind::BlockKindData::TableCell | super::kind::BlockKindData::HtmlTableCell(_) => {
                 let (row, _) = doc.index_in_parent(leaf).expect("table cell has a row");
                 let (table, row_index) = doc.index_in_parent(row).expect("table row has a table");
                 (row_index > 0).then_some(table)
@@ -2192,30 +2192,15 @@ impl BlockEditorState {
         self.blink_cursor.update(cx, |b, cx| b.pause(cx));
     }
 
-    pub(crate) fn edit_html_cell(
+    pub(crate) fn edit_html_table_line(
         &mut self,
         block: BlockId,
-        cell: usize,
-        value: &str,
+        line: super::TableLine,
+        edit: super::TableEdit,
         cx: &mut Context<Self>,
     ) {
-        use super::{document::{AtomData, BlockContent}, kind::BlockKindData, step::DetachedBlock};
-
-        let origin = EditOrigin::Command("html_table_cell");
-        self.edit(origin, |model| {
-            // A source reload while the dialog was open can retire this block.
-            let Some(entry) = model.doc.get(block) else { return Ok(()) };
-            let BlockContent::Atom(AtomData::Custom(node)) = &entry.content else { unreachable!() };
-            let Some(node) = super::html_table::replace_cell(node, cell, value) else { return Ok(()) };
-            let (parent, index) = model.doc.index_in_parent(block).expect("a table belongs to its parent");
-            let replacement = DetachedBlock::leaf(BlockKindData::Custom, BlockContent::Atom(AtomData::Custom(node)));
-            let new_id = replacement.id;
-            model.transact(origin, |tx| {
-                tx.remove(parent, index..index + 1)?;
-                tx.insert(parent, index, vec![replacement])?;
-                Ok(Some(BlockSelection::Blocks { anchor: new_id, head: new_id }))
-            })?;
-            Ok(())
+        self.edit(EditOrigin::Command("html_table_edit"), |model| {
+            model.edit_html_table(block, line, edit).map(|_| ())
         }, cx);
     }
 
@@ -2457,6 +2442,18 @@ impl BlockEditorState {
             let target = if pick_head { head } else { anchor };
             return self.move_to(target, false, cx);
         }
+        let doc = &self.model.doc;
+        if matches!(doc.kind(head.block), Some(super::kind::BlockKindData::HtmlTableCell(_)))
+            && (if forward { doc.leaf_len(head.block) == Some(head.offset) } else { head.offset == 0 })
+        {
+            let table = self.model.table_of(head.block).expect("HTML cell parent table");
+            let grid = super::html_table_model::Grid::new(doc, table);
+            if let Some(cell) = grid.neighbour(head.block, false, forward) {
+                let offset = if forward { 0 } else { doc.leaf_len(cell).expect("HTML cell length") };
+                self.move_to(BlockPosition::new(cell, offset), extend, cx);
+            }
+            return;
+        }
         let next = self.step_horizontal(head, forward);
         self.move_to(next, extend, cx);
     }
@@ -2483,6 +2480,23 @@ impl BlockEditorState {
         let laid_out = frame.caret_bounds(head, self.style.caret_width());
         let x = laid_out.map(|caret| *self.goal_x.get_or_insert(caret.origin.x));
         let visual = x.and_then(|x| frame.vertical(head, x, down));
+        if matches!(self.model.doc.kind(head.block), Some(super::kind::BlockKindData::HtmlTableCell(_)))
+            && !visual.is_some_and(|position| position.block == head.block)
+        {
+            let table = self.model.table_of(head.block).expect("HTML cell parent table");
+            let grid = super::html_table_model::Grid::new(&self.model.doc, table);
+            if let Some(cell) = grid.neighbour(head.block, true, down) {
+                let offset = frame.leaf(cell).zip(x).map_or(0, |(leaf, x)| {
+                    let bounds = leaf.bounds();
+                    let line = leaf.line_height() / 2.;
+                    let y = if down { bounds.top() + line } else { bounds.bottom() - line };
+                    leaf.offset_at(point(x, y))
+                });
+                drop(frame);
+                self.move_to(BlockPosition::new(cell, offset), extend, cx);
+            }
+            return;
+        }
         let target = match (visual, adjacent) {
             // Within the block, or into the laid-out adjacent leaf.
             (Some(t), _) if t.block == head.block => t,

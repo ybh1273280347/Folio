@@ -61,6 +61,9 @@ pub(crate) enum BlockKindData {
     Table {
         aligns: Vec<ColumnAlign>,
     },
+    HtmlTable(std::sync::Arc<super::html_table_model::Source>),
+    HtmlTableRow(super::html_table_model::Row),
+    HtmlTableCell(super::html_table_model::Cell),
     TableRow,
     TableCell,
     Paragraph,
@@ -91,9 +94,9 @@ impl BlockKindData {
             Self::Blockquote | Self::Alert { .. } | Self::Fold { .. } => BlockKind::Blockquote,
             Self::List { ordered, .. } => BlockKind::List { ordered: *ordered },
             Self::ListItem { checked, .. } => BlockKind::ListItem { checked: *checked },
-            Self::Table { .. } => BlockKind::Table,
-            Self::TableRow => BlockKind::TableRow,
-            Self::TableCell => BlockKind::TableCell,
+            Self::Table { .. } | Self::HtmlTable(_) => BlockKind::Table,
+            Self::TableRow | Self::HtmlTableRow(_) => BlockKind::TableRow,
+            Self::TableCell | Self::HtmlTableCell(_) => BlockKind::TableCell,
             Self::Paragraph => BlockKind::Paragraph,
             Self::Heading { level } => BlockKind::Heading { level: *level },
             Self::CodeBlock { .. } => BlockKind::CodeBlock,
@@ -117,6 +120,8 @@ impl BlockKindData {
                 | Self::ListItem { .. }
                 | Self::Table { .. }
                 | Self::TableRow
+                | Self::HtmlTable(_)
+                | Self::HtmlTableRow(_)
         )
     }
 
@@ -124,7 +129,15 @@ impl BlockKindData {
     pub(crate) fn is_textblock(&self) -> bool {
         matches!(
             self,
-            Self::Paragraph | Self::Heading { .. } | Self::TableCell
+            Self::Paragraph | Self::Heading { .. } | Self::TableCell | Self::HtmlTableCell(_)
         )
+    }
+
+    pub(crate) fn is_table_cell(&self) -> bool {
+        matches!(self, Self::TableCell | Self::HtmlTableCell(_))
+    }
+
+    pub(crate) fn is_table(&self) -> bool {
+        matches!(self, Self::Table { .. } | Self::HtmlTable(_))
     }
 }

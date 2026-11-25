@@ -1,14 +1,16 @@
 //! Native HTML table layout and cell editing. The HTML block remains the
 //! document's source so its row groups, spans and attributes can round-trip.
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
-use gpui::AppContext as _;
 use gpui::{
-    AnyElement, App, AvailableSpace, Axis, Bounds, Div, Element, ElementId, Focusable as _,
-    FontWeight, GlobalElementId, InspectorElementId, InteractiveElement as _, IntoElement as _,
-    LayoutId, ParentElement as _, Pixels, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled as _, TextAlign, WeakEntity, Window, canvas, div, px, size,
+    AnyElement, App, AvailableSpace, Axis, Bounds, Div, Element, ElementId, FontWeight,
+    GlobalElementId, InspectorElementId, InteractiveElement as _, IntoElement as _, LayoutId,
+    ParentElement as _, Pixels, ScrollHandle, StatefulInteractiveElement as _, Styled as _,
+    TextAlign, Window, canvas, div, px, size,
 };
 use gpui_kit::{
     base::{
@@ -18,11 +20,6 @@ use gpui_kit::{
             editor_host::{BlockNode, FlowPosition, RenderContext},
         },
     },
-    component::{
-        WindowExt as _,
-        button::{Button, ButtonVariants as _},
-        input::{Textarea, TextareaState},
-    },
     prelude::FluentBuilder as _,
 };
 use html5ever::{
@@ -30,34 +27,47 @@ use html5ever::{
 };
 use markup5ever_rcdom::{Handle, NodeData, RcDom, SerializableHandle};
 
-use super::{BlockEditorState, BlockId};
+use super::BlockId;
 
 pub(crate) const NAME: &str = "editor-html-table";
-pub(crate) const EDITABLE_NAME: &str = "editor-html-table-editable";
-
-/// A view-only binding between a parsed table and the current editor block.
-pub(crate) struct EditableTable {
-    pub(crate) node: MarkdownNode,
-    pub(crate) editor: WeakEntity<BlockEditorState>,
-    pub(crate) block: BlockId,
-}
-
 pub(crate) struct HtmlTable {
-    columns: u16,
-    cells: Vec<Cell>,
-    extensions: Arc<MarkdownExtensions>,
+    pub(super) columns: u16,
+    pub(super) rows: u16,
+    pub(super) cells: Vec<Cell>,
+    pub(super) extensions: Arc<MarkdownExtensions>,
+    pub(super) table_id: Option<BlockId>,
 }
 
-struct Cell {
-    rows: std::ops::Range<i16>,
-    columns: std::ops::Range<i16>,
-    text: SharedString,
-    blocks: Vec<BlockNode>,
-    align: TextAlign,
-    header: bool,
+pub(super) struct Cell {
+    pub(super) rows: std::ops::Range<i16>,
+    pub(super) columns: std::ops::Range<i16>,
+    pub(super) blocks: Vec<BlockNode>,
+    pub(super) align: TextAlign,
+    pub(super) header: bool,
+    id: Option<BlockId>,
 }
 
-fn tag(node: &Handle) -> &str {
+impl Cell {
+    pub(super) fn projected(
+        rows: std::ops::Range<i16>,
+        columns: std::ops::Range<i16>,
+        paragraph: gpui_kit::base::text::editor_host::Paragraph,
+        align: TextAlign,
+        header: bool,
+        id: BlockId,
+    ) -> Self {
+        Self {
+            rows,
+            columns,
+            blocks: vec![BlockNode::Paragraph(paragraph)],
+            align,
+            header,
+            id: Some(id),
+        }
+    }
+}
+
+pub(super) fn tag(node: &Handle) -> &str {
     match &node.data {
         NodeData::Element { name, .. } if name.ns == ns!(html) => &name.local,
         _ => "",
@@ -72,7 +82,7 @@ pub(crate) fn starts_with_html_block(source: &str) -> bool {
     tag.is_some_and(|tag| tag.eq_ignore_ascii_case("<table") || tag.eq_ignore_ascii_case("<div"))
 }
 
-fn html_fragment(source: &str) -> Handle {
+pub(super) fn html_fragment(source: &str) -> Handle {
     let context = QualName::new(None, ns!(html), local_name!("body"));
     let dom = parse_fragment(RcDom::default(), Default::default(), context, vec![]).one(source);
     let root = dom.document.children.borrow_mut().remove(0);
@@ -80,7 +90,7 @@ fn html_fragment(source: &str) -> Handle {
 }
 
 /// Resolve a standalone table, including a table wrapped in layout-only divs.
-fn table_element(root: &Handle) -> Option<Handle> {
+pub(super) fn table_element(root: &Handle) -> Option<Handle> {
     let mut container = root.clone();
     loop {
         let child = {
@@ -104,13 +114,14 @@ fn table_element(root: &Handle) -> Option<Handle> {
     }
 }
 
-fn row_groups(table: &Handle) -> Vec<Vec<Handle>> {
+pub(super) fn group_elements(table: &Handle) -> Vec<Handle> {
     // The HTML parser inserts a tbody for bare tr elements. The HTML display
     // order puts the header first and footer last regardless of source order.
     let children = table.children.borrow();
     let mut groups: Vec<_> = children
         .iter()
         .filter(|node| matches!(tag(node), "thead" | "tbody" | "tfoot"))
+        .cloned()
         .collect();
     groups.sort_by_key(|node| match tag(node) {
         "thead" => 0,
@@ -118,20 +129,23 @@ fn row_groups(table: &Handle) -> Vec<Vec<Handle>> {
         _ => 1,
     });
     groups
+}
+
+pub(super) fn group_rows(group: &Handle) -> Vec<Handle> {
+    group
+        .children
+        .borrow()
         .iter()
-        .map(|group| {
-            group
-                .children
-                .borrow()
-                .iter()
-                .filter(|node| tag(node) == "tr")
-                .cloned()
-                .collect()
-        })
+        .filter(|node| tag(node) == "tr")
+        .cloned()
         .collect()
 }
 
-fn row_cells(row: &Handle) -> Vec<Handle> {
+fn row_groups(table: &Handle) -> Vec<Vec<Handle>> {
+    group_elements(table).iter().map(group_rows).collect()
+}
+
+pub(super) fn row_cells(row: &Handle) -> Vec<Handle> {
     row.children
         .borrow()
         .iter()
@@ -220,8 +234,6 @@ pub(crate) fn parse(source: &str, extensions: Arc<MarkdownExtensions>) -> Option
                     } else {
                         TextAlign::Left
                     });
-                let mut text = String::new();
-                append_cell_text(&node, &mut text);
                 let mut markdown = Vec::new();
                 serialize(
                     &mut markdown,
@@ -234,12 +246,10 @@ pub(crate) fn parse(source: &str, extensions: Arc<MarkdownExtensions>) -> Option
                 cells.push(Cell {
                     rows: i16::try_from(row_index).ok()?..i16::try_from(row_end).ok()?,
                     columns,
-                    text: text
-                        .trim_matches(|ch: char| ch.is_ascii_whitespace())
-                        .into(),
                     blocks,
                     align,
                     header,
+                    id: None,
                 });
             }
             row_index += 1;
@@ -247,86 +257,106 @@ pub(crate) fn parse(source: &str, extensions: Arc<MarkdownExtensions>) -> Option
     }
     (!cells.is_empty()).then_some(HtmlTable {
         columns: occupied_until.len() as u16,
+        rows: (row_index - 1) as u16,
         cells,
         extensions,
+        table_id: None,
     })
 }
 
-fn append_cell_text(node: &Handle, text: &mut String) {
-    if let NodeData::Text { contents } = &node.data {
-        for ch in contents.borrow().chars() {
-            if !ch.is_ascii_whitespace() {
-                text.push(ch);
-            } else if !text.is_empty() && !text.ends_with([' ', '\n']) {
-                text.push(' ');
-            }
-        }
-    } else {
-        match tag(node) {
-            "br" => text.push('\n'),
-            "script" | "style" | "template" => (),
-            _ => {
-                for child in node.children.borrow().iter() {
-                    append_cell_text(child, text);
-                }
-            }
-        }
-    }
+#[derive(Default)]
+pub(crate) struct Geometry {
+    pub(crate) viewport: Bounds<Pixels>,
+    pub(crate) columns: Vec<(Pixels, Pixels)>,
+    pub(crate) rows: Vec<(Pixels, Pixels)>,
+    pub(crate) cells: HashMap<BlockId, Bounds<Pixels>>,
 }
 
-/// Replace only the target cell's children. Serializing the fragment keeps
-/// the other cells, wrapper elements and their HTML attributes intact.
-pub(crate) fn replace_cell(node: &MarkdownNode, index: usize, value: &str) -> Option<MarkdownNode> {
-    let source_table = node.data::<HtmlTable>().expect("HTML table data");
-    let original = &source_table.cells[index];
-    if original.text.as_ref() == value {
-        return None;
-    }
-    let root = html_fragment(node.as_markdown());
-    let table = table_element(&root).expect("an imported HTML table has one table element");
-    let cell = row_groups(&table)
-        .iter()
-        .flatten()
-        .flat_map(row_cells)
-        .nth(index)
-        .expect("cell index comes from the same parsed table");
-    let escaped = value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace("\r\n", "\n")
-        .replace('\n', "<br>");
-    cell.children
-        .replace(html_fragment(&escaped).children.take());
-    let mut output = Vec::new();
-    serialize(
-        &mut output,
-        &SerializableHandle::from(root),
-        Default::default(),
-    )
-    .expect("serialization to memory is infallible");
-    let source = String::from_utf8(output).expect("HTML serialization writes UTF-8");
-    let table = parse(&source, source_table.extensions.clone())
-        .expect("replacing cell text preserves the table structure");
-    Some(
-        MarkdownNode::new(NAME, table)
-            .text(source.clone())
-            .markdown(source),
-    )
-}
+pub(crate) type Layouts = Arc<Mutex<HashMap<BlockId, Geometry>>>;
 
 pub(crate) fn render(node: &MarkdownNode, window: &mut Window, cx: &mut App) -> Div {
-    let grid = render_grid(node, false, window, cx);
-    let key = node.data::<EditableTable>()
-        .map(|editable| editable.block.as_u64())
-        .unwrap_or_else(|| node.source_range().map_or(0, |span| span.start as u64));
+    render_live(node, None, None, window, cx)
+}
+
+pub(crate) fn render_live(
+    node: &MarkdownNode,
+    layouts: Option<&Layouts>,
+    reveal: Option<BlockId>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Div {
+    let table = node.data::<HtmlTable>().expect("HTML table preview data");
+    let key = table.table_id.map_or_else(
+        || node.source_range().map_or(0, |span| span.start as u64),
+        BlockId::as_u64,
+    );
     let scroll = window
         .use_keyed_state(("html-table-scroll", key), cx, |_, _| ScrollHandle::new())
         .read(cx)
         .clone();
+    let measured = table.table_id.zip(layouts.cloned());
+    if let Some((id, layouts)) = &measured {
+        layouts.lock().expect("HTML table geometry").insert(
+            *id,
+            Geometry {
+                rows: vec![(px(0.), px(0.)); table.rows as usize],
+                columns: vec![(px(0.), px(0.)); table.columns as usize],
+                ..Default::default()
+            },
+        );
+    }
+    let grid = render_grid(table, false, measured.as_ref(), window, cx);
     div()
         .relative()
         .w_full()
+        .when_some(measured, |view, (id, layouts)| {
+            let scroll = scroll.clone();
+            let measured = layouts.clone();
+            view.child(
+                canvas(
+                    move |bounds, _, _| {
+                        layouts
+                            .lock()
+                            .expect("HTML table geometry")
+                            .get_mut(&id)
+                            .unwrap()
+                            .viewport = bounds
+                    },
+                    move |bounds, (), window, _| {
+                        // Run after measurements, and only for an editor reveal
+                        // request so manually scrolling does not snap back.
+                        let cell = reveal.and_then(|cell| {
+                            measured
+                                .lock()
+                                .expect("HTML table geometry")
+                                .get(&id)?
+                                .cells
+                                .get(&cell)
+                                .copied()
+                        });
+                        if let Some(cell) = cell {
+                            let delta =
+                                if cell.left() < bounds.left() || cell.left() >= bounds.right() {
+                                    bounds.left() - cell.left()
+                                } else if cell.right() > bounds.right()
+                                    && cell.size.width <= bounds.size.width
+                                {
+                                    bounds.right() - cell.right()
+                                } else {
+                                    px(0.)
+                                };
+                            if delta != px(0.) {
+                                let offset = scroll.offset();
+                                scroll.set_offset(gpui::point(offset.x + delta, offset.y));
+                                window.refresh();
+                            }
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
+        })
         .child(
             div()
                 .id(("html-table-viewport", key))
@@ -355,15 +385,26 @@ pub(crate) fn render_document(
     cx: &mut App,
 ) -> AnyElement {
     DocumentTable {
-        grid: render_grid(node, true, window, cx).into_any_element(),
+        grid: render_grid(
+            node.data::<HtmlTable>().expect("HTML table preview data"),
+            true,
+            None,
+            window,
+            cx,
+        )
+        .into_any_element(),
         width,
-    }.into_any_element()
+    }
+    .into_any_element()
 }
 
-fn render_grid(node: &MarkdownNode, document: bool, window: &mut Window, cx: &mut App) -> Div {
-    let editable = node.data::<EditableTable>();
-    let source = editable.map_or(node, |editable| &editable.node);
-    let table = source.data::<HtmlTable>().expect("HTML table preview data");
+fn render_grid(
+    table: &HtmlTable,
+    document: bool,
+    measured: Option<&(BlockId, Layouts)>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Div {
     let border = Theme::global(cx).tokens.colors.border;
     let render_context = RenderContext::from_app(cx)
         .with_markdown_extensions(table.extensions.clone())
@@ -373,11 +414,13 @@ fn render_grid(node: &MarkdownNode, document: bool, window: &mut Window, cx: &mu
         // Min-content tracks ask Taffy to allocate an intrinsic contribution
         // across all tracks a cell spans. Zero-minimum tracks ignore it.
         .grid_cols_min_content(table.columns)
+        .grid_rows_min_content(table.rows)
         .when(!document, |this| this.min_w_full())
         .border_t_1()
         .border_l_1()
         .border_color(border)
         .children(table.cells.iter().enumerate().map(|(index, cell)| {
+            let id = ("html-cell", cell.id.map_or(index as u64, BlockId::as_u64));
             div()
                 .row_start(cell.rows.start)
                 .row_end(cell.rows.end)
@@ -388,6 +431,7 @@ fn render_grid(node: &MarkdownNode, document: bool, window: &mut Window, cx: &mu
                     // while individual columns get floors from their own cells.
                     this.min_w(px(160.))
                 })
+                .relative()
                 .overflow_hidden()
                 .px(px(12.))
                 .py(px(7.))
@@ -397,67 +441,85 @@ fn render_grid(node: &MarkdownNode, document: bool, window: &mut Window, cx: &mu
                 .whitespace_normal()
                 .text_align(cell.align)
                 .when(cell.header, |this| this.font_weight(FontWeight::SEMIBOLD))
-                .children(window.with_id(("html-cell", index), |window| {
+                .children(window.with_id(id, |window| {
                     let nodes: Vec<_> = cell.blocks.iter().collect();
-                    nodes.iter().enumerate().map(|(index, block)| {
-                        block.render(
-                            index,
-                            FlowPosition::at(&nodes, index, index + 1 == nodes.len()),
-                            &render_context,
-                            window,
-                            cx,
-                        )
-                    }).collect::<Vec<_>>()
+                    nodes
+                        .iter()
+                        .enumerate()
+                        .map(|(index, block)| {
+                            block.render(
+                                index,
+                                FlowPosition::at(&nodes, index, index + 1 == nodes.len()),
+                                &render_context,
+                                window,
+                                cx,
+                            )
+                        })
+                        .collect::<Vec<_>>()
                 }))
-                .id(("html-cell", index))
-                .when_some(editable, |this, editable| {
-                    let editor = editable.editor.clone();
-                    let block = editable.block;
-                    let text = cell.text.clone();
-                    this.cursor_text().on_click(move |event, window, cx| {
-                        if event.click_count() < 2 {
-                            return;
-                        }
-                        cx.stop_propagation();
-                        let input =
-                            cx.new(|cx| TextareaState::new(window, cx).default_value(text.clone()));
-                        let editor = editor.clone();
-                        let focus = input.focus_handle(cx);
-                        window.open_dialog(cx, move |dialog, _, _| {
-                            let editor = editor.clone();
-                            let input_for_save = input.clone();
-                            dialog
-                                .title("编辑表格单元格")
-                                .child(Textarea::new(&input).h(px(100.)))
-                                .footer(
-                                    div()
-                                        .flex()
-                                        .justify_end()
-                                        .gap_2()
-                                        .child(
-                                            Button::new("cancel")
-                                                .label("取消")
-                                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                                        )
-                                        .child(
-                                            Button::new("save").primary().label("保存").on_click(
-                                                move |_, window, cx| {
-                                                    let value = input_for_save.read(cx).value();
-                                                    let _ = editor.update(cx, |state, cx| {
-                                                        state.edit_html_cell(
-                                                            block, index, &value, cx,
-                                                        )
-                                                    });
-                                                    window.close_dialog(cx);
-                                                },
-                                            ),
-                                        ),
-                                )
-                        });
-                        window.defer(cx, move |window, cx| focus.focus(window, cx));
-                    })
+                .id(id)
+                .when_some(measured.zip(cell.id), |this, ((table, layouts), cell)| {
+                    let (table, layouts) = (*table, layouts.clone());
+                    this.cursor_text().child(
+                        canvas(
+                            move |bounds, _, _| {
+                                layouts
+                                    .lock()
+                                    .expect("HTML table geometry")
+                                    .get_mut(&table)
+                                    .unwrap()
+                                    .cells
+                                    .insert(cell, bounds);
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
                 })
         }))
+        .when_some(measured, |grid, (table_id, layouts)| {
+            let table_id = *table_id;
+            let columns = (0..table.columns as i16).map(|c| {
+                let layouts = layouts.clone();
+                canvas(
+                    move |bounds, _, _| {
+                        layouts
+                            .lock()
+                            .expect("HTML table geometry")
+                            .get_mut(&table_id)
+                            .unwrap()
+                            .columns[c as usize] = (bounds.left(), bounds.right());
+                    },
+                    |_, _, _, _| {},
+                )
+                .row_start(1)
+                .row_end(2)
+                .col_start(c + 1)
+                .col_end(c + 2)
+                .size_full()
+            });
+            let rows = (0..table.rows as i16).map(|r| {
+                let layouts = layouts.clone();
+                canvas(
+                    move |bounds, _, _| {
+                        layouts
+                            .lock()
+                            .expect("HTML table geometry")
+                            .get_mut(&table_id)
+                            .unwrap()
+                            .rows[r as usize] = (bounds.top(), bounds.bottom());
+                    },
+                    |_, _, _, _| {},
+                )
+                .col_start(1)
+                .col_end(2)
+                .row_start(r + 1)
+                .row_end(r + 2)
+                .size_full()
+            });
+            grid.children(columns).children(rows)
+        })
         .when(document, |grid| {
             // Use the existing pagination markers for connected row groups.
             // A boundary is safe only when no cell crosses it.
@@ -473,12 +535,15 @@ fn render_grid(node: &MarkdownNode, document: bool, window: &mut Window, cx: &mu
             }
             ranges.push(start..end);
             grid.children(ranges.into_iter().map(|rows| {
-                canvas(|_, _, _| (), |bounds, (), window, _| window.vector_block(bounds))
-                    .row_start(rows.start)
-                    .row_end(rows.end)
-                    .col_start(1)
-                    .col_end(2)
-                    .size_full()
+                canvas(
+                    |_, _, _| (),
+                    |bounds, (), window, _| window.vector_block(bounds),
+                )
+                .row_start(rows.start)
+                .row_end(rows.end)
+                .col_start(1)
+                .col_end(2)
+                .size_full()
             }))
         })
 }

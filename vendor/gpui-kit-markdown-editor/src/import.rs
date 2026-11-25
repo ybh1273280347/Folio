@@ -589,7 +589,9 @@ fn import_block_with_folds(node: &BlockNode, defs: &Defs, out: &mut Vec<Detached
             )
         }
         BlockNode::Custom { node, .. } => {
-            if let Some(block) = folds.and_then(|folds| folds.get(node.as_markdown())) {
+            if node.name() == super::html_table::NAME {
+                super::html_table_model::import(node, defs)
+            } else if let Some(block) = folds.and_then(|folds| folds.get(node.as_markdown())) {
                 block.clone()
             } else {
                 leaf(BlockKindData::Custom, BlockContent::Atom(AtomData::Custom(node.clone())))
@@ -870,10 +872,10 @@ pub(crate) fn preserve_source_extensions(extensions: MarkdownExtensions) -> Mark
     }
     let inline_extensions = Arc::new(extensions.clone());
     extensions
+        .plugin(super::html_table_model::CellFragment)
         .plugin(SourceAtom { block: true, inline_extensions: inline_extensions.clone() })
         .plugin(SourceAtom { block: false, inline_extensions })
         .block_renderer(super::html_table::NAME, super::html_table::render)
-        .block_renderer(super::html_table::EDITABLE_NAME, super::html_table::render)
         .block_renderer(HTML_DIV, |node, _, _| {
             // The kit's HTML renderer draws the children with native text
             // styles. The opaque block still serializes the original HTML.
