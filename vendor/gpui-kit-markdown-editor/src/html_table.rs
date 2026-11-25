@@ -5,13 +5,13 @@ use std::sync::Arc;
 
 use gpui::AppContext as _;
 use gpui::{
-    App, Div, Focusable as _, FontWeight, InteractiveElement as _, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, TextAlign, WeakEntity, Window, div,
-    px,
+    App, Axis, Div, Focusable as _, FontWeight, InteractiveElement as _, ParentElement as _,
+    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, TextAlign,
+    WeakEntity, Window, div, px,
 };
 use gpui_kit::{
     base::{
-        Theme,
+        ScrollableMask, Scrollbar, ScrollbarMode, Theme,
         text::{
             MarkdownExtensions, MarkdownNode,
             editor_host::{BlockNode, FlowPosition, RenderContext},
@@ -322,20 +322,24 @@ pub(crate) fn render(node: &MarkdownNode, window: &mut Window, cx: &mut App) -> 
     let render_context = RenderContext::from_app(cx)
         .with_markdown_extensions(table.extensions.clone())
         .with_body_font_size(window.text_style().font_size.to_pixels(window.rem_size()));
-    div()
+    let vector_capture = window.is_vector_capture();
+    let grid = div()
         .grid()
         .grid_cols(table.columns)
-        .w_full()
+        .when(vector_capture, |this| this.w_full())
+        .when(!vector_capture, |this| this.min_w_full())
         .border_t_1()
         .border_l_1()
         .border_color(border)
         .children(table.cells.iter().enumerate().map(|(index, cell)| {
+            let col_span = (cell.columns.end - cell.columns.start).max(1) as f32;
             div()
                 .row_start(cell.rows.start)
                 .row_end(cell.rows.end)
                 .col_start(cell.columns.start)
                 .col_end(cell.columns.end)
-                .min_w_0()
+                .when(vector_capture, |this| this.min_w_0())
+                .when(!vector_capture, |this| this.min_w(px(160. * col_span)))
                 .px(px(12.))
                 .py(px(7.))
                 .border_b_1()
@@ -404,5 +408,36 @@ pub(crate) fn render(node: &MarkdownNode, window: &mut Window, cx: &mut App) -> 
                         window.defer(cx, move |window, cx| focus.focus(window, cx));
                     })
                 })
-        }))
+        }));
+    if vector_capture {
+        return grid;
+    }
+    let key = editable
+        .map(|editable| editable.block.as_u64())
+        .unwrap_or_else(|| node.source_range().map_or(0, |span| span.start as u64));
+    let scroll = window
+        .use_keyed_state(("html-table-scroll", key), cx, |_, _| ScrollHandle::new())
+        .read(cx)
+        .clone();
+    div()
+        .relative()
+        .w_full()
+        .child(
+            div()
+                .id(("html-table-viewport", key))
+                .w_full()
+                .overflow_hidden()
+                .track_scroll(&scroll)
+                .child(grid),
+        )
+        .child(ScrollableMask::new(Axis::Horizontal, &scroll).id(("html-table-mask", key)))
+        .child(
+            Scrollbar::horizontal(&scroll)
+                .mode(ScrollbarMode::Always)
+                .styles(|styles| {
+                    styles
+                        .track(|track| track.width(px(8.)))
+                        .thumb(|thumb| thumb.width(px(3.)).inset(px(2.)))
+                }),
+        )
 }

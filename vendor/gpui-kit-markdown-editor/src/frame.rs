@@ -159,6 +159,10 @@ pub(crate) struct FrameLayout {
     pub(crate) grids: Vec<TableGeom>,
     /// Cell boxes by cell id, for hit-testing between cells.
     pub(crate) cell_boxes: HashMap<BlockId, Bounds<Pixels>>,
+    /// Visible viewport bounds for each scrolled table block.
+    pub(crate) table_viewports: HashMap<BlockId, Bounds<Pixels>>,
+    /// Owning table block for each cell leaf id.
+    pub(crate) cell_table: HashMap<BlockId, BlockId>,
     /// The editor's content area: tables span its width, while their cells'
     /// text bounds only cover the text.
     pub(crate) content: Option<Bounds<Pixels>>,
@@ -206,6 +210,11 @@ impl FrameLayout {
 
     pub(crate) fn leaf(&self, block: BlockId) -> Option<&LeafGeom> {
         self.index.get(&block).map(|ix| &self.leaves[*ix])
+    }
+
+    pub(crate) fn table_viewport_for_block(&self, block: BlockId) -> Option<Bounds<Pixels>> {
+        let table = self.cell_table.get(&block)?;
+        self.table_viewports.get(table).copied()
     }
 
     pub(crate) fn caret_bounds(&self, pos: BlockPosition, width: Pixels) -> Option<Bounds<Pixels>> {
@@ -396,12 +405,16 @@ impl FrameLayout {
         shapes: &[TableShape],
         pad_x: Pixels,
         content_right: Option<Pixels>,
+        viewports: &HashMap<BlockId, Bounds<Pixels>>,
     ) {
         self.grids.clear();
         self.cell_boxes.clear();
+        self.cell_table.clear();
+        self.table_viewports = viewports.clone();
         for shape in shapes {
             for row in &shape.grid {
                 for (c, cell) in row.iter().enumerate() {
+                    self.cell_table.insert(*cell, shape.table);
                     let align = shape.aligns.get(c).copied().unwrap_or_default();
                     if let Some(ix) = self.index.get(cell) {
                         self.leaves[*ix].align = align;
@@ -489,21 +502,40 @@ impl FrameLayout {
             if row_spans.len() != shape.grid.len() {
                 continue;
             }
+            let viewport = viewports.get(&shape.table).copied();
             for (r, row) in shape.grid.iter().enumerate() {
                 for (c, cell) in row.iter().enumerate() {
                     let (l, rt) = col_spans[c];
                     let (t, b) = row_spans[r];
-                    self.cell_boxes
-                        .insert(*cell, Bounds::from_corners(point(l, t), point(rt, b)));
+                    let cell_bounds = Bounds::from_corners(point(l, t), point(rt, b));
+                    let visible = match viewport {
+                        Some(vp) => cell_bounds.intersect(&vp),
+                        None => cell_bounds,
+                    };
+                    if visible.size.width > px(0.) && visible.size.height > px(0.) {
+                        self.cell_boxes.insert(*cell, visible);
+                    }
                 }
             }
             let (l, r) = (col_spans[0].0, col_spans[cols - 1].1);
             let (t, b) = (row_spans[0].0, row_spans[row_spans.len() - 1].1);
+            let raw_bounds = Bounds::from_corners(point(l - rule, t - rule), point(r + rule, b + rule));
+            let bounds = match viewport {
+                Some(vp) => {
+                    let vis_left = raw_bounds.left().max(vp.left());
+                    let vis_right = raw_bounds.right().min(vp.right()).max(vis_left);
+                    Bounds::from_corners(
+                        point(vis_left, raw_bounds.top()),
+                        point(vis_right, raw_bounds.bottom()),
+                    )
+                }
+                None => raw_bounds,
+            };
             self.grids.push(TableGeom {
                 table: shape.table,
                 cols: col_spans,
                 rows: row_spans,
-                bounds: Bounds::from_corners(point(l - rule, t - rule), point(r + rule, b + rule)),
+                bounds,
             });
         }
     }

@@ -12,7 +12,8 @@ use gpui::{
 };
 
 use super::{
-    InlineElement, TextViewMultiClickKind, inline::point_in_text_selection, state::LineSpan,
+    InlineElement, TextViewMultiClickKind, inline::point_in_text_selection,
+    inline_element::InlineFitToWidthFn, state::LineSpan,
 };
 use crate::{GlobalState, touch_selection::caret_line_box};
 
@@ -42,9 +43,18 @@ impl InlineMetrics {
 pub(super) struct MeasuredInlineObject {
     pub metrics: InlineMetrics,
     content: Option<Rc<RefCell<Option<AnyElement>>>>,
+    content_measured: bool,
+    fit_to_width: Option<InlineFitToWidthFn>,
     text: SharedString,
     font_size: Pixels,
     text_style: TextStyle,
+}
+
+fn wrap_presentation(element: AnyElement, style: &TextStyle) -> AnyElement {
+    // The wrapper carries inherited marks into both layout and painting.
+    let mut wrapper = div().child(element);
+    wrapper.style().text = style.subtract(&Default::default());
+    wrapper.into_any_element()
 }
 
 impl MeasuredInlineObject {
@@ -75,20 +85,23 @@ impl MeasuredInlineObject {
         let mut result = Self {
             metrics: fallback,
             content: None,
+            content_measured: false,
+            fit_to_width: None,
             text,
             font_size,
             text_style: style.clone(),
         };
         if let Some(presentation) = presentation {
-            // The wrapper carries inherited marks into both layout and painting.
-            let mut wrapper = div().child(presentation.element);
-            wrapper.style().text = style.subtract(&Default::default());
-            let mut element = wrapper.into_any_element();
-            let measured = element.layout_as_root(
-                size(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
-                window,
-                cx,
-            );
+            let fit_to_width = presentation.fit_to_width;
+            let mut element = wrap_presentation(presentation.element, style);
+            let measured = match presentation.size {
+                Some(explicit) => explicit,
+                None => element.layout_as_root(
+                    size(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
+                    window,
+                    cx,
+                ),
+            };
             let metrics = InlineMetrics {
                 size: measured,
                 baseline: presentation.baseline.unwrap_or(
@@ -99,14 +112,41 @@ impl MeasuredInlineObject {
             if metrics.is_valid() {
                 result.metrics = metrics;
                 result.content = Some(Rc::new(RefCell::new(Some(element))));
+                result.content_measured = presentation.size.is_none();
+                result.fit_to_width = fit_to_width;
             }
         }
         result
     }
 
     pub fn fit_text(mut self, width: Option<Pixels>) -> Self {
-        // GPUI has no general subtree scale. Only our own plain-text fallback
-        // can be proportionally fitted; custom elements retain their real size.
+        // Must not call `layout_as_root` here because `fit_text` runs inside
+        // GPUI's `request_measured_layout` callback where `layout_engine` is taken.
+        if let (Some(max_width), Some(fit)) = (width, self.fit_to_width.clone())
+            && self.content.is_some()
+            && self.metrics.size.width > max_width
+        {
+            if let Some(fitted) = fit(max_width)
+                && let Some(explicit) = fitted.size
+            {
+                let metrics = InlineMetrics {
+                    size: explicit,
+                    baseline: fitted.baseline.unwrap_or(
+                        (explicit.height - (self.metrics.size.height - self.metrics.baseline))
+                            .max(Pixels::ZERO),
+                    ),
+                };
+                if metrics.is_valid() {
+                    let element = wrap_presentation(fitted.element, &self.text_style);
+                    self.metrics = metrics;
+                    self.content = Some(Rc::new(RefCell::new(Some(element))));
+                    self.content_measured = false;
+                }
+            }
+            return self;
+        }
+        // GPUI has no general subtree scale. Plain-text fallback scales here;
+        // custom elements without a fit hook retain their real size.
         if self.content.is_none() {
             let scale = width.map_or(1., |width| {
                 (width.max(Pixels::ZERO) / self.metrics.size.width).min(1.)
@@ -128,7 +168,7 @@ impl MeasuredInlineObject {
                     .borrow_mut()
                     .take()
                     .expect("inline element painted once per frame"),
-                true,
+                self.content_measured,
             );
         }
         let text = StyledText::new(self.text.clone())
@@ -490,6 +530,37 @@ mod tests {
             assert_eq!(measured.metrics.baseline, px(10.));
             let narrow = measured.fit_text(Some(px(20.)));
             assert_eq!(narrow.metrics.size, size(px(48.), px(14.)));
+        });
+    }
+
+    #[test]
+    fn fit_to_width_re_measures_custom_element_when_narrower() {
+        let mut app = gpui::TestApp::new();
+        in_prepaint(&mut app, |window, cx| {
+            let native = InlineElement::new(div().w(px(100.)).h(px(20.)))
+                .with_baseline(px(15.))
+                .with_fit_to_width(|max_w| {
+                    let ratio = (f32::from(max_w) / 100.).clamp(0.1, 1.);
+                    let fitted = size(max_w, px(20. * ratio));
+                    Some(
+                        InlineElement::new(div().w(fitted.width).h(fitted.height))
+                            .with_size(fitted)
+                            .with_baseline(px(15. * ratio)),
+                    )
+                });
+            let measured = MeasuredInlineObject::measure(
+                "formula",
+                Some(native),
+                &TextStyle::default(),
+                window,
+                cx,
+            );
+            assert_eq!(measured.metrics.size, size(px(100.), px(20.)));
+            let wide = measured.clone().fit_text(Some(px(120.)));
+            assert_eq!(wide.metrics.size, size(px(100.), px(20.)));
+            let narrow = measured.fit_text(Some(px(50.)));
+            assert_eq!(narrow.metrics.size, size(px(50.), px(10.)));
+            assert_eq!(narrow.metrics.baseline, px(7.5));
         });
     }
 

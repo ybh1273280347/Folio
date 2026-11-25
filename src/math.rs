@@ -9,6 +9,7 @@ use gpui_kit::{
     component::text::{
         InlineElement, InlineRenderContext, MarkdownNode, MarkdownParseContext, MarkdownPlugin,
     },
+    prelude::FluentBuilder as _,
     *,
 };
 use sha2::{Digest, Sha256};
@@ -28,6 +29,7 @@ enum Formula {
     Ready(Arc<MathLayout>),
     Failed(String),
 }
+#[derive(Clone)]
 struct MathContent {
     id: u64,
     latex: String,
@@ -252,6 +254,7 @@ fn key(latex: &str, display: bool, appearance: MathAppearance) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect()
 }
+#[derive(Clone)]
 pub struct MathPlugin {
     assets: Arc<Mutex<HashMap<String, Formula>>>,
     pending: Arc<Mutex<HashMap<String, (String, bool)>>>,
@@ -263,7 +266,12 @@ pub struct MathPlugin {
     renderer: WeakEntity<MathRenderer>,
 }
 impl MathPlugin {
-    fn formula_element(&self, content: &MathContent, scale: f32) -> (AnyElement, f32) {
+    fn formula_element(
+        &self,
+        content: &MathContent,
+        scale: f32,
+        max_width: Option<Pixels>,
+    ) -> (AnyElement, Option<Size<Pixels>>, f32) {
         let formula = self
             .assets
             .lock()
@@ -276,36 +284,51 @@ impl MathPlugin {
             .cloned();
         match formula {
             Some(Formula::Ready(layout)) => {
+                let natural_width = (layout.width * scale).ceil() + 1.;
+                let effective_scale = match max_width {
+                    Some(limit) if natural_width > f32::from(limit) => {
+                        let target = (f32::from(limit) - 2.).max(1.);
+                        (target / layout.width.max(1.)).min(scale).max(0.05)
+                    }
+                    _ => scale,
+                };
                 let (width, height, baseline) = (
-                    (layout.width * scale).ceil() + 1.,
-                    (layout.height * scale).ceil() + 1.,
-                    layout.baseline * scale,
+                    (layout.width * effective_scale).ceil() + 1.,
+                    (layout.height * effective_scale).ceil() + 1.,
+                    layout.baseline * effective_scale,
                 );
                 // Round the canvas up: layout rounding must not put the exact TeX
                 // baseline outside its height and trigger GPUI's plain-text fallback.
                 (
                     canvas(
                         |_, _, _| (),
-                        move |bounds, _, window, cx| layout.paint(bounds.origin, scale, window, cx),
+                        move |bounds, _, window, cx| {
+                            layout.paint(bounds.origin, effective_scale, window, cx)
+                        },
                     )
                     .w(px(width))
                     .h(px(height))
                     .into_any_element(),
+                    Some(size(px(width), px(height))),
                     baseline,
                 )
             }
             Some(Formula::Failed(error)) => (
                 div()
+                    .when_some(max_width, |d, limit| d.max_w(limit).overflow_hidden())
                     .text_color(rgb(0xa16b60))
                     .child(crate::i18n::media::math_layout_failed(&content.latex, &error))
                     .into_any_element(),
+                None,
                 14.,
             ),
             None => (
                 div()
+                    .when_some(max_width, |d, limit| d.max_w(limit).overflow_hidden())
                     .text_color(rgb(0x787774))
                     .child(crate::i18n::media::MATH_PENDING.get())
                     .into_any_element(),
+                None,
                 14.,
             ),
         }
@@ -314,6 +337,7 @@ impl MathPlugin {
         let renderer = self.renderer.clone();
         let (id, latex, display) = (content.id, content.latex.clone(), content.display);
         div()
+            .when(display, |d| d.w_full().min_w_0())
             .cursor_pointer()
             .child(element)
             .on_mouse_down(MouseButton::Left, move |event, _, cx| {
@@ -416,53 +440,38 @@ impl MarkdownPlugin for MathPlugin {
             MathDisplaySize::Markdown => appearance.display_size,
             MathDisplaySize::Ai => appearance.ai_display_size,
         };
-        let (element, _) = self.formula_element(content, size / 10.);
+        let (element, _, _) = self.formula_element(content, size / 10., None);
         if matches!(self.display_size, MathDisplaySize::Ai) {
-            let start = node.source_range().expect("parsed math has a span").start;
-            let scroll = window
-                .use_keyed_state(("ai-formula-scroll", start), cx, |_, _| ScrollHandle::new())
-                .read(cx)
-                .clone();
-            return div()
-                .id(("ai-formula", start))
-                .relative()
-                .w_full()
-                .child(
+            let start = node.source_range().expect("parsed math has a span").start as u64;
+            return scrollable_display_formula(
+                ("ai-formula", start),
+                ("ai-formula-scroll", start),
+                element,
+                window,
+                cx,
+            );
+        }
+        if window.is_vector_capture() {
+            return self
+                .editable(
+                    content,
                     div()
-                        .id("viewport")
-                        .w_full()
                         .flex()
+                        .justify_center()
                         .py_2()
-                        .overflow_hidden()
-                        .track_scroll(&scroll)
-                        // Auto margins center short formulas and leave the start
-                        // of an overflowing formula at the viewport's left edge.
-                        .child(div().mx_auto().flex_shrink_0().child(element)),
-                )
-                // Only horizontal gestures belong to the formula. Vertical wheel
-                // events continue through to the conversation scroller.
-                .child(ScrollableMask::new(Axis::Horizontal, &scroll))
-                .child(
-                    Scrollbar::horizontal(&scroll)
-                        .mode(ScrollbarMode::Always)
-                        .styles(|styles| {
-                            styles
-                                .track(|track| track.width(px(8.)))
-                                .thumb(|thumb| thumb.width(px(3.)).inset(px(2.)))
-                        }),
+                        .child(element)
+                        .into_any_element(),
                 )
                 .into_any_element();
         }
-        self.editable(
-            content,
-            div()
-                .flex()
-                .justify_center()
-                .py_2()
-                .child(element)
-                .into_any_element(),
-        )
-        .into_any_element()
+        let scrolled = scrollable_display_formula(
+            ("md-formula", content.id),
+            ("md-formula-scroll", content.id),
+            element,
+            window,
+            cx,
+        );
+        self.editable(content, scrolled).into_any_element()
     }
     fn render_inline(
         &self,
@@ -471,19 +480,85 @@ impl MarkdownPlugin for MathPlugin {
         _: &mut Window,
         _: &mut App,
     ) -> Option<InlineElement> {
-        let content = node.data::<MathContent>().expect("math content");
+        let content = node.data::<MathContent>().expect("math content").clone();
         let inline_scale = self
             .appearance
             .lock()
             .expect("math appearance lock")
             .inline_scale;
-        let (element, baseline) =
-            self.formula_element(content, f32::from(context.font_size()) * inline_scale / 10.);
+        let scale = f32::from(context.font_size()) * inline_scale / 10.;
+        let plugin = self.clone();
+        let fitted_content = content.clone();
         // Mark highlights are painted at the editor line level using the max
         // vertical extent across text and inline math; record bounds in prepaint.
-        let formula = self.editable(content, element).into_any_element();
-        Some(InlineElement::new(InlineBoundsRecorder(formula)).with_baseline(px(baseline)))
+        Some(
+            inline_formula_element(self, &content, scale, None)
+                .expect("natural inline element")
+                .with_fit_to_width(move |max_width| {
+                    inline_formula_element(&plugin, &fitted_content, scale, Some(max_width))
+                }),
+        )
     }
+}
+
+fn scrollable_display_formula(
+    container_id: (&'static str, u64),
+    scroll_key: (&'static str, u64),
+    element: AnyElement,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let scroll = window
+        .use_keyed_state(scroll_key, cx, |_, _| ScrollHandle::new())
+        .read(cx)
+        .clone();
+    div()
+        .id(container_id)
+        .relative()
+        .w_full()
+        .child(
+            div()
+                .id("viewport")
+                .w_full()
+                .flex()
+                .py_2()
+                .overflow_hidden()
+                .track_scroll(&scroll)
+                // Auto margins center short formulas and leave the start
+                // of an overflowing formula at the viewport's left edge.
+                .child(div().mx_auto().flex_shrink_0().child(element)),
+        )
+        // Only horizontal gestures belong to the formula. Vertical wheel
+        // events continue through to the document/conversation scroller.
+        .child(ScrollableMask::new(Axis::Horizontal, &scroll))
+        .child(
+            Scrollbar::horizontal(&scroll)
+                .mode(ScrollbarMode::Always)
+                .styles(|styles| {
+                    styles
+                        .track(|track| track.width(px(8.)))
+                        .thumb(|thumb| thumb.width(px(3.)).inset(px(2.)))
+                }),
+        )
+        .into_any_element()
+}
+
+fn inline_formula_element(
+    plugin: &MathPlugin,
+    content: &MathContent,
+    scale: f32,
+    max_width: Option<Pixels>,
+) -> Option<InlineElement> {
+    let (element, explicit_size, baseline) = plugin.formula_element(content, scale, max_width);
+    if max_width.is_some() && explicit_size.is_none() {
+        return None;
+    }
+    let formula = plugin.editable(content, element).into_any_element();
+    let mut inline = InlineElement::new(InlineBoundsRecorder(formula)).with_baseline(px(baseline));
+    if let Some(size) = explicit_size.filter(|_| max_width.is_some()) {
+        inline = inline.with_size(size);
+    }
+    Some(inline)
 }
 
 struct InlineBoundsRecorder(AnyElement);

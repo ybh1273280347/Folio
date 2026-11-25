@@ -24,3 +24,5 @@ Mermaid 适配保留编辑器原有的 `code_ui` 模块、投影缓存和折叠�
 - `gpui-pdf`：新增 `PdfView::flash_to_page`，用于从知识库或外部定位跳转至目标页顶部并触发 1.4 秒临时高亮边框（冷打开时由 `pending_reveal` 复用该闪烁高亮）。
 - `gpui-pdf`：为左侧缩略图栏与目录栏补充悬浮可拖拽滚动条（复用 `ScrollHandle::max_offset()` 计算几何）；修复页码跳转输入框空态缺字（`⌷` 改为光标 `|` 并高亮激活态、点击外部取消）。
 - `gpui-base 0.9.1`：放开非代码编辑器多行输入框（`Textarea`）的 `set_text_align` 限制，并在空文本状态下按 `alignment_offset` 对齐光标水平位置，供知识画布居中编辑使用。
+- `gpui-base 0.9.1`：为 `InlineElement` 增加 `with_fit_to_width` 钩子，允许自定义行内对象（如超宽行内公式）按可用行宽重新排版并等比缩放；在 `horizontal_scroll_area` 中补充横向 `Scrollbar`，并在 `measure_table_columns_with_floors` 中将单个不可折行自定义行内对象的宽度计入可滚动表格的列宽下限。
+- `gpui-kit-markdown-editor`：交互式渲染视图为 Markdown 表格开启 `Overflow::Scroll`、为 HTML 表格包裹横向滚动容器（PDF 导出 `is_vector_capture()` 仍保持完整页面适应宽度），并在 `FrameLayout` / `EditorRoot` / `table_ui` 中将选区、光标、输入法下划线、行列手柄与整表角标约束到表格可见视口内。

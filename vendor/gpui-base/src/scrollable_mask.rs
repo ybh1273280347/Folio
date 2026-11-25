@@ -12,7 +12,7 @@ use gpui::{
 };
 use gpui::{Corners, Pixels};
 
-use crate::{AxisExt, OngoingScrollExt as _, ScrollbarHandle, StyledExt as _};
+use crate::{AxisExt, OngoingScrollExt as _, Scrollbar, ScrollbarHandle, ScrollbarMode, StyledExt as _};
 
 thread_local! {
     static LAST_HORIZONTAL_SCROLL_CLAIM: Cell<Option<HorizontalScrollClaim>> =
@@ -111,6 +111,15 @@ pub(crate) fn horizontal_scroll_area(
                 .child(child),
         )
         .child(ScrollableMask::new(Axis::Horizontal, scroll_handle).id(id))
+        .child(
+            Scrollbar::horizontal(scroll_handle)
+                .mode(ScrollbarMode::Always)
+                .styles(|styles| {
+                    styles
+                        .track(|track| track.width(px(8.)))
+                        .thumb(|thumb| thumb.width(px(3.)).inset(px(2.)))
+                }),
+        )
         .child(frame)
 }
 
