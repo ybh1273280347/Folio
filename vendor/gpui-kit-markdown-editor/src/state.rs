@@ -290,6 +290,8 @@ pub enum BlockEditorEvent {
         origin: EditOrigin,
     },
     SelectionChanged,
+    /// An active block drag ended, including releases that leave the document unchanged.
+    BlockDragEnded,
     /// Cmd/Ctrl+K: the host should show its link popover (D14) for the
     /// selection or the link at the caret, then call
     /// [`BlockEditorState::set_link`]. `url` is the current link, if any.
@@ -3270,25 +3272,24 @@ impl BlockEditorState {
                 );
                 self.model.break_coalescing();
             }
+            cx.emit(BlockEditorEvent::BlockDragEnded);
             cx.notify();
         }
     }
 
     /// D22: where to paint the drop indicator of an active drag: a line in
-    /// the gap, spanning the blocks' width.
+    /// a valid reorder gap, spanning the editor's content column.
     pub(crate) fn drop_indicator(&self) -> Option<Bounds<Pixels>> {
         use gpui::{point, px, size};
         let drag = self.block_drag.filter(|d| d.active)?;
         let to = drag.drop?;
+        let (_, from) = self.model.doc.index_in_parent(drag.block)?;
+        // Both gaps beside the source lead back to its original position.
+        if to == from || to == from + 1 {
+            return None;
+        }
+        let content = self.frame.borrow().content?;
         let blocks = self.top_level_bounds();
-        let left = blocks
-            .iter()
-            .map(|(_, _, b)| b.left())
-            .reduce(Pixels::min)?;
-        let right = blocks
-            .iter()
-            .map(|(_, _, b)| b.right())
-            .reduce(Pixels::max)?;
         let prev = blocks.iter().rev().find(|(ix, _, _)| *ix < to);
         let next = blocks.iter().find(|(ix, _, _)| *ix >= to);
         let y = match (prev, next) {
@@ -3298,8 +3299,8 @@ impl BlockEditorState {
             (None, None) => return None,
         };
         Some(gpui::Bounds::new(
-            point(left - px(8.), y - px(1.)),
-            size(right - left + px(8.), px(2.)),
+            point(content.left(), y - px(1.)),
+            size(content.size.width, px(2.)),
         ))
     }
 
