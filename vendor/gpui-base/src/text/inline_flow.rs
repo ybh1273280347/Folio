@@ -1006,7 +1006,7 @@ fn layout_measured_flow(
     text_style: &TextStyle,
     wrap_width: Option<Pixels>,
     window: &mut Window,
-    _cx: &mut App,
+    cx: &mut App,
 ) -> InlineFlowLayout {
     #[cfg(test)]
     FLOW_LAYOUTS.with(|layouts| layouts.set(layouts.get() + 1));
@@ -1019,7 +1019,11 @@ fn layout_measured_flow(
 
     let objects = prepared_objects
         .iter()
-        .map(|object| object.clone().map(|object| object.fit_text(wrap_width)))
+        .map(|object| {
+            object
+                .clone()
+                .map(|object| object.fit_text(wrap_width, window, cx))
+        })
         .collect::<Vec<_>>();
     // An image wider than the wrap is narrowed to it, in its ratio, the way
     // the image-alone path narrows with `max_w(relative(1.))`; text objects

@@ -1,13 +1,18 @@
-use gpui::{AnyElement, IntoElement, Pixels, TextStyle};
+use std::rc::Rc;
+
+use gpui::{AnyElement, App, IntoElement, Pixels, TextStyle, Window};
+
+pub(crate) type InlineFitToWidthFn = Rc<dyn Fn(Pixels, &mut Window, &mut App) -> InlineElement>;
 
 /// A GPUI element participating as one atomic object in a text line.
 ///
 /// Use native GPUI styles, events and components on the element. TextView
 /// measures its intrinsic size and wraps around the whole object. Fixed-width
-/// elements keep their actual size; constrain them with GPUI styles as needed.
+/// elements keep their actual size unless [`Self::with_fit_to_width`] is set.
 pub struct InlineElement {
     pub(crate) element: AnyElement,
     pub(crate) baseline: Option<Pixels>,
+    pub(crate) fit_to_width: Option<InlineFitToWidthFn>,
 }
 
 impl InlineElement {
@@ -15,6 +20,7 @@ impl InlineElement {
         Self {
             element: element.into_any_element(),
             baseline: None,
+            fit_to_width: None,
         }
     }
 
@@ -22,6 +28,15 @@ impl InlineElement {
     /// By default the box aligns its bottom with the surrounding text's descent.
     pub fn with_baseline(mut self, baseline: Pixels) -> Self {
         self.baseline = Some(baseline);
+        self
+    }
+
+    /// Rebuild this element when the surrounding line is narrower than its natural width.
+    pub fn with_fit_to_width(
+        mut self,
+        fit: impl Fn(Pixels, &mut Window, &mut App) -> InlineElement + 'static,
+    ) -> Self {
+        self.fit_to_width = Some(Rc::new(fit));
         self
     }
 }
