@@ -652,7 +652,11 @@ impl Render for Workspace {
             y2: 1.0,
         };
         let sidebar_policy = Transition::new(Duration::from_millis(220)).easing(drawer_curve.clone());
-        let right_duration_ms = (200.0 + right_target_w * 0.16).clamp(240.0, 320.0) as u64;
+        let right_duration_ms = if !right_panel_visible && self.right_panel.snap_close {
+            0
+        } else {
+            (200.0 + right_target_w * 0.16).clamp(240.0, 320.0) as u64
+        };
         let right_policy =
             Transition::new(Duration::from_millis(right_duration_ms)).easing(drawer_curve);
 
@@ -721,8 +725,12 @@ impl Render for Workspace {
         }
         if !self.zen_mode {
             for path in self.documents.reading_panes() {
+                let mut panel = resizable_panel();
+                if let Some(width) = self.documents.reading_pane_initial_width(path) {
+                    panel = panel.size(px(width.min((area_width - 100.0).max(280.0))));
+                }
                 work_area =
-                    work_area.child(resizable_panel().child(self.render_reading_pane(path, cx)));
+                    work_area.child(panel.child(self.render_reading_pane(path, cx)));
             }
         }
         let label = if self.build.is_busy() {
