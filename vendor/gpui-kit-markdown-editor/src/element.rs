@@ -13,12 +13,12 @@ use std::sync::{Arc, Mutex};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Bounds, CursorStyle, DefiniteLength, DispatchPhase, Edges, Element, ElementId,
-    ElementInputHandler, Entity, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
-    InspectorElementId, InteractiveElement, IntoElement, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Refineable, RenderOnce, Role,
-    SharedString, StatefulInteractiveElement, Style, StyleRefinement, Styled, TextStyle, Window,
-    canvas, div, fill, point, px, size,
+    AnyElement, App, Bounds, ContentMask, CursorStyle, DefiniteLength, DispatchPhase, Edges,
+    Element, ElementId, ElementInputHandler, Entity, FontWeight, GlobalElementId, Hitbox,
+    HitboxBehavior, Hsla, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Overflow, ParentElement, Pixels,
+    Refineable, RenderOnce, Role, SharedString, StatefulInteractiveElement, Style, StyleRefinement,
+    Styled, TextStyle, Window, canvas, div, fill, point, px, size,
 };
 
 use super::{
@@ -667,6 +667,10 @@ impl RenderOnce for BlockEditor {
                 .with_table_head(head.bg(fade_fill(head_fill)));
             render_cx = render_cx.with_style(style);
         }
+        let mut table_style = render_cx.style().table().clone();
+        table_style.overflow.x = Some(Overflow::Scroll);
+        let updated_style = render_cx.style().clone().with_table(table_style);
+        render_cx = render_cx.with_style(updated_style);
         let text_style = render_cx.style().clone();
         let mut style = self.state.read(cx).style.resolved(&theme.tokens);
         if style.selection_is_default() {
@@ -739,6 +743,7 @@ impl RenderOnce for BlockEditor {
         typography.refine(&self.style.text);
         let atom_bounds: AtomBounds = Arc::default();
         let fold_bounds: AtomBounds = Arc::default();
+        let table_viewports: AtomBounds = Arc::default();
         let code_preview_bounds: BoundsMap = Arc::default();
         let mut extensions = (*extensions).clone();
         code_preview::register_renderer(&mut extensions);
@@ -952,10 +957,25 @@ impl RenderOnce for BlockEditor {
                     }
                     (_, BlockNode::Table(_)) => {
                         let table = live_node.render(node_ix, flow.last(is_last_node), &node_cx, window, cx);
+                        let table_id = unit.id;
+                        let viewports = table_viewports.clone();
                         div()
                             .relative()
                             .w_full()
                             .child(table)
+                            .child(
+                                canvas(
+                                    move |bounds, _, _| {
+                                        viewports
+                                            .lock()
+                                            .expect("table viewports")
+                                            .insert(table_id, bounds);
+                                    },
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .inset_0(),
+                            )
                             .children(super::table_ui::controls(
                                 &self.state,
                                 unit.id,
@@ -1129,6 +1149,7 @@ impl RenderOnce for BlockEditor {
                 content_bounds,
                 atom_bounds,
                 fold_bounds,
+                table_viewports,
                 code_preview_bounds,
                 padding: root_style.padding,
                 typography,
@@ -1212,6 +1233,7 @@ struct EditorRoot {
     backgrounds: Option<LeafBackgrounds>,
     atom_bounds: AtomBounds,
     fold_bounds: AtomBounds,
+    table_viewports: AtomBounds,
     code_preview_bounds: BoundsMap,
     snapshot: Rc<Snapshot>,
     style: BlockEditorStyle,
@@ -1507,7 +1529,8 @@ impl Element for EditorRoot {
                 // gpui-kit's cell padding is `px_3`: 0.75rem.
                 let pad = window.rem_size() * 0.75;
                 let right = frame.content.map(|c| c.right());
-                frame.layout_tables(&shapes, pad, right);
+                let viewports = self.table_viewports.lock().expect("table viewports");
+                frame.layout_tables(&shapes, pad, right, &viewports);
             }
             mark_rects = compute_mark_rects(
                 &frame,
@@ -1627,7 +1650,7 @@ impl Element for EditorRoot {
             let doc = &state.model.doc;
             let ids = doc.children(parent).get(range)?.to_vec();
             let frame = frame.borrow();
-            frame
+            let area = frame
                 .leaves
                 .iter()
                 .filter(|leaf| {
@@ -1636,7 +1659,18 @@ impl Element for EditorRoot {
                         .any(|id| *id == leaf.info.block || path.contains(id))
                 })
                 .map(|leaf| leaf.bounds())
-                .reduce(|a, b| a.union(&b))
+                .reduce(|a, b| a.union(&b))?;
+            if ids.len() == 1
+                && let Some(vp) = frame.table_viewports.get(&ids[0])
+            {
+                let left = area.left().max(vp.left());
+                let right = area.right().min(vp.right()).max(left);
+                return Some(Bounds::from_corners(
+                    point(left, area.top()),
+                    point(right, area.bottom()),
+                ));
+            }
+            Some(area)
         });
 
         window.handle_input(
@@ -1755,7 +1789,12 @@ impl Element for EditorRoot {
                 point(a.x, a.y + leaf.line_height() - thickness),
                 size((b.x - a.x).max(thickness), thickness),
             );
-            window.paint_quad(fill(underline, style.composition_underline()));
+            let mask = frame
+                .table_viewport_for_block(block)
+                .map(|bounds| ContentMask { bounds });
+            window.with_content_mask(mask, |window| {
+                window.paint_quad(fill(underline, style.composition_underline()));
+            });
         }
         if show_caret
             && let Some(pos) = caret
@@ -1764,7 +1803,12 @@ impl Element for EditorRoot {
             // Whole device pixels, like the input caret: a 1px line at a
             // fractional x would blur over two pixels.
             let b = crate::support::snap_caret_to_device_pixels(b, window.scale_factor());
-            window.paint_quad(fill(b, style.caret()));
+            let mask = frame
+                .table_viewport_for_block(pos.block)
+                .map(|bounds| ContentMask { bounds });
+            window.with_content_mask(mask, |window| {
+                window.paint_quad(fill(b, style.caret()));
+            });
         }
         drop(frame);
 

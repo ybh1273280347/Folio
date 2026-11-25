@@ -75,12 +75,16 @@ impl BlockEditorState {
                 .or_else(|| (x < g.cols[0].0).then_some(0));
             if let Some(c) = col {
                 let (l, r) = g.cols[c];
-                let mid = (l + r) / 2.;
-                out.push((
-                    g.table,
-                    TableLine::Column(c),
-                    Bounds::new(point(mid - px(8.), b.top() - px(8.)), size(px(16.), px(4.))),
-                ));
+                let vis_l = l.max(b.left());
+                let vis_r = r.min(b.right());
+                if vis_r > vis_l {
+                    let mid = (vis_l + vis_r) / 2.;
+                    out.push((
+                        g.table,
+                        TableLine::Column(c),
+                        Bounds::new(point(mid - px(8.), b.top() - px(8.)), size(px(16.), px(4.))),
+                    ));
+                }
             }
             let row = g
                 .rows
