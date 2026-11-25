@@ -52,7 +52,7 @@ impl SettingsChanged {
             inline_code_font, block_code_font, inline_code_scale, block_code_scale,
             interface_font_size, editor_font_size, markdown_font_size, ai_font_size,
             math_scale, inline_math_scale, math_font, line_width_limited,
-            internal_link_open_target, tool_execution_view, show_line_numbers,
+            internal_link_open_target, tool_execution_view, show_line_numbers, smooth_caret,
             terminal, translate, ai, rag, keybindings,
         );
         merged
@@ -1072,6 +1072,20 @@ impl Preferences {
                         control("show-line-numbers", if self.settings.show_line_numbers { common_i18n::ENABLED.get() } else { common_i18n::DISABLED.get() })
                             .on_click(cx.listener(|panel, _, _, cx| {
                                 panel.settings.show_line_numbers = !panel.settings.show_line_numbers;
+                                panel.changed(cx);
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(p::SMOOTH_CARET.get())
+                    .child(
+                        control("smooth-caret", if self.settings.smooth_caret { common_i18n::ENABLED.get() } else { common_i18n::DISABLED.get() })
+                            .on_click(cx.listener(|panel, _, _, cx| {
+                                panel.settings.smooth_caret = !panel.settings.smooth_caret;
                                 panel.changed(cx);
                             })),
                     ),

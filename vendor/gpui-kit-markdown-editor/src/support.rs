@@ -258,3 +258,121 @@ pub(crate) fn snap_caret_to_device_pixels(
     let width = (bounds.size.width * scale_factor).round().max(px(1.)) / scale_factor;
     Bounds::new(point(x, bounds.origin.y), size(width, bounds.size.height))
 }
+
+/// Per-editor frame interpolation state for smooth caret gliding.
+#[derive(Clone, Debug)]
+pub(crate) struct SmoothCaretMotion {
+    active: bool,
+    from: Bounds<Pixels>,
+    target: Bounds<Pixels>,
+    started_at: std::time::Instant,
+    last_anchor: gpui::Point<Pixels>,
+}
+
+impl Default for SmoothCaretMotion {
+    fn default() -> Self {
+        Self {
+            active: false,
+            from: Bounds::default(),
+            target: Bounds::default(),
+            started_at: std::time::Instant::now(),
+            last_anchor: gpui::Point::default(),
+        }
+    }
+}
+
+impl SmoothCaretMotion {
+    const DURATION_SECS: f32 = 0.055;
+
+    pub(crate) fn reset(&mut self) {
+        self.active = false;
+    }
+
+    pub(crate) fn step(
+        &mut self,
+        target: Bounds<Pixels>,
+        anchor: gpui::Point<Pixels>,
+        animate: bool,
+    ) -> (Bounds<Pixels>, bool) {
+        if !animate {
+            self.active = false;
+            return (target, false);
+        }
+        if !self.active {
+            self.active = true;
+            self.from = target;
+            self.target = target;
+            self.started_at = std::time::Instant::now();
+            self.last_anchor = anchor;
+            return (target, false);
+        }
+
+        let shift = anchor - self.last_anchor;
+        self.from.origin += shift;
+        self.target.origin += shift;
+        self.last_anchor = anchor;
+
+        let changed = (target.origin.x - self.target.origin.x).abs() > px(0.25)
+            || (target.origin.y - self.target.origin.y).abs() > px(0.25)
+            || (target.size.height - self.target.size.height).abs() > px(0.25);
+
+        if changed {
+            let line_jump = (target.origin.y - self.target.origin.y).abs()
+                > target.size.height.max(px(16.)) * 8.;
+            if line_jump {
+                self.from = target;
+                self.target = target;
+                self.started_at = std::time::Instant::now();
+                return (target, false);
+            }
+            self.from = self.current_bounds();
+            self.target = target;
+            self.started_at = std::time::Instant::now();
+        }
+
+        let t = (self.started_at.elapsed().as_secs_f32() / Self::DURATION_SECS).clamp(0., 1.);
+        (self.lerp_bounds(t), t < 1.)
+    }
+
+    fn current_bounds(&self) -> Bounds<Pixels> {
+        let t = (self.started_at.elapsed().as_secs_f32() / Self::DURATION_SECS).clamp(0., 1.);
+        self.lerp_bounds(t)
+    }
+
+    fn lerp_bounds(&self, raw_t: f32) -> Bounds<Pixels> {
+        let ease = 1. - (1. - raw_t).powi(5);
+        let lerp = |a: Pixels, b: Pixels| a + (b - a) * ease;
+        Bounds::new(
+            point(
+                lerp(self.from.origin.x, self.target.origin.x),
+                lerp(self.from.origin.y, self.target.origin.y),
+            ),
+            size(
+                lerp(self.from.size.width, self.target.size.width),
+                lerp(self.from.size.height, self.target.size.height),
+            ),
+        )
+    }
+}
+
+/// Paints a rounded caret with a subtle theme-accent glow.
+pub(crate) fn paint_smooth_caret(
+    window: &mut gpui::Window,
+    bounds: Bounds<Pixels>,
+    caret_color: gpui::Hsla,
+    accent: Option<gpui::Hsla>,
+) {
+    let scale = window.scale_factor();
+    let x = (bounds.origin.x * scale).round() / scale;
+    let width = (bounds.size.width.max(px(2.)) * scale).round().max(px(1.)) / scale;
+    let pill = Bounds::new(point(x, bounds.origin.y), size(width, bounds.size.height));
+    let glow = accent.unwrap_or(caret_color);
+
+    window.paint_quad(
+        gpui::fill(pill.dilate(px(2.)), glow.alpha(0.14)).corner_radii(px(3.)),
+    );
+    window.paint_quad(
+        gpui::fill(pill.dilate(px(0.8)), glow.alpha(0.28)).corner_radii(px(1.8)),
+    );
+    window.paint_quad(gpui::fill(pill, caret_color).corner_radii(px(1.)));
+}

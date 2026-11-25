@@ -1796,19 +1796,40 @@ impl Element for EditorRoot {
                 window.paint_quad(fill(underline, style.composition_underline()));
             });
         }
-        if show_caret
+        let smooth_cfg = gpui_kit::base::smooth_caret_settings(cx);
+        if !focus.is_focused(window) {
+            self.state.update(cx, |state, _| state.smooth_caret.reset());
+        } else if show_caret
             && let Some(pos) = caret
             && let Some(b) = frame.caret_bounds(pos, style.caret_width())
         {
-            // Whole device pixels, like the input caret: a 1px line at a
-            // fractional x would blur over two pixels.
-            let b = crate::support::snap_caret_to_device_pixels(b, window.scale_factor());
             let mask = frame
                 .table_viewport_for_block(pos.block)
                 .map(|bounds| ContentMask { bounds });
-            window.with_content_mask(mask, |window| {
-                window.paint_quad(fill(b, style.caret()));
-            });
+            if smooth_cfg.enabled {
+                let animate = !cx.reduce_motion();
+                let (animated, needs_frame) = self.state.update(cx, |state, _| {
+                    state.smooth_caret.step(b, bounds.origin, animate)
+                });
+                window.with_content_mask(mask, |window| {
+                    crate::support::paint_smooth_caret(
+                        window,
+                        animated,
+                        style.caret(),
+                        smooth_cfg.accent,
+                    );
+                });
+                if needs_frame {
+                    window.request_animation_frame();
+                }
+            } else {
+                // Whole device pixels, like the input caret: a 1px line at a
+                // fractional x would blur over two pixels.
+                let b = crate::support::snap_caret_to_device_pixels(b, window.scale_factor());
+                window.with_content_mask(mask, |window| {
+                    window.paint_quad(fill(b, style.caret()));
+                });
+            }
         }
         drop(frame);
 

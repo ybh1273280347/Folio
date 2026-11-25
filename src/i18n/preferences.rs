@@ -98,6 +98,7 @@ pub const TOOL_VIEW_MINIMAL: BiText = BiText::new("极简模式", "Minimal");
 pub const TOOL_VIEW_STANDARD: BiText = BiText::new("标准模式", "Standard");
 pub const TOOL_VIEW_DETAILED: BiText = BiText::new("详细模式", "Detailed");
 pub const SHOW_LINE_NUMBERS: BiText = BiText::new("显示行号（TeX / Markdown 源码）", "Show Line Numbers (TeX / Markdown Source)");
+pub const SMOOTH_CARET: BiText = BiText::new("打字光标流畅滑动", "Smooth Typing Caret");
 pub const LIMIT_LINE_WIDTH: BiText = BiText::new("编辑器限制行宽", "Limit Editor Line Width");
 pub const INTERNAL_LINK_TARGET: BiText = BiText::new("内部文件链接跳转位置", "Internal File Link Target");
 pub const TARGET_MAIN_EDITOR: BiText = BiText::new("主编辑区", "Main Editor");

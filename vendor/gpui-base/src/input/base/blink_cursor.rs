@@ -197,6 +197,151 @@ impl BlinkCursor {
     }
 }
 
+/// Global toggle and optional accent color for smooth typing caret gliding and styling.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SmoothCaretSettings {
+    pub enabled: bool,
+    pub accent: Option<gpui::Hsla>,
+}
+
+impl gpui::Global for SmoothCaretSettings {}
+
+/// Updates the application-wide smooth caret configuration.
+pub fn set_smooth_caret(enabled: bool, accent: Option<gpui::Hsla>, cx: &mut App) {
+    *cx.default_global::<SmoothCaretSettings>() = SmoothCaretSettings { enabled, accent };
+}
+
+/// Reads the current application-wide smooth caret configuration.
+pub fn smooth_caret_settings(cx: &App) -> SmoothCaretSettings {
+    cx.try_global::<SmoothCaretSettings>()
+        .copied()
+        .unwrap_or_default()
+}
+
+/// Per-editor frame interpolation state for smooth caret gliding.
+#[derive(Clone, Debug)]
+pub(crate) struct SmoothCaretMotion {
+    active: bool,
+    from: gpui::Bounds<Pixels>,
+    target: gpui::Bounds<Pixels>,
+    started_at: Instant,
+    last_anchor: gpui::Point<Pixels>,
+    last_line_height: Pixels,
+}
+
+impl Default for SmoothCaretMotion {
+    fn default() -> Self {
+        Self {
+            active: false,
+            from: gpui::Bounds::default(),
+            target: gpui::Bounds::default(),
+            started_at: Instant::now(),
+            last_anchor: gpui::Point::default(),
+            last_line_height: px(0.),
+        }
+    }
+}
+
+impl SmoothCaretMotion {
+    const DURATION_SECS: f32 = 0.055;
+
+    pub(crate) fn reset(&mut self) {
+        self.active = false;
+    }
+
+    pub(crate) fn step(
+        &mut self,
+        target: gpui::Bounds<Pixels>,
+        anchor: gpui::Point<Pixels>,
+        line_height: Pixels,
+        animate: bool,
+    ) -> (gpui::Bounds<Pixels>, bool) {
+        if !animate {
+            self.active = false;
+            return (target, false);
+        }
+        if !self.active {
+            self.active = true;
+            self.from = target;
+            self.target = target;
+            self.started_at = Instant::now();
+            self.last_anchor = anchor;
+            self.last_line_height = line_height;
+            return (target, false);
+        }
+
+        let shift = anchor - self.last_anchor;
+        self.from.origin += shift;
+        self.target.origin += shift;
+        self.last_anchor = anchor;
+
+        let changed = (target.origin.x - self.target.origin.x).abs() > px(0.25)
+            || (target.origin.y - self.target.origin.y).abs() > px(0.25)
+            || (target.size.height - self.target.size.height).abs() > px(0.25);
+
+        if changed {
+            let line_jump = (target.origin.y - self.target.origin.y).abs() > line_height * 8.;
+            let height_changed = (self.last_line_height - line_height).abs() > px(0.5);
+            if line_jump || height_changed {
+                self.from = target;
+                self.target = target;
+                self.started_at = Instant::now();
+                self.last_line_height = line_height;
+                return (target, false);
+            }
+            self.from = self.current_bounds();
+            self.target = target;
+            self.started_at = Instant::now();
+        }
+        self.last_line_height = line_height;
+
+        let t = (self.started_at.elapsed().as_secs_f32() / Self::DURATION_SECS).clamp(0., 1.);
+        (self.lerp_bounds(t), t < 1.)
+    }
+
+    fn current_bounds(&self) -> gpui::Bounds<Pixels> {
+        let t = (self.started_at.elapsed().as_secs_f32() / Self::DURATION_SECS).clamp(0., 1.);
+        self.lerp_bounds(t)
+    }
+
+    fn lerp_bounds(&self, raw_t: f32) -> gpui::Bounds<Pixels> {
+        let ease = 1. - (1. - raw_t).powi(5);
+        let lerp = |a: Pixels, b: Pixels| a + (b - a) * ease;
+        gpui::Bounds::new(
+            gpui::point(
+                lerp(self.from.origin.x, self.target.origin.x),
+                lerp(self.from.origin.y, self.target.origin.y),
+            ),
+            gpui::size(
+                lerp(self.from.size.width, self.target.size.width),
+                lerp(self.from.size.height, self.target.size.height),
+            ),
+        )
+    }
+}
+
+/// Paints a rounded caret with a subtle theme-accent glow.
+pub(crate) fn paint_smooth_caret(
+    window: &mut gpui::Window,
+    bounds: gpui::Bounds<Pixels>,
+    caret_color: gpui::Hsla,
+    accent: Option<gpui::Hsla>,
+) {
+    let scale = window.scale_factor();
+    let x = (bounds.origin.x * scale).round() / scale;
+    let width = (bounds.size.width.max(px(2.)) * scale).round().max(px(1.)) / scale;
+    let pill = gpui::Bounds::new(gpui::point(x, bounds.origin.y), gpui::size(width, bounds.size.height));
+    let glow = accent.unwrap_or(caret_color);
+
+    window.paint_quad(
+        gpui::fill(pill.dilate(px(2.)), glow.alpha(0.14)).corner_radii(px(3.)),
+    );
+    window.paint_quad(
+        gpui::fill(pill.dilate(px(0.8)), glow.alpha(0.28)).corner_radii(px(1.8)),
+    );
+    window.paint_quad(gpui::fill(pill, caret_color).corner_radii(px(1.)));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

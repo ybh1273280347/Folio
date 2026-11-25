@@ -525,6 +525,8 @@ pub struct AppSettings {
     pub tool_execution_view: ToolExecutionView,
     /// Shared by TeX and Markdown source editors; rendered Markdown has no source-line gutter.
     pub show_line_numbers: bool,
+    #[serde(default = "default_smooth_caret")]
+    pub smooth_caret: bool,
     pub editor_ratio: f32,
     pub sidebar_open: bool,
     pub sidebar_width: f32,
@@ -538,6 +540,10 @@ pub struct AppSettings {
     /// User-editable foreground text color presets for the Markdown floating toolbar.
     #[serde(default = "default_text_color_presets")]
     pub text_color_presets: Vec<String>,
+}
+
+fn default_smooth_caret() -> bool {
+    true
 }
 
 impl AppSettings {
@@ -602,6 +608,7 @@ impl Default for AppSettings {
             internal_link_open_target: InternalLinkOpenTarget::MainEditor,
             tool_execution_view: ToolExecutionView::default(),
             show_line_numbers: false,
+            smooth_caret: default_smooth_caret(),
             editor_ratio: 0.5,
             sidebar_open: true,
             sidebar_width: 232.,
