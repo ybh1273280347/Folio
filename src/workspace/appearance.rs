@@ -88,6 +88,7 @@ impl Workspace {
         let locale_changed = previous.locale != settings.locale;
 
         if palette_changed || fallback_changed || cjk_scale_changed || previous.interface_font != settings.interface_font
+            || previous.smooth_caret != settings.smooth_caret
             || crate::theme::tool_typography(&previous) != crate::theme::tool_typography(settings)
         {
             crate::theme::apply_settings(settings, cx);

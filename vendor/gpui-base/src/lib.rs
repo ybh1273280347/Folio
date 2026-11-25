@@ -160,6 +160,7 @@ pub use progress::{Progress, ProgressIndicator, ProgressTrack};
 pub use radio::{Radio, RadioStyles};
 pub use radio_group::RadioGroup;
 pub use reduce_motion::apply_system_reduce_motion;
+pub use input::{SmoothCaretSettings, set_smooth_caret, smooth_caret_settings};
 #[doc(hidden)]
 pub use resizable::PANEL_MIN_SIZE;
 pub use resizable::{

@@ -495,6 +495,7 @@ pub struct InputBaseState<M: InputModeKind> {
     /// Popups are positioned in their deferred prepaint, which runs after the
     /// input's prepaint but before its paint.
     pub(crate) prepaint_caret_geometry: Option<PrepaintCaretGeometry>,
+    pub(crate) smooth_caret: crate::input::blink_cursor::SmoothCaretMotion,
     pub(super) last_cursor: Option<usize>,
     /// Where the platform was last told the caret is, for its IME panel.
     pub(super) ime_anchor: Option<(Point<Pixels>, Option<Bounds<Pixels>>)>,
@@ -1223,6 +1224,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             mode: LayoutMode::default(),
             last_layout: None,
             prepaint_caret_geometry: None,
+            smooth_caret: crate::input::blink_cursor::SmoothCaretMotion::default(),
             last_bounds: None,
             revealed_viewport: None,
             last_selected_range: None,

@@ -351,6 +351,11 @@ pub fn apply_settings(settings: &crate::model::AppSettings, cx: &mut App) {
     let base = gpui_kit::base::Theme::global_mut(cx);
     base.tokens.typography.mono = document_typography.mono;
     base.tokens.typography.mono_md = document_typography.mono_md;
+    gpui_kit::base::set_smooth_caret(
+        settings.smooth_caret,
+        Some(Hsla::from(rgb(settings.theme.palette.accent))),
+        cx,
+    );
 }
 
 /// Apply only colors. Font families, sizes, spacing and document data are untouched.

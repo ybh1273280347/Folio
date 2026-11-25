@@ -4058,12 +4058,39 @@ impl<M: InputModeKind> Element for TextElement<M> {
         }
 
         // Paint blinking cursors (shared blink state for all carets)
-        if focused && show_cursor {
+        let smooth_cfg = crate::input::blink_cursor::smooth_caret_settings(cx);
+        if !focused {
+            self.state.update(cx, |state, _| state.smooth_caret.reset());
+        } else if show_cursor {
+            let anchor = input_bounds.origin + prepaint.cursor_scroll_offset;
+            let animate = smooth_cfg.enabled && !cx.reduce_motion();
+            let mut needs_frame = false;
             for cursor_info in prepaint.cursor_infos_with_scroll() {
-                window.paint_quad(fill(
-                    snap_caret_to_device_pixels(cursor_info.bounds, window.scale_factor()),
-                    editor_style.caret,
-                ));
+                if smooth_cfg.enabled {
+                    let bounds = if cursor_info.is_active {
+                        let (b, anim) = self.state.update(cx, |state, _| {
+                            state.smooth_caret.step(cursor_info.bounds, anchor, line_height, animate)
+                        });
+                        needs_frame |= anim;
+                        b
+                    } else {
+                        cursor_info.bounds
+                    };
+                    crate::input::blink_cursor::paint_smooth_caret(
+                        window,
+                        bounds,
+                        editor_style.caret,
+                        smooth_cfg.accent,
+                    );
+                } else {
+                    window.paint_quad(fill(
+                        snap_caret_to_device_pixels(cursor_info.bounds, window.scale_factor()),
+                        editor_style.caret,
+                    ));
+                }
+            }
+            if needs_frame {
+                window.request_animation_frame();
             }
         }
 

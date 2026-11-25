@@ -38,6 +38,7 @@ mod input;
 #[path = "base/token_presentation.rs"]
 mod token_presentation;
 pub use inline_tokens::{InlineToken, InlineTokenError, InlineTokenSpan, InputContent};
+pub use blink_cursor::{SmoothCaretSettings, set_smooth_caret, smooth_caret_settings};
 pub(crate) use token_presentation::InlineTokenPresentation;
 pub use token_presentation::{
     InlineTokenClickEvent, InlineTokenClickListener, InlineTokenContext, InlineTokenHoverEvent,
