@@ -181,6 +181,12 @@ impl Workspace {
             RightPanelAction::OpenTerminal => {
                 self.open_right_panel(RightPanelView::Terminal, window, cx);
             }
+            RightPanelAction::NewSplitPage => {
+                self.close_right_panel(window, cx);
+                if let Err(error) = self.new_markdown_split(window, cx) {
+                    self.report(error, cx);
+                }
+            }
             RightPanelAction::TogglePreview => {
                 self.build.panels.preview = !self.build.panels.preview;
                 cx.notify();

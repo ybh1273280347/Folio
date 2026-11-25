@@ -688,6 +688,27 @@ impl Workspace {
         self.new_preset_in("md", folder.as_deref(), window, cx)
     }
 
+    pub(super) fn new_markdown_split(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> io::Result<()> {
+        if !self.ensure_creatable_workspace(window, cx, |app, window, cx| {
+            if let Err(error) = app.new_markdown_split(window, cx) {
+                app.report(error, cx);
+            }
+        })? {
+            return Ok(());
+        }
+        self.trash.dismiss();
+        let root = PathBuf::from(&self.projects.directory().unwrap().folder);
+        let file = files::create_markdown_in(&root, None)?;
+        self.tree.files = files::list_files(&root)?;
+        self.expand_ancestors(&file.path);
+        self.open_reading_pane(&file, window, cx);
+        Ok(())
+    }
+
     pub(super) fn new_default_markdown(&mut self, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
         if !self.projects.is_default() {
             if self.build.is_busy() { return Ok(()); }

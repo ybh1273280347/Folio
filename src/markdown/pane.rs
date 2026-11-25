@@ -555,9 +555,16 @@ impl MarkdownPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let title_input = cx.new(|cx| InputState::new(window, cx).default_value(
-            path.file_stem().expect("Markdown filename").to_string_lossy().into_owned()
-        ));
+        let title_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(crate::i18n::markdown::UNTITLED_PAGE_PLACEHOLDER.get())
+                .default_value(
+                    path.file_stem()
+                        .expect("Markdown filename")
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+        });
         cx.subscribe_in(&title_input, window, |_pane: &mut Self, input, event: &InputEvent, _, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 cx.emit(MarkdownEvent::RenameTitle(input.read(cx).value().trim().to_owned()));
@@ -1843,6 +1850,9 @@ impl MarkdownPane {
     }
 
     pub fn refresh_locale(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.title_input.update(cx, |input, cx| {
+            input.set_placeholder(crate::i18n::markdown::UNTITLED_PAGE_PLACEHOLDER.get(), window, cx);
+        });
         self.link_input.update(cx, |input, cx| {
             input.set_placeholder(crate::i18n::markdown::LINK_INPUT_PLACEHOLDER.get(), window, cx);
         });
@@ -1891,6 +1901,37 @@ impl MarkdownPane {
         window.defer(cx, move |window, cx| {
             visual_editor.update(cx, |editor, cx| editor.focus(window, cx));
         });
+    }
+
+    pub(super) fn show_empty_templates(&self) -> bool {
+        !self.source && self.loading.is_none() && self.text.trim().is_empty()
+    }
+
+    pub(super) fn apply_empty_template(
+        &mut self,
+        template_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let markdown = match template_id {
+            "todo" => crate::i18n::markdown::todo_template_markdown(),
+            _ => return,
+        };
+        let synced = self.visual_editor.update(cx, |editor, cx| {
+            editor.set_readonly(false, cx);
+            editor.set_source(&markdown, cx)?;
+            Ok::<String, SharedString>(editor.source())
+        });
+        if let Ok(next_text) = synced {
+            self.text = next_text;
+            self.char_count = crate::model::nonspace_char_count(&self.text);
+            self.source_needs_sync = true;
+            self.retain_mermaid_blocks(cx);
+            self.parse_outline();
+            cx.emit(MarkdownEvent::Change(self.text.clone()));
+            self.defer_focus_visual(window, cx);
+            cx.notify();
+        }
     }
 
     fn run_search(&mut self, query: &str, index: isize, cx: &mut Context<Self>) {
