@@ -888,55 +888,21 @@ impl Workspace {
                 .into_any_element()
         };
 
-        let popover_card = div()
-            .id("project-menu-popover")
+        let popover_card = crate::ui::popover_card("project-menu-popover")
             .w(px(284.))
             .max_h(px(420.))
-            .rounded(px(10.))
-            .bg(gpui_kit::rgb(palette.surface))
-            .border_1()
-            .border_color(gpui_kit::rgb(palette.border))
-            .shadow_lg()
-            .occlude()
             .flex()
             .flex_col()
             .overflow_hidden()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_scroll(|_, _, cx| cx.stop_propagation())
             .child(
                 div()
                     .px_2p5()
                     .py_2()
                     .border_b_1()
-                    .border_color(gpui_kit::rgb(palette.border))
+                    .border_color(palette.divider())
                     .child(
-                        div()
-                            .h(px(28.))
-                            .px_2()
-                            .rounded(px(6.))
-                            .bg(gpui_kit::rgb(palette.background))
-                            .border_1()
-                            .border_color(gpui_kit::rgb(palette.border))
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
-                            .child(
-                                crate::ui::icon(IconName::Search)
-                                    .size(px(13.))
-                                    .flex_shrink_0()
-                                    .text_color(muted),
-                            )
-                            .child(
-                                Input::new(&self.project_menu.search)
-                                    .appearance(false)
-                                    .bordered(false)
-                                    .flex_1()
-                                    .min_w_0()
-                                    .px_0()
-                                    .py_0()
-                                    .text_size(px(12.5))
-                                    .text_color(text),
-                            ),
+                        crate::ui::SearchField::new("project-menu-search", &self.project_menu.search)
+                            .text_size(px(12.5)),
                     ),
             )
             .child(list_body)

@@ -3207,7 +3207,12 @@ impl MarkdownPane {
                                                     rgb(0xdc2626)
                                                 }),
                                         )
-                                        .child(Input::new(&self.color_hex_input).flex_1().min_w_0())
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .child(crate::ui::TextField::new(&self.color_hex_input).compact()),
+                                        )
                                         .child(
                                             div()
                                                 .id("md-tc-hex-save")
@@ -3310,19 +3315,18 @@ impl MarkdownPane {
 
         if self.link_editing {
             stack = stack.child(crate::ui::popover_enter(
-                div()
+                crate::ui::popover_card("md-link-edit-card")
                     .w(px(320.))
                     .p_2()
-                    .rounded(px(8.))
-                    .bg(rgb(0xffffff))
-                    .border_1()
-                    .border_color(rgb(0xe2e4e8))
-                    .shadow_md()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(Input::new(&self.link_input).flex_1().min_w_0())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(crate::ui::TextField::new(&self.link_input).compact()),
+                    )
                     .child(
                         crate::ui::button_primary("apply-md-link", crate::i18n::common::CONFIRM.get()).on_click(cx.listener(
                             |pane, _, window, cx| {
@@ -3854,7 +3858,11 @@ impl MarkdownPane {
                     .text_ellipsis()
                     .child(format!("“{}”", item.quote)),
             )
-            .child(Textarea::new(&self.note_input).w_full().text_size(px(comment_font_size)))
+            .child(
+                crate::ui::TextAreaField::new(&self.note_input)
+                    .h(px(76.))
+                    .text_size(px(comment_font_size)),
+            )
             .child(
                 div()
                     .flex()

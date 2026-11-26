@@ -340,14 +340,15 @@ impl Workspace {
             NameAction::RenameFolder(_) => crate::i18n::workspace::MODAL_RENAME_FOLDER.get(),
             NameAction::RenameProject(_) => crate::i18n::workspace::MODAL_RENAME_PROJECT.get(),
         };
+        let palette = crate::theme::palette();
         let card = div()
             .w(px(420.))
             .p_6()
-            .rounded(px(8.))
+            .rounded(px(12.))
             .border_1()
-            .border_color(rgb(0xe6e5e1))
-            .shadow_lg()
-            .bg(rgb(0xffffff))
+            .border_color(palette.card_border())
+            .shadow(palette.modal_shadow())
+            .bg(palette.elevated_surface())
             .flex()
             .flex_col()
             .gap_4()
@@ -356,7 +357,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(div().font_semibold().child(title))
+                    .child(div().font_semibold().text_color(gpui_kit::rgb(palette.text)).child(title))
                     .child(
                         crate::ui::control("close-name-dialog", IconName::Close)
                             .on_click(cx.listener(|app, _, _, cx| {
@@ -365,7 +366,7 @@ impl Workspace {
                             })),
                     ),
             )
-            .child(Input::new(&self.tree.name_input))
+            .child(crate::ui::TextField::new(&self.tree.name_input))
             .when(matches!(action, NameAction::Create), |modal| {
                 modal.child(
                     div()
@@ -2577,16 +2578,14 @@ impl Workspace {
                         .px_3()
                         .pb_2()
                         .child(
-                            Input::new(&self.tree.search_input)
-                                .xsmall()
-                                .h(px(22.))
-                                .text_size(px(12.))
-                                .flex_1()
-                                .min_w_0(),
+                            div().flex_1().min_w_0().child(
+                                crate::ui::SearchField::new("file-tree-search", &self.tree.search_input)
+                                    .surface_bg(),
+                            ),
                         )
                         .child(
                             crate::ui::control("close-file-search", IconName::Close)
-                                .size(px(20.))
+                                .size(px(22.))
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.tree.searching = false;
                                     cx.notify();
@@ -2840,12 +2839,7 @@ impl Workspace {
                     }),
             ))
                 .child(div().absolute().top(px(20.)).bottom(px(20.)).left_0().right_0().child(
-                    Scrollbar::vertical(&self.tree.file_scroll)
-                        .mode(ScrollbarMode::Hover)
-                        .styles(|styles| styles
-                            .thumb(move |style| style.bg(drag_palette.scroll_thumb()).width(px(5.)).inset(px(1.)).radius(px(3.)).min_length(px(24.)))
-                            .thumb_hover(move |style| style.bg(drag_palette.scroll_thumb_hover()).width(px(5.)).inset(px(1.)).radius(px(3.)))
-                            .thumb_active(move |style| style.bg(drag_palette.scroll_thumb_active()).width(px(5.)).inset(px(1.)).radius(px(3.)))),
+                    crate::ui::scrollbar_vertical(&self.tree.file_scroll),
                 )))
             .into_any_element()
     }

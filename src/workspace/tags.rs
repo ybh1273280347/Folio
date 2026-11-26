@@ -539,25 +539,28 @@ impl Workspace {
             Mode::Edit { folder, .. } => folder.as_deref(),
             _ => None,
         };
+        let palette = crate::theme::palette();
         let mut panel = div()
             .flex()
             .flex_col()
             .mx_2()
             .mb_2()
             .p_2()
-            .gap_1()
+            .gap_1p5()
             .min_w_0()
             .border_1()
-            .border_color(rgb(BORDER))
-            .rounded(px(6.))
-            .bg(rgb(BG))
+            .border_color(palette.card_border())
+            .rounded(px(8.))
+            .bg(gpui_kit::rgb(palette.background))
             .when(editing, |panel| {
                 panel
-                    .p_4()
-                    .gap_2()
-                    .rounded(px(8.))
-                    .bg(rgb(0xffffff))
-                    .shadow_lg()
+                    .mx_0()
+                    .mb_0()
+                    .p_5()
+                    .gap_2p5()
+                    .rounded(px(12.))
+                    .bg(palette.elevated_surface())
+                    .shadow(palette.modal_shadow())
             })
             .child(
                 div()
@@ -617,12 +620,11 @@ impl Workspace {
                         .gap_1()
                         .items_center()
                         .child(
-                            Input::new(&self.tags.input)
-                                .xsmall()
-                                .h(px(22.))
-                                .text_size(px(12.))
-                                .flex_1()
-                                .min_w_0(),
+                            div().flex_1().min_w_0().child(
+                                crate::ui::TextField::new(&self.tags.input)
+                                    .compact()
+                                    .when(!editing, |f| f.surface_bg()),
+                            ),
                         )
                         .child(
                             tag_control("save-tag-name", IconName::Check, crate::i18n::tags::SAVE_TAG_NAME.get()).on_click(
@@ -676,12 +678,8 @@ impl Workspace {
                 }
                 panel = panel
                     .child(
-                        Input::new(&self.tags.input)
-                            .xsmall()
-                            .h(px(22.))
-                            .text_size(px(12.))
-                            .flex_1()
-                            .min_w_0(),
+                        crate::ui::SearchField::new("tag-recover-search", &self.tags.input)
+                            .when(!editing, |f| f.surface_bg()),
                     )
                     .when(self.projects.directory().is_none(), |panel| {
                         panel.child(button("tag-open-target", crate::i18n::tags::OPEN_TARGET_FILE.get()).on_click(
@@ -753,12 +751,10 @@ impl Workspace {
                             .items_center()
                             .gap_1()
                             .child(
-                                Input::new(&self.tags.input)
-                                    .xsmall()
-                                    .h(px(22.))
-                                    .text_size(px(12.))
-                                    .flex_1()
-                                    .min_w_0(),
+                                div().flex_1().min_w_0().child(
+                                    crate::ui::SearchField::new("tag-filter-search", &self.tags.input)
+                                        .when(!editing, |f| f.surface_bg()),
+                                ),
                             )
                             .child(
                                 tag_control("create-tag", IconName::Plus, crate::i18n::tags::CREATE_TYPED_TAG.get())

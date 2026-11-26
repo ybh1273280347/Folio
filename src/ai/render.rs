@@ -1432,19 +1432,19 @@ impl ChatPane {
                     .gap_1p5()
                     .children(options.iter().enumerate().map(|(idx, opt)| {
                         let choice = opt.clone();
-                        Button::new(("ext-opt", idx))
-                            .ghost()
-                            .compact()
-                            .label(opt.clone())
+                        crate::ui::button_secondary(("ext-opt", idx), opt.clone())
+                            .text_size(typo.sm)
+                            .min_h(px(26.))
+                            .px_2p5()
                             .on_click(cx.listener(move |pane, _, _, cx| {
                                 pane.respond_select(choice.clone(), cx);
                             }))
                     }))
                     .child(
-                        Button::new("ext-select-cancel")
-                            .ghost()
-                            .compact()
-                            .label(crate::i18n::common::CANCEL.get())
+                        crate::ui::button("ext-select-cancel", crate::i18n::common::CANCEL.get())
+                            .text_size(typo.sm)
+                            .min_h(px(26.))
+                            .px_2p5()
                             .on_click(cx.listener(|pane, _, _, cx| {
                                 pane.cancel_pending_ext(cx);
                             })),
@@ -1465,11 +1465,15 @@ impl ChatPane {
                         )
                     })
                     .child(if is_multi {
-                        Textarea::new(&self.ext_textarea)
+                        crate::ui::TextAreaField::new(&self.ext_textarea)
                             .h(px(80.))
+                            .text_size(typo.sm)
                             .into_any_element()
                     } else {
-                        Input::new(&self.ext_input).into_any_element()
+                        crate::ui::TextField::new(&self.ext_input)
+                            .compact()
+                            .text_size(typo.sm)
+                            .into_any_element()
                     })
                     .child(
                         div()
@@ -1478,22 +1482,27 @@ impl ChatPane {
                             .justify_end()
                             .gap_1p5()
                             .child(
-                                Button::new("ext-input-cancel")
-                                    .ghost()
-                                    .compact()
-                                    .label(crate::i18n::common::CANCEL.get())
-                                    .on_click(cx.listener(|pane, _, _, cx| {
-                                        pane.cancel_pending_ext(cx);
-                                    })),
+                                crate::ui::button_secondary(
+                                    "ext-input-cancel",
+                                    crate::i18n::common::CANCEL.get(),
+                                )
+                                .text_size(typo.sm)
+                                .min_h(px(26.))
+                                .px_2p5()
+                                .on_click(cx.listener(|pane, _, _, cx| {
+                                    pane.cancel_pending_ext(cx);
+                                })),
                             )
                             .child(
-                                Button::new("ext-input-submit")
-                                    .primary()
-                                    .compact()
-                                    .label(crate::i18n::common::SUBMIT.get())
-                                    .on_click(cx.listener(move |pane, _, _, cx| {
-                                        pane.submit_pending_ext_text(is_multi, cx);
-                                    })),
+                                crate::ui::button_primary(
+                                    "ext-input-submit",
+                                    crate::i18n::common::SUBMIT.get(),
+                                )
+                                .text_size(typo.sm)
+                                .min_h(px(26.))
+                                .on_click(cx.listener(move |pane, _, _, cx| {
+                                    pane.submit_pending_ext_text(is_multi, cx);
+                                })),
                             ),
                     )
             }
