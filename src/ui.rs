@@ -10,6 +10,9 @@ use gpui_kit::{
 use std::borrow::Cow;
 
 pub const DEFAULT_SANS_FONT: &str = "Segoe UI";
+pub const TITLEBAR_HEIGHT: f32 = 44.0;
+pub const PANE_HEADER_HEIGHT: f32 = 40.0;
+pub const TAB_HEIGHT: f32 = 30.0;
 
 pub fn sans_font(family: &str) -> SharedString {
     if family.trim().is_empty() {
@@ -45,7 +48,8 @@ impl RenderOnce for CopyDocumentButton {
         });
         let copied = feedback.read(cx).copied;
         Button::new(self.id).ghost().compact().w(px(28.)).h(px(28.))
-            .icon(icon(if copied { IconName::Check } else { IconName::Copy }))
+            .rounded(px(6.))
+            .icon(icon(if copied { IconName::Check } else { IconName::Copy }).size(px(15.)))
             .tooltip(if copied {
                 crate::i18n::common::COPIED_FULL_TEXT.get()
             } else {
@@ -483,8 +487,8 @@ pub(crate) fn panel_toolbar_button(
         )
         .compact()
         .with_size(px(16.))
-        .w(px(22.))
-        .h(px(22.))
+        .w(px(28.))
+        .h(px(28.))
         .rounded(px(6.))
 }
 
@@ -516,9 +520,18 @@ fn raised(alpha: f32, highlight: f32) -> Vec<BoxShadow> {
 }
 
 pub fn control(id: impl Into<ElementId>, name: IconName) -> Stateful<Div> {
+    control_sized(id, name, 27., 14.)
+}
+
+pub(crate) fn control_sized(
+    id: impl Into<ElementId>,
+    name: IconName,
+    box_size: f32,
+    icon_size: f32,
+) -> Stateful<Div> {
     div()
         .id(id)
-        .size(px(27.))
+        .size(px(box_size))
         .flex_shrink_0()
         .flex()
         .items_center()
@@ -532,7 +545,7 @@ pub fn control(id: impl Into<ElementId>, name: IconName) -> Stateful<Div> {
                 .text_color(rgb(0x1f2328))
                 .shadow(inset_press(0.10))
         })
-        .child(icon(name))
+        .child(icon(name).size(px(icon_size)))
 }
 
 pub fn modal_overlay(

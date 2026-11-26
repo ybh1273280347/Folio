@@ -857,18 +857,18 @@ impl Render for AiPane {
             .text_size(px(self.settings.ai_font_size as f32))
             .child(
                 div()
-                    .h(px(32.))
-                    .px_1p5()
+                    .h(px(crate::ui::PANE_HEADER_HEIGHT))
+                    .px_2()
                     .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .gap_1()
+                    .gap_1p5()
                     .bg(gpui_kit::rgb(header_bg))
                     .border_b_1()
                     .border_color(gpui_kit::rgb(palette.border))
                     .child(
                         crate::ui::panel_toolbar_button("ai-back-to-hub", palette, cx)
-                            .icon(crate::ui::icon(IconName::ChevronLeft))
+                            .icon(crate::ui::icon(IconName::ChevronLeft).size(px(16.)))
                             .tooltip(crate::i18n::common::BACK_TO_HUB.get())
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(AiPaneEvent::BackToHub))),
                     )
@@ -876,7 +876,7 @@ impl Render for AiPane {
                         crate::ui::panel_toolbar_button("ai-history", palette, cx)
                             .selected(self.drawer)
                             .toggled(self.drawer)
-                            .icon(crate::ui::icon(IconName::Clock))
+                            .icon(crate::ui::icon(IconName::Clock).size(px(16.)))
                             .tooltip(crate::i18n::ai::SESSION_HISTORY.get())
                             .on_click(cx.listener(|pane, _, _, cx| {
                                 pane.drawer = !pane.drawer;
@@ -921,17 +921,17 @@ impl Render for AiPane {
                                 let tab_hover_bg = fg_alpha(palette.text, 0.07);
                                 let tab = div()
                                     .id(SharedString::from(format!("tab-{id}")))
-                                    .w(px(150.))
+                                    .w(px(164.))
                                     .min_w_0()
                                     .flex_shrink(1.)
                                     .when(current, |tab| tab.flex_shrink_0().max_w(relative(0.65)))
-                                    .h(px(26.))
-                                    .px_2()
-                                    .rounded(px(6.))
+                                    .h(px(crate::ui::TAB_HEIGHT))
+                                    .px_2p5()
+                                    .rounded(px(7.))
                                     .flex()
                                     .overflow_hidden()
                                     .items_center()
-                                    .gap_1()
+                                    .gap_1p5()
                                     .cursor_pointer()
                                     .text_color(fg_alpha(palette.text, 0.78))
                                     .when(current, |s| {
@@ -967,7 +967,7 @@ impl Render for AiPane {
                                         div()
                                             .flex_1()
                                             .min_w_0()
-                                            .text_xs()
+                                            .text_size(px(13.))
                                             .whitespace_nowrap()
                                             .overflow_hidden()
                                             .text_ellipsis()
@@ -979,10 +979,10 @@ impl Render for AiPane {
                                             palette,
                                             cx,
                                         )
-                                            .w(px(18.))
-                                            .h(px(18.))
+                                            .w(px(20.))
+                                            .h(px(20.))
                                             .flex_shrink_0()
-                                            .icon(crate::ui::icon(IconName::Close))
+                                            .icon(crate::ui::icon(IconName::Close).size(px(13.)))
                                             .tooltip(crate::i18n::ai::CLOSE_TAB_KEEP_RUNNING.get())
                                             .on_click(cx.listener(move |pane, _, _, cx| {
                                                 cx.stop_propagation();
@@ -994,15 +994,15 @@ impl Render for AiPane {
                             .child(
                                 crate::ui::panel_toolbar_button("ai-add-tab", palette, cx)
                                     .flex_shrink_0()
-                                    .ml_1()
-                                    .icon(crate::ui::icon(IconName::Plus))
+                                    .ml_0p5()
+                                    .icon(crate::ui::icon(IconName::Plus).size(px(15.)))
                                     .tooltip(crate::i18n::ai::NEW_SESSION.get())
                                     .on_click(cx.listener(|pane, _, _, cx| pane.create(cx))),
                             ),
                     )
                     .child(
                         crate::ui::panel_toolbar_button("ai-maximize", palette, cx)
-                            .icon(crate::ui::icon(IconName::Maximize2))
+                            .icon(crate::ui::icon(IconName::Maximize2).size(px(16.)))
                             .tooltip(crate::i18n::ai::MAXIMIZE_RESTORE.get())
                             .on_click(
                                 cx.listener(|_, _, _, cx| cx.emit(AiPaneEvent::ToggleMaximize)),
@@ -1043,7 +1043,7 @@ impl Render for AiPane {
             .when(self.drawer, |root| {
                 let history = div()
                     .absolute()
-                    .top(px(40.))
+                    .top(px(46.))
                     .left_2()
                     .child(self.history(cx));
                 let history = if cx.reduce_motion() {
@@ -1055,7 +1055,7 @@ impl Render for AiPane {
                             "ai-history-open",
                             Animation::new(Duration::from_millis(140))
                                 .with_easing(ease_out_quint()),
-                            |el, t| el.top(px(36. + 4. * t)).opacity(t),
+                            |el, t| el.top(px(42. + 4. * t)).opacity(t),
                         )
                         .into_any_element()
                 };
@@ -1076,7 +1076,7 @@ impl Render for AiPane {
                     deferred(
                         div()
                             .absolute()
-                            .top(px(45.))
+                            .top(px(48.))
                             .left_2()
                             .p_3()
                             .rounded(px(10.))

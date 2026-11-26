@@ -701,14 +701,14 @@ impl Workspace {
 
         let menu_app = cx.entity();
         let header = div()
-            .h(px(34.))
-            .px_2()
+            .h(px(crate::ui::PANE_HEADER_HEIGHT))
+            .px_2p5()
             .flex_shrink_0()
             .overflow_hidden()
             .flex()
             .items_center()
             .justify_between()
-            .gap_1()
+            .gap_1p5()
             .bg(chrome_bg)
             .border_b_1()
             .border_color(gpui_kit::rgb(palette.border))
@@ -720,7 +720,7 @@ impl Workspace {
                     .min_w_0()
                     .child(
                         crate::ui::panel_toolbar_button("kb-back-to-hub", palette, cx)
-                            .icon(crate::ui::icon(IconName::ChevronLeft))
+                            .icon(crate::ui::icon(IconName::ChevronLeft).size(px(16.)))
                             .tooltip(crate::i18n::common::BACK_TO_HUB.get())
                             .on_click(cx.listener(|app, _, window, cx| {
                                 app.open_right_panel(RightPanelView::Hub, window, cx);
@@ -728,8 +728,8 @@ impl Workspace {
                     )
                     .child(
                         crate::ui::icon(IconName::Library)
-                            .w(px(15.))
-                            .h(px(15.))
+                            .w(px(16.))
+                            .h(px(16.))
                             .flex_shrink_0()
                             .text_color(gpui_kit::rgb(palette.accent)),
                     )
@@ -752,6 +752,7 @@ impl Workspace {
                         let app_menu = menu_app.clone();
                         let sync_icon = if syncing {
                             crate::ui::icon(IconName::LoaderCircle)
+                                .size(px(16.))
                                 .text_color(gpui_kit::rgb(palette.accent))
                                 .with_animation(
                                     "kb-header-sync-spin",
@@ -762,10 +763,11 @@ impl Workspace {
                                 )
                                 .into_any_element()
                         } else {
-                            crate::ui::icon(IconName::FolderSync).into_any_element()
+                            crate::ui::icon(IconName::FolderSync).size(px(16.)).into_any_element()
                         };
                         let pdf_mgr_icon = if ocr_active {
                             crate::ui::icon(IconName::LoaderCircle)
+                                .size(px(16.))
                                 .text_color(gpui_kit::rgb(palette.accent))
                                 .with_animation(
                                     "kb-header-ocr-spin",
@@ -776,7 +778,7 @@ impl Workspace {
                                 )
                                 .into_any_element()
                         } else {
-                            crate::ui::icon(IconName::BookOpenText).into_any_element()
+                            crate::ui::icon(IconName::BookOpenText).size(px(16.)).into_any_element()
                         };
                         bar.child(
                             crate::ui::panel_toolbar_button("kb-sync-now", palette, cx)
@@ -806,8 +808,8 @@ impl Workspace {
                                     btn.child(
                                         div()
                                             .absolute()
-                                            .top(px(2.))
-                                            .right(px(2.))
+                                            .top(px(4.))
+                                            .right(px(4.))
                                             .size(px(6.))
                                             .rounded_full()
                                             .bg(gpui_kit::rgb(0xef4444)),
@@ -817,7 +819,7 @@ impl Workspace {
                         .child(
                             crate::ui::panel_toolbar_button("kb-more-menu", palette, cx)
                                 .disabled(syncing)
-                                .icon(crate::ui::icon(IconName::Ellipsis))
+                                .icon(crate::ui::icon(IconName::Ellipsis).size(px(16.)))
                                 .tooltip(rp::KB_MENU_TOOLTIP.get())
                                 .dropdown_menu(move |menu, _, _| {
                                     let rebuild_app = app_menu.clone();
@@ -850,7 +852,7 @@ impl Workspace {
                     })
                     .child(
                         crate::ui::panel_toolbar_button("kb-maximize", palette, cx)
-                            .icon(crate::ui::icon(IconName::Maximize2))
+                            .icon(crate::ui::icon(IconName::Maximize2).size(px(16.)))
                             .tooltip(crate::i18n::ai::MAXIMIZE_RESTORE.get())
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.right_panel.maximized = !app.right_panel.maximized;
@@ -1897,6 +1899,7 @@ impl Workspace {
 
         let sync_icon = if syncing {
             crate::ui::icon(IconName::LoaderCircle)
+                .size(px(16.))
                 .text_color(gpui_kit::rgb(palette.accent))
                 .with_animation(
                     "kb-pdf-mgr-sync-spin",
@@ -1905,18 +1908,18 @@ impl Workspace {
                 )
                 .into_any_element()
         } else {
-            crate::ui::icon(IconName::FolderSync).into_any_element()
+            crate::ui::icon(IconName::FolderSync).size(px(16.)).into_any_element()
         };
 
         let header = div()
-            .h(px(34.))
-            .px_2()
+            .h(px(crate::ui::PANE_HEADER_HEIGHT))
+            .px_2p5()
             .flex_shrink_0()
             .overflow_hidden()
             .flex()
             .items_center()
             .justify_between()
-            .gap_1()
+            .gap_1p5()
             .bg(chrome_bg)
             .border_b_1()
             .border_color(gpui_kit::rgb(palette.border))
@@ -1928,7 +1931,7 @@ impl Workspace {
                     .min_w_0()
                     .child(
                         crate::ui::panel_toolbar_button("kb-pdf-mgr-back", palette, cx)
-                            .icon(crate::ui::icon(IconName::ChevronLeft))
+                            .icon(crate::ui::icon(IconName::ChevronLeft).size(px(16.)))
                             .tooltip(rp::KB_BACK_TO_SEARCH.get())
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.right_panel.kb.pdf_manager_open = false;
@@ -1937,8 +1940,8 @@ impl Workspace {
                     )
                     .child(
                         crate::ui::icon(IconName::BookOpenText)
-                            .w(px(15.))
-                            .h(px(15.))
+                            .w(px(16.))
+                            .h(px(16.))
                             .flex_shrink_0()
                             .text_color(gpui_kit::rgb(palette.accent)),
                     )
@@ -1972,7 +1975,7 @@ impl Workspace {
                     )
                     .child(
                         crate::ui::panel_toolbar_button("kb-pdf-mgr-maximize", palette, cx)
-                            .icon(crate::ui::icon(IconName::Maximize2))
+                            .icon(crate::ui::icon(IconName::Maximize2).size(px(16.)))
                             .tooltip(crate::i18n::ai::MAXIMIZE_RESTORE.get())
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.right_panel.maximized = !app.right_panel.maximized;

@@ -169,7 +169,7 @@ impl Render for PathsPreview {
 fn terminal_control(id: impl Into<ElementId>, name: IconName, palette: Palette) -> Stateful<Div> {
     div()
         .id(id)
-        .size(px(27.))
+        .size(px(20.))
         .flex_shrink_0()
         .flex()
         .items_center()
@@ -185,7 +185,7 @@ fn terminal_control(id: impl Into<ElementId>, name: IconName, palette: Palette) 
             s.bg(gpui_kit::rgb(palette.pressed))
                 .text_color(gpui_kit::rgb(palette.text))
         })
-        .child(crate::ui::icon(name))
+        .child(crate::ui::icon(name).size(px(13.)))
 }
 
 pub enum TerminalPaneEvent {
@@ -454,11 +454,12 @@ impl Render for TerminalPane {
                 .id(("terminal-tab", id as usize))
                 .flex()
                 .items_center()
-                .gap_1()
-                .px_2()
-                .h(px(32.))
-                .rounded(px(4.))
+                .gap_1p5()
+                .px_2p5()
+                .h(px(crate::ui::TAB_HEIGHT))
+                .rounded(px(7.))
                 .cursor_pointer()
+                .text_size(px(13.))
                 .text_color(gpui_kit::rgb(if active {
                     palette.text
                 } else {
@@ -494,9 +495,7 @@ impl Render for TerminalPane {
         let current = self.sessions.iter().find(|tab| Some(tab.id) == self.active);
         let pane_entity = cx.entity();
         let new_menu_btn = crate::ui::panel_toolbar_button("new-terminal", palette, cx)
-            .w(px(26.))
-            .h(px(26.))
-            .icon(crate::ui::icon(IconName::Plus))
+            .icon(crate::ui::icon(IconName::Plus).size(px(15.)))
             .tooltip(crate::i18n::media::TERM_NEW_OR_AGENT.get())
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                 let pane_term = pane_entity.clone();
@@ -576,16 +575,15 @@ impl Render for TerminalPane {
                 div()
                     .flex()
                     .items_center()
-                    .h(px(34.))
+                    .h(px(crate::ui::PANE_HEADER_HEIGHT))
                     .flex_shrink_0()
                     .px_2()
-                    .gap_1()
+                    .gap_1p5()
                     .border_b_1()
                     .border_color(gpui_kit::rgb(palette.border))
                     .child(
                         crate::ui::panel_toolbar_button("terminal-back-to-hub", palette, cx)
-                            .size(px(27.))
-                            .icon(crate::ui::icon(IconName::ChevronLeft))
+                            .icon(crate::ui::icon(IconName::ChevronLeft).size(px(16.)))
                             .tooltip(crate::i18n::common::BACK_TO_HUB.get())
                             .on_click(cx.listener(|_, _, _, cx| {
                                 cx.emit(TerminalPaneEvent::BackToHub)
@@ -605,8 +603,7 @@ impl Render for TerminalPane {
                     .child(new_menu_btn)
                     .child(
                         crate::ui::panel_toolbar_button("maximize-terminal", palette, cx)
-                            .size(px(27.))
-                            .icon(crate::ui::icon(IconName::Maximize2))
+                            .icon(crate::ui::icon(IconName::Maximize2).size(px(16.)))
                             .on_click(cx.listener(|_, _, _, cx| {
                                 cx.emit(TerminalPaneEvent::ToggleMaximize)
                             })),

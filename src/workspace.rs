@@ -76,7 +76,7 @@ actions!(
 const BG: u32 = 0xf7f6f5;
 const BORDER: u32 = 0xe8e7e3;
 const MUTED: u32 = 0x787774;
-pub(super) const RAIL_WIDTH: f32 = 40.0;
+pub(super) const RAIL_WIDTH: f32 = 48.0;
 
 #[derive(Clone)]
 struct SidebarResizeDrag;
@@ -1079,20 +1079,20 @@ impl Render for Workspace {
                 let project_pills_area = if recent_projects.is_empty() {
                     div()
                         .id("top-add-project")
-                        .h(px(26.))
+                        .h(px(crate::ui::TAB_HEIGHT))
                         .px_2p5()
-                        .rounded(px(6.))
+                        .rounded(px(7.))
                         .flex()
                         .items_center()
                         .gap_1p5()
                         .cursor_pointer()
-                        .text_xs()
+                        .text_size(px(13.))
                         .text_color(pill_muted)
                         .hover(move |s| s.bg(hover_bg).text_color(pill_text))
                         .on_click(cx.listener(|app, _, window, cx| {
                             app.add_project(&OpenProject, window, cx);
                         }))
-                        .child(crate::ui::icon(IconName::Plus).size(px(12.)))
+                        .child(crate::ui::icon(IconName::Plus).size(px(14.)))
                         .child(crate::i18n::workspace::ADD_LOCAL_PROJECT.get())
                         .into_any_element()
                 } else {
@@ -1100,7 +1100,7 @@ impl Render for Workspace {
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(3.))
+                        .gap(px(4.))
                         .children(recent_projects.into_iter().map(|project| {
                             let id = project.id.clone();
                             let rename_id = id.clone();
@@ -1112,14 +1112,14 @@ impl Render for Workspace {
                             let is_active = active_project_id.as_deref() == Some(id.as_str());
                             div()
                                 .id(SharedString::from(format!("top-project-{id}")))
-                                .h(px(26.))
-                                .px(px(10.))
-                                .max_w(px(148.))
-                                .rounded(px(6.))
+                                .h(px(crate::ui::TAB_HEIGHT))
+                                .px(px(12.))
+                                .max_w(px(168.))
+                                .rounded(px(7.))
                                 .flex()
                                 .items_center()
                                 .cursor_pointer()
-                                .text_xs()
+                                .text_size(px(13.))
                                 .text_ellipsis()
                                 .when(is_active, |pill| {
                                     pill.bg(pill_active_bg)
@@ -1185,7 +1185,7 @@ impl Render for Workspace {
                 app.child(
                     div()
                         .flex()
-                        .h(px(38.))
+                        .h(px(crate::ui::TITLEBAR_HEIGHT))
                     .flex_shrink_0()
                     .items_center()
                     .pl_0()
@@ -1218,7 +1218,7 @@ impl Render for Workspace {
                                 div()
                                     .font_family("Georgia")
                                     .italic()
-                                    .text_size(px(21.))
+                                    .text_size(px(23.))
                                     .line_height(relative(1.))
                                     .child("ƒ"),
                             ),
@@ -1240,6 +1240,9 @@ impl Render for Workspace {
                     .when(self.compile_target().is_some(), |header| {
                         header.child(
                             button("compile", label)
+                                .h(px(30.))
+                                .px_2p5()
+                                .text_size(px(13.))
                                 .text_color(rgb(0x4b7b59))
                                 .tooltip({
                                     let target = self
@@ -1261,7 +1264,13 @@ impl Render for Workspace {
                     .when(self.projects.active_id().is_some(), |header| {
                         header.child(
                             Button::new("compile-settings")
-                                .icon(crate::ui::icon(IconName::SlidersHorizontal))
+                                .ghost()
+                                .compact()
+                                .with_size(px(16.))
+                                .w(px(30.))
+                                .h(px(30.))
+                                .rounded(px(6.))
+                                .icon(crate::ui::icon(IconName::SlidersHorizontal).size(px(16.)))
                                 .tooltip(crate::i18n::workspace::TOOLTIP_BUILD_SETTINGS.get())
                                 .dropdown_menu(move |menu, _, _| {
                                     let menu =
@@ -1333,7 +1342,7 @@ impl Render for Workspace {
                             }),
                     )
                     .child(
-                        crate::ui::control("top-toggle-preview", IconName::Columns2)
+                        crate::ui::control_sized("top-toggle-preview", IconName::Columns2, 30., 16.)
                             .when(preview_open, |c| {
                                 c.bg(gpui_kit::rgb(palette.selection))
                                     .text_color(gpui_kit::rgb(palette.text))
@@ -1356,7 +1365,7 @@ impl Render for Workspace {
                             })),
                     )
                     .child(
-                        crate::ui::control("top-toggle-logs", IconName::ListTree)
+                        crate::ui::control_sized("top-toggle-logs", IconName::ListTree, 30., 16.)
                             .relative()
                             .when(logs_open, |c| {
                                 c.bg(gpui_kit::rgb(palette.selection))
@@ -1366,8 +1375,8 @@ impl Render for Workspace {
                                 c.text_color(gpui_kit::rgb(palette.danger)).child(
                                     div()
                                         .absolute()
-                                        .top(px(4.))
-                                        .right(px(4.))
+                                        .top(px(5.))
+                                        .right(px(5.))
                                         .size(px(6.))
                                         .rounded_full()
                                         .bg(gpui_kit::rgb(palette.danger)),
@@ -1396,9 +1405,9 @@ impl Render for Workspace {
                                 cx.notify();
                             })),
                     )
-                    .child(div().w(px(1.)).h(px(14.)).mx_0p5().bg(rgb(BORDER)))
+                    .child(div().w(px(1.)).h(px(16.)).mx_0p5().bg(rgb(BORDER)))
                     .child(
-                        crate::ui::control("toggle-right-panel", IconName::PanelRightOpen)
+                        crate::ui::control_sized("toggle-right-panel", IconName::PanelRightOpen, 30., 16.)
                             .when(right_panel_visible, |c| {
                                 c.bg(gpui_kit::rgb(palette.selection))
                                     .text_color(gpui_kit::rgb(palette.text))
@@ -1425,22 +1434,22 @@ impl Render for Workspace {
                             .h_full()
                             .flex_shrink_0()
                             .child(
-                                crate::ui::control("minimize", IconName::Minus)
-                                    .w(px(42.))
+                                crate::ui::control_sized("minimize", IconName::Minus, 46., 15.)
+                                    .w(px(46.))
                                     .h_full()
                                     .rounded_none()
                                     .window_control_area(WindowControlArea::Min),
                             )
                             .child(
-                                crate::ui::control("maximize", IconName::Maximize2)
-                                    .w(px(42.))
+                                crate::ui::control_sized("maximize", IconName::Maximize2, 46., 15.)
+                                    .w(px(46.))
                                     .h_full()
                                     .rounded_none()
                                     .window_control_area(WindowControlArea::Max),
                             )
                             .child(
-                                crate::ui::control("close-window", IconName::Close)
-                                    .w(px(42.))
+                                crate::ui::control_sized("close-window", IconName::Close, 46., 15.)
+                                    .w(px(46.))
                                     .h_full()
                                     .rounded_none()
                                     .hover(|s| s.bg(rgb(0xdf5151)).text_color(crate::theme::on_accent()))

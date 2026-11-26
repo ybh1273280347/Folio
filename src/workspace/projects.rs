@@ -912,7 +912,7 @@ impl Workspace {
                         div()
                             .id("project-menu-popover")
                             .absolute()
-                            .top(px(40.))
+                            .top(px(crate::ui::TITLEBAR_HEIGHT + 2.))
                             .left(px(6.))
                             .w(px(284.))
                             .max_h(px(420.))

@@ -1340,8 +1340,8 @@ impl Workspace {
             div()
                 .id(id)
                 .relative()
-                .size(px(32.))
-                .rounded(px(6.))
+                .size(px(36.))
+                .rounded(px(8.))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1354,15 +1354,15 @@ impl Workspace {
                     btn.child(
                         div()
                             .absolute()
-                            .left(px(-4.))
-                            .top(px(7.))
-                            .bottom(px(7.))
-                            .w(px(2.))
+                            .left(px(-6.))
+                            .top(px(8.))
+                            .bottom(px(8.))
+                            .w(px(2.5))
                             .rounded_full()
                             .bg(accent),
                     )
                 })
-                .child(crate::ui::icon(icon).size(px(16.)))
+                .child(crate::ui::icon(icon).size(px(18.)))
         };
 
         let sidebar_shortcut =
@@ -1464,15 +1464,15 @@ impl Workspace {
                         .absolute()
                         .top(px(2.))
                         .right(px(2.))
-                        .min_w(px(13.))
-                        .h(px(13.))
+                        .min_w(px(14.))
+                        .h(px(14.))
                         .px_1()
                         .rounded_full()
                         .bg(if is_loose { accent } else { gpui_kit::rgb(palette.border) })
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_size(px(9.))
+                        .text_size(px(10.))
                         .line_height(relative(1.))
                         .text_color(if is_loose {
                             gpui_kit::rgb(palette.on_accent)
@@ -1533,9 +1533,9 @@ impl Workspace {
         let trash_btn = div()
             .id("trash-entry")
             .relative()
-            .w(px(32.))
-            .h(px(if dragging_tree_item { 72. } else { 32. }))
-            .rounded(px(6.))
+            .w(px(36.))
+            .h(px(if dragging_tree_item { 72. } else { 36. }))
+            .rounded(px(8.))
             .flex()
             .items_center()
             .justify_center()
@@ -1559,7 +1559,7 @@ impl Workspace {
                 )
                 .build(window, cx)
             })
-            .child(crate::ui::icon(IconName::Trash).size(px(16.)))
+            .child(crate::ui::icon(IconName::Trash).size(px(18.)))
             .child(
                 canvas(
                     move |area, _, _| {
@@ -1630,7 +1630,7 @@ impl Workspace {
             .flex_col()
             .items_center()
             .justify_between()
-            .py_2()
+            .py_2p5()
             .bg(rgb(BG))
             .border_r_1()
             .border_color(rgb(BORDER))
@@ -1639,11 +1639,11 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .items_center()
-                    .gap_1()
+                    .gap_1p5()
                     .child(toggle_sidebar_btn)
                     .child(default_space_btn)
                     .child(loose_files_btn)
-                    .child(div().w(px(18.)).h(px(1.)).my_1p5().bg(rgb(BORDER)))
+                    .child(div().w(px(22.)).h(px(1.)).my_2().bg(rgb(BORDER)))
                     .child(open_file_btn)
                     .child(zen_btn),
             )
@@ -1652,7 +1652,7 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .items_center()
-                    .gap_1()
+                    .gap_1p5()
                     .child(trash_btn)
                     .child(prefs_btn),
             )
@@ -2441,11 +2441,11 @@ impl Workspace {
             .border_color(rgb(BORDER))
             .child(
                 div()
-                    .px_4()
+                    .px_3p5()
                     .pt_3()
                     .pb_1()
                     .flex_shrink_0()
-                    .text_xs()
+                    .text_size(px(14.))
                     .font_semibold()
                     .text_color(rgb(0x37352f))
                     .text_ellipsis()
@@ -2456,50 +2456,63 @@ impl Workspace {
                     .flex()
                     .justify_between()
                     .items_center()
-                    .px_4()
-                    .pt_2()
+                    .px_3p5()
+                    .pt_1p5()
                     .flex_shrink_0()
                     .pb_2()
-                    .text_xs()
+                    .gap_1()
                     .text_color(rgb(MUTED))
-                    .child(crate::i18n::workspace::FILES_HEADER.get())
-                    .child(self.render_tag_toggle(cx))
-                    .child(self.render_new_file_split_button(cx))
-                    .when(self.projects.directory().is_none(), |header| header.child(button("open-file", crate::i18n::workspace::OPEN_FILE.get()).on_click(
-                        cx.listener(|app, _, window, cx| app.open_file_dialog(window, cx)),
-                    )))
-                    .when(self.projects.directory().is_some(), |header| {
-                        header.child(
-                            div()
-                                .flex()
-                                .gap_1()
-                                .child(crate::ui::control("refresh-files", IconName::RotateCcw)
-                                    .tooltip(|window, cx| {
-                                        gpui_kit::component::tooltip::Tooltip::new(crate::i18n::workspace::REFRESH_FILES_TOOLTIP.get())
-                                            .build(window, cx)
-                                    })
-                                    .on_click(cx.listener(|app, _, window, cx| {
-                                        match app.refresh_all_files(window, cx) {
-                                            Ok(()) => {
-                                                app.tree.selected_files.retain(|path| {
-                                                    app.tree.files.iter().any(|file| &file.path == path)
-                                                });
-                                                app.report(crate::i18n::workspace::FILES_REFRESHED.get(), cx);
-                                            }
-                                            Err(error) => app.report(error, cx),
-                                        }
-                                    })))
-                                .child(button("new-folder", "📁+").on_click(cx.listener(
-                                    |app, _, window, cx| {
-                                        let prefix = app.focused_folder_prefix();
-                                        app.start_name(NameAction::CreateFolder, &prefix, window, cx)
-                                    },
-                                ))),
-                        )
-                    })
-                    .child(button("find-file", "⌕").on_click(cx.listener(
-                        |app, _, window, cx| app.find_file(&FindFile, window, cx),
-                    ))),
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(12.5))
+                            .font_medium()
+                            .child(crate::i18n::workspace::FILES_HEADER.get()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_0p5()
+                            .flex_shrink_0()
+                            .child(self.render_tag_toggle(cx))
+                            .child(self.render_new_file_split_button(cx))
+                            .when(self.projects.directory().is_none(), |header| header.child(button("open-file", crate::i18n::workspace::OPEN_FILE.get()).on_click(
+                                cx.listener(|app, _, window, cx| app.open_file_dialog(window, cx)),
+                            )))
+                            .when(self.projects.directory().is_some(), |header| {
+                                header.child(
+                                    div()
+                                        .flex()
+                                        .gap_0p5()
+                                        .child(crate::ui::control("refresh-files", IconName::RotateCcw)
+                                            .tooltip(|window, cx| {
+                                                gpui_kit::component::tooltip::Tooltip::new(crate::i18n::workspace::REFRESH_FILES_TOOLTIP.get())
+                                                    .build(window, cx)
+                                            })
+                                            .on_click(cx.listener(|app, _, window, cx| {
+                                                match app.refresh_all_files(window, cx) {
+                                                    Ok(()) => {
+                                                        app.tree.selected_files.retain(|path| {
+                                                            app.tree.files.iter().any(|file| &file.path == path)
+                                                        });
+                                                        app.report(crate::i18n::workspace::FILES_REFRESHED.get(), cx);
+                                                    }
+                                                    Err(error) => app.report(error, cx),
+                                                }
+                                            })))
+                                        .child(button("new-folder", "📁+").on_click(cx.listener(
+                                            |app, _, window, cx| {
+                                                let prefix = app.focused_folder_prefix();
+                                                app.start_name(NameAction::CreateFolder, &prefix, window, cx)
+                                            },
+                                        ))),
+                                )
+                            })
+                            .child(button("find-file", "⌕").on_click(cx.listener(
+                                |app, _, window, cx| app.find_file(&FindFile, window, cx),
+                            ))),
+                    ),
             )
             .when(self.tree.searching, |sidebar| {
                 sidebar.child(
