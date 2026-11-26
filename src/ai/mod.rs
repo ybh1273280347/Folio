@@ -1575,7 +1575,7 @@ impl Render for ChatPane {
                                                     .token(move |ctx, _, _| {
                                                         let quote = SelectionQuote::from_token(ctx.token())
                                                             .expect("message editor contains only quote tokens");
-                                                        inline_quote_token(ctx, quote, palette)
+                                                        inline_quote_token(ctx, quote, palette, typo.body)
                                                     }),
                                             )
                                         })

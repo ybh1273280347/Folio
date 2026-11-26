@@ -6,6 +6,7 @@ pub(super) fn inline_quote_token(
     context: &gpui_kit::component::input::InlineTokenContext,
     quote: SelectionQuote,
     palette: Palette,
+    font_size: Pixels,
 ) -> AnyElement {
     let tip = quote.tooltip();
     div()
@@ -13,6 +14,9 @@ pub(super) fn inline_quote_token(
         .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
         .child(
             InputToken::new(context)
+                .px(px(2.))
+                .h(context.line_height() - px(2.))
+                .text_size(font_size - px(1.))
                 .border_color(gpui::transparent_black())
                 .when(!context.is_selected(), |token| token.bg(gpui::transparent_black()))
                 .text_color(gpui_kit::rgb(palette.accent)),
@@ -2518,7 +2522,7 @@ impl ChatPane {
                                     .token(move |ctx, _, _| {
                                         let id = ctx.token().id();
                                         if let Some(quote) = SelectionQuote::from_token(ctx.token()) {
-                                            inline_quote_token(ctx, quote, palette)
+                                            inline_quote_token(ctx, quote, palette, typo.body)
                                         } else if id.starts_with("skill:") {
                                             InputToken::new(ctx)
                                                 .icon(IconName::Sparkles)
