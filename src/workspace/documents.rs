@@ -1901,10 +1901,13 @@ impl Workspace {
     }
 
     pub(super) fn render_reading_pane(&self, path: &str, cx: &mut Context<Self>) -> AnyElement {
+        let palette = crate::theme::palette();
         let close = path.to_owned();
         let is_pdf = path.to_ascii_lowercase().ends_with(".pdf");
         let key = PaneKey::reading(path);
         let markdown = self.documents.markdown_panes.get(&key);
+        let html = self.documents.html_panes.get(&key);
+        let canvas = self.documents.canvas_panes.get(&key);
         let show_background = self.has_visible_background() && markdown.is_some();
         let source = self.document_path(path);
         let filename = Path::new(path)
@@ -1912,47 +1915,275 @@ impl Workspace {
             .expect("reading pane has filename")
             .to_string_lossy()
             .into_owned();
+        let active_tab_bg = if palette.is_dark() {
+            gpui_kit::rgb(palette.selection)
+        } else {
+            gpui_kit::rgb(palette.hover)
+        };
+        let translucent_tab_bg = gpui_kit::rgb(palette.text).opacity(if palette.is_dark() {
+            0.08
+        } else {
+            0.06
+        });
+
         let mut pane = div()
             .relative()
             .size_full()
             .flex()
             .flex_col()
-            .when(!show_background, |pane| pane.bg(rgb(0xffffff)));
+            .when(!show_background, |pane| pane.bg(gpui_kit::rgb(palette.surface)));
+
         let mut titlebar = div()
-            .h(px(32.))
+            .h(px(34.))
+            .px_2()
             .flex_shrink_0()
             .flex()
             .items_center()
-            .gap_2()
-            .pl_3()
-            .pr_1()
-            .when(!show_background, |bar| bar.bg(rgb(0xfafaf9)))
+            .gap_1()
+            .when(!show_background, |bar| bar.bg(gpui_kit::rgb(palette.surface)))
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(gpui_kit::rgb(palette.border));
+
+        if let Some(md_pane) = markdown {
+            let outline_open = md_pane.read(cx).is_outline_open();
+            let outline_pane = md_pane.clone();
+            titlebar = titlebar.child(
+                Button::new(SharedString::from(format!("reading-md-outline-{path}")))
+                    .ghost()
+                    .compact()
+                    .with_size(px(16.))
+                    .w(px(24.))
+                    .h(px(24.))
+                    .rounded(px(6.))
+                    .when(outline_open, |b| b.bg(gpui_kit::rgb(palette.selection)))
+                    .icon(crate::ui::icon(IconName::ListTree))
+                    .tooltip(if outline_open {
+                        crate::i18n::workspace::TOOLTIP_COLLAPSE_OUTLINE.get()
+                    } else {
+                        crate::i18n::workspace::TOOLTIP_EXPAND_OUTLINE.get()
+                    })
+                    .on_click(move |_, window, cx| {
+                        outline_pane.update(cx, |pane, cx| {
+                            pane.toggle_outline(cx);
+                            if pane.is_outline_open() && !pane.is_focused(window, cx) {
+                                pane.focus(window, cx);
+                            }
+                        });
+                    }),
+            );
+        } else if let Some(html_pane) = html {
+            let back_pane = html_pane.clone();
+            let fwd_pane = html_pane.clone();
+            let reload_pane = html_pane.clone();
+            titlebar = titlebar
+                .child(
+                    crate::ui::control(
+                        SharedString::from(format!("reading-html-back-{path}")),
+                        IconName::ChevronLeft,
+                    )
+                    .size(px(24.))
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(
+                            crate::i18n::media::HTML_BACK.get(),
+                        )
+                        .build(window, cx)
+                    })
+                    .on_click(move |_, _, cx| {
+                        back_pane.update(cx, |pane, cx| pane.go_back(cx));
+                    }),
+                )
+                .child(
+                    crate::ui::control(
+                        SharedString::from(format!("reading-html-forward-{path}")),
+                        IconName::ChevronRight,
+                    )
+                    .size(px(24.))
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(
+                            crate::i18n::media::HTML_FORWARD.get(),
+                        )
+                        .build(window, cx)
+                    })
+                    .on_click(move |_, _, cx| {
+                        fwd_pane.update(cx, |pane, cx| pane.go_forward(cx));
+                    }),
+                )
+                .child(
+                    crate::ui::control(
+                        SharedString::from(format!("reading-html-reload-{path}")),
+                        IconName::RotateCcw,
+                    )
+                    .size(px(24.))
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(
+                            crate::i18n::media::HTML_REFRESH.get(),
+                        )
+                        .build(window, cx)
+                    })
+                    .on_click(move |_, window, cx| {
+                        reload_pane.update(cx, |pane, cx| pane.reload(window, cx));
+                    }),
+                );
+        }
+
+        let html_status = html.and_then(|p| p.read(cx).status_label());
+        let tooltip_path = path.to_owned();
+        let tab_pill = div()
+            .id(SharedString::from(format!("reading-tab-{path}")))
+            .h(px(26.))
+            .max_w(relative(0.68))
+            .min_w_0()
+            .px_2p5()
+            .rounded(px(6.))
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .overflow_hidden()
+            .bg(if show_background {
+                translucent_tab_bg
+            } else {
+                active_tab_bg
+            })
+            .text_color(gpui_kit::rgb(palette.text))
+            .font_medium()
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tooltip_path.clone()).build(window, cx)
+            })
             .child(crate::ui::file_icon(path, false, false))
-            .child(div().min_w_0().text_ellipsis().child(filename))
-            .child(div().flex_1());
-        if is_pdf {
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_xs()
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(filename),
+            )
+            .when_some(html_status, |pill, status| {
+                pill.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .font_normal()
+                        .text_color(gpui_kit::rgb(palette.muted))
+                        .child(format!("· {status}")),
+                )
+            })
+            .child(
+                Button::new(SharedString::from(format!("close-reading-{path}")))
+                    .ghost()
+                    .compact()
+                    .with_size(px(16.))
+                    .w(px(18.))
+                    .h(px(18.))
+                    .flex_shrink_0()
+                    .icon(crate::ui::icon(IconName::Close))
+                    .tooltip(crate::i18n::workspace::TOOLTIP_CLOSE_TAB.get())
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        cx.stop_propagation();
+                        app.close_reading_pane(&close, window, cx);
+                    })),
+            );
+
+        titlebar = titlebar.child(tab_pill).child(div().flex_1().min_w(px(4.)));
+
+        if let Some(md_pane) = markdown {
+            let count = md_pane.read(cx).annotation_count();
+            if count > 0 {
+                let drawer_pane = md_pane.clone();
+                titlebar = titlebar.child(
+                    div()
+                        .id(SharedString::from(format!("reading-md-annotations-{path}")))
+                        .px_2()
+                        .h(px(22.))
+                        .rounded_full()
+                        .bg(rgb(0xfef9c3))
+                        .border_1()
+                        .border_color(rgb(0xfde047))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(0xfef08a)))
+                        .active(|s| s.bg(rgb(0xfde047)))
+                        .text_xs()
+                        .text_color(rgb(0x854d0e))
+                        .child(crate::ui::icon(IconName::MessageSquareText))
+                        .child(format!("{count}"))
+                        .on_click(move |_, _, cx| {
+                            drawer_pane.update(cx, |pane, cx| pane.toggle_annotations_drawer(cx));
+                        }),
+                );
+            }
+            let copy_pane = md_pane.clone();
+            let source_pane = md_pane.clone();
+            let is_source = md_pane.read(cx).is_source();
+            titlebar = titlebar
+                .child(crate::ui::copy_document_button(
+                    SharedString::from(format!("reading-md-copy-{path}")),
+                    move |cx| copy_pane.read(cx).source_text(),
+                ))
+                .child(
+                    Button::new(SharedString::from(format!("reading-md-source-{path}")))
+                        .ghost()
+                        .compact()
+                        .with_size(px(16.))
+                        .w(px(24.))
+                        .h(px(24.))
+                        .rounded(px(6.))
+                        .when(is_source, |b| b.bg(gpui_kit::rgb(palette.selection)))
+                        .icon(crate::ui::icon(IconName::CodeXml))
+                        .tooltip(if is_source {
+                            crate::i18n::workspace::TOOLTIP_SWITCH_WYSIWYG.get()
+                        } else {
+                            crate::i18n::workspace::TOOLTIP_SWITCH_SOURCE.get()
+                        })
+                        .on_click(move |_, window, cx| {
+                            source_pane.update(cx, |pane, cx| pane.toggle_source(window, cx));
+                        }),
+                );
+        } else if is_pdf {
             let source = source.clone();
             titlebar = titlebar.child(
-                button("export-reading-pdf", crate::i18n::workspace::EXPORT_BTN.get()).on_click(
-                    cx.listener(move |app, _, window, cx| app.export_pdf(source.clone(), window, cx)),
-                ),
+                button(
+                    SharedString::from(format!("export-reading-pdf-{path}")),
+                    crate::i18n::workspace::EXPORT_BTN.get(),
+                )
+                .on_click(cx.listener(move |app, _, window, cx| {
+                    app.export_pdf(source.clone(), window, cx)
+                })),
             );
+        } else if let Some(html_pane) = html {
+            let ext_pane = html_pane.clone();
+            titlebar = titlebar.child(
+                crate::ui::control(
+                    SharedString::from(format!("reading-html-external-{path}")),
+                    IconName::ExternalLink,
+                )
+                .size(px(24.))
+                .tooltip(|window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(
+                        crate::i18n::media::HTML_OPEN_BROWSER.get(),
+                    )
+                    .build(window, cx)
+                })
+                .on_click(move |_, _, cx| {
+                    ext_pane.update(cx, |pane, cx| pane.open_external(cx));
+                }),
+            );
+        } else if let Some(canvas_pane) = canvas {
+            let copy_pane = canvas_pane.clone();
+            titlebar = titlebar.child(crate::ui::copy_document_button(
+                SharedString::from(format!("reading-canvas-copy-{path}")),
+                move |cx| copy_pane.read(cx).document().to_json_pretty().unwrap_or_default(),
+            ));
         }
-        titlebar = titlebar.child(
-            crate::ui::control(
-                SharedString::from(format!("close-reading-{path}")),
-                IconName::Close,
-            )
-            .on_click(
-                cx.listener(move |app, _, window, cx| app.close_reading_pane(&close, window, cx)),
-            ),
-        );
+
         pane = pane.child(titlebar);
         if let Some(pdf) = self.documents.pdf_panes.get(&key) {
             pane = pane.child(div().flex_1().min_h_0().child(pdf.clone()));
-        } else if let Some(html) = self.documents.html_panes.get(&key) {
+        } else if let Some(html) = html {
             pane = pane.child(div().flex_1().min_h_0().child(html.clone()));
         } else if let Some(drawio) = self.documents.drawio_panes.get(&key) {
             pane = pane.child(div().flex_1().min_h_0().child(drawio.clone()));
@@ -1960,7 +2191,7 @@ impl Workspace {
             pane = pane.child(div().flex_1().min_h_0().child(image.clone()));
         } else if let Some(markdown) = markdown {
             pane = pane.child(div().flex_1().min_h_0().child(markdown.clone()));
-        } else if let Some(canvas) = self.documents.canvas_panes.get(&key) {
+        } else if let Some(canvas) = canvas {
             pane = pane.child(div().flex_1().min_h_0().child(canvas.clone()));
         }
         pane.into_any_element()

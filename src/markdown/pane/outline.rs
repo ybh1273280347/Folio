@@ -511,56 +511,6 @@ impl OutlineColors {
     }
 }
 
-/// Styled outline toggle button with active light-gray rounded background when open.
-pub(super) fn render_toggle_button(
-    id: impl Into<ElementId>,
-    active: bool,
-    cx: &mut Context<MarkdownPane>,
-) -> Stateful<Div> {
-    let tooltip_text = if active {
-        crate::i18n::markdown::OUTLINE_COLLAPSE.get()
-    } else {
-        crate::i18n::markdown::OUTLINE_EXPAND.get()
-    };
-    let active_bg = crate::theme::color(0xefefed);
-    let active_hover = crate::theme::color(0xe6e5e1);
-    let active_text = crate::theme::color(0x37352f);
-    let rest_text = crate::theme::color(0x7d838b);
-    let hover_bg = crate::theme::color(0xe9ebed);
-    let hover_text = crate::theme::color(0x343a40);
-    let pressed_bg = crate::theme::color(0xdcdfe3);
-
-    div()
-        .id(id)
-        .size(px(27.))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(6.))
-        .cursor_pointer()
-        .when(active, |s| {
-            s.bg(active_bg)
-                .text_color(active_text)
-                .hover(move |h| h.bg(active_hover).text_color(active_text))
-                .active(move |a| a.bg(pressed_bg))
-        })
-        .when(!active, |s| {
-            s.text_color(rest_text)
-                .hover(move |h| h.bg(hover_bg).text_color(hover_text))
-                .active(move |a| a.bg(pressed_bg).text_color(active_text))
-        })
-        .tooltip(move |window, cx| Tooltip::new(tooltip_text).build(window, cx))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(cx.listener(|pane, _, window, cx| {
-            pane.toggle_outline(cx);
-            if pane.is_outline_open() && !pane.focus.contains_focused(window, cx) {
-                pane.focus.focus(window, cx);
-            }
-        }))
-        .child(crate::ui::icon(IconName::ListTree))
-}
-
 fn render_panel_body(
     pane: &MarkdownPane,
     overlay: bool,

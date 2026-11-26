@@ -3855,11 +3855,6 @@ impl MarkdownPane {
     }
 }
 
-fn action(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
-    crate::ui::button(id, label)
-}
-
-
 fn match_heading_index(headings: &[OutlineHeading], anchor: &str) -> Option<usize> {
     let decoded = crate::files::percent_decode(anchor);
     let target = decoded.trim();

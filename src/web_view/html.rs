@@ -299,6 +299,36 @@ impl HtmlPane {
         self.init_task = Some(task);
     }
 
+    pub fn go_back(&mut self, cx: &mut Context<Self>) {
+        if let Some(wv) = &self.webview {
+            wv.update(cx, |view, _| {
+                let _ = view.back();
+            });
+        }
+    }
+
+    pub fn go_forward(&mut self, cx: &mut Context<Self>) {
+        if let Some(wv) = &self.webview {
+            wv.update(cx, |view, _| {
+                let _ = view.forward();
+            });
+        }
+    }
+
+    pub fn open_external(&mut self, cx: &mut Context<Self>) {
+        cx.open_url(&self.fallback_url);
+    }
+
+    pub fn status_label(&self) -> Option<&'static str> {
+        if self.error.is_some() {
+            Some(crate::i18n::media::HTML_STATUS_FAILED.get())
+        } else if self.loading {
+            Some(crate::i18n::media::HTML_STATUS_LOADING.get())
+        } else {
+            None
+        }
+    }
+
     fn display_name(&self) -> String {
         self.file_path
             .file_name()
@@ -314,13 +344,7 @@ impl HtmlPane {
 impl Render for HtmlPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let filename = self.display_name();
-        let status_label = if self.error.is_some() {
-            Some(crate::i18n::media::HTML_STATUS_FAILED.get())
-        } else if self.loading {
-            Some(crate::i18n::media::HTML_STATUS_LOADING.get())
-        } else {
-            None
-        };
+        let status_label = self.status_label();
 
         let mut root = div()
             .track_focus(&self.focus_handle)
@@ -329,99 +353,89 @@ impl Render for HtmlPane {
             .flex_col()
             .bg(rgb(0xffffff));
 
-        let mut toolbar = div()
-            .h(px(34.))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .gap_1()
-            .px_2()
-            .bg(rgb(0xfafaf9))
-            .border_b_1()
-            .border_color(rgb(BORDER))
-            .child(
-                ui::control("html-back", IconName::ChevronLeft)
-                    .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(crate::i18n::media::HTML_BACK.get()).build(window, cx)
-                    })
-                    .on_click(cx.listener(|pane, _, _, cx| {
-                        if let Some(wv) = &pane.webview {
-                            wv.update(cx, |view, _| {
-                                let _ = view.back();
-                            });
-                        }
-                    })),
-            )
-            .child(
-                ui::control("html-forward", IconName::ChevronRight)
-                    .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(crate::i18n::media::HTML_FORWARD.get()).build(window, cx)
-                    })
-                    .on_click(cx.listener(|pane, _, _, cx| {
-                        if let Some(wv) = &pane.webview {
-                            wv.update(cx, |view, _| {
-                                let _ = view.forward();
-                            });
-                        }
-                    })),
-            )
-            .child(
-                ui::control("html-reload", IconName::RotateCcw)
-                    .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(crate::i18n::media::HTML_REFRESH.get()).build(window, cx)
-                    })
-                    .on_click(cx.listener(|pane, _, window, cx| {
-                        pane.reload(window, cx);
-                    })),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(ui::icon(IconName::Globe).text_color(rgb(0xd97706)))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .text_ellipsis()
-                            .text_xs()
-                            .font_medium()
-                            .child(filename),
-                    )
-                    .children(status_label.map(|status| {
-                        div()
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .child(format!("· {status}"))
-                    })),
-            )
-            .child(
-                ui::control("html-external", IconName::ExternalLink)
-                    .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(crate::i18n::media::HTML_OPEN_BROWSER.get())
-                            .build(window, cx)
-                    })
-                    .on_click(cx.listener(|pane, _, _, cx| {
-                        pane.open_in_external_browser(cx);
-                    })),
-            );
-
         if !self.is_reading {
-            toolbar = toolbar.child(
-                ui::control("html-close", IconName::Close)
-                    .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(crate::i18n::media::HTML_CLOSE_TAB.get()).build(window, cx)
-                    })
-                    .on_click(cx.listener(|_, _, _, cx| {
-                        cx.emit(HtmlPaneEvent::Close);
-                    })),
-            );
+            let toolbar = div()
+                .h(px(34.))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .bg(rgb(0xfafaf9))
+                .border_b_1()
+                .border_color(rgb(BORDER))
+                .child(
+                    ui::control("html-back", IconName::ChevronLeft)
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(crate::i18n::media::HTML_BACK.get()).build(window, cx)
+                        })
+                        .on_click(cx.listener(|pane, _, _, cx| {
+                            pane.go_back(cx);
+                        })),
+                )
+                .child(
+                    ui::control("html-forward", IconName::ChevronRight)
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(crate::i18n::media::HTML_FORWARD.get()).build(window, cx)
+                        })
+                        .on_click(cx.listener(|pane, _, _, cx| {
+                            pane.go_forward(cx);
+                        })),
+                )
+                .child(
+                    ui::control("html-reload", IconName::RotateCcw)
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(crate::i18n::media::HTML_REFRESH.get()).build(window, cx)
+                        })
+                        .on_click(cx.listener(|pane, _, window, cx| {
+                            pane.reload(window, cx);
+                        })),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(ui::icon(IconName::Globe).text_color(rgb(0xd97706)))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_ellipsis()
+                                .text_xs()
+                                .font_medium()
+                                .child(filename),
+                        )
+                        .children(status_label.map(|status| {
+                            div()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .child(format!("· {status}"))
+                        })),
+                )
+                .child(
+                    ui::control("html-external", IconName::ExternalLink)
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(crate::i18n::media::HTML_OPEN_BROWSER.get())
+                                .build(window, cx)
+                        })
+                        .on_click(cx.listener(|pane, _, _, cx| {
+                            pane.open_in_external_browser(cx);
+                        })),
+                )
+                .child(
+                    ui::control("html-close", IconName::Close)
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(crate::i18n::media::HTML_CLOSE_TAB.get()).build(window, cx)
+                        })
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.emit(HtmlPaneEvent::Close);
+                        })),
+                );
+            root = root.child(toolbar);
         }
-
-        root = root.child(toolbar);
 
         if let Some(err) = &self.error {
             root = root.child(
