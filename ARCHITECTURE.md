@@ -65,7 +65,7 @@ flowchart LR
 ### 修改渲染或导出
 
 - **Markdown** 从同一文档布局生成编辑视图与导出绘制操作。影响布局、字体或 Markdown 节点的改动要检查屏幕和 PDF 两条路径。更新公式或 Callout 扩展时，也检查 AI 文本和批注定位的消费者。在 [markdown/pdf.rs](src/markdown/pdf.rs) 修改分页、字形嵌入或绘制操作转换。
-- **原生知识画布** 由 [canvas/export.rs](src/canvas/export.rs) 从画布模型生成 SVG，再按目标格式输出 SVG、PNG 或 PDF。改动节点可见性或连线几何时，检查屏幕显示、命中检测和导出选区。
+- **原生知识画布** 由 [canvas/export.rs](src/canvas/export.rs) 从画布模型生成 SVG，再按目标格式输出 SVG、PNG 或 PDF。[canvas/routing.rs](src/canvas/routing.rs) 用画布坐标为屏幕绘制、命中检测和导出计算连线。改动节点可见性或连线几何时，检查这三个入口。
 - **图片与 Draw.io** 复用 [svg/](src/svg/) 的预处理和字体，各自保有导出尺寸、选区和错误策略。Draw.io 文件协议在 [drawio/file.rs](src/drawio/file.rs)，当前画布和导出在 [drawio/mod.rs](src/drawio/mod.rs)。Draw.io 的 AI 工具页面侧逻辑位于 vendored [Draw.io App.js](resources/drawio/js/diagramly/App.js) 的应用初始化和画布生命周期中。
 - **维护 vendored 资源** 优先在已有生命周期或 API 边界修复，记录 Rust vendor 补丁到 [vendor/FOLIO-PATCHES.md](vendor/FOLIO-PATCHES.md)。[install-drawio.ps1](scripts/install-drawio.ps1) 会重新解包整个 Draw.io 目录。升级时把 Folio 的本地集成迁到新版源码，再验证离线打开、选区、编辑与导出。
 

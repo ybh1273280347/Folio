@@ -5,15 +5,17 @@ use super::{
     export::{ExportFormat, export_canvas_to_file},
     history::CanvasHistory,
     interaction::{
-        Camera, EdgeHandleEnd, EdgeRoute, InteractionState, WHEEL_ZOOM_STEP, ZOOM_STEP,
-        compute_drop_target, edge_endpoints_for_doc, edge_midpoint_local, hit_edge,
-        hit_edge_endpoint, hit_node, hit_port, hit_resize_handle, nearest_side, nodes_in_rect,
-        route_edge_for_doc, route_edge_points, tree_hierarchy_sides,
+        Camera, EdgeHandleEnd, InteractionState, WHEEL_ZOOM_STEP, ZOOM_STEP, compute_drop_target,
+        edge_midpoint_local, hit_edge, hit_edge_endpoint, hit_node, hit_port, hit_resize_handle,
+        nearest_side, nodes_in_rect,
     },
     model::{
         ApplyReport, CanvasDocument, CanvasEdge, CanvasNode, CanvasNodeType, CanvasOp,
         CanvasViewMode, DropPlacement, EdgeEnd, EdgeKind, EdgeSide, MIN_NODE_HEIGHT,
         MIN_NODE_WIDTH, TreeLayoutMode, ViewportState,
+    },
+    routing::{
+        EdgeRoute, edge_endpoints_for_doc, route_edge_for_doc, route_edge_points, tree_hierarchy_sides,
     },
 };
 use crate::{
