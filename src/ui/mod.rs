@@ -3,8 +3,8 @@ mod input;
 mod menu;
 mod surface;
 
-pub use input::{FieldSize, SearchField, TextAreaField, TextField};
-pub use menu::{FolioContextMenuExt, FolioDropdownMenuExt, FolioMenu, FolioMenuItem};
+pub use input::{SearchField, TextAreaField, TextField};
+pub use menu::{FolioContextMenuExt, FolioDropdownMenuExt, FolioMenuItem};
 pub use surface::{popover_card, scrollbar_vertical, tooltip};
 
 use crate::theme::color as rgb;
@@ -514,8 +514,7 @@ pub(crate) fn panel_toolbar_button(
 // ad-hoc `.hover()` colours, otherwise the pressed feedback gets lost.
 // ---------------------------------------------------------------------------
 
-/// Neutral surface tints shared by ghost buttons, list rows and menu items.
-pub const HOVER_BG: u32 = 0xefefed;
+/// Neutral pressed tint shared by legacy inline hover/press rules.
 pub const PRESSED_BG: u32 = 0xe4e3df;
 
 fn inset_press(alpha: f32) -> Vec<BoxShadow> {

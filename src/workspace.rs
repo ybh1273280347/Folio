@@ -73,7 +73,6 @@ actions!(
         Dismiss
     ]
 );
-const BG: u32 = 0xf7f6f5;
 const BORDER: u32 = 0xe8e7e3;
 const MUTED: u32 = 0x787774;
 pub(super) const RAIL_WIDTH: f32 = 44.0;
@@ -1728,7 +1727,7 @@ impl Render for Workspace {
                 .rounded(px(12.))
                 .border_1()
                 .border_color(palette.card_border())
-                .shadow_lg()
+                .shadow(palette.modal_shadow())
                 .bg(palette.elevated_surface())
                 .child(
                     crate::ui::control("close-preferences", IconName::Close)

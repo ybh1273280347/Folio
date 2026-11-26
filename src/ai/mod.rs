@@ -31,7 +31,7 @@ use gpui::{
 use gpui_kit::{
     assets::IconName,
     base::{
-        Dialog, DialogPopup, Scrollbar, ScrollbarMode, StyledExt, TextSelection,
+        Scrollbar, ScrollbarMode, StyledExt, TextSelection,
         text::{MarkdownExtensions, TextView, TextViewStyle},
     },
     component::{
@@ -1844,33 +1844,46 @@ impl Render for ChatPane {
             .children(self.render_quote_popover(palette, typo, cx))
             .when_some(self.overlay.as_ref(), |root, (image, _)| {
                 let viewport = window.viewport_size();
-                root.child(Dialog::new(cx)
-                        .focus_handle(self.overlay_focus.clone())
-                        .on_close(cx.listener(|pane, _, window, cx| pane.close_overlay(window, cx)))
-                        .accessibility_label(crate::i18n::ai::IMAGE_MESSAGE.get())
-                        .backdrop(div().size_full().occlude().bg(gpui::black().opacity(0.56)))
-                        .popup(
-                            DialogPopup::new()
-                                .relative()
-                                .rounded(px(10.))
-                                .overflow_hidden()
-                                .bg(gpui_kit::rgb(palette.surface))
-                                .shadow(popover_shadow(palette.is_dark()))
-                                .child(
-                                    img(image.clone())
-                                        .id("ai-image-preview")
-                                        .max_w(viewport.width * 0.9)
-                                        .max_h(viewport.height * 0.9)
-                                        .object_fit(ObjectFit::Contain),
-                                )
-                                .child(div().absolute().top_2().right_2().child(
-                                    Button::new("close-ai-image-preview")
-                                        .small()
-                                        .icon(crate::ui::icon(IconName::Close))
-                                        .tooltip(crate::i18n::common::CLOSE.get())
-                                        .on_click(cx.listener(|pane, _, window, cx| pane.close_overlay(window, cx))),
-                                )),
-                        ))
+                let card = div()
+                    .relative()
+                    .rounded(px(12.))
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(palette.card_border())
+                    .bg(palette.elevated_surface())
+                    .shadow(palette.modal_shadow())
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        img(image.clone())
+                            .id("ai-image-preview")
+                            .max_w(viewport.width * 0.88)
+                            .max_h(viewport.height * 0.88)
+                            .object_fit(ObjectFit::Contain),
+                    )
+                    .child(
+                        div().absolute().top_2().right_2().child(
+                            crate::ui::control_sized("close-ai-image-preview", IconName::Close, 26., 14.)
+                                .bg(palette.elevated_surface())
+                                .border_1()
+                                .border_color(palette.card_border())
+                                .tooltip(|w, cx| crate::ui::tooltip(crate::i18n::common::CLOSE.get(), w, cx))
+                                .on_click(cx.listener(|pane, _, window, cx| pane.close_overlay(window, cx))),
+                        ),
+                    );
+                root.child(
+                    deferred(
+                        crate::ui::modal_shell("ai-image-preview-backdrop", card)
+                            .track_focus(&self.overlay_focus)
+                            .on_action(cx.listener(|pane, _: &Escape, window, cx| {
+                                pane.close_overlay(window, cx);
+                            }))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|pane, _, window, cx| pane.close_overlay(window, cx)),
+                            ),
+                    )
+                    .with_priority(10),
+                )
             })
     }
 }
@@ -1899,10 +1912,8 @@ fn replace_utf8_range(
     );
 }
 
-fn subtle_border(border: u32) -> Rgba {
-    let mut c = gpui_kit::rgb(border);
-    c.a = 0.78;
-    c
+fn subtle_border(_border: u32) -> Rgba {
+    active_palette().subtle_border()
 }
 
 fn fg_alpha(hex: u32, alpha: f32) -> Rgba {
@@ -2437,22 +2448,12 @@ impl RenderOnce for DiffPatchView {
     }
 }
 
-fn card_shadow(dark: bool) -> Vec<BoxShadow> {
-    vec![
-        BoxShadow::new(px(0.), px(4.), hsla(0., 0., 0., if dark { 0.34 } else { 0.06 }))
-            .blur_radius(px(14.)),
-        BoxShadow::new(px(0.), px(1.), hsla(0., 0., 0., if dark { 0.22 } else { 0.03 }))
-            .blur_radius(px(3.)),
-    ]
+fn card_shadow(_dark: bool) -> Vec<BoxShadow> {
+    active_palette().card_shadow()
 }
 
-fn popover_shadow(dark: bool) -> Vec<BoxShadow> {
-    vec![
-        BoxShadow::new(px(0.), px(10.), hsla(0., 0., 0., if dark { 0.45 } else { 0.12 }))
-            .blur_radius(px(26.)),
-        BoxShadow::new(px(0.), px(2.), hsla(0., 0., 0., if dark { 0.25 } else { 0.04 }))
-            .blur_radius(px(6.)),
-    ]
+fn popover_shadow(_dark: bool) -> Vec<BoxShadow> {
+    active_palette().popover_shadow()
 }
 
 fn mix_color(base: u32, tint: u32, amount: f32) -> Rgba {

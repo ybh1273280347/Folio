@@ -8,7 +8,7 @@ use crate::{
 };
 use gpui::{MouseButton, Subscription};
 use gpui_kit::base::{HandleEdge, resize_handle};
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use gpui_pdf::{Highlight, NormRect, PdfStyle, PdfView};
@@ -533,7 +533,11 @@ impl PdfPane {
                     .text_color(rgb(0x787774))
                     .child(quote_preview),
             )
-            .child(Textarea::new(&self.annotation_comment_input).w_full().text_size(px(12.0)));
+            .child(
+                ui::TextAreaField::new(&self.annotation_comment_input)
+                    .h(px(72.))
+                    .text_size(px(12.0)),
+            );
 
         Some(
             div()
@@ -766,8 +770,8 @@ impl PdfPane {
                                                     .children(drawer_swatches),
                                             )
                                             .child(
-                                                Textarea::new(&self.drawer_comment_input)
-                                                    .w_full()
+                                                ui::TextAreaField::new(&self.drawer_comment_input)
+                                                    .h(px(72.))
                                                     .text_size(px(12.0)),
                                             )
                                             .child(

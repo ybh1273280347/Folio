@@ -62,14 +62,6 @@ impl FolioMenuItem {
         })
     }
 
-    pub fn separator() -> Self {
-        Self::Separator
-    }
-
-    pub fn label(text: impl Into<SharedString>) -> Self {
-        Self::Label(text.into())
-    }
-
     pub fn icon(mut self, icon: IconName) -> Self {
         if let Self::Action(entry) = &mut self {
             entry.icon = Some(icon);
@@ -97,13 +89,6 @@ impl FolioMenuItem {
     pub fn checked(mut self, checked: bool) -> Self {
         if let Self::Action(entry) = &mut self {
             entry.checked = checked;
-        }
-        self
-    }
-
-    pub fn disabled(mut self, disabled: bool) -> Self {
-        if let Self::Action(entry) = &mut self {
-            entry.disabled = disabled;
         }
         self
     }
@@ -188,11 +173,6 @@ impl FolioMenu {
 
     pub fn min_w(mut self, width: Pixels) -> Self {
         self.min_width = width;
-        self
-    }
-
-    pub fn max_h(mut self, height: Pixels) -> Self {
-        self.max_height = Some(height);
         self
     }
 

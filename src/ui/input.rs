@@ -65,11 +65,6 @@ impl TextField {
         self.text_size = Some(size);
         self
     }
-
-    pub fn font_family(mut self, family: impl Into<SharedString>) -> Self {
-        self.font_family = Some(family.into());
-        self
-    }
 }
 
 impl RenderOnce for TextField {
@@ -147,11 +142,6 @@ impl SearchField {
         }
     }
 
-    pub fn regular(mut self) -> Self {
-        self.size = FieldSize::Regular;
-        self
-    }
-
     pub fn surface_bg(mut self) -> Self {
         self.surface_bg = true;
         self
@@ -164,11 +154,6 @@ impl SearchField {
 
     pub fn font_family(mut self, family: impl Into<SharedString>) -> Self {
         self.font_family = Some(family.into());
-        self
-    }
-
-    pub fn on_clear(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
-        self.on_clear = Some(Box::new(handler));
         self
     }
 }
@@ -277,11 +262,6 @@ impl TextAreaField {
 
     pub fn h(mut self, height: Pixels) -> Self {
         self.height = Some(height);
-        self
-    }
-
-    pub fn surface_bg(mut self) -> Self {
-        self.surface_bg = true;
         self
     }
 
