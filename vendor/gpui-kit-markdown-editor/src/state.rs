@@ -412,6 +412,7 @@ pub struct BlockEditorState {
     pub(crate) frame: Rc<RefCell<FrameLayout>>,
     pub(crate) cull: Rc<RefCell<super::cull::CullState>>,
     pub(crate) fold_open: std::collections::HashMap<BlockId, bool>,
+    pub(crate) fold_open_at: std::collections::HashMap<BlockId, std::time::Instant>,
     pub(crate) content_folding: bool,
     /// The accessible value (document text), cached per revision (D8).
     pub(crate) a11y_value: RefCell<Option<(u64, SharedString)>>,
@@ -514,6 +515,7 @@ impl BlockEditorState {
             frame: Rc::default(),
             cull: Rc::default(),
             fold_open: Default::default(),
+            fold_open_at: Default::default(),
             content_folding: false,
             a11y_value: RefCell::default(),
             scroll_handle: Some(gpui::ScrollHandle::new()),
@@ -805,6 +807,7 @@ impl BlockEditorState {
         let _ = self.model.set_source(source);
         self.reset_code_preview_selection();
         self.fold_open.clear();
+        self.fold_open_at.clear();
         self.reveal_selection_folds();
         self.projection.invalidate();
         self
@@ -829,6 +832,7 @@ impl BlockEditorState {
         self.model.callout_names = callout_names;
         self.reset_code_preview_selection();
         self.fold_open.clear();
+        self.fold_open_at.clear();
         self.reveal_selection_folds();
         self.projection.invalidate();
         cx.notify();
@@ -841,6 +845,7 @@ impl BlockEditorState {
         self.image_resize = None;
         self.reset_code_preview_selection();
         self.fold_open.clear();
+        self.fold_open_at.clear();
         self.reveal_selection_folds();
         self.marked = None;
         self.composition_open = false;
@@ -864,6 +869,7 @@ impl BlockEditorState {
         self.image_resize = None;
         self.reset_code_preview_selection();
         self.fold_open.clear();
+        self.fold_open_at.clear();
         self.reveal_selection_folds();
         self.marked = None;
         self.composition_open = false;
@@ -2009,6 +2015,11 @@ impl BlockEditorState {
             }
         }
         self.fold_open.insert(fold, !open);
+        if !open {
+            self.fold_open_at.insert(fold, std::time::Instant::now());
+        } else {
+            self.fold_open_at.remove(&fold);
+        }
         self.invalidate_fold_height(&self.model.doc.path(fold));
         cx.notify();
     }
@@ -2031,6 +2042,11 @@ impl BlockEditorState {
             self.table_menu = None;
         }
         self.fold_open.insert(block, !open);
+        if !open {
+            self.fold_open_at.insert(block, std::time::Instant::now());
+        } else {
+            self.fold_open_at.remove(&block);
+        }
         self.invalidate_fold_height(&self.model.doc.path(block));
         cx.notify();
     }
