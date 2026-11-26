@@ -33,7 +33,7 @@ use markdown_editor::{
     TableEdit,
 };
 use crate::rag::SearchHit;
-use std::{cell::RefCell, cmp::Reverse, ops::Range, path::PathBuf, rc::Rc};
+use std::{cell::RefCell, cmp::Reverse, collections::BTreeSet, ops::Range, path::PathBuf, rc::Rc};
 
 mod emoji;
 mod outline;
@@ -339,6 +339,8 @@ pub struct MarkdownPane {
     path: PathBuf,
     title_input: Entity<InputState>,
     headings: Vec<OutlineHeading>,
+    outline_tree: Vec<outline::OutlineNode>,
+    outline_parents: BTreeSet<usize>,
     source_editor: Entity<EditorState>,
     // Each view keeps its editing state until the other view changes the buffer.
     source_needs_sync: bool,
@@ -360,7 +362,7 @@ pub struct MarkdownPane {
     outline_closing: bool,
     outline_closing_task: Task<()>,
     outline_scroll: ScrollHandle,
-    outline_collapsed: std::collections::BTreeSet<usize>,
+    outline_collapsed: BTreeSet<usize>,
     active_heading: Option<usize>,
     heading_click_lock_until: Option<std::time::Instant>,
     pane_outer_width: Rc<std::cell::Cell<f32>>,
@@ -965,6 +967,8 @@ impl MarkdownPane {
             path,
             title_input,
             headings: Vec::new(),
+            outline_tree: Vec::new(),
+            outline_parents: BTreeSet::new(),
             source_editor,
             source_needs_sync: true,
             visual_needs_sync: false,
@@ -1070,7 +1074,7 @@ impl MarkdownPane {
             self.apply_pending_visual_jump(cx);
             return;
         }
-        self.headings.clear();
+        self.set_outline_headings(Vec::new());
         let text = self.text.clone();
         let extensions = self.extensions.clone();
         let prepared = cx.background_executor().spawn(async move {
@@ -1086,7 +1090,7 @@ impl MarkdownPane {
                     editor.set_readonly(false, cx);
                 });
                 pane.retain_mermaid_blocks(cx);
-                pane.headings = headings;
+                pane.set_outline_headings(headings);
                 pane.reconcile_outline_state(cx);
                 pane.loading = None;
                 pane.apply_pending_visual_jump(cx);
@@ -1103,8 +1107,15 @@ impl MarkdownPane {
         self.mermaid.update(cx, |renderer, _| renderer.retain_blocks(ids));
     }
 
+    fn set_outline_headings(&mut self, headings: Vec<OutlineHeading>) {
+        // Window and split-pane resizing redraws the outline without changing its headings.
+        self.outline_tree = outline::build_tree(&headings);
+        self.outline_parents = outline::parent_indices(&self.outline_tree);
+        self.headings = headings;
+    }
+
     fn parse_outline(&mut self) {
-        self.headings = Self::outline_headings(&self.text);
+        self.set_outline_headings(Self::outline_headings(&self.text));
         let len = self.headings.len();
         self.outline_collapsed.retain(|&ix| ix < len);
         if self.active_heading.is_some_and(|ix| ix >= len) {
