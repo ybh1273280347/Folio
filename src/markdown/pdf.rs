@@ -1,5 +1,6 @@
 //! Vector PDF publication consumes GPUI's document paint operations, without a second layout engine.
 use crate::build::{BuildResult, BuildStatus};
+use crate::export_provenance::{self, DERIVED_PDF_KEYWORD};
 use gpui_kit::*;
 use krilla::{
     Document,
@@ -136,7 +137,7 @@ fn write(
         Metadata::new()
             .creator("Folio".to_owned())
             .producer("Folio-Markdown".to_owned())
-            .keywords(vec!["folio-derived".to_owned()]),
+            .keywords(vec![DERIVED_PDF_KEYWORD.to_owned()]),
     );
     let scale = PAGE_WIDTH / f32::from(size.width);
     let page_height = PAGE_HEIGHT / scale;
@@ -444,7 +445,7 @@ fn write(
     std::fs::create_dir_all(request.preview.parent().expect("preview parent"))?;
     std::fs::write(&request.preview, &pdf)?;
     std::fs::write(&request.destination, &pdf)?;
-    let _ = crate::rag::record_derived_pdf(
+    let _ = export_provenance::record_derived_pdf(
         &request.root,
         &request.source,
         &request.destination,

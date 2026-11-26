@@ -1379,7 +1379,7 @@ fn allocate_docid(tx: &Transaction<'_>, rel_path: &str, content_hash: &str) -> R
             return Ok(candidate.to_owned());
         }
     }
-    Ok(super::sha256_hex(rel_path.as_bytes())[..12].to_owned())
+    Ok(crate::files::sha256_hex(rel_path.as_bytes())[..12].to_owned())
 }
 
 fn prune_orphans(tx: &Transaction<'_>) -> Result<bool, String> {

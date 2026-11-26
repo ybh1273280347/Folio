@@ -46,6 +46,7 @@ flowchart LR
 | 文件标签与批注 | 标签以 SQLite 数据库为准，项目及默认空间使用 `.folio/metadata.sqlite3`，独立文件使用应用数据目录的 `loose-metadata.sqlite3`。批注记录保存在文件旁的 `.folio/annotations.json`，Markdown 内联高亮还写入正文。手动与 AI 操作共用数据和写入规则。 |
 | AI 会话 | Pi JSONL 保存对话和会话名称。Folio 的 `ai-tabs.json` 与 `ai-session-metadata.json` 保存标签、置顶和标题来源等应用状态。面板切换只改变交互视图，运行中任务仍由原会话承接。 |
 | 构建产物、预览和缓存 | 成功的编译或导出发布 PDF，前台预览跟随成功结果。失败时保留上一份有效预览。PDF 页图、图表光栅图、导出布局和文件树索引可从源内容重建。 |
+| 导出产物来源 | [export_provenance.rs](src/export_provenance.rs) 管理项目内的 PDF 和 Markdown 来源指纹。导出方登记生成时的内容，知识库索引读取登记以识别派生副本。PDF 可按指纹识别改名后的副本，Markdown 导出被编辑后可以独立索引。 |
 
 ## 常见改动怎么做
 
