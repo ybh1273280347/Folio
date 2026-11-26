@@ -45,6 +45,17 @@ pub const HIGHLIGHT_COLORS: &[(&str, &str, u32)] = &[
     ("orange", "#fed7aa", 0xfb923c),
 ];
 
+/// RGB hex for Markdown `<mark>` highlight text background (matches the light `#fef08a` default).
+pub fn highlight_mark_rgb(name: &str) -> u32 {
+    match name {
+        "green" => 0xbbf7d0,
+        "blue" => 0xbae6fd,
+        "pink" => 0xfbcfe8,
+        "orange" => 0xfed7aa,
+        _ => 0xfef08a,
+    }
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Params {
@@ -144,7 +155,7 @@ pub fn prepare_markdown(source: &str, params: &Params, extensions: MarkdownExten
     model.set_selection(BlockSelection::Text {
         anchor: BlockPosition::new(*block, *start), head: BlockPosition::new(*block, start + quote.len()),
     }).map_err(|e| Failure::new("placement_error", format!("{e:?}")))?;
-    model.run(EditorCommand::ApplyMark(MarkChange::new().with_highlight(gpui_kit::rgb(0xfacc15).into())))
+    model.run(EditorCommand::ApplyMark(MarkChange::new().with_highlight(gpui_kit::rgb(highlight_mark_rgb("yellow")).into())))
         .map_err(|e| Failure::new("placement_error", format!("{e:?}")))?;
     Ok(Prepared { item: AnnotationItem { id: 0, file: String::new(), page: 0,
         quote: quote.into(), occurrence: index, color: "yellow".into(), comment: comment.into(), region: None, rects: vec![] },

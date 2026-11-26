@@ -292,13 +292,7 @@ fn quick_insert_items(prefix: &str) -> Option<(usize, String, Vec<&'static Slash
 }
 
 fn hsla_for_color_name(name: &str) -> Hsla {
-    match name {
-        "green" => rgb(0x86efac).into(),
-        "blue" => rgb(0x7dd3fc).into(),
-        "pink" => rgb(0xf9a8d4).into(),
-        "orange" => rgb(0xfdba74).into(),
-        _ => rgb(0xfde047).into(),
-    }
+    rgb(crate::annotations::highlight_mark_rgb(name)).into()
 }
 
 fn hsla_to_hex(color: Hsla) -> String {
