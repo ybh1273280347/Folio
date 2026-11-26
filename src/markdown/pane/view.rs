@@ -19,7 +19,7 @@ impl Render for MarkdownPane {
             .overflow_hidden();
         let outline_overlay = self.is_outline_overlay();
         if self.is_outline_rendered() && !outline_overlay {
-            content = content.child(outline::render_docked(self, cx));
+            content = content.child(outline::render_docked(self, window, cx));
         }
         if self.source && self.is_outline_open() {
             content = content.child(
@@ -322,22 +322,27 @@ impl Render for MarkdownPane {
                             );
                             area.child(
                                 div()
-                                    .id("md-link-hover-pill")
                                     .absolute()
                                     .bottom_2()
                                     .left_3()
-                                    .max_w(px(520.))
-                                    .px_2()
-                                    .py_1()
-                                    .rounded(px(6.))
-                                    .bg(rgb(0xf7f7f5))
-                                    .border_1()
-                                    .border_color(rgb(0xe2e4e8))
-                                    .shadow_sm()
-                                    .text_xs()
-                                    .text_color(rgb(0x5b5b58))
-                                    .text_ellipsis()
-                                    .child(format!("{label}：{url}")),
+                                    .child(crate::ui::popover_enter(
+                                        div()
+                                            .id("md-link-hover-pill")
+                                            .max_w(px(520.))
+                                            .px_2()
+                                            .py_1()
+                                            .rounded(px(6.))
+                                            .bg(rgb(0xf7f7f5))
+                                            .border_1()
+                                            .border_color(rgb(0xe2e4e8))
+                                            .shadow_sm()
+                                            .text_xs()
+                                            .text_color(rgb(0x5b5b58))
+                                            .text_ellipsis()
+                                            .child(format!("{label}：{url}")),
+                                        "md-link-hover-enter",
+                                        crate::ui::PopoverDirection::Fade,
+                                    )),
                             )
                         })
                     })
@@ -362,197 +367,218 @@ impl Render for MarkdownPane {
                         let case_on = self.search_case_sensitive;
                         let word_on = self.search_whole_word;
                         let replace_on = self.search_replace_open;
+                        let replace_open = self.search_replace_open && !self.reading;
+                        let replace_progress = crate::ui::sample_disclosure(
+                            ("md-search-replace-fold", cx.entity_id().as_u64() as usize),
+                            replace_open,
+                            window,
+                            cx,
+                        );
+                        let replace_rendered = replace_open || replace_progress > 0.001;
 
-                        area.child(
-                            div()
-                                .id("md-search-bar")
-                                .absolute()
-                                .top_2p5()
-                                .right(right_offset)
-                                .px_2()
-                                .py_1p5()
-                                .rounded(px(10.))
-                                .bg(palette.elevated_surface())
-                                .border_1()
-                                .border_color(palette.card_border())
-                                .shadow_md()
-                                .flex()
-                                .flex_col()
-                                .gap_1p5()
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .w(px(230.))
-                                                .h(px(26.))
-                                                .px_1p5()
-                                                .rounded(px(6.))
-                                                .bg(gpui_kit::rgb(palette.background))
-                                                .border_1()
-                                                .border_color(gpui_kit::rgb(palette.border))
-                                                .flex()
-                                                .items_center()
-                                                .gap_0p5()
-                                                .child(
-                                                    Input::new(&self.search_input)
-                                                        .appearance(false)
-                                                        .bordered(false)
-                                                        .xsmall()
-                                                        .h(px(22.))
-                                                        .text_size(px(12.))
-                                                        .flex_1()
-                                                        .min_w_0(),
-                                                )
-                                                .child(
-                                                    crate::ui::control("toggle-md-case", IconName::CaseSensitive)
-                                                        .size(px(20.))
-                                                        .rounded(px(4.))
-                                                        .when(case_on, |s| s.bg(active_bg).text_color(active_text))
-                                                        .tooltip(|window, cx| {
-                                                            Tooltip::new(crate::i18n::markdown::FIND_CASE_SENSITIVE.get()).build(window, cx)
-                                                        })
-                                                        .on_click(cx.listener(|pane, _, _, cx| {
-                                                            pane.search_case_sensitive = !pane.search_case_sensitive;
-                                                            let q = pane.search_input.read(cx).value().to_string();
-                                                            pane.run_search(&q, 0, cx);
-                                                            cx.notify();
-                                                        })),
-                                                )
-                                                .child(
-                                                    crate::ui::control("toggle-md-word", IconName::WholeWord)
-                                                        .size(px(20.))
-                                                        .rounded(px(4.))
-                                                        .when(word_on, |s| s.bg(active_bg).text_color(active_text))
-                                                        .tooltip(|window, cx| {
-                                                            Tooltip::new(crate::i18n::markdown::FIND_WHOLE_WORD.get()).build(window, cx)
-                                                        })
-                                                        .on_click(cx.listener(|pane, _, _, cx| {
-                                                            pane.search_whole_word = !pane.search_whole_word;
-                                                            let q = pane.search_input.read(cx).value().to_string();
-                                                            pane.run_search(&q, 0, cx);
-                                                            cx.notify();
-                                                        })),
-                                                ),
-                                        )
-                                        .when(!self.reading, |row| {
-                                            row.child(
-                                                crate::ui::control("toggle-md-replace", IconName::Replace)
-                                                    .size(px(22.))
-                                                    .when(replace_on, |s| s.bg(active_bg).text_color(active_text))
-                                                    .tooltip(|window, cx| {
-                                                        Tooltip::new(crate::i18n::markdown::FIND_TOGGLE_REPLACE.get()).build(window, cx)
-                                                    })
-                                                    .on_click(cx.listener(|pane, _, window, cx| {
-                                                        pane.toggle_replace(window, cx);
-                                                    })),
-                                            )
-                                        })
-                                        .child(
-                                            div()
-                                                .w(px(1.))
-                                                .h(px(14.))
-                                                .mx_0p5()
-                                                .bg(gpui_kit::rgb(palette.border)),
-                                        )
-                                        .child(
-                                            crate::ui::control("prev-md-search", IconName::ChevronLeft)
-                                                .size(px(20.))
-                                                .tooltip(|window, cx| {
-                                                    Tooltip::new(crate::i18n::markdown::FIND_PREV.get()).build(window, cx)
-                                                })
-                                                .on_click(cx.listener(|pane, _, _, cx| {
-                                                    let q = pane.search_input.read(cx).value().to_string();
-                                                    pane.step_search(&q, -1, cx);
-                                                    cx.notify();
-                                                })),
-                                        )
-                                        .child(
-                                            crate::ui::control("next-md-search", IconName::ChevronRight)
-                                                .size(px(20.))
-                                                .tooltip(|window, cx| {
-                                                    Tooltip::new(crate::i18n::markdown::FIND_NEXT.get()).build(window, cx)
-                                                })
-                                                .on_click(cx.listener(|pane, _, _, cx| {
-                                                    let q = pane.search_input.read(cx).value().to_string();
-                                                    pane.step_search(&q, 1, cx);
-                                                    cx.notify();
-                                                })),
-                                        )
-                                        .when_some(count_label, |row, label| {
-                                            row.child(
-                                                div()
-                                                    .px_1()
-                                                    .text_size(px(11.))
-                                                    .text_color(muted_text)
-                                                    .flex_shrink_0()
-                                                    .child(label),
-                                            )
-                                        })
-                                        .child(
-                                            crate::ui::control("close-md-search", IconName::Close)
-                                                .size(px(20.))
-                                                .tooltip(|window, cx| {
-                                                    Tooltip::new(crate::i18n::markdown::FIND_CLOSE.get()).build(window, cx)
-                                                })
-                                                .on_click(cx.listener(|pane, _, window, cx| {
-                                                    pane.close_search(window, cx);
-                                                })),
-                                        ),
-                                )
-                                .when(self.search_replace_open && !self.reading, |col| {
-                                    col.child(
+                        let search_card = div()
+                            .id("md-search-bar")
+                            .px_2()
+                            .py_1p5()
+                            .rounded(px(10.))
+                            .bg(palette.elevated_surface())
+                            .border_1()
+                            .border_color(palette.card_border())
+                            .shadow_md()
+                            .flex()
+                            .flex_col()
+                            .gap_1p5()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
                                         div()
+                                            .w(px(230.))
+                                            .h(px(26.))
+                                            .px_1p5()
+                                            .rounded(px(6.))
+                                            .bg(gpui_kit::rgb(palette.background))
+                                            .border_1()
+                                            .border_color(gpui_kit::rgb(palette.border))
                                             .flex()
                                             .items_center()
-                                            .gap_1()
+                                            .gap_0p5()
                                             .child(
-                                                div()
-                                                    .w(px(230.))
-                                                    .h(px(26.))
-                                                    .px_1p5()
-                                                    .rounded(px(6.))
-                                                    .bg(gpui_kit::rgb(palette.background))
-                                                    .border_1()
-                                                    .border_color(gpui_kit::rgb(palette.border))
-                                                    .flex()
-                                                    .items_center()
-                                                    .child(
-                                                        Input::new(&self.replace_input)
-                                                            .appearance(false)
-                                                            .bordered(false)
-                                                            .xsmall()
-                                                            .h(px(22.))
-                                                            .text_size(px(12.))
-                                                            .flex_1()
-                                                            .min_w_0(),
-                                                    ),
+                                                Input::new(&self.search_input)
+                                                    .appearance(false)
+                                                    .bordered(false)
+                                                    .xsmall()
+                                                    .h(px(22.))
+                                                    .text_size(px(12.))
+                                                    .flex_1()
+                                                    .min_w_0(),
                                             )
                                             .child(
-                                                crate::ui::control("replace-md-one", IconName::Replace)
-                                                    .size(px(22.))
+                                                crate::ui::control("toggle-md-case", IconName::CaseSensitive)
+                                                    .size(px(20.))
+                                                    .rounded(px(4.))
+                                                    .when(case_on, |s| s.bg(active_bg).text_color(active_text))
                                                     .tooltip(|window, cx| {
-                                                        Tooltip::new(crate::i18n::markdown::REPLACE_ONE.get()).build(window, cx)
+                                                        Tooltip::new(crate::i18n::markdown::FIND_CASE_SENSITIVE.get()).build(window, cx)
                                                     })
                                                     .on_click(cx.listener(|pane, _, _, cx| {
-                                                        pane.replace_current(cx);
+                                                        pane.search_case_sensitive = !pane.search_case_sensitive;
+                                                        let q = pane.search_input.read(cx).value().to_string();
+                                                        pane.run_search(&q, 0, cx);
+                                                        cx.notify();
                                                     })),
                                             )
                                             .child(
-                                                crate::ui::control("replace-md-all", IconName::ReplaceAll)
-                                                    .size(px(22.))
+                                                crate::ui::control("toggle-md-word", IconName::WholeWord)
+                                                    .size(px(20.))
+                                                    .rounded(px(4.))
+                                                    .when(word_on, |s| s.bg(active_bg).text_color(active_text))
                                                     .tooltip(|window, cx| {
-                                                        Tooltip::new(crate::i18n::markdown::REPLACE_ALL.get()).build(window, cx)
+                                                        Tooltip::new(crate::i18n::markdown::FIND_WHOLE_WORD.get()).build(window, cx)
                                                     })
                                                     .on_click(cx.listener(|pane, _, _, cx| {
-                                                        pane.replace_all(cx);
+                                                        pane.search_whole_word = !pane.search_whole_word;
+                                                        let q = pane.search_input.read(cx).value().to_string();
+                                                        pane.run_search(&q, 0, cx);
+                                                        cx.notify();
                                                     })),
                                             ),
                                     )
-                                }),
+                                    .when(!self.reading, |row| {
+                                        row.child(
+                                            crate::ui::control("toggle-md-replace", IconName::Replace)
+                                                .size(px(22.))
+                                                .when(replace_on, |s| s.bg(active_bg).text_color(active_text))
+                                                .tooltip(|window, cx| {
+                                                    Tooltip::new(crate::i18n::markdown::FIND_TOGGLE_REPLACE.get()).build(window, cx)
+                                                })
+                                                .on_click(cx.listener(|pane, _, window, cx| {
+                                                    pane.toggle_replace(window, cx);
+                                                })),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .w(px(1.))
+                                            .h(px(14.))
+                                            .mx_0p5()
+                                            .bg(gpui_kit::rgb(palette.border)),
+                                    )
+                                    .child(
+                                        crate::ui::control("prev-md-search", IconName::ChevronLeft)
+                                            .size(px(20.))
+                                            .tooltip(|window, cx| {
+                                                Tooltip::new(crate::i18n::markdown::FIND_PREV.get()).build(window, cx)
+                                            })
+                                            .on_click(cx.listener(|pane, _, _, cx| {
+                                                let q = pane.search_input.read(cx).value().to_string();
+                                                pane.step_search(&q, -1, cx);
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        crate::ui::control("next-md-search", IconName::ChevronRight)
+                                            .size(px(20.))
+                                            .tooltip(|window, cx| {
+                                                Tooltip::new(crate::i18n::markdown::FIND_NEXT.get()).build(window, cx)
+                                            })
+                                            .on_click(cx.listener(|pane, _, _, cx| {
+                                                let q = pane.search_input.read(cx).value().to_string();
+                                                pane.step_search(&q, 1, cx);
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .when_some(count_label, |row, label| {
+                                        row.child(
+                                            div()
+                                                .px_1()
+                                                .text_size(px(11.))
+                                                .text_color(muted_text)
+                                                .flex_shrink_0()
+                                                .child(label),
+                                        )
+                                    })
+                                    .child(
+                                        crate::ui::control("close-md-search", IconName::Close)
+                                            .size(px(20.))
+                                            .tooltip(|window, cx| {
+                                                Tooltip::new(crate::i18n::markdown::FIND_CLOSE.get()).build(window, cx)
+                                            })
+                                            .on_click(cx.listener(|pane, _, window, cx| {
+                                                pane.close_search(window, cx);
+                                            })),
+                                    ),
+                            )
+                            .when(replace_rendered, |col| {
+                                let replace_row = div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .w(px(230.))
+                                            .h(px(26.))
+                                            .px_1p5()
+                                            .rounded(px(6.))
+                                            .bg(gpui_kit::rgb(palette.background))
+                                            .border_1()
+                                            .border_color(gpui_kit::rgb(palette.border))
+                                            .flex()
+                                            .items_center()
+                                            .child(
+                                                Input::new(&self.replace_input)
+                                                    .appearance(false)
+                                                    .bordered(false)
+                                                    .xsmall()
+                                                    .h(px(22.))
+                                                    .text_size(px(12.))
+                                                    .flex_1()
+                                                    .min_w_0(),
+                                            ),
+                                    )
+                                    .child(
+                                        crate::ui::control("replace-md-one", IconName::Replace)
+                                            .size(px(22.))
+                                            .tooltip(|window, cx| {
+                                                Tooltip::new(crate::i18n::markdown::REPLACE_ONE.get()).build(window, cx)
+                                            })
+                                            .on_click(cx.listener(|pane, _, _, cx| {
+                                                pane.replace_current(cx);
+                                            })),
+                                    )
+                                    .child(
+                                        crate::ui::control("replace-md-all", IconName::ReplaceAll)
+                                            .size(px(22.))
+                                            .tooltip(|window, cx| {
+                                                Tooltip::new(crate::i18n::markdown::REPLACE_ALL.get()).build(window, cx)
+                                            })
+                                            .on_click(cx.listener(|pane, _, _, cx| {
+                                                pane.replace_all(cx);
+                                            })),
+                                    );
+                                col.child(crate::ui::disclosure_body(
+                                    ("md-search-replace-body", cx.entity_id().as_u64() as usize),
+                                    replace_open,
+                                    replace_progress,
+                                    replace_row,
+                                    window,
+                                    cx,
+                                ))
+                            });
+
+                        area.child(
+                            div()
+                                .absolute()
+                                .top_2p5()
+                                .right(right_offset)
+                                .child(crate::ui::popover_enter(
+                                    search_card,
+                                    "md-search-bar-enter",
+                                    crate::ui::PopoverDirection::Down,
+                                )),
                         )
                     })
                     .child({
@@ -648,14 +674,23 @@ impl Render for MarkdownPane {
             }
 
             if self.is_outline_rendered() && outline_overlay {
-                content = content.child(outline::render_overlay(self, cx));
+                content = content.child(outline::render_overlay(self, window, cx));
             }
 
-            if self.show_annotations_drawer && !self.annotations.is_empty() {
+            let ann_open = self.show_annotations_drawer && !self.annotations.is_empty();
+            let ann_progress = crate::ui::sample_drawer(
+                ("md-annotations-drawer-motion", cx.entity_id().as_u64() as usize),
+                ann_open,
+                200,
+                window,
+                cx,
+            );
+            let ann_rendered = ann_open || ann_progress > 0.001;
+            let drawer_panel = if ann_rendered {
                 let quote_font_size = 12.0;
                 let comment_font_size = 12.5;
                 let title_font_size = 13.0;
-                let drawer_width = 300.0;
+                let drawer_width = self.annotations_drawer_width.clamp(200., 800.);
 
                 let cards = self.annotations.iter().map(|item| {
                     let id = item.id;
@@ -781,7 +816,7 @@ impl Render for MarkdownPane {
                                 ),
                         )
                         .when(is_editing, |card| {
-                            card.child(
+                            card.child(crate::ui::popover_enter(
                                 div()
                                     .w_full()
                                     .flex()
@@ -861,7 +896,9 @@ impl Render for MarkdownPane {
                                                 )),
                                             ),
                                     ),
-                            )
+                                ("md-drawer-ann-edit-enter", id as usize),
+                                crate::ui::PopoverDirection::Down,
+                            ))
                         })
                         .when(!is_editing && !comment.is_empty(), |card| {
                             card.child(
@@ -899,107 +936,148 @@ impl Render for MarkdownPane {
                             cx.notify();
                         }))
                 });
-                content = div().flex_1().min_w_0().min_h_0().child(
-                    h_resizable("markdown-annotations-layout")
-                        .child(
-                            resizable_panel()
-                                .size_range(px(200.)..Pixels::MAX)
-                                .child(content),
-                        )
-                        // The drawer scales with zoom and remains user-resizable.
-                        .child(
-                            resizable_panel()
-                                .size(px(drawer_width))
-                                .size_range(px(200.)..px(800.))
-                                .fixed()
-                                .child(
-                                    div()
-                                        .id("md-annotations-drawer")
-                                        .track_focus(&self.annotation_list_focus)
-                                        .on_key_down(cx.listener(
-                                            |pane, event: &KeyDownEvent, window, cx| {
-                                                // Deletion keys in the comment editor edit text, not the card.
-                                                if matches!(
-                                                    event.keystroke.key.as_str(),
-                                                    "delete" | "backspace"
-                                                ) && pane.editing_drawer_annotation_id.is_none()
-                                                    && pane.annotation_list_focus.is_focused(window)
-                                                    && let Some(id) = pane.selected_annotation_id
-                                                {
-                                                    cx.stop_propagation();
-                                                    cx.emit(MarkdownEvent::DeleteAnnotation(id));
-                                                }
-                                            },
-                                        ))
-                                        .w_full()
-                                        .min_w_0()
-                                        .flex_shrink_0()
-                                        .h_full()
-                                        .min_h_0()
-                                        .bg(rgb(0xfafaf9))
-                                        .border_l_1()
-                                        .border_color(rgb(0xe8e7e3))
-                                        .flex()
-                                        .flex_col()
-                                        .child(
-                                            div()
-                                                .flex_shrink_0()
-                                                .px_3()
-                                                .pt_3()
-                                                .pb_2()
-                                                .flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .child(
-                                                    div()
-                                                        .text_size(px(title_font_size))
-                                                        .font_semibold()
-                                                        .text_color(rgb(0x37352f))
-                                                        .child(
-                                                            crate::i18n::markdown::DOC_ANNOTATIONS
-                                                                .get(),
-                                                        ),
-                                                )
-                                                .child(
-                                                    crate::ui::control(
-                                                        "close-ann-drawer",
-                                                        IconName::Close,
-                                                    )
-                                                    .on_click(cx.listener(|pane, _, _, cx| {
-                                                        pane.show_annotations_drawer = false;
-                                                        cx.notify();
-                                                    })),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .relative()
-                                                .flex_1()
-                                                .min_h_0()
-                                                .child(
-                                                    div()
-                                                        .id("md-annotations-list")
-                                                        .size_full()
-                                                        .overflow_y_scroll()
-                                                        .track_scroll(&self.annotation_list_scroll)
-                                                        .px_3()
-                                                        .pb_3()
-                                                        .flex()
-                                                        .flex_col()
-                                                        .gap_2()
-                                                        .children(cards),
-                                                )
-                                                .child(div().absolute().inset_0().child(
-                                                    Scrollbar::vertical(
-                                                        &self.annotation_list_scroll,
-                                                    )
-                                                    .mode(ScrollbarMode::Hover),
-                                                )),
-                                        ),
+
+                let drawer_body = div()
+                    .id("md-annotations-drawer")
+                    .track_focus(&self.annotation_list_focus)
+                    .on_key_down(cx.listener(
+                        |pane, event: &KeyDownEvent, window, cx| {
+                            // Deletion keys in the comment editor edit text, not the card.
+                            if matches!(
+                                event.keystroke.key.as_str(),
+                                "delete" | "backspace"
+                            ) && pane.editing_drawer_annotation_id.is_none()
+                                && pane.annotation_list_focus.is_focused(window)
+                                && let Some(id) = pane.selected_annotation_id
+                            {
+                                cx.stop_propagation();
+                                cx.emit(MarkdownEvent::DeleteAnnotation(id));
+                            }
+                        },
+                    ))
+                    .w_full()
+                    .min_w_0()
+                    .flex_shrink_0()
+                    .h_full()
+                    .min_h_0()
+                    .bg(rgb(0xfafaf9))
+                    .border_l_1()
+                    .border_color(rgb(0xe8e7e3))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .px_3()
+                            .pt_3()
+                            .pb_2()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(title_font_size))
+                                    .font_semibold()
+                                    .text_color(rgb(0x37352f))
+                                    .child(
+                                        crate::i18n::markdown::DOC_ANNOTATIONS
+                                            .get(),
+                                    ),
+                            )
+                            .child(
+                                crate::ui::control(
+                                    "close-ann-drawer",
+                                    IconName::Close,
+                                )
+                                .on_click(cx.listener(|pane, _, _, cx| {
+                                    pane.show_annotations_drawer = false;
+                                    cx.notify();
+                                })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_h_0()
+                            .child(
+                                div()
+                                    .id("md-annotations-list")
+                                    .size_full()
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.annotation_list_scroll)
+                                    .px_3()
+                                    .pb_3()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .children(cards),
+                            )
+                            .child(div().absolute().inset_0().child(
+                                Scrollbar::vertical(
+                                    &self.annotation_list_scroll,
+                                )
+                                .mode(ScrollbarMode::Hover),
+                            )),
+                    );
+
+                let drag_pane = cx.entity();
+                Some(
+                    crate::ui::horizontal_drawer(
+                        crate::ui::DrawerSide::Right,
+                        ann_open,
+                        ann_progress,
+                        drawer_width,
+                        drawer_body,
+                    )
+                    .when(ann_open && ann_progress >= 0.999, |drawer| {
+                        drawer.child(
+                            resize_handle("md-annotations-resize", Axis::Horizontal)
+                                .inside(HandleEdge::Leading)
+                                .on_drag(
+                                    AnnotationsDrawerResizeDrag,
+                                    move |_, _, window, cx| {
+                                        let start_x = f32::from(window.mouse_position().x);
+                                        drag_pane.update(cx, |pane, _| {
+                                            pane.annotations_drawer_drag = Some((
+                                                start_x,
+                                                pane.annotations_drawer_width.clamp(200., 800.),
+                                            ));
+                                        });
+                                        cx.new(|_| AnnotationsDrawerResizeDrag)
+                                    },
                                 ),
-                        ),
-                );
-            }
+                        )
+                    }),
+                )
+            } else {
+                None
+            };
+
+            content = div().relative().flex().flex_1().min_w_0().min_h_0().child(
+                div()
+                    .id("markdown-annotations-layout")
+                    .relative()
+                    .flex()
+                    .size_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .on_drag_move(cx.listener(
+                        |pane, event: &DragMoveEvent<AnnotationsDrawerResizeDrag>, _, cx| {
+                            let Some((start_x, start_w)) = pane.annotations_drawer_drag else {
+                                return;
+                            };
+                            let delta = f32::from(event.event.position.x) - start_x;
+                            let next_w = (start_w - delta).clamp(200., 800.).round();
+                            if (pane.annotations_drawer_width - next_w).abs() >= 1.0 {
+                                pane.annotations_drawer_width = next_w;
+                                cx.notify();
+                            }
+                        },
+                    ))
+                    .child(div().relative().flex().flex_1().min_w_0().min_h_0().h_full().child(content))
+                    .children(drawer_panel),
+            );
         }
 
         // Pane chrome: the badge stays put while the document scrolls and is

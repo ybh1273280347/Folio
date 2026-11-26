@@ -888,6 +888,87 @@ impl Workspace {
                 .into_any_element()
         };
 
+        let popover_card = div()
+            .id("project-menu-popover")
+            .w(px(284.))
+            .max_h(px(420.))
+            .rounded(px(10.))
+            .bg(gpui_kit::rgb(palette.surface))
+            .border_1()
+            .border_color(gpui_kit::rgb(palette.border))
+            .shadow_lg()
+            .occlude()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_scroll(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .px_2p5()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(gpui_kit::rgb(palette.border))
+                    .child(
+                        div()
+                            .h(px(28.))
+                            .px_2()
+                            .rounded(px(6.))
+                            .bg(gpui_kit::rgb(palette.background))
+                            .border_1()
+                            .border_color(gpui_kit::rgb(palette.border))
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .child(
+                                crate::ui::icon(IconName::Search)
+                                    .size(px(13.))
+                                    .flex_shrink_0()
+                                    .text_color(muted),
+                            )
+                            .child(
+                                Input::new(&self.project_menu.search)
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .flex_1()
+                                    .min_w_0()
+                                    .px_0()
+                                    .py_0()
+                                    .text_size(px(12.5))
+                                    .text_color(text),
+                            ),
+                    ),
+            )
+            .child(list_body)
+            .child(
+                div()
+                    .border_t_1()
+                    .border_color(gpui_kit::rgb(palette.border))
+                    .p_1p5()
+                    .child(
+                        div()
+                            .id("project-menu-add")
+                            .h(px(30.))
+                            .px_2()
+                            .rounded(px(6.))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(muted)
+                            .hover(move |s| s.bg(hover_bg).text_color(text))
+                            .on_click(cx.listener(|app, _, window, cx| {
+                                app.close_project_menu(cx);
+                                app.add_project(&OpenProject, window, cx);
+                            }))
+                            .child(crate::ui::icon(IconName::Plus).size(px(13.)))
+                            .child(
+                                crate::i18n::workspace::ADD_LOCAL_PROJECT.get(),
+                            ),
+                    ),
+            );
+
         Some(
             deferred(
                 div()
@@ -910,88 +991,14 @@ impl Workspace {
                     )
                     .child(
                         div()
-                            .id("project-menu-popover")
                             .absolute()
                             .top(px(crate::ui::TITLEBAR_HEIGHT + 2.))
                             .left(px(6.))
-                            .w(px(284.))
-                            .max_h(px(420.))
-                            .rounded(px(10.))
-                            .bg(gpui_kit::rgb(palette.surface))
-                            .border_1()
-                            .border_color(gpui_kit::rgb(palette.border))
-                            .shadow_lg()
-                            .occlude()
-                            .flex()
-                            .flex_col()
-                            .overflow_hidden()
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_scroll(|_, _, cx| cx.stop_propagation())
-                            .child(
-                                div()
-                                    .px_2p5()
-                                    .py_2()
-                                    .border_b_1()
-                                    .border_color(gpui_kit::rgb(palette.border))
-                                    .child(
-                                        div()
-                                            .h(px(28.))
-                                            .px_2()
-                                            .rounded(px(6.))
-                                            .bg(gpui_kit::rgb(palette.background))
-                                            .border_1()
-                                            .border_color(gpui_kit::rgb(palette.border))
-                                            .flex()
-                                            .items_center()
-                                            .gap_1p5()
-                                            .child(
-                                                crate::ui::icon(IconName::Search)
-                                                    .size(px(13.))
-                                                    .flex_shrink_0()
-                                                    .text_color(muted),
-                                            )
-                                            .child(
-                                                Input::new(&self.project_menu.search)
-                                                    .appearance(false)
-                                                    .bordered(false)
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .px_0()
-                                                    .py_0()
-                                                    .text_size(px(12.5))
-                                                    .text_color(text),
-                                            ),
-                                    ),
-                            )
-                            .child(list_body)
-                            .child(
-                                div()
-                                    .border_t_1()
-                                    .border_color(gpui_kit::rgb(palette.border))
-                                    .p_1p5()
-                                    .child(
-                                        div()
-                                            .id("project-menu-add")
-                                            .h(px(30.))
-                                            .px_2()
-                                            .rounded(px(6.))
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .cursor_pointer()
-                                            .text_xs()
-                                            .text_color(muted)
-                                            .hover(move |s| s.bg(hover_bg).text_color(text))
-                                            .on_click(cx.listener(|app, _, window, cx| {
-                                                app.close_project_menu(cx);
-                                                app.add_project(&OpenProject, window, cx);
-                                            }))
-                                            .child(crate::ui::icon(IconName::Plus).size(px(13.)))
-                                            .child(
-                                                crate::i18n::workspace::ADD_LOCAL_PROJECT.get(),
-                                            ),
-                                    ),
-                            ),
+                            .child(crate::ui::popover_enter(
+                                popover_card,
+                                "project-menu-pop",
+                                crate::ui::PopoverDirection::Down,
+                            )),
                     ),
             )
             .with_priority(8)

@@ -293,7 +293,7 @@ impl ChatPane {
                     .child(chevron),
             )
             .when(expanded, |col| {
-                col.child(
+                col.child(crate::ui::popover_enter(
                     div()
                         .ml(px(12.))
                         .pl_3()
@@ -307,7 +307,9 @@ impl ChatPane {
                                 .iter()
                                 .map(|block| self.render_tag_approval(block, palette, typo, ui_font, cx)),
                         ),
-                )
+                    SharedString::from(format!("ai-approval-group-body-{group_key}")),
+                    crate::ui::PopoverDirection::Down,
+                ))
             })
             .into_any_element()
     }
@@ -331,7 +333,14 @@ impl ChatPane {
         };
         let toggle = id.to_owned();
         let expanded = self.expanded_tag_receipts.contains(id);
-        let details = expanded.then(|| tag_preview(&approval.preview, palette, typo).into_any_element());
+        let details = expanded.then(|| {
+            crate::ui::popover_enter(
+                div().child(tag_preview(&approval.preview, palette, typo)),
+                SharedString::from(format!("ai-tag-receipt-body-{id}")),
+                crate::ui::PopoverDirection::Down,
+            )
+            .into_any_element()
+        });
         let row_id = SharedString::from(format!("tag-review-{id}"));
         let hover_bg = gpui_kit::hsla(0., 0., if palette.is_dark() { 1. } else { 0. }, 0.04);
         let chevron = div()

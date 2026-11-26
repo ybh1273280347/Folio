@@ -1820,7 +1820,7 @@ fn choice_button(id: impl Into<ElementId>, label: &'static str, selected: bool) 
     }
 }
 impl Render for Preferences {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui_font_size = px(self.settings.interface_font_size as f32);
         let nav_item = |id: &'static str,
                         tab: PreferencesTab,
@@ -1868,6 +1868,62 @@ impl Render for Preferences {
             PreferencesTab::Terminal => self.render_terminal(),
             PreferencesTab::Api => self.render_api(cx),
         };
+        let appearance_chevron = crate::ui::fold_chevron(
+            "pref-appearance-chevron",
+            self.appearance_expanded,
+            px(14.),
+            rgb(0x57606a),
+            window,
+            cx,
+        );
+        let appearance_progress = crate::ui::sample_disclosure(
+            "pref-appearance-fold",
+            self.appearance_expanded,
+            window,
+            cx,
+        );
+        let appearance_body = (self.appearance_expanded || appearance_progress > 0.001).then(|| {
+            let group = div()
+                .ml_2()
+                .pl_2()
+                .border_l_1()
+                .border_color(rgb(0xe8e7e3))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(nav_item(
+                    "pref-tab-fonts",
+                    PreferencesTab::Fonts,
+                    IconName::Type,
+                    p::NAV_FONTS.get(),
+                    self.tab == PreferencesTab::Fonts,
+                    cx,
+                ))
+                .child(nav_item(
+                    "pref-tab-theme",
+                    PreferencesTab::Theme,
+                    IconName::Palette,
+                    p::NAV_THEME.get(),
+                    self.tab == PreferencesTab::Theme,
+                    cx,
+                ))
+                .child(nav_item(
+                    "pref-tab-view",
+                    PreferencesTab::View,
+                    IconName::Columns2,
+                    p::NAV_VIEW.get(),
+                    self.tab == PreferencesTab::View,
+                    cx,
+                ));
+            crate::ui::disclosure_body(
+                "pref-appearance-body",
+                self.appearance_expanded,
+                appearance_progress,
+                group,
+                window,
+                cx,
+            )
+        });
         div()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|panel, event: &KeyDownEvent, _, cx| {
@@ -1937,27 +1993,14 @@ impl Render for Preferences {
                             .flex().items_center().gap_2().px_2().py_2()
                             .rounded(px(6.)).cursor_pointer().text_size(ui_font_size)
                             .hover(|s| s.bg(rgb(0xefefed)))
-                            .child(crate::ui::icon(if self.appearance_expanded {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            }))
+                            .child(appearance_chevron)
                             .child(p::NAV_APPEARANCE.get())
                             .on_click(cx.listener(|panel, _, _, cx| {
                                 panel.appearance_expanded = !panel.appearance_expanded;
                                 cx.notify();
                             })),
                     )
-                    .when(self.appearance_expanded, |nav| nav.child(
-                            div().ml_2().pl_2().border_l_1().border_color(rgb(0xe8e7e3))
-                            .flex().flex_col().gap_1()
-                            .child(nav_item("pref-tab-fonts", PreferencesTab::Fonts,
-                                IconName::Type, p::NAV_FONTS.get(), self.tab == PreferencesTab::Fonts, cx))
-                            .child(nav_item("pref-tab-theme", PreferencesTab::Theme,
-                                IconName::Palette, p::NAV_THEME.get(), self.tab == PreferencesTab::Theme, cx))
-                            .child(nav_item("pref-tab-view", PreferencesTab::View,
-                                IconName::Columns2, p::NAV_VIEW.get(), self.tab == PreferencesTab::View, cx))
-                    ))
+                    .children(appearance_body)
                     .child(nav_item(
                         "pref-tab-shortcuts",
                         PreferencesTab::Shortcuts,

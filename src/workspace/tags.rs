@@ -502,21 +502,14 @@ impl Workspace {
     }
 
     pub(super) fn render_tag_editor(&self, cx: &Context<Self>) -> AnyElement {
-        div()
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(0x00000030))
-            .occlude()
-            .child(
-                div()
-                    .w(px(420.))
-                    .max_w_full()
-                    .children(self.render_tag_panel(cx)),
-            )
-            .into_any_element()
+        crate::ui::modal_shell(
+            "tag-editor-backdrop",
+            div()
+                .w(px(420.))
+                .max_w_full()
+                .children(self.render_tag_panel(cx)),
+        )
+        .into_any_element()
     }
 
     pub(super) fn render_tag_panel(&self, cx: &Context<Self>) -> Option<AnyElement> {

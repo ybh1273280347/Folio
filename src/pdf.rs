@@ -7,8 +7,8 @@ use crate::{
     ui,
 };
 use gpui::{MouseButton, Subscription};
+use gpui_kit::base::{HandleEdge, resize_handle};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
-use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use gpui_pdf::{Highlight, NormRect, PdfStyle, PdfView};
@@ -26,6 +26,15 @@ pub enum PdfPaneEvent {
 }
 impl EventEmitter<PdfPaneEvent> for PdfPane {}
 
+#[derive(Clone)]
+struct PdfAnnotationsResizeDrag;
+
+impl Render for PdfAnnotationsResizeDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
 pub struct PdfPane {
     path: PathBuf,
     view: Option<Entity<PdfView>>,
@@ -38,6 +47,8 @@ pub struct PdfPane {
     annotation_comment_input: Entity<TextareaState>,
     drawer_comment_input: Entity<TextareaState>,
     annotations_drawer_open: bool,
+    annotations_drawer_width: f32,
+    annotations_drawer_drag: Option<(f32, f32)>,
     pending_jump_page: Option<usize>,
     translate: crate::translate::TranslatePopover,
     _subscriptions: Vec<Subscription>,
@@ -124,6 +135,8 @@ impl PdfPane {
             annotation_comment_input,
             drawer_comment_input,
             annotations_drawer_open: false,
+            annotations_drawer_width: 268.0,
+            annotations_drawer_drag: None,
             pending_jump_page: None,
             translate: crate::translate::TranslatePopover::default(),
             _subscriptions: vec![sub, drawer_sub],
@@ -431,111 +444,114 @@ impl PdfPane {
         };
         let active_color = item.color.clone();
 
+        let card = div()
+            .id("pdf-active-annotation-card")
+            .w(px(310.))
+            .p(px(12.))
+            .rounded(px(10.))
+            .bg(rgb(0xffffff))
+            .border_1()
+            .border_color(rgb(0xe8e7e3))
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(5.))
+                            .items_center()
+                            .children(HIGHLIGHT_COLORS.iter().enumerate().map(
+                                |(idx, (color_id, _label, hex))| {
+                                    let is_current = active_color == *color_id;
+                                    let cid = (*color_id).to_string();
+                                    div()
+                                        .id(("pdf-ann-color", idx))
+                                        .size(px(16.))
+                                        .rounded(px(8.))
+                                        .bg(gpui_kit::rgb(*hex))
+                                        .border_1()
+                                        .border_color(if is_current {
+                                            rgb(0x37352f)
+                                        } else {
+                                            rgb(0xd8d6d0)
+                                        })
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |this, _, _window, cx| {
+                                            this.set_annotation_color(active_id, &cid, cx);
+                                        }))
+                                },
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(4.))
+                            .child(
+                                ui::button("pdf-ann-canvas", "画布").on_click(cx.listener(
+                                    move |this, _, _window, cx| {
+                                        if let Some(item) =
+                                            this.annotations.iter().find(|a| a.id == active_id)
+                                        {
+                                            cx.emit(PdfPaneEvent::SendToCanvas {
+                                                path: this.path.clone(),
+                                                annotation_id: item.id,
+                                                page_1based: item.page + 1,
+                                                quote: item.quote.clone(),
+                                                rects: item.rects.clone(),
+                                            });
+                                        }
+                                    },
+                                )),
+                            )
+                            .child(
+                                ui::button_danger_soft("pdf-ann-delete", crate::i18n::common::DELETE.get())
+                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                        this.delete_annotation(active_id, cx);
+                                    })),
+                            )
+                            .child(
+                                ui::button("pdf-ann-close", "×")
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        this.active_annotation_id = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(rgb(0x787774))
+                    .child(quote_preview),
+            )
+            .child(Textarea::new(&self.annotation_comment_input).w_full().text_size(px(12.0)));
+
         Some(
             div()
-                .id("pdf-active-annotation-card")
                 .absolute()
                 .top(px(44.))
                 .right(px(20.))
-                .w(px(310.))
-                .p(px(12.))
-                .rounded(px(10.))
-                .bg(rgb(0xffffff))
-                .border_1()
-                .border_color(rgb(0xe8e7e3))
-                .shadow_lg()
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                    cx.stop_propagation();
-                })
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .flex()
-                                .gap(px(5.))
-                                .items_center()
-                                .children(HIGHLIGHT_COLORS.iter().enumerate().map(
-                                    |(idx, (color_id, _label, hex))| {
-                                        let is_current = active_color == *color_id;
-                                        let cid = (*color_id).to_string();
-                                        div()
-                                            .id(("pdf-ann-color", idx))
-                                            .size(px(16.))
-                                            .rounded(px(8.))
-                                            .bg(gpui_kit::rgb(*hex))
-                                            .border_1()
-                                            .border_color(if is_current {
-                                                rgb(0x37352f)
-                                            } else {
-                                                rgb(0xd8d6d0)
-                                            })
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                                this.set_annotation_color(active_id, &cid, cx);
-                                            }))
-                                    },
-                                )),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .gap(px(4.))
-                                .child(
-                                    ui::button("pdf-ann-canvas", "画布").on_click(cx.listener(
-                                        move |this, _, _window, cx| {
-                                            if let Some(item) =
-                                                this.annotations.iter().find(|a| a.id == active_id)
-                                            {
-                                                cx.emit(PdfPaneEvent::SendToCanvas {
-                                                    path: this.path.clone(),
-                                                    annotation_id: item.id,
-                                                    page_1based: item.page + 1,
-                                                    quote: item.quote.clone(),
-                                                    rects: item.rects.clone(),
-                                                });
-                                            }
-                                        },
-                                    )),
-                                )
-                                .child(
-                                    ui::button_danger_soft("pdf-ann-delete", crate::i18n::common::DELETE.get())
-                                        .on_click(cx.listener(move |this, _, _window, cx| {
-                                            this.delete_annotation(active_id, cx);
-                                        })),
-                                )
-                                .child(
-                                    ui::button("pdf-ann-close", "×")
-                                        .on_click(cx.listener(|this, _, _window, cx| {
-                                            this.active_annotation_id = None;
-                                            cx.notify();
-                                        })),
-                                ),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.5))
-                        .text_color(rgb(0x787774))
-                        .child(quote_preview),
-                )
-                .child(Textarea::new(&self.annotation_comment_input).w_full().text_size(px(12.0)))
+                .child(ui::popover_enter(
+                    card,
+                    ("pdf-ann-pop", active_id as usize),
+                    ui::PopoverDirection::Down,
+                ))
                 .into_any_element(),
         )
     }
 
-    fn render_annotations_drawer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.annotations_drawer_open {
-            return None;
-        }
+    fn render_annotations_drawer(&self, cx: &mut Context<Self>) -> AnyElement {
         let pdf_annotations: Vec<&AnnotationItem> = self.annotations.iter().collect();
-        Some(
-            div()
+        div()
                 .id("pdf-annotations-drawer")
                 .flex()
                 .flex_col()
@@ -817,13 +833,12 @@ impl PdfPane {
                                 })
                         })),
                 )
-                .into_any_element(),
-        )
+                .into_any_element()
     }
 }
 
 impl Render for PdfPane {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let viewer = div()
             .flex()
             .relative()
@@ -847,16 +862,65 @@ impl Render for PdfPane {
                         cx,
                         |this| &mut this.translate,
                     )),
+            );
+        let ann_open = self.annotations_drawer_open;
+        let ann_progress = ui::sample_drawer(
+            ("pdf-annotations-drawer-motion", cx.entity_id().as_u64() as usize),
+            ann_open,
+            200,
+            window,
+            cx,
+        );
+        let ann_rendered = ann_open || ann_progress > 0.001;
+        let drawer_width = self.annotations_drawer_width.clamp(160., 700.);
+        let drag_pane = cx.entity();
+        let drawer = ann_rendered.then(|| {
+            ui::horizontal_drawer(
+                ui::DrawerSide::Right,
+                ann_open,
+                ann_progress,
+                drawer_width,
+                self.render_annotations_drawer(cx),
             )
-            ;
-        let content = if let Some(drawer) = self.render_annotations_drawer(cx) {
-            h_resizable("pdf-annotations-layout")
-                .child(resizable_panel().size_range(px(200.)..Pixels::MAX).child(viewer))
-                .child(resizable_panel().size(px(268.)).size_range(px(160.)..px(700.)).fixed().child(drawer))
-                .into_any_element()
-        } else {
-            viewer.into_any_element()
-        };
+            .when(ann_open && ann_progress >= 0.999, |drawer| {
+                drawer.child(
+                    resize_handle("pdf-annotations-resize", Axis::Horizontal)
+                        .inside(HandleEdge::Leading)
+                        .on_drag(PdfAnnotationsResizeDrag, move |_, _, window, cx| {
+                            let start_x = f32::from(window.mouse_position().x);
+                            drag_pane.update(cx, |pane, _| {
+                                pane.annotations_drawer_drag = Some((
+                                    start_x,
+                                    pane.annotations_drawer_width.clamp(160., 700.),
+                                ));
+                            });
+                            cx.new(|_| PdfAnnotationsResizeDrag)
+                        }),
+                )
+            })
+        });
+        let content = div()
+            .id("pdf-annotations-layout")
+            .relative()
+            .flex()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .on_drag_move(cx.listener(
+                |pane, event: &DragMoveEvent<PdfAnnotationsResizeDrag>, _, cx| {
+                    let Some((start_x, start_w)) = pane.annotations_drawer_drag else {
+                        return;
+                    };
+                    let delta = f32::from(event.event.position.x) - start_x;
+                    let next_w = (start_w - delta).clamp(160., 700.).round();
+                    if (pane.annotations_drawer_width - next_w).abs() >= 1.0 {
+                        pane.annotations_drawer_width = next_w;
+                        cx.notify();
+                    }
+                },
+            ))
+            .child(div().flex_1().min_w_0().h_full().child(viewer))
+            .children(drawer);
         div().size_full().track_focus(&self.annotation_list_focus)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 if this.translate.is_open() {

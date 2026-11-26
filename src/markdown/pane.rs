@@ -12,7 +12,7 @@ use crate::model::AppSettings;
 use comrak::{Arena, Options, nodes::NodeValue, parse_document};
 use gpui_kit::{
     assets::IconName,
-    base::{Scrollbar, ScrollbarMode, StyledExt, text::MarkdownExtensions},
+    base::{HandleEdge, Scrollbar, ScrollbarMode, StyledExt, resize_handle, text::MarkdownExtensions},
     component::{
         Sizable,
         input::{
@@ -21,7 +21,6 @@ use gpui_kit::{
             TextareaState,
         },
         menu::ContextMenuExt,
-        resizable::{h_resizable, resizable_panel},
         tooltip::Tooltip,
     },
     prelude::FluentBuilder,
@@ -330,6 +329,15 @@ impl Render for OutlineResizeDrag {
     }
 }
 
+#[derive(Clone)]
+struct AnnotationsDrawerResizeDrag;
+
+impl Render for AnnotationsDrawerResizeDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
 pub struct MarkdownPane {
     export: Rc<RefCell<Option<pdf::ExportRequest>>>,
     export_width: Pixels,
@@ -416,6 +424,8 @@ pub struct MarkdownPane {
     annotation_list_focus: FocusHandle,
     annotation_list_scroll: ScrollHandle,
     show_annotations_drawer: bool,
+    annotations_drawer_width: f32,
+    annotations_drawer_drag: Option<(f32, f32)>,
     note_input: Entity<TextareaState>,
     drawer_note_input: Entity<TextareaState>,
     zoom_hud: crate::ui::ZoomHud,
@@ -1037,6 +1047,8 @@ impl MarkdownPane {
             annotation_list_focus: cx.focus_handle(),
             annotation_list_scroll: ScrollHandle::new(),
             show_annotations_drawer: false,
+            annotations_drawer_width: 300.0,
+            annotations_drawer_drag: None,
             note_input,
             drawer_note_input,
             zoom_hud: crate::ui::ZoomHud::default(),
@@ -2852,7 +2864,11 @@ impl MarkdownPane {
             .flex()
             .flex_col()
             .gap_1p5()
-            .child(pill);
+            .child(crate::ui::popover_enter(
+                pill,
+                "md-floating-toolbar-enter",
+                crate::ui::PopoverDirection::Fade,
+            ));
 
         if self.show_turn_into {
             let turn_items: &[(&str, &str, IconName)] = &[
@@ -2901,7 +2917,7 @@ impl MarkdownPane {
                         pane.execute_slash_command(cmd_id, 0, window, cx);
                     }))
             });
-            stack = stack.child(
+            stack = stack.child(crate::ui::popover_enter(
                 div()
                     .w(px(186.))
                     .p_1p5()
@@ -2915,7 +2931,9 @@ impl MarkdownPane {
                     .gap_0p5()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .children(rows),
-            );
+                "md-turn-into-pop",
+                crate::ui::PopoverDirection::Down,
+            ));
         }
 
         if self.show_color_picker {
@@ -3012,7 +3030,7 @@ impl MarkdownPane {
             let preview_rgb =
                 crate::model::parse_rgb_hex(self.color_hex_input.read(cx).value().as_ref());
 
-            stack = stack.child(
+            stack = stack.child(crate::ui::popover_enter(
                 div()
                     .w(px(284.))
                     .px_3()
@@ -3291,11 +3309,13 @@ impl MarkdownPane {
                             .gap_1p5()
                             .children(hl_swatches),
                     ),
-            );
+                "md-color-picker-pop",
+                crate::ui::PopoverDirection::Down,
+            ));
         }
 
         if self.link_editing {
-            stack = stack.child(
+            stack = stack.child(crate::ui::popover_enter(
                 div()
                     .w(px(320.))
                     .p_2()
@@ -3322,7 +3342,9 @@ impl MarkdownPane {
                             },
                         )),
                     ),
-            );
+                "md-link-edit-pop",
+                crate::ui::PopoverDirection::Down,
+            ));
         }
 
         Some(deferred(stack).into_any_element())
@@ -3450,51 +3472,58 @@ impl MarkdownPane {
             Some(crate::i18n::markdown::slash_header_query(&query))
         };
 
+        let slash_card = div()
+            .id("md-slash-menu")
+            .w(menu_w)
+            .p_1p5()
+            .rounded(px(12.))
+            .bg(rgb(0xffffff))
+            .border_1()
+            .border_color(rgb(0xeae9e5))
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .when_some(header_label, |el, label| {
+                el.child(
+                    div()
+                        .px_2p5()
+                        .pt_1()
+                        .pb_1p5()
+                        .border_b_1()
+                        .border_color(rgb(0xf1f0eb))
+                        .text_size(px(11.))
+                        .text_color(rgb(0x9b9a97))
+                        .child(label),
+                )
+            })
+            .child(
+                div()
+                    .id("slash-menu-items")
+                    .max_h(px(320.))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.slash_scroll)
+                    .on_scroll(cx.listener(|_, _: &ScrollEvent, _, cx| {
+                        cx.stop_propagation();
+                    }))
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .children(rows),
+            );
+
         Some(
             deferred(
                 div()
-                    .id("md-slash-menu")
                     .absolute()
                     .left(rel_x)
                     .top(rel_y)
-                    .w(menu_w)
-                    .p_1p5()
-                    .rounded(px(12.))
-                    .bg(rgb(0xffffff))
-                    .border_1()
-                    .border_color(rgb(0xeae9e5))
-                    .shadow_lg()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .when_some(header_label, |el, label| {
-                        el.child(
-                            div()
-                                .px_2p5()
-                                .pt_1()
-                                .pb_1p5()
-                                .border_b_1()
-                                .border_color(rgb(0xf1f0eb))
-                                .text_size(px(11.))
-                                .text_color(rgb(0x9b9a97))
-                                .child(label),
-                        )
-                    })
-                    .child(
-                        div()
-                            .id("slash-menu-items")
-                            .max_h(px(320.))
-                            .overflow_y_scroll()
-                            .track_scroll(&self.slash_scroll)
-                            .on_scroll(cx.listener(|_, _: &ScrollEvent, _, cx| {
-                                cx.stop_propagation();
-                            }))
-                            .flex()
-                            .flex_col()
-                            .gap_0p5()
-                            .children(rows),
-                    ),
+                    .child(crate::ui::popover_enter(
+                        slash_card,
+                        "md-slash-menu-pop",
+                        crate::ui::PopoverDirection::Down,
+                    )),
             )
             .into_any_element(),
         )
@@ -3660,9 +3689,6 @@ impl MarkdownPane {
             });
             let menu = div()
                 .id("md-block-action-menu")
-                .absolute()
-                .left(rel_x)
-                .top(rel_y + px(26.))
                 .w(px(186.))
                 .p_1p5()
                 .rounded(px(8.))
@@ -3716,7 +3742,17 @@ impl MarkdownPane {
             return Some(
                 div()
                     .child(handle)
-                    .child(deferred(menu))
+                    .child(deferred(
+                        div()
+                            .absolute()
+                            .left(rel_x)
+                            .top(rel_y + px(26.))
+                            .child(crate::ui::popover_enter(
+                                menu,
+                                ("md-block-menu-pop", top_id.as_u64() as usize),
+                                crate::ui::PopoverDirection::Down,
+                            )),
+                    ))
                     .into_any_element(),
             );
         }
@@ -3772,94 +3808,101 @@ impl MarkdownPane {
                 }))
         });
 
-        Some(
-            deferred(
+        let card = div()
+            .id("md-annotation-popover")
+            .w(px(popover_w))
+            .p_3()
+            .rounded(px(10.))
+            .bg(rgb(0xffffff))
+            .border_1()
+            .border_color(rgb(0xe2e4e8))
+            .shadow_md()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
                 div()
-                    .id("md-annotation-popover")
-                    .absolute()
-                    .left(rel_x)
-                    .top(rel_y)
-                    .w(px(popover_w))
-                    .p_3()
-                    .rounded(px(10.))
-                    .bg(rgb(0xffffff))
-                    .border_1()
-                    .border_color(rgb(0xe2e4e8))
-                    .shadow_md()
                     .flex()
-                    .flex_col()
-                    .gap_2()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .items_center()
+                    .justify_between()
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .children(swatches),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(
-                                        crate::ui::control("delete-md-annotation", IconName::Trash)
-                                            .on_click(cx.listener(move |_, _, _, cx| {
-                                                cx.emit(MarkdownEvent::DeleteAnnotation(id));
-                                            })),
-                                    )
-                                    .child(
-                                        crate::ui::control("close-md-annotation", IconName::Close)
-                                            .on_click(cx.listener(|pane, _, _, cx| {
-                                                pane.active_annotation_id = None;
-                                                cx.notify();
-                                            })),
-                                    ),
-                            ),
+                            .gap_1p5()
+                            .children(swatches),
                     )
-                    .child(
-                        div()
-                            .text_size(px(quote_font_size))
-                            .text_color(rgb(0x787774))
-                            .text_ellipsis()
-                            .child(format!("“{}”", item.quote)),
-                    )
-                    .child(Textarea::new(&self.note_input).w_full().text_size(px(comment_font_size)))
                     .child(
                         div()
                             .flex()
-                            .justify_end()
+                            .items_center()
+                            .gap_1()
                             .child(
-                                crate::ui::button_primary("save-md-annotation", crate::i18n::markdown::SAVE_ANNOTATION.get())
-                                    .font_family(crate::ui::sans_font(&self.settings.interface_font))
-                                    .text_size(px(12.))
-                                    .min_h(px(26.))
-                                    .px(px(10.))
-                                    .py(px(3.))
-                                    .on_click(
-                                    cx.listener(move |pane, _, _, cx| {
-                                        let comment =
-                                            pane.note_input.read(cx).value().trim().to_string();
-                                        if let Some(a) =
-                                            pane.annotations.iter_mut().find(|a| a.id == id)
-                                        {
-                                            a.comment = comment;
-                                        }
-                                        let _ = annotations::save_annotations(
-                                            &pane.path,
-                                            &pane.annotations,
-                                        );
+                                crate::ui::control("delete-md-annotation", IconName::Trash)
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(MarkdownEvent::DeleteAnnotation(id));
+                                    })),
+                            )
+                            .child(
+                                crate::ui::control("close-md-annotation", IconName::Close)
+                                    .on_click(cx.listener(|pane, _, _, cx| {
                                         pane.active_annotation_id = None;
                                         cx.notify();
-                                    }),
-                                ),
+                                    })),
                             ),
                     ),
+            )
+            .child(
+                div()
+                    .text_size(px(quote_font_size))
+                    .text_color(rgb(0x787774))
+                    .text_ellipsis()
+                    .child(format!("“{}”", item.quote)),
+            )
+            .child(Textarea::new(&self.note_input).w_full().text_size(px(comment_font_size)))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .child(
+                        crate::ui::button_primary("save-md-annotation", crate::i18n::markdown::SAVE_ANNOTATION.get())
+                            .font_family(crate::ui::sans_font(&self.settings.interface_font))
+                            .text_size(px(12.))
+                            .min_h(px(26.))
+                            .px(px(10.))
+                            .py(px(3.))
+                            .on_click(
+                            cx.listener(move |pane, _, _, cx| {
+                                let comment =
+                                    pane.note_input.read(cx).value().trim().to_string();
+                                if let Some(a) =
+                                    pane.annotations.iter_mut().find(|a| a.id == id)
+                                {
+                                    a.comment = comment;
+                                }
+                                let _ = annotations::save_annotations(
+                                    &pane.path,
+                                    &pane.annotations,
+                                );
+                                pane.active_annotation_id = None;
+                                cx.notify();
+                            }),
+                        ),
+                    ),
+            );
+
+        Some(
+            deferred(
+                div()
+                    .absolute()
+                    .left(rel_x)
+                    .top(rel_y)
+                    .child(crate::ui::popover_enter(
+                        card,
+                        ("md-ann-pop", id as usize),
+                        crate::ui::PopoverDirection::Down,
+                    )),
             )
             .into_any_element(),
         )

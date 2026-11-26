@@ -548,6 +548,275 @@ pub(crate) fn control_sized(
         .child(icon(name).size(px(icon_size)))
 }
 
+/// Direction for anchored popover entrance motion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopoverDirection {
+    /// Opens downward from its anchor (slides from -5px to 0).
+    Down,
+    /// Opens upward from its anchor (slides from +5px to 0).
+    Up,
+    /// Pure opacity fade without spatial offset.
+    Fade,
+}
+
+/// Shared 140ms ease-out-quint entrance for anchored popovers and floating cards.
+///
+/// Apply to a non-`.absolute()` card (or wrap an inner card inside an `.absolute()`
+/// positioner) so the relative `top` offset never overwrites explicit coordinates.
+pub fn popover_enter<E: Styled + IntoElement + 'static>(
+    element: E,
+    id: impl Into<ElementId>,
+    direction: PopoverDirection,
+) -> AnimationElement<E> {
+    let start_y = match direction {
+        PopoverDirection::Down => -5.0,
+        PopoverDirection::Up => 5.0,
+        PopoverDirection::Fade => 0.0,
+    };
+    element.relative().with_animation(
+        id,
+        Animation::new(std::time::Duration::from_millis(140)).with_easing(ease_out_quint()),
+        move |el, t| {
+            let el = el.opacity(t);
+            if start_y == 0.0 {
+                el
+            } else {
+                el.top(px(start_y * (1.0 - t)))
+            }
+        },
+    )
+}
+
+/// Shared 160ms rotating `ChevronRight` (0° closed ↔ 90° open) that adopts its
+/// initial state immediately without a mount-time spin and respects `reduce_motion`.
+pub fn fold_chevron(
+    id: impl Into<ElementId>,
+    open: bool,
+    size: Pixels,
+    color: impl Into<Hsla>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Icon {
+    let progress = gpui_kit::base::transition_with_status(
+        id.into(),
+        if open { 1.0_f32 } else { 0.0_f32 },
+        gpui_kit::base::Transition::new(std::time::Duration::from_millis(160))
+            .ease(ease_out_quint()),
+        window,
+        cx,
+    )
+    .value
+    .clamp(0.0, 1.0);
+    icon(IconName::ChevronRight)
+        .w(size)
+        .h(size)
+        .text_color(color.into())
+        .rotate(gpui::radians(progress * std::f32::consts::FRAC_PI_2))
+}
+
+/// Side from which a docked horizontal drawer slides in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrawerSide {
+    #[allow(dead_code)]
+    Left,
+    Right,
+}
+
+/// Sample normalized `[0.0, 1.0]` progress for a horizontal docked drawer.
+pub fn sample_drawer(
+    id: impl Into<ElementId>,
+    open: bool,
+    duration_ms: u64,
+    window: &mut Window,
+    cx: &mut App,
+) -> f32 {
+    gpui_kit::base::transition_with_status(
+        id.into(),
+        if open { 1.0_f32 } else { 0.0_f32 },
+        gpui_kit::base::Transition::new(std::time::Duration::from_millis(duration_ms))
+            .ease(gpui_kit::base::animation::ease_out_cubic),
+        window,
+        cx,
+    )
+    .value
+    .clamp(0.0, 1.0)
+}
+
+/// Render a docked horizontal drawer with width clipping, edge slide and subtle fade.
+///
+/// While closing (`!open`), pointer clicks are absorbed so exiting controls cannot
+/// be triggered mid-transition. Callers can attach a `resize_handle` onto the
+/// returned `Div` when `open && progress >= 0.999`.
+pub fn horizontal_drawer(
+    side: DrawerSide,
+    open: bool,
+    progress: f32,
+    target_width: f32,
+    panel: impl IntoElement,
+) -> Div {
+    let offset = match side {
+        DrawerSide::Left => -target_width * (1.0 - progress),
+        DrawerSide::Right => target_width * (1.0 - progress),
+    };
+    div()
+        .relative()
+        .w(px(target_width * progress))
+        .h_full()
+        .flex_shrink_0()
+        .when(progress < 0.999, |d| d.overflow_hidden())
+        .child(
+            div()
+                .relative()
+                .w(px(target_width))
+                .h_full()
+                .left(px(offset))
+                .opacity(0.6 + 0.4 * progress)
+                .child(panel),
+        )
+        .when(!open, |d| {
+            d.child(div().absolute().inset_0().block_mouse_except_scroll())
+        })
+}
+
+/// Sample normalized `[0.0, 1.0]` progress for a vertical disclosure/accordion.
+pub fn sample_disclosure(
+    id: impl Into<ElementId>,
+    open: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> f32 {
+    gpui_kit::base::transition_with_status(
+        id.into(),
+        if open { 1.0_f32 } else { 0.0_f32 },
+        gpui_kit::base::Transition::new(std::time::Duration::from_millis(180))
+            .ease(gpui_kit::base::animation::ease_out_cubic),
+        window,
+        cx,
+    )
+    .value
+    .clamp(0.0, 1.0)
+}
+
+/// Render a vertical collapsible body with height clipping and fade.
+///
+/// At rest (`open && progress >= 0.999`), the child renders directly at natural
+/// height while a passive `canvas` caches its measured height. Subsequent collapse
+/// and re-open transitions clip against the cached height in O(1), avoiding nested
+/// `layout_as_root` work; first-time expansion from a collapsed initial state falls
+/// back to `MotionReveal`.
+pub fn disclosure_body(
+    id: impl Into<ElementId>,
+    open: bool,
+    progress: f32,
+    child: impl IntoElement,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let base_id = id.into();
+    let height_id = ElementId::NamedChild(base_id.clone().into(), "disclosure-h".into());
+    let reveal_id = ElementId::NamedChild(base_id.into(), "disclosure-reveal".into());
+    let height_cell = window
+        .use_keyed_state(height_id, cx, |_, _| {
+            std::rc::Rc::new(std::cell::Cell::new(None::<Pixels>))
+        })
+        .read(cx)
+        .clone();
+
+    if open && progress >= 0.999 {
+        return div()
+            .relative()
+            .w_full()
+            .child(child)
+            .child(
+                canvas(
+                    move |bounds, _, _| {
+                        if bounds.size.height > px(0.) {
+                            height_cell.set(Some(bounds.size.height));
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .into_any_element();
+    }
+
+    let inner = div()
+        .relative()
+        .w_full()
+        .opacity(0.2 + 0.8 * progress)
+        .child(child)
+        .when(!open, |d| {
+            d.child(div().absolute().inset_0().block_mouse_except_scroll())
+        });
+
+    if let Some(measured_h) = height_cell.get() {
+        div()
+            .w_full()
+            .h(measured_h * progress)
+            .overflow_hidden()
+            .child(inner)
+            .into_any_element()
+    } else {
+        div()
+            .w_full()
+            .overflow_hidden()
+            .child(gpui_kit::base::MotionReveal::new(
+                reveal_id,
+                progress,
+                inner.into_any_element(),
+            ))
+            .into_any_element()
+    }
+}
+
+/// Shared modal backdrop + rising card animation shell for custom dialogs.
+///
+/// Returns a `Stateful<Div>` backdrop with `.occlude()` so callers can attach
+/// backdrop click/scroll handlers while sharing the 140ms scrim fade and 180ms
+/// card rise motion.
+pub fn modal_shell<E: Styled + IntoElement + 'static>(
+    id: impl Into<ElementId>,
+    card: E,
+) -> Stateful<Div> {
+    let palette = crate::theme::palette();
+    let base_id = id.into();
+    let scrim_id = ElementId::NamedChild(base_id.clone().into(), "scrim".into());
+    let card_id = ElementId::NamedChild(base_id.clone().into(), "card".into());
+    let scrim = if palette.is_dark() {
+        rgba(0x07090db8)
+    } else {
+        rgba(0x16161640)
+    };
+    let animated_scrim = div()
+        .absolute()
+        .inset_0()
+        .bg(scrim)
+        .with_animation(
+            scrim_id,
+            Animation::new(std::time::Duration::from_millis(140)).with_easing(ease_out_quint()),
+            |el, t| el.opacity(t),
+        );
+    // Rise in from slightly below while fading in; feels anchored, not popped.
+    let animated_card = card.relative().with_animation(
+        card_id,
+        Animation::new(std::time::Duration::from_millis(180)).with_easing(ease_out_quint()),
+        |card, t| card.top(px(10. * (1. - t))).opacity(0.4 + 0.6 * t),
+    );
+    div()
+        .id(base_id)
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        // Keep hover / clicks from leaking to the UI behind the dialog.
+        .occlude()
+        .child(animated_scrim)
+        .child(animated_card)
+}
+
 pub fn modal_overlay(
     title: impl IntoElement,
     description: impl IntoElement,
@@ -581,30 +850,8 @@ pub fn modal_overlay(
         .gap_4()
         .child(div().font_semibold().text_color(gpui_kit::rgb(palette.text)).child(title))
         .child(div().text_color(gpui_kit::rgb(palette.muted)).child(description))
-        .child(actions)
-        // Rise in from slightly below while fading in; feels anchored, not popped.
-        .relative()
-        .with_animation(
-            "modal-card",
-            Animation::new(std::time::Duration::from_millis(180)).with_easing(ease_out_quint()),
-            |card, t| card.top(px(10. * (1. - t))).opacity(0.4 + 0.6 * t),
-        );
-    div()
-        .id("modal-backdrop")
-        .absolute()
-        .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(if palette.is_dark() { rgba(0x07090db8) } else { rgba(0x16161640) })
-        // Keep hover / clicks from leaking to the UI behind the dialog.
-        .occlude()
-        .child(card)
-        .with_animation(
-            "modal-backdrop-fade",
-            Animation::new(std::time::Duration::from_millis(140)).with_easing(ease_out_quint()),
-            |backdrop, t| backdrop.opacity(t),
-        )
+        .child(actions);
+    modal_shell("modal-backdrop", card)
 }
 
 fn button_base(id: impl Into<ElementId>, text: SharedString) -> Stateful<Div> {

@@ -1498,7 +1498,8 @@ impl ChatPane {
                     )
             }
         };
-        card.into_any_element()
+        crate::ui::popover_enter(card, "ai-pending-ui-pop", crate::ui::PopoverDirection::Up)
+            .into_any_element()
     }
 
     pub(super) fn render_context_ring(&self, palette: Palette) -> AnyElement {

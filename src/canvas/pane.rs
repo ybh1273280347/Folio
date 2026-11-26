@@ -2472,9 +2472,6 @@ impl Render for CanvasPane {
             ];
             let mut swatch_row = div()
                 .id("canvas-color-popover")
-                .absolute()
-                .top_2()
-                .right_3()
                 .h(px(32.))
                 .px_2()
                 .rounded(px(8.))
@@ -2518,7 +2515,17 @@ impl Render for CanvasPane {
                         })),
                 );
             }
-            viewport = viewport.child(swatch_row);
+            viewport = viewport.child(
+                div()
+                    .absolute()
+                    .top_2()
+                    .right_3()
+                    .child(crate::ui::popover_enter(
+                        swatch_row,
+                        "canvas-color-pop",
+                        crate::ui::PopoverDirection::Down,
+                    )),
+            );
         }
 
         // Floating toolbar anchored near the selected edge.
@@ -2529,83 +2536,89 @@ impl Render for CanvasPane {
             let is_ref = edge.kind() == EdgeKind::Reference;
             let bar_x = (f32::from(mid.x) - 86.0).max(12.0);
             let bar_y = (f32::from(mid.y) - 44.0).max(12.0);
+            let edge_bar = div()
+                .id("canvas-edge-toolbar")
+                .h(px(28.))
+                .px_1p5()
+                .rounded(px(7.))
+                .bg(gpui_kit::rgb(palette.surface))
+                .border_1()
+                .border_color(gpui_kit::rgb(palette.accent))
+                .shadow_md()
+                .flex()
+                .items_center()
+                .gap_1()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    Button::new("canvas-edge-toggle-kind")
+                        .ghost()
+                        .compact()
+                        .h(px(20.))
+                        .px_1p5()
+                        .icon(crate::ui::icon(IconName::Link))
+                        .label(if is_ref {
+                            i18n_canvas::EDGE_TO_SOLID.get()
+                        } else {
+                            i18n_canvas::EDGE_TO_DASHED.get()
+                        })
+                        .tooltip(i18n_canvas::TOOLTIP_EDGE_TOGGLE_KIND)
+                        .on_click(cx.listener(move |pane, _, _, cx| {
+                            let next = if is_ref {
+                                EdgeKind::Hierarchy
+                            } else {
+                                EdgeKind::Reference
+                            };
+                            pane.set_selected_edge_kind(next, cx);
+                        })),
+                )
+                .child(
+                    Button::new("canvas-edge-reverse")
+                        .ghost()
+                        .compact()
+                        .h(px(20.))
+                        .w(px(22.))
+                        .icon(crate::ui::icon(IconName::Replace))
+                        .tooltip(i18n_canvas::TOOLTIP_EDGE_REVERSE)
+                        .on_click(cx.listener(|pane, _, _, cx| {
+                            pane.reverse_selected_edge(cx);
+                        })),
+                )
+                .child(
+                    Button::new("canvas-edge-color")
+                        .ghost()
+                        .compact()
+                        .h(px(20.))
+                        .w(px(22.))
+                        .when(self.color_picker_open, |b| b.bg(gpui_kit::rgb(palette.selection)))
+                        .icon(crate::ui::icon(IconName::Palette))
+                        .tooltip(i18n_canvas::TOOLTIP_COLOR_PICKER)
+                        .on_click(cx.listener(|pane, _, _, cx| {
+                            pane.color_picker_open = !pane.color_picker_open;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("canvas-edge-delete")
+                        .ghost()
+                        .compact()
+                        .h(px(20.))
+                        .w(px(22.))
+                        .icon(crate::ui::icon(IconName::Trash))
+                        .tooltip(i18n_canvas::TOOLTIP_EDGE_DELETE)
+                        .on_click(cx.listener(|pane, _, _, cx| {
+                            pane.delete_selection(cx);
+                        })),
+                );
             viewport = viewport.child(
                 div()
-                    .id("canvas-edge-toolbar")
                     .absolute()
                     .left(px(bar_x))
                     .top(px(bar_y))
-                    .h(px(28.))
-                    .px_1p5()
-                    .rounded(px(7.))
-                    .bg(gpui_kit::rgb(palette.surface))
-                    .border_1()
-                    .border_color(gpui_kit::rgb(palette.accent))
-                    .shadow_md()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
-                        Button::new("canvas-edge-toggle-kind")
-                            .ghost()
-                            .compact()
-                            .h(px(20.))
-                            .px_1p5()
-                            .icon(crate::ui::icon(IconName::Link))
-                            .label(if is_ref {
-                                i18n_canvas::EDGE_TO_SOLID.get()
-                            } else {
-                                i18n_canvas::EDGE_TO_DASHED.get()
-                            })
-                            .tooltip(i18n_canvas::TOOLTIP_EDGE_TOGGLE_KIND)
-                            .on_click(cx.listener(move |pane, _, _, cx| {
-                                let next = if is_ref {
-                                    EdgeKind::Hierarchy
-                                } else {
-                                    EdgeKind::Reference
-                                };
-                                pane.set_selected_edge_kind(next, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("canvas-edge-reverse")
-                            .ghost()
-                            .compact()
-                            .h(px(20.))
-                            .w(px(22.))
-                            .icon(crate::ui::icon(IconName::Replace))
-                            .tooltip(i18n_canvas::TOOLTIP_EDGE_REVERSE)
-                            .on_click(cx.listener(|pane, _, _, cx| {
-                                pane.reverse_selected_edge(cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("canvas-edge-color")
-                            .ghost()
-                            .compact()
-                            .h(px(20.))
-                            .w(px(22.))
-                            .when(self.color_picker_open, |b| b.bg(gpui_kit::rgb(palette.selection)))
-                            .icon(crate::ui::icon(IconName::Palette))
-                            .tooltip(i18n_canvas::TOOLTIP_COLOR_PICKER)
-                            .on_click(cx.listener(|pane, _, _, cx| {
-                                pane.color_picker_open = !pane.color_picker_open;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("canvas-edge-delete")
-                            .ghost()
-                            .compact()
-                            .h(px(20.))
-                            .w(px(22.))
-                            .icon(crate::ui::icon(IconName::Trash))
-                            .tooltip(i18n_canvas::TOOLTIP_EDGE_DELETE)
-                            .on_click(cx.listener(|pane, _, _, cx| {
-                                pane.delete_selection(cx);
-                            })),
-                    ),
+                    .child(crate::ui::popover_enter(
+                        edge_bar,
+                        SharedString::from(format!("canvas-edge-bar-pop-{edge_id}")),
+                        crate::ui::PopoverDirection::Up,
+                    )),
             );
         }
 

@@ -98,6 +98,15 @@ impl Render for RightPanelResizeDrag {
     }
 }
 
+#[derive(Clone)]
+struct BuildLogResizeDrag;
+
+impl Render for BuildLogResizeDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
 pub fn bind_shortcuts(settings: &AppSettings, cx: &mut App) {
     let mut bindings = vec![
         KeyBinding::new("ctrl-c", gpui_kit::component::input::Copy, Some("FolioPdf")),
@@ -236,6 +245,7 @@ pub struct Workspace {
     right_panel: RightPanel,
     sidebar_drag: Option<(f32, f32)>,
     right_panel_drag: Option<(f32, f32)>,
+    log_drag: Option<(f32, f32)>,
     resize_save_task: Task<()>,
     notice: Option<String>,
     notice_until: Option<Instant>,
@@ -362,6 +372,7 @@ impl Workspace {
             right_panel,
             sidebar_drag: None,
             right_panel_drag: None,
+            log_drag: None,
             resize_save_task: Task::ready(()),
             notice: None,
             notice_until: None,
@@ -775,11 +786,12 @@ impl Render for Workspace {
         } else {
             right_target_w * right_progress
         };
-        let log_w = if self.build.panels.logs {
-            self.settings.log_width
-        } else {
-            0.0
-        };
+        let log_open = self.build.panels.logs;
+        let log_target_w = self.settings.log_width.clamp(220., 700.);
+        let log_progress =
+            crate::ui::sample_drawer("workspace-build-log-motion", log_open, 200, window, cx);
+        let log_rendered = log_open || log_progress > 0.001;
+        let log_w = log_target_w * log_progress;
         let rail_w = if self.zen_mode { 0.0 } else { RAIL_WIDTH };
         let area_width = (f32::from(window.viewport_size().width)
             - rail_w
@@ -827,52 +839,67 @@ impl Render for Workspace {
             crate::i18n::workspace::BTN_COMPILE_BUILD.get()
         };
         let status = self.build.status_label(self.documents.source_version());
-        let mut work_with_logs = h_resizable(if self.build.panels.logs {
-            "work-with-logs"
-        } else {
-            "work-no-logs"
-        })
-        .on_resize({
-            let app = cx.entity();
-            move |state, _, cx| {
-                let log_width = f32::from(
-                    *state
-                        .read(cx)
-                        .sizes()
-                        .last()
-                        .expect("work area has a panel"),
-                );
-                app.update(cx, |app, cx| {
-                    if app.build.panels.logs {
-                        app.settings.log_width = log_width;
-                        app.persist_settings(cx);
+        let log_drawer = log_rendered.then(|| {
+            let drag_app = cx.entity();
+            crate::ui::horizontal_drawer(
+                crate::ui::DrawerSide::Right,
+                log_open,
+                log_progress,
+                log_target_w,
+                self.render_build_log(cx),
+            )
+            .when(log_open && log_progress >= 0.999, |drawer| {
+                drawer.child(
+                    resize_handle("build-log-resize", Axis::Horizontal)
+                        .inside(HandleEdge::Leading)
+                        .on_drag(BuildLogResizeDrag, move |_, _, window, cx| {
+                            let start_x = f32::from(window.mouse_position().x);
+                            drag_app.update(cx, |app, _| {
+                                app.log_drag = Some((
+                                    start_x,
+                                    app.settings.log_width.clamp(220., 700.),
+                                ));
+                            });
+                            cx.new(|_| BuildLogResizeDrag)
+                        }),
+                )
+            })
+        });
+        let work_with_logs = div()
+            .id("work-with-logs")
+            .relative()
+            .flex()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .on_drag_move(cx.listener(
+                |app, event: &DragMoveEvent<BuildLogResizeDrag>, _, cx| {
+                    let Some((start_x, start_w)) = app.log_drag else {
+                        return;
+                    };
+                    let delta = f32::from(event.event.position.x) - start_x;
+                    let next_w = (start_w - delta).clamp(220., 700.).round();
+                    if (app.settings.log_width - next_w).abs() >= 1.0 {
+                        app.settings.log_width = next_w;
+                        app.schedule_resize_save(cx);
+                        cx.notify();
                     }
-                });
-            }
-        })
-        .child(
-            resizable_panel().child(
+                },
+            ))
+            .child(
                 div()
                     .id("work-area-drop-host")
                     .relative()
-                    .size_full()
+                    .flex_1()
                     .min_w_0()
                     .min_h_0()
+                    .h_full()
                     .child(work_area)
                     .when(show_work_area_drop, |host| {
                         host.child(self.render_work_area_drop_overlay(cx))
                     }),
-            ),
-        );
-        if self.build.panels.logs {
-            work_with_logs = work_with_logs.child(
-                resizable_panel()
-                    .size(px(self.settings.log_width))
-                    .size_range(px(220.)..px(700.))
-                    .fixed()
-                    .child(self.render_build_log(cx)),
-            );
-        }
+            )
+            .children(log_drawer);
         let palette = self.settings.theme.palette;
         let shell_canvas = palette.island_canvas();
         let shell_hover = palette.island_shell_hover();
@@ -1690,51 +1717,37 @@ impl Render for Workspace {
         app = app.children(self.render_name_dialog(cx));
         if self.show_preferences {
             let palette = crate::theme::palette();
+            let card = div()
+                .w(px(680.))
+                .max_h(relative(0.92))
+                .p_7()
+                .rounded(px(12.))
+                .border_1()
+                .border_color(palette.card_border())
+                .shadow_lg()
+                .bg(palette.elevated_surface())
+                .child(
+                    crate::ui::control("close-preferences", IconName::Close)
+                        .absolute()
+                        .top_3()
+                        .right_3()
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.show_preferences = false;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .id("preferences-content")
+                        .max_h(px(f32::from(window.viewport_size().height) * 0.92 - 56.))
+                        .overflow_y_scroll()
+                        .child(self.preferences.clone()),
+                );
             app = app.child(
                 deferred(
-                    div()
-                        .id("preferences-overlay")
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(if palette.is_dark() { rgba(0x07090db8) } else { rgba(0x16161638) })
-                        // Occlude background hitboxes while leaving the dialog's
-                        // child inputs and scroll container interactive.
-                        .occlude()
+                    crate::ui::modal_shell("preferences-overlay", card)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_scroll(|_, _, cx| cx.stop_propagation())
-                        .child(
-                            div()
-                                .relative()
-                                .w(px(680.))
-                                .max_h(relative(0.92))
-                                .p_7()
-                                .rounded(px(12.))
-                                .border_1()
-                                .border_color(palette.card_border())
-                                .shadow_lg()
-                                .bg(palette.elevated_surface())
-                                .child(
-                                    crate::ui::control("close-preferences", IconName::Close)
-                                        .absolute()
-                                        .top_3()
-                                        .right_3()
-                                        .on_click(cx.listener(|app, _, _, cx| {
-                                            app.show_preferences = false;
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    div()
-                                        .id("preferences-content")
-                                        .max_h(px(f32::from(window.viewport_size().height) * 0.92
-                                            - 56.))
-                                        .overflow_y_scroll()
-                                        .child(self.preferences.clone()),
-                                ),
-                        ),
+                        .on_scroll(|_, _, cx| cx.stop_propagation()),
                 )
                 .with_priority(10),
             );

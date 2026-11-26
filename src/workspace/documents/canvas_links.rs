@@ -418,98 +418,90 @@ impl Workspace {
             }
         }
 
+        let card = div()
+            .id("canvas-target-picker-card")
+            .w(px(420.))
+            .p_4()
+            .rounded(px(10.))
+            .bg(rgb(palette.surface))
+            .border_1()
+            .border_color(rgb(palette.border))
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(palette.text))
+                                    .child(crate::i18n::canvas::PICKER_TITLE.get()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(palette.muted))
+                                    .child(crate::i18n::canvas::PICKER_SUBTITLE.get()),
+                            ),
+                    )
+                    .child(
+                        Button::new("canvas-picker-close")
+                            .ghost()
+                            .compact()
+                            .h(px(22.))
+                            .w(px(22.))
+                            .icon(crate::ui::icon(IconName::Close))
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.documents.pending_canvas_insert = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(list)
+            .child(
+                div()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(rgb(palette.border))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            gpui_kit::component::input::Input::new(&pending.name_input),
+                        ),
+                    )
+                    .child(
+                        crate::ui::button_primary(
+                            "canvas-picker-create",
+                            crate::i18n::canvas::PICKER_BTN_CREATE_AND_ADD.get(),
+                        )
+                        .h(px(28.))
+                        .on_click(cx.listener(|app, _, window, cx| {
+                            app.create_and_insert_pending_canvas(window, cx);
+                        })),
+                    ),
+            );
+
         Some(
-            div()
-                .id("canvas-target-picker-backdrop")
-                .absolute()
-                .inset_0()
-                .bg(rgba(0x0000004d))
-                .flex()
-                .items_center()
-                .justify_center()
+            crate::ui::modal_shell("canvas-target-picker-backdrop", card)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|app, _, _, cx| {
                     app.documents.pending_canvas_insert = None;
                     cx.notify();
                 }))
-                .child(
-                    div()
-                        .id("canvas-target-picker-card")
-                        .w(px(420.))
-                        .p_4()
-                        .rounded(px(10.))
-                        .bg(rgb(palette.surface))
-                        .border_1()
-                        .border_color(rgb(palette.border))
-                        .shadow_lg()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .on_click(|_, _, cx| cx.stop_propagation())
-                        .child(
-                            div()
-                                .flex()
-                                .items_start()
-                                .justify_between()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_0p5()
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(rgb(palette.text))
-                                                .child(crate::i18n::canvas::PICKER_TITLE.get()),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(palette.muted))
-                                                .child(crate::i18n::canvas::PICKER_SUBTITLE.get()),
-                                        ),
-                                )
-                                .child(
-                                    Button::new("canvas-picker-close")
-                                        .ghost()
-                                        .compact()
-                                        .h(px(22.))
-                                        .w(px(22.))
-                                        .icon(crate::ui::icon(IconName::Close))
-                                        .on_click(cx.listener(|app, _, _, cx| {
-                                            app.documents.pending_canvas_insert = None;
-                                            cx.notify();
-                                        })),
-                                ),
-                        )
-                        .child(list)
-                        .child(
-                            div()
-                                .pt_2()
-                                .border_t_1()
-                                .border_color(rgb(palette.border))
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div().flex_1().min_w_0().child(
-                                        gpui_kit::component::input::Input::new(&pending.name_input),
-                                    ),
-                                )
-                                .child(
-                                    crate::ui::button_primary(
-                                        "canvas-picker-create",
-                                        crate::i18n::canvas::PICKER_BTN_CREATE_AND_ADD.get(),
-                                    )
-                                    .h(px(28.))
-                                    .on_click(cx.listener(|app, _, window, cx| {
-                                        app.create_and_insert_pending_canvas(window, cx);
-                                    })),
-                                ),
-                        ),
-                )
                 .into_any_element(),
         )
     }

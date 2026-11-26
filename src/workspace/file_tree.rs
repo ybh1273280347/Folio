@@ -350,74 +350,63 @@ impl Workspace {
             NameAction::RenameFolder(_) => crate::i18n::workspace::MODAL_RENAME_FOLDER.get(),
             NameAction::RenameProject(_) => crate::i18n::workspace::MODAL_RENAME_PROJECT.get(),
         };
-        Some(
-            div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgba(0x00000030))
-                .occlude()
-                .child(
+        let card = div()
+            .w(px(420.))
+            .p_6()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(rgb(0xe6e5e1))
+            .shadow_lg()
+            .bg(rgb(0xffffff))
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().font_semibold().child(title))
+                    .child(
+                        crate::ui::control("close-name-dialog", IconName::Close)
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.tree.name_action = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(Input::new(&self.tree.name_input))
+            .when(matches!(action, NameAction::Create), |modal| {
+                modal.child(
                     div()
-                        .w(px(420.))
-                        .p_6()
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(rgb(0xe6e5e1))
-                        .shadow_lg()
-                        .bg(rgb(0xffffff))
-                        .flex()
-                        .flex_col()
-                        .gap_4()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(div().font_semibold().child(title))
-                                .child(
-                                    crate::ui::control("close-name-dialog", IconName::Close)
-                                        .on_click(cx.listener(|app, _, _, cx| {
-                                            app.tree.name_action = None;
-                                            cx.notify();
-                                        })),
-                                ),
-                        )
-                        .child(Input::new(&self.tree.name_input))
-                        .when(matches!(action, NameAction::Create), |modal| {
-                            modal.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(MUTED))
-                                    .child(crate::i18n::workspace::CREATE_FILE_HINT.get()),
-                            )
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .justify_end()
-                                .gap_3()
-                                .child(
-                                    crate::ui::button_secondary("cancel-name", crate::i18n::common::CANCEL.get())
-                                        .on_click(cx.listener(|app, _, _, cx| {
-                                            app.tree.name_action = None;
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    crate::ui::button_primary("apply-name", crate::i18n::common::CONFIRM.get()).on_click(
-                                        cx.listener(|app, _, window, cx| {
-                                            if let Err(error) = app.apply_name(window, cx) {
-                                                app.report(error, cx);
-                                            }
-                                        }),
-                                    ),
-                                ),
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child(crate::i18n::workspace::CREATE_FILE_HINT.get()),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_3()
+                    .child(
+                        crate::ui::button_secondary("cancel-name", crate::i18n::common::CANCEL.get())
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.tree.name_action = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        crate::ui::button_primary("apply-name", crate::i18n::common::CONFIRM.get()).on_click(
+                            cx.listener(|app, _, window, cx| {
+                                if let Err(error) = app.apply_name(window, cx) {
+                                    app.report(error, cx);
+                                }
+                            }),
                         ),
-                ).into_any_element(),
-        )
+                    ),
+            );
+        Some(crate::ui::modal_shell("name-dialog-backdrop", card).into_any_element())
     }
 
     pub(super) fn start_rename_project(
@@ -2525,9 +2514,24 @@ impl Workspace {
                             ))),
                     ),
             )
-            .when(self.tree.searching, |sidebar| {
-                sidebar.child(
-                    div()
+            .when(
+                {
+                    let search_progress = crate::ui::sample_disclosure(
+                        "file-tree-search-fold",
+                        self.tree.searching,
+                        window,
+                        cx,
+                    );
+                    self.tree.searching || search_progress > 0.001
+                },
+                |sidebar| {
+                    let search_progress = crate::ui::sample_disclosure(
+                        "file-tree-search-fold",
+                        self.tree.searching,
+                        window,
+                        cx,
+                    );
+                    let search_row = div()
                         .flex()
                         .items_center()
                         .gap_1()
@@ -2548,9 +2552,17 @@ impl Workspace {
                                     app.tree.searching = false;
                                     cx.notify();
                                 })),
-                        ),
-                )
-            })
+                        );
+                    sidebar.child(crate::ui::disclosure_body(
+                        "file-tree-search-body",
+                        self.tree.searching,
+                        search_progress,
+                        search_row,
+                        window,
+                        cx,
+                    ))
+                },
+            )
             // The toolbar stays above this viewport, even as the project's tree grows.
             .child(div().relative().flex_1().min_h_0().overflow_hidden().child(
                 div().id("sidebar-content-scroll").flex().flex_col().size_full().overflow_y_scroll()
@@ -2566,7 +2578,7 @@ impl Workspace {
                         .active(move |style| style.text_color(rgb(active)))
                         .child(crate::ui::icon(icon))
                 };
-                sidebar.child(
+                sidebar.child(crate::ui::popover_enter(
                     div()
                         .mx_2()
                         .mb_2()
@@ -2639,7 +2651,9 @@ impl Workspace {
                                         })),
                                 ),
                         ),
-                )
+                    "file-tree-batch-bar-enter",
+                    crate::ui::PopoverDirection::Down,
+                ))
             })
             .child(
                 // Preserve the tree's content height for the outer scroll handle. A zero

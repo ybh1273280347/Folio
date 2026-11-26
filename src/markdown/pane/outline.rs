@@ -514,6 +514,7 @@ impl OutlineColors {
 fn render_panel_body(
     pane: &MarkdownPane,
     overlay: bool,
+    window: &mut Window,
     cx: &mut Context<MarkdownPane>,
 ) -> Stateful<Div> {
     let mut colors = OutlineColors::current();
@@ -604,6 +605,7 @@ fn render_panel_body(
                 pane.active_heading,
                 &pane.outline_collapsed,
                 colors,
+                window,
                 cx,
             ))
             .into_any_element()
@@ -687,6 +689,7 @@ fn render_nodes(
     active_heading: Option<usize>,
     collapsed: &BTreeSet<usize>,
     colors: OutlineColors,
+    window: &mut Window,
     cx: &mut Context<MarkdownPane>,
 ) -> Div {
     let any_has_children = nodes.iter().any(|n| !n.children.is_empty());
@@ -697,6 +700,11 @@ fn render_nodes(
         let index = node.index;
         let has_children = !node.children.is_empty();
         let is_collapsed = has_children && collapsed.contains(&index);
+        let fold_progress = if has_children {
+            crate::ui::sample_disclosure(("md-outline-node-fold", index), !is_collapsed, window, cx)
+        } else {
+            0.0
+        };
         let is_direct_active = active_heading == Some(index);
         let is_collapsed_ancestor_active =
             is_collapsed && active_heading.is_some_and(|active_ix| node.contains_index(active_ix));
@@ -713,6 +721,17 @@ fn render_nodes(
             colors.item_text_nested
         };
         let full_title = node.title.clone();
+
+        let fold_chevron = has_children.then(|| {
+            crate::ui::fold_chevron(
+                ("md-outline-chev", index),
+                !is_collapsed,
+                px(10.),
+                colors.chevron,
+                window,
+                cx,
+            )
+        });
 
         let row = div()
             .id(("md-outline-item", index))
@@ -749,7 +768,7 @@ fn render_nodes(
                 .active(move |s| s.bg(colors.item_bg_pressed))
             })
             .when(any_has_children, |row| {
-                if has_children {
+                if let Some(chev) = fold_chevron {
                     row.child(
                         div()
                             .id(("md-outline-fold", index))
@@ -770,15 +789,7 @@ fn render_nodes(
                                 }
                                 cx.notify();
                             }))
-                            .child(
-                                crate::ui::icon(if is_collapsed {
-                                    IconName::ChevronRight
-                                } else {
-                                    IconName::ChevronDown
-                                })
-                                .w(px(10.))
-                                .h(px(10.)),
-                            ),
+                            .child(chev),
                     )
                 } else {
                     row.child(div().w(px(14.)).h(line_height).flex_shrink_0())
@@ -799,7 +810,7 @@ fn render_nodes(
 
         list = list.child(row);
 
-        if has_children && !is_collapsed {
+        if has_children && (!is_collapsed || fold_progress > 0.001) {
             let guide_ml = if depth == 0 {
                 px(11.)
             } else if depth < 3 {
@@ -821,9 +832,17 @@ fn render_nodes(
                     active_heading,
                     collapsed,
                     colors,
+                    window,
                     cx,
                 ));
-            list = list.child(child_group);
+            list = list.child(crate::ui::disclosure_body(
+                ("md-outline-body", index),
+                !is_collapsed,
+                fold_progress,
+                child_group,
+                window,
+                cx,
+            ));
         }
     }
 
@@ -831,8 +850,12 @@ fn render_nodes(
 }
 
 /// Render the docked left-side outline with smooth 200ms ease-out width + slide animation.
-pub(super) fn render_docked(pane: &MarkdownPane, cx: &mut Context<MarkdownPane>) -> AnyElement {
-    let panel = render_panel_body(pane, false, cx);
+pub(super) fn render_docked(
+    pane: &MarkdownPane,
+    window: &mut Window,
+    cx: &mut Context<MarkdownPane>,
+) -> AnyElement {
+    let panel = render_panel_body(pane, false, window, cx);
     let width = pane.docked_outline_panel_width();
 
     // Initial wide-screen auto-open renders statically without sliding in on document load.
@@ -883,11 +906,15 @@ pub(super) fn render_docked(pane: &MarkdownPane, cx: &mut Context<MarkdownPane>)
 }
 
 /// Render the narrow-screen left overlay drawer with backdrop click-outside dismissal.
-pub(super) fn render_overlay(pane: &MarkdownPane, cx: &mut Context<MarkdownPane>) -> AnyElement {
+pub(super) fn render_overlay(
+    pane: &MarkdownPane,
+    window: &mut Window,
+    cx: &mut Context<MarkdownPane>,
+) -> AnyElement {
     let closing = pane.outline_closing;
     let anim_gen = pane.outline_anim_gen;
     let duration = Duration::from_millis(ANIMATION_MS);
-    let panel = render_panel_body(pane, true, cx);
+    let panel = render_panel_body(pane, true, window, cx);
 
     let scrim = if crate::theme::palette().is_dark() {
         rgba(0x07090d70)

@@ -193,16 +193,29 @@ fn with_live_surfaces(
                 };
                 let mut fold_children = vec![header_surface];
                 if force_preview || state.is_fold_open(id) {
-                    for (child, child_id) in children[1..].iter().zip(&doc_children[1..]) {
-                        fold_children.push(with_live_surfaces(
-                            child,
-                            *child_id,
-                            state,
-                            editor,
-                            include_atoms,
-                            force_preview,
-                            preview_bounds,
-                        ));
+                    let body_children: Vec<_> = children[1..]
+                        .iter()
+                        .zip(&doc_children[1..])
+                        .map(|(child, child_id)| {
+                            with_live_surfaces(
+                                child,
+                                *child_id,
+                                state,
+                                editor,
+                                include_atoms,
+                                force_preview,
+                                preview_bounds,
+                            )
+                        })
+                        .collect();
+                    if !force_preview && !body_children.is_empty() {
+                        fold_children.push(BlockNode::Surface {
+                            name: format!("editor-fold-body-{}", id.as_u64()).into(),
+                            children: body_children,
+                            span: None,
+                        });
+                    } else {
+                        fold_children.extend(body_children);
                     }
                 }
                 return BlockNode::Surface {
@@ -248,6 +261,8 @@ fn register_fold_surfaces(
     let muted = theme.tokens.colors.muted;
     let is_dark = theme.tokens.colors.background.l < 0.5;
 
+    let interactive = fold_bounds.is_some();
+
     for (&id, entry) in &state.model.doc.blocks {
         let super::kind::BlockKindData::Fold { syntax, .. } = &entry.kind else {
             continue;
@@ -255,6 +270,58 @@ fn register_fold_surfaces(
         let open = state.is_fold_open(id);
         let has_body = state.model.doc.children(id).len() > 1;
         let fold_bounds = fold_bounds.cloned();
+        let opened_at = interactive
+            .then(|| state.fold_open_at.get(&id).copied())
+            .flatten();
+
+        let fold_chevron = move |color: Hsla, window: &mut Window, cx: &mut App| {
+            let progress = if interactive {
+                gpui_kit::base::transition_with_status(
+                    ElementId::from(("editor-fold-chevron", id.as_u64() as usize)),
+                    if open { 1.0_f32 } else { 0.0_f32 },
+                    gpui_kit::base::Transition::new(std::time::Duration::from_millis(160))
+                        .ease(gpui_kit::base::animation::ease_out_cubic),
+                    window,
+                    cx,
+                )
+                .value
+                .clamp(0.0, 1.0)
+            } else if open {
+                1.0
+            } else {
+                0.0
+            };
+            Icon::new(IconName::ChevronRight)
+                .size(px(13.))
+                .text_color(color)
+                .rotate(gpui::radians(progress * std::f32::consts::FRAC_PI_2))
+        };
+
+        if interactive && open && has_body {
+            *extensions = std::mem::take(extensions).block_surface(
+                format!("editor-fold-body-{}", id.as_u64()),
+                move |window, cx| {
+                    let Some(started) = opened_at else {
+                        return div().w_full();
+                    };
+                    if cx.reduce_motion() {
+                        return div().w_full();
+                    }
+                    let raw = (started.elapsed().as_secs_f32() / 0.16).clamp(0.0, 1.0);
+                    if raw < 1.0 {
+                        window.request_animation_frame();
+                        let t = gpui_kit::base::animation::ease_out_cubic(raw);
+                        div()
+                            .relative()
+                            .w_full()
+                            .top(px(4.0 * (1.0 - t)))
+                            .opacity(0.25 + 0.75 * t)
+                    } else {
+                        div().w_full()
+                    }
+                },
+            );
+        }
 
         match syntax {
             super::kind::FoldSyntax::Details { .. } => {
@@ -281,7 +348,7 @@ fn register_fold_surfaces(
                                     .bg(accent),
                             )
                     })
-                    .block_surface(format!("editor-fold-header-{}", id.as_u64()), move |_, _| {
+                    .block_surface(format!("editor-fold-header-{}", id.as_u64()), move |window, cx| {
                         let toggle = div()
                             .relative()
                             .w(px(20.))
@@ -294,15 +361,7 @@ fn register_fold_surfaces(
                             .bg(accent.opacity(0.10))
                             .hover(|s| s.bg(accent.opacity(0.20)))
                             .cursor_pointer()
-                            .child(
-                                Icon::new(if open {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                })
-                                .size(px(13.))
-                                .text_color(accent),
-                            )
+                            .child(fold_chevron(accent, window, cx))
                             .when_some(fold_bounds.clone(), |this, bounds| {
                                 this.child(
                                     canvas(
@@ -342,7 +401,7 @@ fn register_fold_surfaces(
                     .block_surface(format!("editor-fold-{}", id.as_u64()), move |_, _| {
                         super::style::callout_container(color)
                     })
-                    .block_surface(format!("editor-fold-header-{}", id.as_u64()), move |_, _| {
+                    .block_surface(format!("editor-fold-header-{}", id.as_u64()), move |window, cx| {
                         let trigger = div()
                             .relative()
                             .flex_shrink_0()
@@ -356,15 +415,7 @@ fn register_fold_surfaces(
                             .py(px(1.))
                             .hover(|s| s.bg(color.opacity(0.10)))
                             .cursor_pointer()
-                            .child(
-                                Icon::new(if open {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                })
-                                .size(px(13.))
-                                .text_color(color),
-                            )
+                            .child(fold_chevron(color, window, cx))
                             .child(super::style::callout_header(badge_title.clone(), color))
                             .when_some(fold_bounds.clone(), |this, bounds| {
                                 this.child(
