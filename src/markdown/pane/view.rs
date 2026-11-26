@@ -10,78 +10,6 @@ impl Render for MarkdownPane {
         // Keep room below the last line without letting the canvas scroll indefinitely.
         let trailing_space = (pane_size.height * 0.4).clamp(px(160.), px(480.));
 
-        let toolbar = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .h(px(36.))
-            .flex_shrink_0()
-            .px_3()
-            .pr(px(38.))
-            .border_b_1()
-            .border_color(rgb(0xe8e7e3))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .flex_1()
-                    .min_w_0()
-                    .child(outline::render_toggle_button(
-                        "md-outline",
-                        self.is_outline_open(),
-                        cx,
-                    ))
-                    .child(crate::ui::icon(IconName::FileText))
-                    .child(
-                        div().min_w_0().text_ellipsis().child(
-                            self.path
-                                .file_name()
-                                .expect("Markdown has filename")
-                                .to_string_lossy()
-                                .into_owned(),
-                        ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        action(
-                            "md-font-size",
-                            format!("{}px", self.settings.markdown_font_size),
-                        )
-                        .on_click(cx.listener(|pane, _, _, cx| {
-                            pane.settings.markdown_font_size = 14;
-                            pane.visual_editor.update(cx, |editor, cx| {
-                                let body_size = px(pane.settings.markdown_font_size as f32);
-                                editor.set_code_styles(
-                                    crate::ui::inline_code_style(&pane.settings, body_size),
-                                    crate::ui::block_code_style(&pane.settings, body_size),
-                                    cx,
-                                );
-                            });
-                            cx.emit(MarkdownEvent::Zoom(14));
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        action("md-source", crate::i18n::workspace::SOURCE_LABEL.get()).on_click(
-                            cx.listener(|pane, _, window, cx| pane.toggle_source(window, cx)),
-                        ),
-                    )
-                    .child({
-                        let pane = cx.entity();
-                        crate::ui::copy_document_button("md-copy-document", move |cx| {
-                            // The pane retains the full Markdown, including content not yet rendered.
-                            pane.read(cx).text.clone()
-                        })
-                    }),
-            );
-
         let mut content = div()
             .relative()
             .flex()
@@ -383,36 +311,6 @@ impl Render for MarkdownPane {
                     .children(slash_menu)
                     .children(annotation_popover)
                     .children(translate_popover)
-                    .when(self.reading && !self.annotations.is_empty(), |area| {
-                        let count = self.annotations.len();
-                        area.child(
-                            div()
-                                .id("md-annotations-pill-reading")
-                                .absolute()
-                                .top_3()
-                                .right_4()
-                                .px_2p5()
-                                .py_1()
-                                .rounded_full()
-                                .bg(rgb(0xfef9c3))
-                                .border_1()
-                                .border_color(rgb(0xfde047))
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .cursor_pointer()
-                                .hover(|s| s.bg(rgb(0xfef08a)))
-                                .active(|s| s.bg(rgb(0xfde047)))
-                                .text_xs()
-                                .text_color(rgb(0x854d0e))
-                                .child(crate::ui::icon(IconName::MessageSquareText))
-                                .child(format!("{count}"))
-                                .on_click(cx.listener(|pane, _, _, cx| {
-                                    pane.show_annotations_drawer = !pane.show_annotations_drawer;
-                                    cx.notify();
-                                })),
-                        )
-                    })
                     .when(!self.zen_mode, |area| {
                         area.when_some(self.hovered_link.as_ref(), |area, url| {
                             let label = crate::i18n::markdown::link_tooltip_click(
@@ -450,11 +348,7 @@ impl Render for MarkdownPane {
                         } else {
                             Some(format!("{}/{}", self.search_match_index, self.search_match_total))
                         };
-                        let right_offset = if self.reading && !self.annotations.is_empty() {
-                            px(72.)
-                        } else {
-                            px(16.)
-                        };
+                        let right_offset = px(16.);
                         let active_bg = gpui_kit::rgb(palette.accent).opacity(if palette.is_dark() {
                             0.22
                         } else {
@@ -1119,8 +1013,7 @@ impl Render for MarkdownPane {
             .track_focus(&self.focus)
             .flex()
             .flex_col()
-            // The workspace container supplies the surface so all text panes can share one backdrop.
-            .when(self.reading, |pane| pane.child(toolbar))
+            // The workspace container supplies the surface and unified header bar.
             .child(crate::ui::ctrl_scroll_capture(cx.listener(
                 |pane, event: &ScrollEvent, _, cx| {
                     if event.modifiers.control {

@@ -288,13 +288,51 @@ mod tests {
     }
 }
 
-use super::{Workspace, Compile, BORDER, MUTED, button, rgb};
+use super::{Workspace, Compile, MUTED, button, rgb};
+use gpui_kit::base::StyledExt;
+use gpui_kit::component::{Sizable, button::{Button, ButtonVariants}};
 use crate::{model::{Engine, Project}, storage};
 use sha2::Digest;
 use std::{collections::BTreeSet, path::Path, thread};
 
 impl Workspace {
     pub(super) fn render_preview(&self, cx: &mut Context<Self>) -> AnyElement {
+        let palette = crate::theme::palette();
+        let active_tab_bg = if palette.is_dark() {
+            gpui_kit::rgb(palette.selection)
+        } else {
+            gpui_kit::rgb(palette.hover)
+        };
+        let preview_tab = |title: &'static str| {
+            div()
+                .h(px(26.))
+                .px_2p5()
+                .rounded(px(6.))
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .bg(active_tab_bg)
+                .text_xs()
+                .font_medium()
+                .text_color(gpui_kit::rgb(palette.text))
+                .child(crate::ui::icon(IconName::FileText))
+                .child(title)
+                .child(
+                    Button::new("close-build-preview")
+                        .ghost()
+                        .compact()
+                        .with_size(px(16.))
+                        .w(px(18.))
+                        .h(px(18.))
+                        .flex_shrink_0()
+                        .icon(crate::ui::icon(IconName::Close))
+                        .tooltip(crate::i18n::workspace::TOOLTIP_CLOSE_TAB.get())
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.build.panels.preview = false;
+                            cx.notify();
+                        })),
+                )
+        };
         if let Some(pane) = &self.build.preview {
             let path = pane.read(cx).path().to_owned();
             return div()
@@ -303,28 +341,25 @@ impl Workspace {
                 .flex_col()
                 .child(
                     div()
-                        .h(px(32.))
+                        .h(px(34.))
+                        .px_2()
                         .flex_shrink_0()
                         .flex()
                         .items_center()
-                        .gap_2()
-                        .px_3()
-                        .bg(rgb(0xfafaf9))
+                        .gap_1()
+                        .bg(gpui_kit::rgb(palette.surface))
                         .border_b_1()
-                        .border_color(rgb(BORDER))
-                        .child(crate::ui::icon(IconName::FileText))
-                        .child(crate::i18n::workspace::COMPILE_PREVIEW_TITLE.get())
+                        .border_color(gpui_kit::rgb(palette.border))
+                        .child(preview_tab(crate::i18n::workspace::COMPILE_PREVIEW_TITLE.get()))
                         .child(div().flex_1())
-                        .child(button("export-build-pdf", crate::i18n::workspace::EXPORT_BTN.get()).on_click(cx.listener(
-                            move |app, _, window, cx| app.export_pdf(path.clone(), window, cx),
-                        )))
                         .child(
-                            crate::ui::control("close-build-preview", IconName::Close).on_click(
-                                cx.listener(|app, _, _, cx| {
-                                    app.build.panels.preview = false;
-                                    cx.notify();
-                                }),
-                            ),
+                            button(
+                                "export-build-pdf",
+                                crate::i18n::workspace::EXPORT_BTN.get(),
+                            )
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.export_pdf(path.clone(), window, cx)
+                            })),
                         ),
                 )
                 .child(div().flex_1().min_h_0().child(pane.clone()))
@@ -337,31 +372,16 @@ impl Workspace {
             .bg(rgb(0xf1f1ef))
             .child(
                 div()
-                    .h(px(38.))
+                    .h(px(34.))
+                    .px_2()
                     .flex_shrink_0()
-                    .px_4()
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .bg(rgb(0xffffff))
+                    .gap_1()
+                    .bg(gpui_kit::rgb(palette.surface))
                     .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(crate::ui::icon(IconName::FileText))
-                            .child(crate::i18n::workspace::PREVIEW_TITLE.get()),
-                    )
-                    .child(
-                        crate::ui::control("close-build-preview", IconName::Close).on_click(
-                            cx.listener(|app, _, _, cx| {
-                                app.build.panels.preview = false;
-                                cx.notify();
-                            }),
-                        ),
-                    ),
+                    .border_color(gpui_kit::rgb(palette.border))
+                    .child(preview_tab(crate::i18n::workspace::PREVIEW_TITLE.get())),
             )
             .child(
                 div()

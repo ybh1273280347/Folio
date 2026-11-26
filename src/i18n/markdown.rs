@@ -131,8 +131,6 @@ pub const IMAGE_IMPORT_FAILED: BiText = BiText::new("图片导入失败", "Image
 // Outline (src/markdown/outline.rs)
 pub const OUTLINE_TITLE: BiText = BiText::new("文档大纲", "Outline");
 pub const OUTLINE_EMPTY: BiText = BiText::new("暂无标题", "No headings");
-pub const OUTLINE_COLLAPSE: BiText = BiText::new("收起文档大纲", "Collapse outline");
-pub const OUTLINE_EXPAND: BiText = BiText::new("展开文档大纲", "Expand outline");
 
 // Empty-page templates
 pub const UNTITLED_PAGE_PLACEHOLDER: BiText = BiText::new("无标题页", "Untitled");

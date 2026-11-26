@@ -581,6 +581,7 @@ pub enum PdfEvent {
 /// [`release`](PdfView::release) before dropping it (e.g. when its tab closes) to
 /// free the atlas textures gpui won't free on plain drop.
 pub struct PdfView {
+    #[allow(dead_code)]
     path: PathBuf,
     style: PdfStyleFn,
     quality: PdfQualityFn,
@@ -2257,11 +2258,6 @@ impl Render for PdfView {
             return loading(style).into_any_element();
         }
 
-        let name = self
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
         let total = self.dims.len();
         let page_width = self.page_width();
         let current = current_page(&self.dims, page_width, f32::from(-self.scroll.offset().y));
@@ -2744,31 +2740,27 @@ impl Render for PdfView {
                 .tooltip(self.tip("Page thumbnails"))
         };
 
-        // Header: [☰] filename · N pages … (spacer) … page nav · zoom.
+        // Header: [▦] [≡] … (spacer) … page nav · zoom · fit · markup · search.
+        // The host tab/split bar already displays the document filename, and the
+        // page counter ("N / total") already displays the total page count.
         let header = div()
             .id("pdf-toolbar")
+            .h(px(30.0))
             .flex_shrink_0()
             .min_w_0()
             .overflow_x_scroll()
-            .px(px(16.0))
-            .py(px(6.0))
+            .px(px(10.0))
             .border_b_1()
             .border_color(style.border)
             .flex()
             .flex_row()
             .items_center()
-            .gap_2()
+            .gap_1p5()
             .text_size(px(12.0))
             .text_color(style.header_fg)
             .child(thumbnail_toggle)
             .children(toc_toggle)
-            .child(div().flex_1().min_w_0().text_ellipsis().child(format!("📄 {name}")))
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_color(style.header_muted)
-                    .child(format!("· {total} pages")),
-            )
+            .child(div().flex_1().min_w(px(4.0)))
             .child(
                 self.control("pdf-prev", "‹")
                     .on_click(cx.listener(|this, _, _window, cx| this.prev_page(cx)))

@@ -13,6 +13,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use gpui_webview::WebView;
 use krilla::{Document, geom::Size as KrillaSize, page::PageSettings};
@@ -741,13 +742,13 @@ impl Render for DrawioPane {
             .bg(rgb(0xffffff));
 
         let mut toolbar = div()
-            .h(px(34.))
+            .h(px(if self.is_reading { 30. } else { 34. }))
             .flex_shrink_0()
             .flex()
             .items_center()
             .gap_1()
             .px_2()
-            .bg(rgb(0xfafaf9))
+            .bg(if self.is_reading { rgb(0xffffff) } else { rgb(0xfafaf9) })
             .border_b_1()
             .border_color(rgb(BORDER))
             .child(
@@ -758,20 +759,26 @@ impl Render for DrawioPane {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(ui::icon(IconName::LayoutGrid).text_color(rgb(0xd97706)))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .text_ellipsis()
-                            .text_xs()
-                            .font_medium()
-                            .child(filename),
-                    )
+                    .when(!self.is_reading, |info| {
+                        info.child(ui::icon(IconName::LayoutGrid).text_color(rgb(0xd97706)))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_ellipsis()
+                                    .text_xs()
+                                    .font_medium()
+                                    .child(filename),
+                            )
+                    })
                     .children(status_label.map(|status| {
                         div()
                             .text_xs()
                             .text_color(rgb(MUTED))
-                            .child(format!("· {status}"))
+                            .child(if self.is_reading {
+                                status.to_owned()
+                            } else {
+                                format!("· {status}")
+                            })
                     })),
             )
             .child(
