@@ -466,9 +466,8 @@ impl TranslatePopover {
                 })
             });
 
-        let mut card = div()
+        let card = div()
             .id(SharedString::from(format!("{id_prefix}-card")))
-            .absolute()
             .w(px(POPOVER_WIDTH))
             .max_h(px(420.))
             .p_3()
@@ -489,17 +488,24 @@ impl TranslatePopover {
             .child(source_box)
             .child(body);
 
+        let animated = crate::ui::popover_enter(
+            card,
+            SharedString::from(format!("{id_prefix}-pop")),
+            crate::ui::PopoverDirection::Down,
+        );
+        let mut host = div().absolute().child(animated);
+
         if let (Some(anchor), Some(size)) = (self.anchor, pane_size) {
             let max_x = (size.width - px(POPOVER_WIDTH + 16.0)).max(px(16.0));
             let max_y = (size.height - px(280.0)).max(px(16.0));
             let left = anchor.x.clamp(px(16.0), max_x);
             let top = anchor.y.clamp(px(16.0), max_y);
-            card = card.left(left).top(top);
+            host = host.left(left).top(top);
         } else {
-            card = card.top(px(44.)).right(px(20.));
+            host = host.top(px(44.)).right(px(20.));
         }
 
-        Some(deferred(card).with_priority(2).into_any_element())
+        Some(deferred(host).with_priority(2).into_any_element())
     }
 }
 
