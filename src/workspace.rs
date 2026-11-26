@@ -77,6 +77,8 @@ const BG: u32 = 0xf7f6f5;
 const BORDER: u32 = 0xe8e7e3;
 const MUTED: u32 = 0x787774;
 pub(super) const RAIL_WIDTH: f32 = 48.0;
+const CANVAS_GUTTER: f32 = 6.0;
+const CANVAS_RADIUS: f32 = 10.0;
 
 #[derive(Clone)]
 struct SidebarResizeDrag;
@@ -779,9 +781,13 @@ impl Render for Workspace {
             0.0
         };
         let rail_w = if self.zen_mode { 0.0 } else { RAIL_WIDTH };
-        let area_width =
-            (f32::from(window.viewport_size().width) - rail_w - right_now_w - sidebar_now_w - log_w - 16.)
-                .max(200.0);
+        let area_width = (f32::from(window.viewport_size().width)
+            - rail_w
+            - right_now_w
+            - sidebar_now_w
+            - log_w
+            - if self.zen_mode { 0. } else { 24. })
+            .max(200.0);
         let mut work_area = h_resizable("work-area")
             .on_resize(move |state, _, cx| {
                 let sizes = state.read(cx).sizes();
@@ -867,7 +873,58 @@ impl Render for Workspace {
                     .child(self.render_build_log(cx)),
             );
         }
-        let right_panel_content = right_rendered.then(|| self.render_right_panel(window, cx));
+        let palette = self.settings.theme.palette;
+        let zen_mode = self.zen_mode;
+        let show_backdrop = self.has_visible_background();
+        let backdrop_image = (show_backdrop && !trash_open)
+            .then(|| self.backdrop.image().cloned())
+            .flatten();
+        let canvas_card = move |content: AnyElement| -> AnyElement {
+            div()
+                .relative()
+                .size_full()
+                .min_w_0()
+                .min_h_0()
+                .bg(gpui_kit::rgb(palette.surface))
+                .when(!zen_mode, |card| {
+                    card.rounded(px(CANVAS_RADIUS))
+                        .border_1()
+                        .border_color(gpui_kit::rgb(palette.border))
+                        .overflow_hidden()
+                        .shadow(vec![
+                            BoxShadow::new(
+                                px(0.),
+                                px(1.),
+                                hsla(0., 0., 0., if palette.is_dark() { 0.22 } else { 0.04 }),
+                            )
+                            .blur_radius(px(3.)),
+                        ])
+                })
+                .child(content)
+                .into_any_element()
+        };
+        let main_canvas = canvas_card(
+            div()
+                .relative()
+                .size_full()
+                .min_w_0()
+                .min_h_0()
+                // Paint once at work-area coordinates so text panes share the same crop as they scroll.
+                .when_some(backdrop_image, |card, image| {
+                    card.child(
+                        img(image)
+                            .absolute()
+                            .inset_0()
+                            .size_full()
+                            .object_fit(ObjectFit::Cover)
+                            .opacity(f32::from(self.settings.background_image_opacity) / 100.),
+                    )
+                })
+                .child(work_with_logs)
+                .into_any_element(),
+        );
+        let right_panel_content = right_rendered
+            .then(|| canvas_card(self.render_right_panel(window, cx)));
 
         let editor_with_terminal: AnyElement = if maximized {
             div()
@@ -906,7 +963,7 @@ impl Render for Workspace {
                         .flex_1()
                         .min_w_0()
                         .min_h_0()
-                        .child(work_with_logs),
+                        .child(main_canvas),
                 )
                 .when(right_rendered, |row| {
                     row.child(
@@ -921,6 +978,7 @@ impl Render for Workspace {
                                     .relative()
                                     .w(px(right_target_w))
                                     .h_full()
+                                    .when(!zen_mode, |wrap| wrap.pl(px(CANVAS_GUTTER)))
                                     .opacity(0.6 + 0.4 * right_progress)
                                     .children(right_panel_content),
                             )
@@ -948,31 +1006,13 @@ impl Render for Workspace {
                 })
                 .into_any_element()
         };
-        let show_backdrop = self.has_visible_background();
         let mut app = div()
             .children(exports)
             .relative()
             .size_full()
             .flex()
             .flex_col()
-            .bg(if show_backdrop {
-                gpui_kit::rgb(self.settings.theme.palette.surface)
-            } else {
-                rgb(BG)
-            })
-            // Paint once at window coordinates so text panes share the same crop as they scroll.
-            .when(show_backdrop, |app| {
-                app.when_some(self.backdrop.image().cloned(), |app, image| {
-                    app.child(
-                        img(image)
-                            .absolute()
-                            .inset_0()
-                            .size_full()
-                            .object_fit(ObjectFit::Cover)
-                            .opacity(f32::from(self.settings.background_image_opacity) / 100.),
-                    )
-                })
-            })
+            .bg(rgb(BG))
             .text_color(rgb(0x37352f))
             .text_size(px(14.))
             .font_family(crate::ui::sans_font(&self.settings.interface_font))
@@ -1191,8 +1231,6 @@ impl Render for Workspace {
                     .pl_0()
                     .gap_2()
                     .bg(rgb(BG))
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
                     .child(
                         div()
                             .id("project-menu-trigger")
@@ -1463,7 +1501,7 @@ impl Render for Workspace {
                 // Constrain the resize group to the space below the title bar.
                 div().flex_1().min_h_0().overflow_hidden().child({
                     let main_content = if trash_open {
-                        self.render_editor(window, cx)
+                        canvas_card(self.render_editor(window, cx))
                     } else {
                         editor_with_terminal
                     };
@@ -1489,7 +1527,7 @@ impl Render for Workspace {
                             },
                         ))
                         .when(!self.zen_mode, |row| {
-                            row.child(self.render_activity_rail(window, cx))
+                            row.child(self.render_activity_rail(sidebar_rendered, window, cx))
                         })
                         .when(sidebar_rendered, |row| {
                             row.child(
@@ -1542,6 +1580,11 @@ impl Render for Workspace {
                                 .min_w_0()
                                 .h_full()
                                 .min_h_0()
+                                .when(!self.zen_mode, |host| {
+                                    host.pl(px(CANVAS_GUTTER))
+                                        .pr(px(CANVAS_GUTTER))
+                                        .pb(px(CANVAS_GUTTER))
+                                })
                                 .child(main_content),
                         )
                 }),

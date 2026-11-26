@@ -597,8 +597,6 @@ pub(crate) fn render_hub(
         .min_w_0()
         .min_h_0()
         .bg(gpui_kit::rgb(palette.surface))
-        .border_l_1()
-        .border_color(gpui_kit::rgb(palette.border))
         .overflow_y_scroll()
         .child(
             div()

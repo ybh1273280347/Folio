@@ -1316,7 +1316,7 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn render_activity_rail(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_activity_rail(&mut self, sidebar_rendered: bool, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let dragging_tree_item =
             cx.has_active_drag() && self.tree.dragging_tree_item.load(Ordering::Relaxed);
         let sidebar_visible = self.is_sidebar_open();
@@ -1632,8 +1632,7 @@ impl Workspace {
             .justify_between()
             .py_2p5()
             .bg(rgb(BG))
-            .border_r_1()
-            .border_color(rgb(BORDER))
+            .when(sidebar_rendered, |rail| rail.border_r_1().border_color(rgb(BORDER)))
             .child(
                 div()
                     .flex()
@@ -2437,8 +2436,6 @@ impl Workspace {
             .bg(rgb(BG))
             .font_family(crate::ui::sans_font(&self.settings.interface_font))
             .text_size(px(self.settings.interface_font_size as f32))
-            .border_r_1()
-            .border_color(rgb(BORDER))
             .child(
                 div()
                     .px_3p5()
