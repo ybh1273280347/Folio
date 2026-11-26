@@ -30,13 +30,13 @@ use crate::{
     },
     storage,
 };
+use crate::ui::{FolioContextMenuExt, FolioDropdownMenuExt, FolioMenuItem};
 use gpui_kit::{
     assets::IconName,
     base::{Easing, Scrollbar, ScrollbarMode, StyledExt, Transition, transition_with_status},
     component::{
         button::{Button, ButtonVariants},
         input::{Input, InputEvent, InputState},
-        menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
         progress::Progress,
         resizable::{HandleEdge, h_resizable, resizable_panel, resize_handle},
     },
@@ -1214,25 +1214,27 @@ impl Render for Workspace {
                                     app.trash.dismiss();
                                     app.switch_project(&id, window, cx);
                                 }))
-                                .context_menu(move |menu, _, _| {
+                                .folio_context_menu(move |menu, _, _| {
                                     let root = root.clone();
                                     let name = rename_name.clone();
                                     let id = rename_id.clone();
                                     let app = app.clone();
                                     let remove_app = app.clone();
                                     let remove_id = remove_id.clone();
-                                    menu.min_w(px(90.))
+                                    menu.min_w(px(164.))
                                         .item(
-                                            compact_menu_item(
+                                            FolioMenuItem::new(
                                                 crate::i18n::workspace::MENU_REVEAL_IN_EXPLORER
                                                     .get(),
                                             )
+                                            .icon(IconName::FolderOpen)
                                             .on_click(move |_, _, cx| reveal_path(&root, cx)),
                                         )
                                         .item(
-                                            compact_menu_item(
+                                            FolioMenuItem::new(
                                                 crate::i18n::workspace::MENU_RENAME_PROJECT.get(),
                                             )
+                                            .icon(IconName::PencilLine)
                                             .on_click(move |_, window, cx| {
                                                 app.update(cx, |app, cx| {
                                                     app.start_rename_project(
@@ -1246,9 +1248,11 @@ impl Render for Workspace {
                                         )
                                         .separator()
                                         .item(
-                                            compact_menu_item(
+                                            FolioMenuItem::new(
                                                 crate::i18n::workspace::MENU_REMOVE_PROJECT.get(),
                                             )
+                                            .icon(IconName::Trash)
+                                            .danger()
                                             .on_click(move |_, window, cx| {
                                                 remove_app.update(cx, |app, cx| {
                                                     app.remove_project(&remove_id, window, cx)
@@ -1348,18 +1352,18 @@ impl Render for Workspace {
                                 .rounded(px(6.))
                                 .icon(crate::ui::icon(IconName::SlidersHorizontal).size(px(15.)))
                                 .tooltip(crate::i18n::workspace::TOOLTIP_BUILD_SETTINGS.get())
-                                .dropdown_menu(move |menu, _, _| {
+                                .folio_dropdown_menu(move |menu, _, _| {
                                     let menu =
                                         [Engine::Xelatex, Engine::Pdflatex, Engine::Lualatex]
                                             .into_iter()
                                             .fold(
-                                                menu.item(PopupMenuItem::label(
+                                                menu.min_w(px(176.)).label(
                                                     crate::i18n::workspace::LABEL_COMPILE_ENGINE.get(),
-                                                )),
+                                                ),
                                                 |menu, choice| {
                                                     let app = engine_app.clone();
                                                     menu.item(
-                                                        PopupMenuItem::new(format!("{choice:?}"))
+                                                        FolioMenuItem::new(format!("{choice:?}"))
                                                             .checked(engine == Some(choice))
                                                             .on_click(move |_, _, cx| {
                                                                 app.update(cx, |app, cx| {
@@ -1370,14 +1374,14 @@ impl Render for Workspace {
                                                 },
                                             );
                                     main_files.iter().fold(
-                                        menu.separator().item(PopupMenuItem::label(
+                                        menu.separator().label(
                                             crate::i18n::workspace::LABEL_MAIN_FILE.get(),
-                                        )),
+                                        ),
                                         |menu, file| {
                                             let app = main_app.clone();
                                             let file = file.clone();
                                             menu.item(
-                                                PopupMenuItem::new(file.clone())
+                                                FolioMenuItem::new(file.clone())
                                                     .checked(file == main_label)
                                                     .on_click(move |_, _, cx| {
                                                         app.update(cx, |app, cx| {
@@ -1758,17 +1762,6 @@ impl Render for Workspace {
     }
 }
 
-fn compact_menu_item(label: &'static str) -> PopupMenuItem {
-    PopupMenuItem::element(move |_, _| {
-        div()
-            .h(px(18.))
-            .flex()
-            .items_center()
-            .text_size(px(11.5))
-            .child(label)
-    })
-}
-
 pub(crate) fn line_byte_range(text: &str, line0: usize) -> Option<std::ops::Range<usize>> {
     let mut current = 0usize;
     let mut start = 0usize;
@@ -1784,19 +1777,6 @@ pub(crate) fn line_byte_range(text: &str, line0: usize) -> Option<std::ops::Rang
         return Some(start..text.len());
     }
     None
-}
-
-pub(in crate::workspace) fn compact_menu_icon_item(icon: IconName, label: &'static str) -> PopupMenuItem {
-    PopupMenuItem::element(move |_, _| {
-        div()
-            .h(px(18.))
-            .flex()
-            .items_center()
-            .gap_1p5()
-            .text_size(px(11.5))
-            .child(crate::ui::icon(icon).size(px(12.)))
-            .child(label)
-    })
 }
 
 fn reveal_path(path: &Path, cx: &App) {

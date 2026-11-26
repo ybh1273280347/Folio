@@ -16,7 +16,11 @@ use super::{
         MIN_NODE_WIDTH, TreeLayoutMode, ViewportState,
     },
 };
-use crate::{i18n::canvas as i18n_canvas, theme::palette as active_palette};
+use crate::{
+    i18n::canvas as i18n_canvas,
+    theme::palette as active_palette,
+    ui::{FolioDropdownMenuExt, FolioMenuItem},
+};
 use gpui::{
     CursorStyle, EventEmitter, FocusHandle, Focusable, KeyBinding, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder, Pixels, Point,
@@ -28,7 +32,6 @@ use gpui_kit::{
         Disableable, Sizable,
         button::{Button, ButtonVariants},
         input::{InputEvent, Textarea, TextareaState},
-        menu::{DropdownMenu, PopupMenuItem},
         tooltip::Tooltip,
     },
     prelude::FluentBuilder,
@@ -2327,20 +2330,23 @@ impl Render for CanvasPane {
                     .w(px(24.))
                     .icon(crate::ui::icon(IconName::FileDown))
                     .tooltip(i18n_canvas::TOOLTIP_EXPORT)
-                    .dropdown_menu(move |menu, _, _| {
+                    .folio_dropdown_menu(move |menu, _, _| {
                         let p_pdf = pane_entity.clone();
                         let p_svg = pane_entity.clone();
                         let p_png = pane_entity.clone();
-                        menu.item(
-                            PopupMenuItem::new(crate::i18n::media::DRAWIO_EXPORT_PDF.get())
-                                .on_click(move |_, _, cx| {
-                                    p_pdf.update(cx, |pane, cx| {
-                                        pane.export_to(ExportFormat::Pdf, cx);
-                                    });
-                                }),
-                        )
+                        menu.min_w(px(148.))
                             .item(
-                                PopupMenuItem::new(crate::i18n::media::DRAWIO_EXPORT_SVG.get())
+                                FolioMenuItem::new(crate::i18n::media::DRAWIO_EXPORT_PDF.get())
+                                    .icon(IconName::FileDown)
+                                    .on_click(move |_, _, cx| {
+                                        p_pdf.update(cx, |pane, cx| {
+                                            pane.export_to(ExportFormat::Pdf, cx);
+                                        });
+                                    }),
+                            )
+                            .item(
+                                FolioMenuItem::new(crate::i18n::media::DRAWIO_EXPORT_SVG.get())
+                                    .icon(IconName::FileCode)
                                     .on_click(move |_, _, cx| {
                                         p_svg.update(cx, |pane, cx| {
                                             pane.export_to(ExportFormat::Svg, cx);
@@ -2348,7 +2354,8 @@ impl Render for CanvasPane {
                                     }),
                             )
                             .item(
-                                PopupMenuItem::new(crate::i18n::media::DRAWIO_EXPORT_PNG.get())
+                                FolioMenuItem::new(crate::i18n::media::DRAWIO_EXPORT_PNG.get())
+                                    .icon(IconName::FileImage)
                                     .on_click(move |_, _, cx| {
                                         p_png.update(cx, |pane, cx| {
                                             pane.export_to(ExportFormat::Png, cx);

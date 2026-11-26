@@ -10,6 +10,7 @@ use crate::mermaid::{MermaidReady, MermaidRenderer};
 use crate::annotations::{self, AnnotationItem, HIGHLIGHT_COLORS};
 use crate::model::AppSettings;
 use comrak::{Arena, Options, nodes::NodeValue, parse_document};
+use crate::ui::FolioContextMenuExt;
 use gpui_kit::{
     assets::IconName,
     base::{HandleEdge, Scrollbar, ScrollbarMode, StyledExt, resize_handle, text::MarkdownExtensions},
@@ -20,7 +21,6 @@ use gpui_kit::{
             RangeDecoration, RangeDecorationCollection, RangeDecorationStyle, RopeExt, Textarea,
             TextareaState,
         },
-        menu::ContextMenuExt,
         tooltip::Tooltip,
     },
     prelude::FluentBuilder,

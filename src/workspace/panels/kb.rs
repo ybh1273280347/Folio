@@ -821,32 +821,30 @@ impl Workspace {
                                 .disabled(syncing)
                                 .icon(crate::ui::icon(IconName::Ellipsis).size(px(15.)))
                                 .tooltip(rp::KB_MENU_TOOLTIP.get())
-                                .dropdown_menu(move |menu, _, _| {
+                                .folio_dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                                     let rebuild_app = app_menu.clone();
                                     let disable_app = app_menu.clone();
-                                    menu.item(
-                                        super::super::compact_menu_icon_item(
-                                            IconName::RotateCcw,
-                                            rp::KB_MENU_REBUILD.get(),
+                                    menu.min_w(px(164.))
+                                        .item(
+                                            FolioMenuItem::new(rp::KB_MENU_REBUILD.get())
+                                                .icon(IconName::RotateCcw)
+                                                .on_click(move |_, _, cx| {
+                                                    rebuild_app.update(cx, |app, cx| {
+                                                        app.run_kb_sync(true, None, Vec::new(), cx);
+                                                    });
+                                                }),
                                         )
-                                        .on_click(move |_, _, cx| {
-                                            rebuild_app.update(cx, |app, cx| {
-                                                app.run_kb_sync(true, None, Vec::new(), cx);
-                                            });
-                                        }),
-                                    )
-                                    .separator()
-                                    .item(
-                                        super::super::compact_menu_icon_item(
-                                            IconName::Trash,
-                                            rp::KB_MENU_DISABLE.get(),
+                                        .separator()
+                                        .item(
+                                            FolioMenuItem::new(rp::KB_MENU_DISABLE.get())
+                                                .icon(IconName::Trash)
+                                                .danger()
+                                                .on_click(move |_, window, cx| {
+                                                    disable_app.update(cx, |app, cx| {
+                                                        app.disable_kb(window, cx);
+                                                    });
+                                                }),
                                         )
-                                        .on_click(move |_, window, cx| {
-                                            disable_app.update(cx, |app, cx| {
-                                                app.disable_kb(window, cx);
-                                            });
-                                        }),
-                                    )
                                 }),
                         )
                     })

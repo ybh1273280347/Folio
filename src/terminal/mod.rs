@@ -2,12 +2,13 @@
 mod session;
 pub mod theme;
 
-use crate::{model::TerminalSettings, theme::Palette};
+use crate::{
+    model::TerminalSettings,
+    theme::Palette,
+    ui::{FolioDropdownMenuExt, FolioMenuItem},
+};
 use gpui_kit::{
     assets::IconName,
-    component::{
-        menu::{DropdownMenu, PopupMenuItem},
-    },
     prelude::FluentBuilder,
     *,
 };
@@ -497,62 +498,30 @@ impl Render for TerminalPane {
         let new_menu_btn = crate::ui::panel_toolbar_button("new-terminal", palette, cx)
             .icon(crate::ui::icon(IconName::Plus).size(px(15.)))
             .tooltip(crate::i18n::media::TERM_NEW_OR_AGENT.get())
-            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+            .folio_dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                 let pane_term = pane_entity.clone();
                 let mut menu = menu
-                    .min_w(px(188.))
+                    .min_w(px(196.))
                     .item(
-                        PopupMenuItem::element(move |_, _| {
-                            div()
-                                .w_full()
-                                .py(px(1.))
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_3()
-                                .text_xs()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(crate::ui::icon(IconName::Terminal).w(px(14.)).h(px(14.)))
-                                        .child("Terminal"),
-                                )
-                                .child(div().text_size(px(11.)).opacity(0.55).child("Shell"))
-                        })
-                        .on_click(move |_, window, cx| {
-                            pane_term.update(cx, |pane, cx| pane.new_session(window, cx));
-                        }),
+                        FolioMenuItem::new(crate::i18n::media::TERM_MENU_SHELL.get())
+                            .icon(IconName::Terminal)
+                            .shortcut("Shell")
+                            .on_click(move |_, window, cx| {
+                                pane_term.update(cx, |pane, cx| pane.new_session(window, cx));
+                            }),
                     )
                     .separator()
-                    .item(PopupMenuItem::label("Start an agent"));
+                    .label(crate::i18n::media::TERM_MENU_START_AGENT.get());
                 for (idx, harness) in AiHarness::ALL.into_iter().enumerate() {
                     let pane_h = pane_entity.clone();
                     let index_label = (idx + 1).to_string();
                     menu = menu.item(
-                        PopupMenuItem::element(move |_, _| {
-                            div()
-                                .w_full()
-                                .py(px(1.))
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_3()
-                                .text_xs()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(img(harness.icon_path()).w(px(14.)).h(px(14.)))
-                                        .child(harness.label()),
-                                )
-                                .child(div().text_size(px(11.)).opacity(0.5).child(index_label.clone()))
-                        })
-                        .on_click(move |_, window, cx| {
-                            pane_h.update(cx, |pane, cx| pane.new_harness_session(harness, window, cx));
-                        }),
+                        FolioMenuItem::new(harness.label())
+                            .custom_icon(move |_, _| img(harness.icon_path()).w(px(14.)).h(px(14.)))
+                            .shortcut(index_label)
+                            .on_click(move |_, window, cx| {
+                                pane_h.update(cx, |pane, cx| pane.new_harness_session(harness, window, cx));
+                            }),
                     );
                 }
                 menu
