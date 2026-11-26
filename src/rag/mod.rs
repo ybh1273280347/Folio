@@ -268,9 +268,10 @@ pub fn doc_kind(rel_path: &str) -> Option<&'static str> {
 
 /// Collects project-relative paths eligible for RAG indexing by extension.
 /// Derived PDFs are filtered later in `sync_project` strictly by protocol fingerprints.
-pub fn collect_eligible_paths(paths: impl IntoIterator<Item = String>) -> Vec<String> {
+pub fn collect_eligible_paths<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     paths
         .into_iter()
         .filter(|path| doc_kind(path).is_some())
+        .map(str::to_owned)
         .collect()
 }

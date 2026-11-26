@@ -4,9 +4,9 @@ use super::super::Workspace;
 use crate::{
     ai::{WorkspaceToolAction, WorkspaceToolRequest},
     rag::{
-        DirtyDocument, RagError, SearchRequest,
+        RagError, SearchRequest,
         client::{EmbeddingClient, RerankClient},
-        collect_eligible_paths, ocr,
+        ocr,
         pipeline::{SearchServices, SyncOptions, search_project, sync_project},
         store::RagStore,
     },
@@ -127,18 +127,16 @@ impl Workspace {
 
         let db_path = root.join(".folio").join("rag.sqlite3");
         let config = self.settings.rag.clone();
-        let eligible_paths =
-            collect_eligible_paths(self.tree.files().iter().map(|file| file.path.clone()));
-        let dirty_docs: Vec<DirtyDocument> = self
-            .documents
-            .open_buffers()
-            .filter(|(_, buffer)| buffer.is_dirty() && !buffer.deleted)
-            .map(|(path, buffer)| DirtyDocument {
-                rel_path: path.to_owned(),
-                text: buffer.text.clone(),
-            })
-            .collect();
-        let tag_snapshot = self.tags.snapshot.clone();
+        // The workspace thread only copies inputs used by this operation.
+        let (eligible_paths, dirty_docs, tag_snapshot) = match &operation {
+            RagOperation::Search { params } => (
+                self.rag_eligible_paths(),
+                self.dirty_rag_documents(),
+                (!params.tags.is_empty()).then(|| self.tags.snapshot.clone()),
+            ),
+            RagOperation::Reindex { .. } => (self.rag_eligible_paths(), Vec::new(), None),
+            RagOperation::Status | RagOperation::ReadPdf { .. } => (Vec::new(), Vec::new(), None),
+        };
 
         let cancelled = Arc::new(AtomicBool::new(false));
         self.tool_requests
@@ -239,12 +237,15 @@ impl Workspace {
                     Ok((json!({ "status": "ok", "report": report }), snapshot))
                 }
                 RagOperation::Search { params } => {
-                    let allowed_paths = resolve_tag_filter(
-                        &tag_snapshot,
-                        &eligible_paths,
-                        &params.tags,
-                        &params.r#match,
-                    )?;
+                    let allowed_paths = match tag_snapshot.as_ref() {
+                        Some(tags) => Some(resolve_tag_filter(
+                            tags,
+                            &eligible_paths,
+                            &params.tags,
+                            &params.r#match,
+                        )?),
+                        None => None,
+                    };
 
                     if !eligible_paths.is_empty()
                         && !store.has_indexed_documents().map_err(|e| RagError::new("store_error", e))?
@@ -336,10 +337,7 @@ fn resolve_tag_filter(
     eligible_paths: &[String],
     tag_names: &[String],
     match_mode: &str,
-) -> Result<Option<HashSet<String>>, RagError> {
-    if tag_names.is_empty() {
-        return Ok(None);
-    }
+) -> Result<HashSet<String>, RagError> {
     if !matches!(match_mode, "all" | "any") {
         return Err(RagError::new(
             "invalid_request",
@@ -349,7 +347,7 @@ fn resolve_tag_filter(
     let mut tag_ids = Vec::with_capacity(tag_names.len());
     for name in tag_names {
         let Some(tag) = snapshot.tags.iter().find(|t| t.name == *name) else {
-            return Ok(Some(HashSet::new()));
+            return Ok(HashSet::new());
         };
         tag_ids.push(tag.id.as_str());
     }
@@ -365,7 +363,7 @@ fn resolve_tag_filter(
         })
         .cloned()
         .collect();
-    Ok(Some(allowed))
+    Ok(allowed)
 }
 
 fn error_json(error: &RagError) -> Value {

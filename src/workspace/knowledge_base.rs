@@ -86,6 +86,22 @@ impl Workspace {
         Some((key, root))
     }
 
+    pub(super) fn rag_eligible_paths(&self) -> Vec<String> {
+        collect_eligible_paths(self.tree.files().iter().map(|file| file.path.as_str()))
+    }
+
+    /// Snapshot unsaved text so the background worker can search it alongside the index.
+    pub(super) fn dirty_rag_documents(&self) -> Vec<DirtyDocument> {
+        self.documents
+            .open_buffers()
+            .filter(|(_, buffer)| buffer.is_dirty() && !buffer.deleted)
+            .map(|(path, buffer)| DirtyDocument {
+                rel_path: path.to_owned(),
+                text: buffer.text.clone(),
+            })
+            .collect()
+    }
+
     pub(in crate::workspace) fn schedule_rag_sync(&mut self) {
         let Some((_, root)) = self.active_rag_root() else {
             return;
@@ -382,8 +398,7 @@ impl Workspace {
         let accurate_configured = !ocr::resolve_ocr_token(&config).is_empty();
         self.right_panel.kb.accurate_configured = accurate_configured;
         self.right_panel.kb.sync_error = None;
-        let eligible_paths =
-            collect_eligible_paths(self.tree.files().iter().map(|file| file.path.clone()));
+        let eligible_paths = self.rag_eligible_paths();
         let sync_id = self.rag_sync.next_sync_id.wrapping_add(1);
         self.rag_sync.next_sync_id = sync_id;
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -678,15 +693,7 @@ impl Workspace {
         cx.notify();
 
         let config = self.settings.rag.clone();
-        let dirty_docs: Vec<DirtyDocument> = self
-            .documents
-            .open_buffers()
-            .filter(|(_, buffer)| buffer.is_dirty() && !buffer.deleted)
-            .map(|(path, buffer)| DirtyDocument {
-                rel_path: path.to_owned(),
-                text: buffer.text.clone(),
-            })
-            .collect();
+        let dirty_docs = self.dirty_rag_documents();
         let mut cache = self.rag_sync.kb_search_cache.clone();
         let task = cx.background_spawn(async move {
             let store =

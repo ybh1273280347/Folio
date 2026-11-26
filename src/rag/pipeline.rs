@@ -2114,11 +2114,11 @@ mod tests {
         )
         .unwrap();
 
-        let eligible = crate::rag::collect_eligible_paths(vec![
-            "notes.tex".into(),
-            "notes.pdf".into(),
-            "renamed-tex-output.pdf".into(),
-            "renamed-md-export.pdf".into(),
+        let eligible = crate::rag::collect_eligible_paths([
+            "notes.tex",
+            "notes.pdf",
+            "renamed-tex-output.pdf",
+            "renamed-md-export.pdf",
         ]);
         assert_eq!(eligible.len(), 4);
 
