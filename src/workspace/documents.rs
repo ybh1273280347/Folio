@@ -631,6 +631,85 @@ impl Workspace {
             || lower.ends_with(".pdf")
             || Self::is_html_path(&lower)
             || Self::is_drawio_path(&lower)
+            || Self::is_image_path(&lower)
+    }
+
+    fn resolve_dropped_files(
+        &mut self,
+        dragged: &crate::terminal::DraggedPaths,
+        split_only: bool,
+        cx: &mut Context<Self>,
+    ) -> Vec<ProjectFile> {
+        // A mixed selection contributes only supported files to the reading panes.
+        let paths = dragged.0.iter().filter(|path| {
+            !split_only || Self::supports_split_pane(&path.to_string_lossy())
+        });
+        if let Some(source_project) = dragged.1.as_deref() {
+            let Some(project) = self.projects.directory() else {
+                self.report(crate::i18n::workspace::ERR_SOURCE_PROJECT_CHANGED.get(), cx);
+                return Vec::new();
+            };
+            if project.id != source_project {
+                self.report(crate::i18n::workspace::ERR_SOURCE_PROJECT_CHANGED.get(), cx);
+                return Vec::new();
+            }
+            let root = PathBuf::from(&project.folder);
+            let mut resolved = Vec::new();
+            for path in paths {
+                // Tree drags construct paths by joining the same project root to the file key.
+                let Ok(relative) = path.strip_prefix(&root) else {
+                    self.report(crate::i18n::workspace::ERR_SOURCE_NOT_IN_PROJECT.get(), cx);
+                    continue;
+                };
+                if !path.is_file() {
+                    self.report(crate::i18n::workspace::err_file_not_found(path), cx);
+                    continue;
+                }
+                resolved.push(ProjectFile {
+                    kind: Self::file_kind(path),
+                    path: relative.to_string_lossy().replace('\\', "/"),
+                });
+            }
+            return resolved;
+        }
+        let mut resolved = Vec::new();
+        for path in paths {
+            match self.prepare_standalone_file(path) {
+                Ok(file) => resolved.push(file),
+                Err(error) => self.report(error, cx),
+            }
+        }
+        resolved
+    }
+
+    pub(super) fn drop_files_to_main_tab(
+        &mut self,
+        dragged: &crate::terminal::DraggedPaths,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let files = self.resolve_dropped_files(dragged, false, cx);
+        for file in &files {
+            if let Err(error) = self.open_file(file, window, cx) {
+                self.report(error, cx);
+            }
+        }
+    }
+
+    pub(super) fn drop_files_to_split_pane(
+        &mut self,
+        dragged: &crate::terminal::DraggedPaths,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.zen_mode {
+            self.drop_files_to_main_tab(dragged, window, cx);
+            return;
+        }
+        let files = self.resolve_dropped_files(dragged, true, cx);
+        for file in &files {
+            self.open_reading_pane(file, window, cx);
+        }
     }
 
     pub(super) fn open_reading_key(
@@ -1769,6 +1848,12 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if self.documents.reading_panes.contains(&file.path) {
+            let key = PaneKey::reading(&file.path);
+            if let Some(pane) = self.documents.markdown_panes.get(&key) {
+                pane.update(cx, |pane, cx| pane.focus(window, cx));
+            } else if let Some(pane) = self.documents.canvas_panes.get(&key) {
+                pane.update(cx, |pane, cx| pane.focus(window, cx));
+            }
             return;
         }
         let key = PaneKey::reading(&file.path);
@@ -1879,5 +1964,35 @@ impl Workspace {
             pane = pane.child(div().flex_1().min_h_0().child(canvas.clone()));
         }
         pane.into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Workspace;
+
+    #[test]
+    fn supports_split_pane_includes_images_and_existing_types() {
+        for path in [
+            "notes.md",
+            "NOTES.MD",
+            "board.canvas",
+            "paper.pdf",
+            "preview.html",
+            "preview.htm",
+            "diagram.drawio",
+            "diagram.drawio.svg",
+            "photo.png",
+            "photo.jpg",
+            "photo.jpeg",
+            "photo.webp",
+            "photo.gif",
+            "vector.svg",
+        ] {
+            assert!(Workspace::supports_split_pane(path), "{path} should support split pane");
+        }
+        for path in ["main.tex", "notes.txt", "refs.bib", "config.json"] {
+            assert!(!Workspace::supports_split_pane(path), "{path} should not support split pane");
+        }
     }
 }

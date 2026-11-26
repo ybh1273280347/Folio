@@ -76,6 +76,9 @@ pub(super) struct FileTree {
     tree_drag: Option<TreeSelectionDrag>,
     trash_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     dragging_tree_item: Arc<AtomicBool>,
+    dragging_tree_files: Arc<AtomicBool>,
+    dragging_files_can_split: Arc<AtomicBool>,
+    work_area_drop_bounds: Arc<Mutex<crate::terminal::WorkAreaDropBounds>>,
     file_tree_focus: FocusHandle,
     file_scroll: ScrollHandle,
     name_action: Option<NameAction>,
@@ -117,6 +120,9 @@ impl FileTree {
             tree_drag: None,
             trash_bounds: Arc::new(Mutex::new(None)),
             dragging_tree_item: Arc::new(AtomicBool::new(false)),
+            dragging_tree_files: Arc::new(AtomicBool::new(false)),
+            dragging_files_can_split: Arc::new(AtomicBool::new(false)),
+            work_area_drop_bounds: Arc::new(Mutex::new(Default::default())),
             file_tree_focus: cx.focus_handle(),
             file_scroll: ScrollHandle::new(),
             name_action: None,
@@ -159,6 +165,32 @@ impl FileTree {
     pub(super) fn dismiss_overlays(&mut self) {
         self.name_action = None;
         self.searching = false;
+    }
+
+    pub(super) fn sync_drag_state(&self, has_active_drag: bool) {
+        // GPUI also ends cancelled drags without calling any drop handler.
+        if !has_active_drag && self.dragging_tree_item.swap(false, Ordering::Relaxed) {
+            self.dragging_tree_files.store(false, Ordering::Relaxed);
+            self.dragging_files_can_split.store(false, Ordering::Relaxed);
+            self.dragged_folder.borrow_mut().take();
+            self.clear_work_area_drop_bounds();
+        }
+    }
+
+    pub(super) fn is_dragging_files(&self, has_active_drag: bool) -> bool {
+        has_active_drag && self.dragging_tree_files.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn dragged_files_can_split(&self) -> bool {
+        self.dragging_files_can_split.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn work_area_drop_bounds(&self) -> Arc<Mutex<crate::terminal::WorkAreaDropBounds>> {
+        self.work_area_drop_bounds.clone()
+    }
+
+    pub(super) fn clear_work_area_drop_bounds(&self) {
+        *self.work_area_drop_bounds.lock().expect("work area drop bounds") = Default::default();
     }
 
     pub(super) fn replace_listing(&mut self, files: Vec<ProjectFile>, folders: Vec<String>) {
@@ -1285,10 +1317,6 @@ impl Workspace {
     }
 
     pub(super) fn render_activity_rail(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if !cx.has_active_drag() {
-            self.tree.dragging_tree_item.store(false, Ordering::Relaxed);
-            self.tree.dragged_folder.borrow_mut().take();
-        }
         let dragging_tree_item =
             cx.has_active_drag() && self.tree.dragging_tree_item.load(Ordering::Relaxed);
         let sidebar_visible = self.is_sidebar_open();
@@ -1632,10 +1660,6 @@ impl Workspace {
     }
 
     pub(super) fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if !cx.has_active_drag() {
-            self.tree.dragging_tree_item.store(false, Ordering::Relaxed);
-            self.tree.dragged_folder.borrow_mut().take();
-        }
         self.tree.drop_hover.borrow_mut().take_if(|target| {
             !cx.has_active_drag() || !self.tree.tree_row_bounds.lock().expect("tree bounds")
                 .get(&target.row).is_some_and(|(_, bounds)| bounds.contains(&window.mouse_position()))
@@ -1788,6 +1812,9 @@ impl Workspace {
                     let preview_font_size = self.settings.interface_font_size;
                     let trash_bounds = self.tree.trash_bounds.clone();
                     let dragging = self.tree.dragging_tree_item.clone();
+                    let dragging_files = self.tree.dragging_tree_files.clone();
+                    let can_split = self.tree.dragging_files_can_split.clone();
+                    let work_area_bounds = self.tree.work_area_drop_bounds.clone();
                     let row_bounds = self.tree.tree_row_bounds.clone();
                     let close_id = SharedString::from(format!("close-default-file-{key}"));
                     let name = Path::new(path)
@@ -1799,7 +1826,12 @@ impl Workspace {
                         .id(SharedString::from(format!("default-file-{key}")))
                         .on_drag(crate::terminal::DraggedPaths(vec![full], None), move |paths, offset, _, cx| {
                             dragging.store(true, Ordering::Relaxed);
-                            cx.new(|_| crate::terminal::PathsPreview { paths: paths.0.clone(), offset, font: preview_font.clone(), font_size: preview_font_size, palette: drag_palette, trash_bounds: trash_bounds.clone(), source_folder: None, can_trash: false, row_bounds: row_bounds.clone() })
+                            dragging_files.store(true, Ordering::Relaxed);
+                            can_split.store(
+                                paths.0.iter().any(|p| Self::supports_split_pane(&p.to_string_lossy())),
+                                Ordering::Relaxed,
+                            );
+                            cx.new(|_| crate::terminal::PathsPreview { paths: paths.0.clone(), offset, font: preview_font.clone(), font_size: preview_font_size, palette: drag_palette, trash_bounds: trash_bounds.clone(), source_folder: None, can_trash: false, row_bounds: row_bounds.clone(), work_area_bounds: work_area_bounds.clone() })
                         })
                         .flex()
                         .items_center()
@@ -1871,14 +1903,19 @@ impl Workspace {
                     let folder_font_size = self.settings.interface_font_size;
                     let trash_bounds = self.tree.trash_bounds.clone();
                     let dragging = self.tree.dragging_tree_item.clone();
+                    let dragging_files = self.tree.dragging_tree_files.clone();
+                    let can_split = self.tree.dragging_files_can_split.clone();
+                    let work_area_bounds = self.tree.work_area_drop_bounds.clone();
                     let dragged_folder = self.tree.dragged_folder.clone();
                     let row_bounds = self.tree.tree_row_bounds.clone();
                     return div()
                         .id(SharedString::from(format!("folder-{path}")))
                         .on_drag(folder_drag, move |dragged, offset, _, cx| {
                             dragging.store(true, Ordering::Relaxed);
+                            dragging_files.store(false, Ordering::Relaxed);
+                            can_split.store(false, Ordering::Relaxed);
                             dragged_folder.replace(Some(dragged.0.clone()));
-                            cx.new(|_| crate::terminal::PathsPreview { paths: vec![dragged.2.clone()], offset, font: folder_font.clone(), font_size: folder_font_size, palette: drag_palette, trash_bounds: trash_bounds.clone(), source_folder: Some(dragged.0.clone()), can_trash: true, row_bounds: row_bounds.clone() })
+                            cx.new(|_| crate::terminal::PathsPreview { paths: vec![dragged.2.clone()], offset, font: folder_font.clone(), font_size: folder_font_size, palette: drag_palette, trash_bounds: trash_bounds.clone(), source_folder: Some(dragged.0.clone()), can_trash: true, row_bounds: row_bounds.clone(), work_area_bounds: work_area_bounds.clone() })
                         })
                         .when(interactive, |row| self.tree_drop_target(row, path, false, drag_palette, cx))
                         .relative()
@@ -2087,12 +2124,20 @@ impl Workspace {
                 let drag_project = self.projects.directory().expect("file has project").id.clone();
                 let trash_bounds = self.tree.trash_bounds.clone();
                 let dragging = self.tree.dragging_tree_item.clone();
+                let dragging_files = self.tree.dragging_tree_files.clone();
+                let can_split = self.tree.dragging_files_can_split.clone();
+                let work_area_bounds = self.tree.work_area_drop_bounds.clone();
                 let row_bounds = self.tree.tree_row_bounds.clone();
                 div()
                     .id(SharedString::from(format!("file-{}", file.path)))
                     .on_drag(crate::terminal::DraggedPaths(dragged_paths, Some(drag_project)), move |paths, offset, _, cx| {
                         dragging.store(true, Ordering::Relaxed);
-                        cx.new(|_| crate::terminal::PathsPreview { paths: paths.0.clone(), offset, font: preview_font.clone(), font_size: preview_font_size, palette: drag_palette, trash_bounds: trash_bounds.clone(), source_folder: None, can_trash: true, row_bounds: row_bounds.clone() })
+                        dragging_files.store(true, Ordering::Relaxed);
+                        can_split.store(
+                            paths.0.iter().any(|p| Self::supports_split_pane(&p.to_string_lossy())),
+                            Ordering::Relaxed,
+                        );
+                        cx.new(|_| crate::terminal::PathsPreview { paths: paths.0.clone(), offset, font: preview_font.clone(), font_size: preview_font_size, palette: drag_palette, trash_bounds: trash_bounds.clone(), source_folder: None, can_trash: true, row_bounds: row_bounds.clone(), work_area_bounds: work_area_bounds.clone() })
                     })
                     .when(interactive, |row| self.tree_drop_target(row, path, true, drag_palette, cx))
                     .flex()
