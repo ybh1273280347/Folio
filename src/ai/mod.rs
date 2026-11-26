@@ -12,7 +12,8 @@ pub use manager::AiPane;
 pub(crate) use rpc::project_key;
 pub(crate) use rpc::{WorkspaceToolAction, WorkspaceToolRequest};
 pub use quote::SelectionQuote;
-use quote::{append_quotes, split_injected_prompt};
+use quote::{decode_prompt_body, encode_prompt_body, split_injected_prompt};
+use render::{UserMessageBody, inline_quote_token};
 
 use crate::math::{MathDisplaySize, MathReady, MathRenderer};
 use base64::Engine as _;
@@ -37,7 +38,7 @@ use gpui_kit::{
         button::{Button, ButtonCustomVariant, ButtonVariants},
         diff::{Diff, DiffChangeIndicator, DiffHunkSeparator, DiffState},
         input::{
-            Enter, Escape, IndentInline, InlineToken, Input, InputEvent, InputState, InputToken,
+            Enter, Escape, IndentInline, InlineToken, Input, InputContent, InputEvent, InputState, InputToken,
             MoveDown, MoveUp, Textarea, TextareaState,
         },
         tooltip::Tooltip,
@@ -142,7 +143,7 @@ enum AssistantPart {
 enum ChatMessage {
     User {
         entry_id: Option<String>,
-        display_text: String,
+        body: UserMessageBody,
         // Context injected ahead of the editable body, such as file references and quotes.
         prompt_prefix: String,
         // Pi stores user-message timestamps as Unix milliseconds.
@@ -237,7 +238,6 @@ struct ChatPane {
     settings: AppSettings,
     active_file: Option<AttachedFile>,
     attach_active_file: bool,
-    quoted_selections: Vec<SelectionQuote>,
     quote_popover: Option<AnswerQuotePopover>,
     quote_drag: Option<(usize, usize, Point<Pixels>)>,
     quote_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -249,6 +249,8 @@ struct ChatPane {
     next_image_id: u64,
     pending_ext_prefill: Option<(String, bool)>,
     pending_composer_text: Option<String>,
+    submitted_draft: Option<(InputContent, Vec<PastedImage>)>,
+    restore_submitted_draft: bool,
     ext_input: Entity<InputState>,
     ext_textarea: Entity<TextareaState>,
     toast: Option<(String, bool)>,
@@ -305,7 +307,20 @@ impl ChatPane {
         });
         let quote_view = cx.entity().downgrade();
         let quote_window = window.window_handle();
-        let sub_popover_escape = cx.intercept_keystrokes(move |event, window, cx| {
+        let sub_pane_keys = cx.intercept_keystrokes(move |event, window, cx| {
+            let modifiers = event.keystroke.modifiers;
+            if window.window_handle() == quote_window
+                && event.keystroke.key == "l"
+                && modifiers.control
+                && modifiers.number_of_modifiers() == 1
+            {
+                let _ = quote_view.update(cx, |pane, cx| {
+                    if pane.quote_popover.is_some() {
+                        pane.insert_answer_quote(window, cx);
+                        cx.stop_propagation();
+                    }
+                });
+            }
             if window.window_handle() == quote_window
                 && event.keystroke.key == "escape"
                 && event.keystroke.modifiers.number_of_modifiers() == 0
@@ -405,7 +420,6 @@ impl ChatPane {
             settings,
             active_file: None,
             attach_active_file: false,
-            quoted_selections: Vec::new(),
             quote_popover: None,
             quote_drag: None,
             quote_bounds: Rc::new(Cell::new(Bounds::default())),
@@ -417,6 +431,8 @@ impl ChatPane {
             next_image_id: 1,
             pending_ext_prefill: None,
             pending_composer_text: None,
+            submitted_draft: None,
+            restore_submitted_draft: false,
             ext_input,
             ext_textarea,
             toast: None,
@@ -454,7 +470,7 @@ impl ChatPane {
                 sub_ext,
                 sub_math,
                 sub_mermaid,
-                sub_popover_escape,
+                sub_pane_keys,
             ],
         };
         pane
@@ -489,6 +505,13 @@ impl ChatPane {
         if let Some(text) = changes.composer_text {
             self.pending_composer_text = Some(text);
         }
+        if let Some(accepted) = changes.prompt_accepted {
+            if accepted {
+                self.submitted_draft = None;
+            } else {
+                self.restore_submitted_draft = true;
+            }
+        }
         if changes.edit_applied {
             self.editing_entry = None;
             self.stick_to_bottom = true;
@@ -508,7 +531,7 @@ impl ChatPane {
     }
 
     fn submit_inline_edit(&mut self, cx: &mut Context<Self>) {
-        let body = self.edit_input.read(cx).value().trim().to_owned();
+        let (body, _) = encode_prompt_body(&self.edit_input.read(cx).content());
         let result = {
             let mut session = self.session.borrow_mut();
             let Some(entry_id) = self.editing_entry.as_deref() else { return };
@@ -519,7 +542,7 @@ impl ChatPane {
                 return;
             }
             let payload = format!("{prompt_prefix}{body}");
-            session.edit_message(entry_id, &payload, &body)
+            session.edit_message(entry_id, &payload, &decode_prompt_body(&body).text().replace('\u{2063}', ""))
         };
         if let Err(error) = result {
             self.show_toast(crate::i18n::ai::command_failed(crate::i18n::ai::EDIT_MESSAGE.get(), &error), true, cx);
@@ -558,6 +581,25 @@ impl ChatPane {
         Bounds::new(point(bounds.left() + x, bounds.top() + y), size(width, height))
     }
 
+    fn insert_answer_quote(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.quote_popover.take() else { return };
+        if pending.scroll_offset == self.scroll.offset() {
+            self.insert_quote(pending.quote, window, cx);
+            TextSelection::clear(window, cx);
+        }
+        self.quote_drag = None;
+        cx.notify();
+    }
+
+    fn insert_quote(&mut self, quote: SelectionQuote, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| {
+            // The input owns the selection even while the source pane has focus.
+            input.replace_with_token(quote.token(), window, cx)
+                .expect("valid quote token in the AI composer");
+            input.focus(window, cx);
+        });
+    }
+
     fn render_quote_popover(&self, palette: Palette, typo: AiTypography, cx: &mut Context<Self>) -> Option<AnyElement> {
         let pending = self.quote_popover.as_ref()?;
         let bounds = self.quote_popover_bounds(pending);
@@ -568,29 +610,18 @@ impl ChatPane {
                 .absolute()
                 .left(bounds.left() - origin.x).top(bounds.top() - origin.y)
                 .w(bounds.size.width).h(bounds.size.height)
-                .rounded(px(7.)).shadow_md()
+                .rounded_full().shadow_md()
                 .bg(gpui_kit::rgb(palette.surface))
                 .border_1().border_color(subtle_border(palette.border))
-                .flex().items_center().justify_center()
+                .flex().items_center().justify_center().gap_2()
                 .text_size(typo.sm).text_color(gpui_kit::rgb(palette.text))
                 .cursor_pointer()
                 .hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
                 // The window selection may clear on press; the quote was frozen on release.
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(|pane, _, window, cx| {
-                    let pending = pane.quote_popover.take().expect("visible quote popover");
-                    if pending.scroll_offset == pane.scroll.offset()
-                        && !pane.quoted_selections.iter().any(|quote|
-                            quote.answer == pending.quote.answer && quote.text == pending.quote.text)
-                    {
-                        pane.quoted_selections.push(pending.quote);
-                    }
-                    TextSelection::clear(window, cx);
-                    pane.quote_drag = None;
-                    pane.focus(window, cx);
-                    cx.notify();
-                }))
-                .child(crate::i18n::ai::ADD_TO_CHAT.get()),
+                .on_click(cx.listener(|pane, _, window, cx| pane.insert_answer_quote(window, cx)))
+                .child(crate::i18n::ai::QUOTE_SELECTION.get())
+                .child(div().text_size(typo.xs).text_color(gpui_kit::rgb(palette.muted)).child("Ctrl+L")),
         ).with_priority(4).into_any_element())
     }
 
@@ -670,11 +701,10 @@ impl ChatPane {
     ) {
         let trimmed = text.trim();
         if !trimmed.is_empty() {
-            self.quoted_selections.push(SelectionQuote {
+            self.insert_quote(SelectionQuote {
                 source,
                 text: trimmed.to_owned(),
-                answer: None,
-            });
+            }, window, cx);
         }
         if let Some(f) = file {
             self.active_file = Some(f);
@@ -1046,7 +1076,7 @@ impl ChatPane {
         let content = self.input.read(cx).content();
         let raw_text = content.text().as_ref();
         let trimmed = raw_text.trim();
-        if trimmed.is_empty() && self.quoted_selections.is_empty() && self.pasted_images.is_empty() {
+        if trimmed.is_empty() && self.pasted_images.is_empty() {
             return;
         }
 
@@ -1056,35 +1086,11 @@ impl ChatPane {
             return;
         }
 
-        let mut skills: Vec<String> = Vec::new();
-        let mut clean_body = String::with_capacity(raw_text.len());
-        let mut cursor = 0usize;
-        let mut spans = content.tokens().to_vec();
-        spans.sort_by_key(|s| s.range().start);
-        for span in &spans {
-            let range = span.range();
-            if range.start > cursor && range.start <= raw_text.len() {
-                clean_body.push_str(&raw_text[cursor..range.start]);
-            }
-            if let Some(skill_short) = span.token().id().strip_prefix("skill:") {
-                let full_skill = format!("skill:{skill_short}");
-                if !skills.contains(&full_skill) {
-                    skills.push(full_skill);
-                }
-                clean_body.push_str(span.token().label().as_ref());
-            } else if range.end <= raw_text.len() {
-                clean_body.push_str(&raw_text[range.start..range.end]);
-            }
-            cursor = range.end.min(raw_text.len());
-        }
-        if cursor < raw_text.len() {
-            clean_body.push_str(&raw_text[cursor..]);
-        }
-        let body_trimmed = clean_body.trim();
+        let (wire_body, skills) = encode_prompt_body(&content);
+        let body = decode_prompt_body(&wire_body);
 
         let attached = self.effective_attached_file().cloned();
         // Keep all draft attachments until the host accepts the request.
-        let quotes = self.quoted_selections.clone();
         let rpc_images: Vec<RpcImage> = self.pasted_images
             .iter()
             .map(|p| RpcImage {
@@ -1102,28 +1108,28 @@ impl ChatPane {
             payload.push_str(" \n");
         }
         if let Some(file) = &attached
-            && !body_trimmed.starts_with('/')
+            && !wire_body.starts_with('/')
         {
             let rel = path_for_prompt(&self.session.borrow().cwd, &file.path);
             payload.push('@');
             payload.push_str(&rel);
             payload.push_str("\n\n");
         }
-        append_quotes(&mut payload, &quotes);
         let prompt_prefix = payload.clone();
-        payload.push_str(body_trimmed);
+        payload.push_str(&wire_body);
 
+        let title = body.text().replace('\u{2063}', "");
         let message = ChatMessage::User {
             entry_id: None,
-            display_text: body_trimmed.to_owned(),
+            body: UserMessageBody::new(body),
             prompt_prefix,
             timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
             attached_file: attached.map(|f| f.display),
             mounted_skills: skills,
-            quotes,
+            quotes: Vec::new(),
             images: msg_images,
         };
-        let result = self.session.borrow_mut().submit_prompt(&payload, &rpc_images, body_trimmed, message);
+        let result = self.session.borrow_mut().submit_prompt(&payload, &rpc_images, &title, message);
         match result {
             Ok(true) => {}
             Ok(false) => {
@@ -1135,8 +1141,8 @@ impl ChatPane {
                 return;
             }
         }
-        self.quoted_selections.clear();
-        self.pasted_images.clear();
+        // A successful write to the host pipe is not yet a durable Pi message.
+        self.submitted_draft = Some((content, std::mem::take(&mut self.pasted_images)));
         self.quote_popover = None;
         self.input.update(cx, |input, cx| {
             input.set_value(String::new(), window, cx);
@@ -1186,6 +1192,36 @@ impl Render for ChatPane {
                 input.set_value(text, window, cx);
                 input.focus(window, cx);
             });
+        }
+        if std::mem::take(&mut self.restore_submitted_draft)
+            && let Some((draft, mut images)) = self.submitted_draft.take()
+        {
+            self.input.update(cx, |input, cx| {
+                let current = input.content();
+                let restored = if current.text().is_empty() {
+                    draft
+                } else if draft.text().is_empty() {
+                    current
+                } else {
+                    // Typing can continue while Pi is acknowledging an outgoing prompt.
+                    let offset = draft.text().len() + 2;
+                    let mut merged = InputContent::new(format!("{}\n\n{}", draft.text(), current.text()));
+                    for span in draft.tokens() {
+                        merged = merged.with_token(span.range(), span.token().clone())
+                            .expect("draft token ranges are unchanged");
+                    }
+                    for span in current.tokens() {
+                        let range = span.range();
+                        merged = merged.with_token(
+                            range.start + offset..range.end + offset, span.token().clone(),
+                        ).expect("new draft tokens are shifted by the restored text");
+                    }
+                    merged
+                };
+                input.set_value(restored, window, cx);
+            });
+            images.append(&mut self.pasted_images);
+            self.pasted_images = images;
         }
 
         let palette = active_palette();
@@ -1364,7 +1400,7 @@ impl Render for ChatPane {
                                 ChatMessage::User {
                                     entry_id,
                                     prompt_prefix: _,
-                                    display_text,
+                                    body,
                                     timestamp_ms,
                                     attached_file,
                                     mounted_skills,
@@ -1372,8 +1408,9 @@ impl Render for ChatPane {
                                     images,
                                 } => {
                                     let editing = entry_id.is_some() && self.editing_entry == *entry_id;
+                                    let display_text = body.input.text();
                                     let text = if !display_text.is_empty() {
-                                        display_text.as_str()
+                                        display_text.as_ref()
                                     } else if let Some(quote) = quotes.first() {
                                         quote.text.as_str()
                                     } else {
@@ -1534,17 +1571,17 @@ impl Render for ChatPane {
                                                     .bordered(false)
                                                     .aria_label(crate::i18n::ai::EDIT_MESSAGE.get())
                                                     .font_family(ui_font.clone())
-                                                    .text_size(typo.body),
+                                                    .text_size(typo.body)
+                                                    .token(move |ctx, _, _| {
+                                                        let quote = SelectionQuote::from_token(ctx.token())
+                                                            .expect("message editor contains only quote tokens");
+                                                        inline_quote_token(ctx, quote, palette, typo.body)
+                                                    }),
                                             )
                                         })
                                         .when(!editing && !display_text.is_empty(), |b| {
                                             b.child(
-                                                TextView::markdown(
-                                                    SharedString::from(format!(
-                                                        "ai-user-md-{msg_idx}"
-                                                    )),
-                                                    display_text.clone(),
-                                                )
+                                                body.render(msg_idx)
                                                 .selectable(true)
                                                 .style(md_style.clone())
                                                 .font_family(ui_font.clone())
@@ -1566,7 +1603,7 @@ impl Render for ChatPane {
                                                 )),
                                                 crate::i18n::ai::COPY_MESSAGE.get(),
                                                 crate::i18n::common::COPIED.get(),
-                                                display_text.clone(),
+                                                display_text.replace('\u{2063}', ""),
                                             )))
                                             .when(editing, |row| row.children(
                                                 [
@@ -1589,7 +1626,7 @@ impl Render for ChatPane {
                                             ))
                                             .when_some(entry_id.as_ref().filter(|_| !editing && can_rewind), |row, entry_id| {
                                                 let entry_id = entry_id.clone();
-                                                let body = display_text.clone();
+                                                let body = body.input.clone();
                                                 row.child(Button::new(SharedString::from(format!("ai-edit-message-{msg_idx}")))
                                                     .ghost().compact().with_size(px(16.)).w(px(22.)).h(px(22.))
                                                     .icon(crate::ui::icon(IconName::PencilLine))

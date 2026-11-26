@@ -60,6 +60,7 @@ pub(super) struct SessionChanges {
     pub(super) toast: Option<(String, bool)>,
     pub(super) extension_prefill: Option<(String, bool)>,
     pub(super) composer_text: Option<String>,
+    pub(super) prompt_accepted: Option<bool>,
     pub(super) edit_applied: bool,
 }
 
@@ -89,6 +90,8 @@ pub(super) struct Session {
     pub(super) active_thinking_start: Option<std::time::Instant>,
     pub(super) write_snapshots: HashMap<String, String>,
     pub(super) active_part_map: HashMap<usize, usize>,
+    // Present until the RPC response. The flag records whether Pi already persisted the user entry.
+    pending_prompt: Option<bool>,
     changes: SessionChanges,
 }
 
@@ -120,6 +123,7 @@ impl Session {
             active_thinking_start: None,
             write_snapshots: HashMap::new(),
             active_part_map: HashMap::new(),
+            pending_prompt: None,
             changes: SessionChanges::default(),
         }
     }
@@ -162,15 +166,32 @@ impl Session {
         title_source: &str,
         message: ChatMessage,
     ) -> Result<bool, String> {
+        if self.pending_prompt.is_some() {
+            return Ok(false);
+        }
         self.connect();
         let Some(client) = &self.client else {
             return Ok(false);
         };
         client.prompt_with_images(payload, images, title_source)?;
         self.messages.push(message);
+        self.pending_prompt = Some(false);
         self.is_streaming = true;
         self.active_run_start = Some(std::time::Instant::now());
         Ok(true)
+    }
+
+    fn resolve_prompt(&mut self, accepted: bool) {
+        if self.pending_prompt.take() != Some(false) {
+            return;
+        }
+        self.changes.prompt_accepted = Some(accepted);
+        if !accepted
+            && let Some(index) = self.messages.iter().rposition(|message| matches!(message, ChatMessage::User { .. }))
+            && matches!(self.messages[index], ChatMessage::User { entry_id: None, .. })
+        {
+            self.messages.remove(index);
+        }
     }
 
     pub(super) fn compact(&mut self) {
@@ -273,6 +294,9 @@ impl Session {
                 data,
                 error,
             } => {
+                if command == "prompt" {
+                    self.resolve_prompt(success);
+                }
                 if command == "edit_prompt" {
                     self.is_rewinding = false;
                     if !success {
@@ -353,6 +377,7 @@ impl Session {
                 }
             }
             RpcInbound::Exited(code) => {
+                self.resolve_prompt(false);
                 self.client = None;
                 self.is_streaming = false;
                 self.is_compacting = false;
@@ -515,7 +540,7 @@ impl Session {
                     };
                     self.messages.push(ChatMessage::User {
                         entry_id: msg["entryId"].as_str().map(str::to_owned),
-                        display_text,
+                        body: UserMessageBody::new(decode_prompt_body(&display_text)),
                         prompt_prefix,
                         timestamp_ms: msg.get("timestamp").and_then(Value::as_i64),
                         attached_file,
@@ -628,6 +653,10 @@ impl Session {
                 {
                     *entry_id = ev["entryId"].as_str().map(str::to_owned);
                     *timestamp_ms = ev["timestamp"].as_i64();
+                }
+                if let Some(persisted) = &mut self.pending_prompt {
+                    *persisted = true;
+                    self.changes.prompt_accepted = Some(true);
                 }
             }
             "agent_start" => {

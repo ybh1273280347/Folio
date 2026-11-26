@@ -5,7 +5,7 @@ pub const INPUT_PLACEHOLDER: BiText = BiText::new("随心输入，/ 呼出命令
 pub const EXT_INPUT_PLACEHOLDER: BiText = BiText::new("输入内容…", "Enter text…");
 pub const EXT_TEXTAREA_PLACEHOLDER: BiText = BiText::new("编辑文本…", "Edit text…");
 pub const MODEL_SEARCH_PLACEHOLDER: BiText = BiText::new("搜索模型…", "Search models...");
-pub const ADD_TO_CHAT: BiText = BiText::new("添加到对话", "Add to chat");
+pub const QUOTE_SELECTION: BiText = BiText::new("引用", "Quote");
 pub const DEFAULT_NOTE_TITLE: BiText = BiText::new("AI回答", "AI Response");
 pub const AI_ANSWER_SOURCE: BiText = BiText::new("AI 回答", "AI Response");
 pub const TURN_NAVIGATION: BiText = BiText::new("对话轮次", "Conversation turns");
@@ -178,12 +178,6 @@ pub fn context_window_stats(pct: u64, rem: u64, used_k: usize, total_k: usize) -
     match locale() {
         Locale::ZhCn => format!("上下文窗口：{pct}% 已用（剩余 {rem}%）· {used_k}k / {total_k}k"),
         Locale::En => format!("Context window: {pct}% used ({rem}% left) · {used_k}k / {total_k}k"),
-    }
-}
-pub fn quote_prefix(source: &str, text: &str) -> String {
-    match locale() {
-        Locale::ZhCn => format!("引用 {source}: {text}"),
-        Locale::En => format!("Quote {source}: {text}"),
     }
 }
 pub fn attached_file_tooltip(display: &str) -> String {
