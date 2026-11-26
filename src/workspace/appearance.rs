@@ -87,7 +87,9 @@ impl Workspace {
         let cjk_scale_changed = (previous.cjk_font_scale - settings.cjk_font_scale).abs() > f32::EPSILON;
         let locale_changed = previous.locale != settings.locale;
 
-        if palette_changed || fallback_changed || cjk_scale_changed || previous.interface_font != settings.interface_font
+        if palette_changed || fallback_changed || cjk_scale_changed
+            || previous.interface_font != settings.interface_font
+            || previous.interface_font_size != settings.interface_font_size
             || previous.smooth_caret != settings.smooth_caret
             || crate::theme::tool_typography(&previous) != crate::theme::tool_typography(settings)
         {

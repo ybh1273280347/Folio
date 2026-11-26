@@ -6,7 +6,7 @@ mod i18n;
 mod model;
 #[path = "../src/theme.rs"]
 mod theme;
-#[path = "../src/ui.rs"]
+#[path = "../src/ui/mod.rs"]
 mod ui;
 
 use gpui_kit::px;

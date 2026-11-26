@@ -184,9 +184,83 @@ impl Palette {
         rgb(self.get(role))
     }
 
-    /// Slightly crisper border for cards, popovers and inputs (Claude `--card-border`).
+    /// Subtle hairline border with soft alpha for floating cards and dividers.
+    pub fn subtle_border(self) -> Rgba {
+        let mut c = rgb(self.border);
+        c.a = if self.is_dark() { 0.82 } else { 0.78 };
+        c
+    }
+
+    /// Subtle divider line inside menus, popovers and cards.
+    pub fn divider(self) -> Rgba {
+        let mut c = rgb(self.border);
+        c.a = if self.is_dark() { 0.72 } else { 0.78 };
+        c
+    }
+
+    /// Soft tinted background for destructive hover/emphasis surfaces.
+    pub fn danger_surface(self) -> Rgba {
+        if self.is_dark() {
+            mix(self.surface, self.danger, 0.18)
+        } else {
+            mix(self.surface, self.danger, 0.09)
+        }
+    }
+
+    /// Soft tinted border for subtle danger controls.
+    pub fn danger_border(self) -> Rgba {
+        if self.is_dark() {
+            mix(self.surface, self.danger, 0.36)
+        } else {
+            mix(self.surface, self.danger, 0.28)
+        }
+    }
+
+    /// Crisp border for cards, popovers and inputs (Claude `--card-border`).
     pub fn card_border(self) -> Rgba {
         mix(self.border, self.text, if self.is_dark() { 0.06 } else { 0.05 })
+    }
+
+    /// Tight dual-layer shadow for menus and floating popovers.
+    pub fn popover_shadow(self) -> Vec<BoxShadow> {
+        let dark = self.is_dark();
+        vec![
+            BoxShadow::new(px(0.), px(8.), hsla(0., 0., 0., if dark { 0.42 } else { 0.10 }))
+                .blur_radius(px(20.))
+                .spread_radius(px(-4.)),
+            BoxShadow::new(px(0.), px(2.), hsla(0., 0., 0., if dark { 0.24 } else { 0.04 }))
+                .blur_radius(px(5.)),
+        ]
+    }
+
+    /// Elevated shadow for window-modal dialogs.
+    pub fn modal_shadow(self) -> Vec<BoxShadow> {
+        let dark = self.is_dark();
+        vec![
+            BoxShadow::new(px(0.), px(16.), hsla(0., 0., 0., if dark { 0.44 } else { 0.12 }))
+                .blur_radius(px(40.))
+                .spread_radius(px(-8.)),
+            BoxShadow::new(px(0.), px(2.), hsla(0., 0., 0., if dark { 0.22 } else { 0.05 }))
+                .blur_radius(px(6.)),
+        ]
+    }
+
+    /// Gentle lift shadow for inline cards.
+    pub fn card_shadow(self) -> Vec<BoxShadow> {
+        let dark = self.is_dark();
+        vec![
+            BoxShadow::new(px(0.), px(4.), hsla(0., 0., 0., if dark { 0.34 } else { 0.06 }))
+                .blur_radius(px(14.)),
+            BoxShadow::new(px(0.), px(1.), hsla(0., 0., 0., if dark { 0.22 } else { 0.03 }))
+                .blur_radius(px(3.)),
+        ]
+    }
+
+    /// Accent color with caller-specified alpha (e.g. input focus halo).
+    pub fn accent_alpha(self, alpha: f32) -> Rgba {
+        let mut c = rgb(self.accent);
+        c.a = alpha;
+        c
     }
 
     /// Elevated surface for popovers and modals (`#1b1e26` in Obsidian Dark, `#ffffff` in Claude Light).
@@ -494,8 +568,12 @@ pub fn apply_settings(settings: &crate::model::AppSettings, cx: &mut App) {
     Theme::update(cx, |theme| {
         // Native Diff reads the component monospace font at row layout time.
         theme.font_family = ui_font;
+        theme.font_size = px(settings.interface_font_size as f32);
         theme.mono_font_family = tool_font;
         theme.mono_font_size = tool_size;
+        theme.radius = px(6.);
+        theme.radius_lg = px(12.);
+        theme.focus_ring = false;
     });
     // The Base projection also serves Markdown and PDF. Keep their independent
     // code typography when syncing the native component theme for AI tools.
@@ -556,6 +634,13 @@ fn apply(palette: Palette, cx: &mut App) {
         c.primary_hover = palette.accent_hover().into();
         c.primary_active = palette.accent_active().into();
         c.primary_foreground = rgb(palette.on_accent).into();
+        c.danger = rgb(palette.danger).into();
+        c.danger_hover = palette.danger_hover().into();
+        c.danger_active = palette.danger_active().into();
+        c.danger_foreground = rgb(palette.on_accent).into();
+        c.button_danger_hover = palette.danger_hover().into();
+        c.button_danger_active = palette.danger_active().into();
+        c.button_danger_foreground = rgb(palette.on_accent).into();
         c.accent = rgb(palette.hover).into();
         c.accent_foreground = rgb(palette.text).into();
         c.secondary = rgb(palette.background).into();
