@@ -1316,7 +1316,7 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn render_activity_rail(&mut self, sidebar_rendered: bool, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_activity_rail(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let dragging_tree_item =
             cx.has_active_drag() && self.tree.dragging_tree_item.load(Ordering::Relaxed);
         let sidebar_visible = self.is_sidebar_open();
@@ -1332,8 +1332,9 @@ impl Workspace {
         let palette = self.settings.theme.palette;
         let muted = gpui_kit::rgb(palette.muted);
         let text = gpui_kit::rgb(palette.text);
-        let hover_bg = gpui_kit::rgb(palette.hover);
-        let active_bg = gpui_kit::rgb(palette.selection);
+        let hover_bg = palette.island_shell_hover();
+        let active_bg = palette.island_shell_active();
+        let light_island_lift = !palette.is_dark();
         let accent = gpui_kit::rgb(palette.accent);
 
         let rail_btn = |id: &'static str, icon: IconName, active: bool, indicator: bool| {
@@ -1347,7 +1348,14 @@ impl Workspace {
                 .justify_center()
                 .cursor_pointer()
                 .text_color(if active { text } else { muted })
-                .when(active, |btn| btn.bg(active_bg))
+                .when(active, |btn| {
+                    btn.bg(active_bg).when(light_island_lift, |btn| {
+                        btn.shadow(vec![
+                            BoxShadow::new(px(0.), px(1.), hsla(0., 0., 0., 0.06))
+                                .blur_radius(px(2.)),
+                        ])
+                    })
+                })
                 .hover(move |s| s.bg(hover_bg).text_color(text))
                 .active(|s| s.bg(rgb(crate::ui::PRESSED_BG)))
                 .when(active && indicator, |btn| {
@@ -1541,7 +1549,14 @@ impl Workspace {
             .justify_center()
             .cursor_pointer()
             .text_color(if trash_open { text } else { muted })
-            .when(trash_open, |btn| btn.bg(active_bg))
+            .when(trash_open, |btn| {
+                btn.bg(active_bg).when(light_island_lift, |btn| {
+                    btn.shadow(vec![
+                        BoxShadow::new(px(0.), px(1.), hsla(0., 0., 0., 0.06))
+                            .blur_radius(px(2.)),
+                    ])
+                })
+            })
             .when(dragging_tree_item, |btn| {
                 btn.bg(rgb(0xf0f4fa))
                     .border_1()
@@ -1631,8 +1646,7 @@ impl Workspace {
             .items_center()
             .justify_between()
             .py_2()
-            .bg(rgb(BG))
-            .when(sidebar_rendered, |rail| rail.border_r_1().border_color(rgb(BORDER)))
+            .bg(palette.island_canvas())
             .child(
                 div()
                     .flex()
@@ -2433,7 +2447,7 @@ impl Workspace {
             .flex_col()
             .min_h_0()
             .overflow_hidden()
-            .bg(rgb(BG))
+            .bg(gpui_kit::rgb(self.settings.theme.palette.surface))
             .font_family(crate::ui::sans_font(&self.settings.interface_font))
             .text_size(px(self.settings.interface_font_size as f32))
             .child(

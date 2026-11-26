@@ -786,7 +786,7 @@ impl Render for Workspace {
             - right_now_w
             - sidebar_now_w
             - log_w
-            - if self.zen_mode { 0. } else { 24. })
+            - if self.zen_mode { 0. } else { 18. })
             .max(200.0);
         let mut work_area = h_resizable("work-area")
             .on_resize(move |state, _, cx| {
@@ -874,6 +874,10 @@ impl Render for Workspace {
             );
         }
         let palette = self.settings.theme.palette;
+        let shell_canvas = palette.island_canvas();
+        let shell_hover = palette.island_shell_hover();
+        let shell_active = palette.island_shell_active();
+        let shell_text = gpui_kit::rgb(palette.text);
         let zen_mode = self.zen_mode;
         let show_backdrop = self.has_visible_background();
         let backdrop_image = (show_backdrop && !trash_open)
@@ -972,7 +976,7 @@ impl Render for Workspace {
                             .w(px(right_now_w))
                             .h_full()
                             .flex_shrink_0()
-                            .overflow_hidden()
+                            .when(right_progress < 0.999, |p| p.overflow_hidden())
                             .child(
                                 div()
                                     .relative()
@@ -1012,7 +1016,7 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(BG))
+            .bg(shell_canvas)
             .text_color(rgb(0x37352f))
             .text_size(px(14.))
             .font_family(crate::ui::sans_font(&self.settings.interface_font))
@@ -1071,7 +1075,6 @@ impl Render for Workspace {
                 app.toggle_sidebar(cx);
             }))
             .when(!self.zen_mode, |app| {
-                let palette = self.settings.theme.palette;
                 let project_menu_open = self.project_menu.open;
                 let viewport_w = f32::from(window.viewport_size().width);
                 let max_pills = if viewport_w >= 1150.0 {
@@ -1108,9 +1111,7 @@ impl Render for Workspace {
                 } else {
                     self.projects.active_id().map(str::to_owned)
                 };
-                let hover_bg = gpui_kit::rgb(palette.hover);
-                let pill_active_bg = gpui_kit::rgb(palette.selection);
-                let pill_text = gpui_kit::rgb(palette.text);
+                let pill_text = shell_text;
                 let pill_muted = gpui_kit::rgb(palette.muted);
                 let preview_open = self.build.panels.preview;
                 let logs_open = self.build.panels.logs;
@@ -1128,7 +1129,7 @@ impl Render for Workspace {
                         .cursor_pointer()
                         .text_size(px(12.5))
                         .text_color(pill_muted)
-                        .hover(move |s| s.bg(hover_bg).text_color(pill_text))
+                        .hover(move |s| s.bg(shell_hover).text_color(pill_text))
                         .on_click(cx.listener(|app, _, window, cx| {
                             app.add_project(&OpenProject, window, cx);
                         }))
@@ -1162,13 +1163,23 @@ impl Render for Workspace {
                                 .text_size(px(12.5))
                                 .text_ellipsis()
                                 .when(is_active, |pill| {
-                                    pill.bg(pill_active_bg)
+                                    pill.bg(shell_active)
                                         .font_medium()
                                         .text_color(pill_text)
+                                        .when(!palette.is_dark(), |pill| {
+                                            pill.shadow(vec![
+                                                BoxShadow::new(
+                                                    px(0.),
+                                                    px(1.),
+                                                    hsla(0., 0., 0., 0.06),
+                                                )
+                                                .blur_radius(px(2.)),
+                                            ])
+                                        })
                                 })
                                 .when(!is_active, |pill| {
                                     pill.text_color(pill_muted)
-                                        .hover(move |s| s.bg(hover_bg).text_color(pill_text))
+                                        .hover(move |s| s.bg(shell_hover).text_color(pill_text))
                                 })
                                 .child(name)
                                 .on_click(cx.listener(move |app, _, window, cx| {
@@ -1230,7 +1241,7 @@ impl Render for Workspace {
                     .items_center()
                     .pl_0()
                     .gap_2()
-                    .bg(rgb(BG))
+                    .bg(shell_canvas)
                     .child(
                         div()
                             .id("project-menu-trigger")
@@ -1241,8 +1252,8 @@ impl Render for Workspace {
                             .items_center()
                             .justify_center()
                             .cursor_pointer()
-                            .when(project_menu_open, |btn| btn.bg(gpui_kit::rgb(palette.selection)))
-                            .hover(move |s| s.bg(hover_bg))
+                            .when(project_menu_open, |btn| btn.bg(shell_active))
+                            .hover(move |s| s.bg(shell_hover))
                             .tooltip(|window, cx| {
                                 gpui_kit::component::tooltip::Tooltip::new(
                                     crate::i18n::workspace::TOOLTIP_PROJECT_SWITCHER.get(),
@@ -1381,9 +1392,10 @@ impl Render for Workspace {
                     )
                     .child(
                         crate::ui::control_sized("top-toggle-preview", IconName::Columns2, 28., 15.)
+                            .hover(move |s| s.bg(shell_hover).text_color(shell_text))
                             .when(preview_open, |c| {
-                                c.bg(gpui_kit::rgb(palette.selection))
-                                    .text_color(gpui_kit::rgb(palette.text))
+                                c.bg(shell_active)
+                                    .text_color(shell_text)
                             })
                             .tooltip(move |window, cx| {
                                 let label = if preview_open {
@@ -1405,9 +1417,10 @@ impl Render for Workspace {
                     .child(
                         crate::ui::control_sized("top-toggle-logs", IconName::ListTree, 28., 15.)
                             .relative()
+                            .hover(move |s| s.bg(shell_hover).text_color(shell_text))
                             .when(logs_open, |c| {
-                                c.bg(gpui_kit::rgb(palette.selection))
-                                    .text_color(gpui_kit::rgb(palette.text))
+                                c.bg(shell_active)
+                                    .text_color(shell_text)
                             })
                             .when(build_failed && !logs_open, |c| {
                                 c.text_color(gpui_kit::rgb(palette.danger)).child(
@@ -1446,9 +1459,10 @@ impl Render for Workspace {
                     .child(div().w(px(1.)).h(px(14.)).mx_0p5().bg(rgb(BORDER)))
                     .child(
                         crate::ui::control_sized("toggle-right-panel", IconName::PanelRightOpen, 28., 15.)
+                            .hover(move |s| s.bg(shell_hover).text_color(shell_text))
                             .when(right_panel_visible, |c| {
-                                c.bg(gpui_kit::rgb(palette.selection))
-                                    .text_color(gpui_kit::rgb(palette.text))
+                                c.bg(shell_active)
+                                    .text_color(shell_text)
                             })
                             .tooltip(move |window, cx| {
                                 gpui_kit::component::tooltip::Tooltip::new(if right_panel_visible {
@@ -1476,6 +1490,7 @@ impl Render for Workspace {
                                     .w(px(44.))
                                     .h_full()
                                     .rounded_none()
+                                    .hover(move |s| s.bg(shell_hover).text_color(shell_text))
                                     .window_control_area(WindowControlArea::Min),
                             )
                             .child(
@@ -1483,6 +1498,7 @@ impl Render for Workspace {
                                     .w(px(44.))
                                     .h_full()
                                     .rounded_none()
+                                    .hover(move |s| s.bg(shell_hover).text_color(shell_text))
                                     .window_control_area(WindowControlArea::Max),
                             )
                             .child(
@@ -1526,8 +1542,8 @@ impl Render for Workspace {
                                 }
                             },
                         ))
-                        .when(!self.zen_mode, |row| {
-                            row.child(self.render_activity_rail(sidebar_rendered, window, cx))
+                        .when(!zen_mode, |row| {
+                            row.child(self.render_activity_rail(window, cx))
                         })
                         .when(sidebar_rendered, |row| {
                             row.child(
@@ -1536,14 +1552,16 @@ impl Render for Workspace {
                                     .w(px(sidebar_now_w))
                                     .h_full()
                                     .flex_shrink_0()
-                                    .overflow_hidden()
+                                    .when(sidebar_progress < 0.999, |p| p.overflow_hidden())
+                                    .when(!zen_mode, |p| p.pb(px(CANVAS_GUTTER)))
                                     .child(
                                         div()
                                             .relative()
                                             .w(px(sidebar_target_w))
                                             .h_full()
                                             .left(px(-sidebar_target_w * (1.0 - sidebar_progress)))
-                                            .child(self.render_sidebar(window, cx)),
+                                            .when(!zen_mode, |inner| inner.pr(px(CANVAS_GUTTER)))
+                                            .child(canvas_card(self.render_sidebar(window, cx))),
                                     )
                                     .when(
                                         sidebar_visible && sidebar_progress >= 0.999,
@@ -1580,9 +1598,8 @@ impl Render for Workspace {
                                 .min_w_0()
                                 .h_full()
                                 .min_h_0()
-                                .when(!self.zen_mode, |host| {
-                                    host.pl(px(CANVAS_GUTTER))
-                                        .pr(px(CANVAS_GUTTER))
+                                .when(!zen_mode, |host| {
+                                    host.pr(px(CANVAS_GUTTER))
                                         .pb(px(CANVAS_GUTTER))
                                 })
                                 .child(main_content),

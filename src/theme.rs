@@ -311,6 +311,33 @@ impl Palette {
             rgb(0xfef3c7)
         }
     }
+
+    /// Derived outer workbench canvas behind floating Islands.
+    pub fn island_canvas(self) -> Rgba {
+        if self.is_dark() {
+            mix(self.background, 0x000000, 0.25)
+        } else {
+            mix(self.background, self.border, 0.55)
+        }
+    }
+
+    /// Hover tint for controls sitting directly on the outer Islands shell.
+    pub fn island_shell_hover(self) -> Rgba {
+        if self.is_dark() {
+            mix(self.background, self.text, 0.08)
+        } else {
+            mix(self.border, self.text, 0.04)
+        }
+    }
+
+    /// Active surface for controls sitting directly on the outer Islands shell.
+    pub fn island_shell_active(self) -> Rgba {
+        if self.is_dark() {
+            rgb(self.selection)
+        } else {
+            rgb(self.surface)
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
