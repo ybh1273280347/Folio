@@ -89,10 +89,13 @@ impl Render for MarkdownPane {
                     pane.update(cx, |pane, cx| pane.handle_source_paste(item, window, cx))
                 });
             content = content.child(
-                div().relative().flex_1().min_w_0().min_h_0().p_2()
+                div().relative().flex_1().min_w_0().min_h_0().p_2().flex().justify_center()
                     // Mount the empty editor during preparation so it can measure the
                     // actual text area without shaping the entire source in prepaint.
-                    .child(div().size_full().when(loading, |editor| editor.invisible()).child(editor))
+                    .child(div().size_full().min_w_0()
+                        .when(self.settings.line_width_limited, |editor| editor.max_w(px(850.)))
+                        .when(loading, |editor| editor.invisible())
+                        .child(editor))
                     .when(loading, |source| {
                         source.child(div().absolute().inset_2().text_sm().text_color(rgb(0x787774))
                             .child(crate::i18n::markdown::LOADING_MORE_CONTENT.get()))
