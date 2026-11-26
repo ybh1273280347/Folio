@@ -5,11 +5,15 @@ use crate::files::sha256_hex;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    fs,
+    fs, io,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 pub const DERIVED_PDF_KEYWORD: &str = "folio-derived";
+
+// Parallel build workers must finish each read-modify-write before another worker reads.
+static MANIFEST_WRITES: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct DerivedPdfEntry {
@@ -46,13 +50,23 @@ fn project_rel_slash(project_root: &Path, path: &Path) -> Option<String> {
     }
 }
 
+fn write_manifest(path: &Path, value: &impl Serialize) -> io::Result<()> {
+    // Indexing can read while exports write. Publish a complete replacement from the same directory.
+    let parent = path.parent().expect("manifest parent");
+    fs::create_dir_all(parent)?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer_pretty(staged.as_file_mut(), value).map_err(io::Error::other)?;
+    staged.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
 pub fn record_derived_pdf(
     project_root: &Path,
     source_path: &Path,
     pdf_path: &Path,
     pdf_bytes: &[u8],
     origin: &str,
-) -> std::io::Result<()> {
+) -> io::Result<()> {
     let Some(pdf_rel) = project_rel_slash(project_root, pdf_path) else {
         return Ok(());
     };
@@ -60,6 +74,7 @@ pub fn record_derived_pdf(
     let pdf_hash = sha256_hex(pdf_bytes);
     let manifest_path = derived_manifest_path(project_root);
 
+    let _guard = MANIFEST_WRITES.lock().expect("manifest write lock poisoned");
     let mut manifest: DerivedPdfManifest = fs::read(&manifest_path)
         .ok()
         .and_then(|raw| serde_json::from_slice(&raw).ok())
@@ -73,11 +88,7 @@ pub fn record_derived_pdf(
         origin: origin.to_owned(),
     });
 
-    if let Some(parent) = manifest_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let json = serde_json::to_vec_pretty(&manifest).map_err(std::io::Error::other)?;
-    fs::write(&manifest_path, json)
+    write_manifest(&manifest_path, &manifest)
 }
 
 pub fn load_derived_pdf_hashes(project_root: &Path) -> HashSet<String> {
@@ -103,11 +114,12 @@ pub fn record_derived_markdown(
     source_pdf_path: &Path,
     source_pdf_hash: &str,
     markdown: &str,
-) -> std::io::Result<()> {
+) -> io::Result<()> {
     let Some(path) = project_rel_slash(project_root, markdown_path) else {
         return Ok(());
     };
     let manifest_path = derived_markdown_manifest_path(project_root);
+    let _guard = MANIFEST_WRITES.lock().expect("manifest write lock poisoned");
     let mut entries: HashMap<String, DerivedMarkdownEntry> = fs::read(&manifest_path)
         .ok()
         .and_then(|raw| serde_json::from_slice(&raw).ok())
@@ -120,16 +132,10 @@ pub fn record_derived_markdown(
             markdown_hash: sha256_hex(markdown.as_bytes()),
         },
     );
-    if let Some(parent) = manifest_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let json = serde_json::to_vec_pretty(&entries).map_err(std::io::Error::other)?;
-    fs::write(manifest_path, json)
+    write_manifest(&manifest_path, &entries)
 }
 
-pub fn load_derived_markdown_entries(
-    project_root: &Path,
-) -> HashMap<String, DerivedMarkdownEntry> {
+pub fn load_derived_markdown_entries(project_root: &Path) -> HashMap<String, DerivedMarkdownEntry> {
     fs::read(derived_markdown_manifest_path(project_root))
         .ok()
         .and_then(|raw| serde_json::from_slice(&raw).ok())
@@ -145,4 +151,43 @@ pub fn has_folio_pdf_fingerprint(bytes: &[u8]) -> bool {
     MARKERS
         .iter()
         .any(|needle| bytes.windows(needle.len()).any(|w| w == *needle))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{sync::Barrier, thread};
+
+    #[test]
+    fn concurrent_pdf_exports_preserve_both_fingerprints() {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path();
+        let start = Barrier::new(2);
+        thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                start.wait();
+                record_derived_pdf(
+                    root,
+                    &root.join("a.tex"),
+                    &root.join("a.pdf"),
+                    b"pdf A",
+                    "tex",
+                )
+            });
+            start.wait();
+            record_derived_pdf(
+                root,
+                &root.join("b.tex"),
+                &root.join("b.pdf"),
+                b"pdf B",
+                "tex",
+            )
+            .unwrap();
+            first.join().unwrap().unwrap();
+        });
+        assert_eq!(
+            load_derived_pdf_hashes(root),
+            HashSet::from([sha256_hex(b"pdf A"), sha256_hex(b"pdf B")]),
+        );
+    }
 }
