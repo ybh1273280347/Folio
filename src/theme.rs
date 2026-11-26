@@ -32,38 +32,71 @@ impl Default for Palette {
 }
 
 impl Palette {
+    /// Previous built-in light palette, kept for one-time migration of unmodified settings.
+    pub const LEGACY_LIGHT: Self = Self {
+        background: 0xf7f6f5,
+        surface: 0xffffff,
+        text: 0x37352f,
+        muted: 0x787774,
+        border: 0xe8e7e3,
+        hover: 0xefefed,
+        pressed: 0xe4e3df,
+        accent: 0x52769a,
+        on_accent: 0xffffff,
+        code_background: 0xf5f5f5,
+        selection: 0xe8e7e4,
+        danger: 0xd4373f,
+    };
+
+    /// Previous built-in dark palette (warm charcoal), kept for one-time migration.
+    pub const LEGACY_DARK: Self = Self {
+        background: 0x141413,
+        surface: 0x20201e,
+        text: 0xfaf9f5,
+        muted: 0xb0aea5,
+        border: 0x3d3c38,
+        hover: 0x2d2c29,
+        pressed: 0x383732,
+        accent: 0xd97757,
+        on_accent: 0x141413,
+        code_background: 0x191918,
+        selection: 0x44352e,
+        danger: 0xf08c86,
+    };
+
+    /// Claude Classic Light: crisp paper white, whisper-light neutral chrome and terracotta accent.
     pub const fn light() -> Self {
         Self {
-            background: 0xf7f6f5,
+            background: 0xfafafa,
             surface: 0xffffff,
-            text: 0x37352f,
-            muted: 0x787774,
-            border: 0xe8e7e3,
-            hover: 0xefefed,
-            pressed: 0xe4e3df,
-            accent: 0x52769a,
+            text: 0x161616,
+            muted: 0x70696b,
+            border: 0xe9e9e9,
+            hover: 0xf2f2f1,
+            pressed: 0xe6e6e5,
+            accent: 0xd97757,
             on_accent: 0xffffff,
-            code_background: 0xf5f5f5,
-            selection: 0xe8e7e4,
+            code_background: 0xf7f7f7,
+            selection: 0xebebea,
             danger: 0xd4373f,
         }
     }
 
-    /// Warm charcoal, ivory and clay based on Anthropic's public brand palette.
+    /// Obsidian Blue-Dark: unified blue-black chrome, subtle elevated paper, cool-white ink and cobalt accent.
     pub const fn dark() -> Self {
         Self {
-            background: 0x141413,
-            surface: 0x20201e,
-            text: 0xfaf9f5,
-            muted: 0xb0aea5,
-            border: 0x3d3c38,
-            hover: 0x2d2c29,
-            pressed: 0x383732,
-            accent: 0xd97757,
-            on_accent: 0x141413,
-            code_background: 0x191918,
-            selection: 0x44352e,
-            danger: 0xf08c86,
+            background: 0x13161d,
+            surface: 0x161922,
+            text: 0xf4f9ff,
+            muted: 0x88929f,
+            border: 0x23262e,
+            hover: 0x22252d,
+            pressed: 0x2c313d,
+            accent: 0x4d6bfe,
+            on_accent: 0xf2f7ff,
+            code_background: 0x1b1e26,
+            selection: 0x262b36,
+            danger: 0xef8585,
         }
     }
 
@@ -114,20 +147,19 @@ impl Palette {
         }
     }
 
-    /// Retain every existing light-theme tint until its semantic role is edited.
-    /// This keeps the current appearance exact while older controls adopt themes.
+    /// Map legacy literal tints onto the active palette's semantic roles.
     fn resolve(self, original: u32) -> Rgba {
         use ColorRole::*;
         let role = match original {
             0xffffff => Surface,
             0xf7f6f5 | 0xfafaf9 | 0xfbfbfa | 0xf7f6f3 | 0xf7f6f4 | 0xf7f7f5 | 0xf4f3ef
-            | 0xf1f1ef | 0xf2f3f5 => Background,
+            | 0xf1f1ef | 0xf2f3f5 | 0xf4f4f2 => Background,
             0x37352f | 0x1f2328 | 0x343a40 | 0x1e293b | 0x5d5d5a => Text,
             0x787774 | 0x7d838b | 0x57606a | 0x64748b | 0x777774 | 0x999996 | 0x9b9a97
-            | 0x94a3b8 | 0x8b989f => Muted,
+            | 0x94a3b8 | 0x8b989f | 0x7c7c78 | 0x5b5b58 => Muted,
             0xe8e7e3 | 0xe6e5e1 | 0xdcdbd7 | 0xcfcec9 | 0xc5c4bf | 0xd3d1cb | 0xe2e1dd
-            | 0xe2e4e8 | 0xe5e6eb | 0xf1f0eb | 0xd8d6d0 | 0xc4c7cc => Border,
-            0xefefed | 0xe9ebed => Hover,
+            | 0xe2e1dc | 0xe2e4e8 | 0xe5e6eb | 0xf1f0eb | 0xd8d6d0 | 0xc4c7cc | 0xa8a7a2 => Border,
+            0xefefed | 0xe9ebed | 0xeae9e5 => Hover,
             0xe4e3df | 0xdcdfe3 | 0xedece9 | 0xdddcda => Pressed,
             0xe8e7e4 | 0xe0ecff | 0xe8f3ff | 0xeef4fb | 0xe8eff5 | 0xedf2fa | 0xf2f7ff | 0xdde9f6
             | 0xb9d8fb | 0xd0e6ff => Selection,
@@ -146,14 +178,90 @@ impl Palette {
                 return rgb(0x3c3323);
             }
             0xb45309 | 0x854d0e | 0x5c4628 if self.is_dark() => return rgb(0xe7bd7c),
-            0x4b7b59 if self.is_dark() => return rgb(0x9abd81),
+            0x4b7b59 if self.is_dark() => return rgb(0x63c59a),
             _ => return rgb(original),
         };
-        if self.get(role) == Self::light().get(role) {
-            rgb(original)
+        rgb(self.get(role))
+    }
+
+    /// Slightly crisper border for cards, popovers and inputs (Claude `--card-border`).
+    pub fn card_border(self) -> Rgba {
+        mix(self.border, self.text, if self.is_dark() { 0.06 } else { 0.05 })
+    }
+
+    /// Elevated surface for popovers and modals (`#1b1e26` in Obsidian Dark, `#ffffff` in Claude Light).
+    pub fn elevated_surface(self) -> Rgba {
+        if self.is_dark() {
+            rgb(self.code_background)
         } else {
-            rgb(self.get(role))
+            rgb(self.surface)
         }
+    }
+
+    /// Hover tint for primary accent controls.
+    pub fn accent_hover(self) -> Rgba {
+        if self.is_dark() {
+            mix(self.accent, self.text, 0.16)
+        } else {
+            mix(self.accent, 0x000000, 0.10)
+        }
+    }
+
+    /// Pressed tint for primary accent controls.
+    pub fn accent_active(self) -> Rgba {
+        if self.is_dark() {
+            mix(self.accent, self.text, 0.08)
+        } else {
+            mix(self.accent, 0x000000, 0.18)
+        }
+    }
+
+    /// Hover tint for danger controls.
+    pub fn danger_hover(self) -> Rgba {
+        if self.is_dark() {
+            mix(self.danger, self.text, 0.14)
+        } else {
+            mix(self.danger, 0x000000, 0.10)
+        }
+    }
+
+    /// Pressed tint for danger controls.
+    pub fn danger_active(self) -> Rgba {
+        if self.is_dark() {
+            mix(self.danger, 0x000000, 0.12)
+        } else {
+            mix(self.danger, 0x000000, 0.20)
+        }
+    }
+
+    /// Link ink derived from the active palette (Claude ink-blue in terracotta light, luminous cobalt in dark).
+    pub fn link_color(self) -> Rgba {
+        if self.is_dark() {
+            mix(self.accent, self.text, 0.35)
+        } else if self.accent == Self::light().accent {
+            rgb(0x184f95)
+        } else {
+            rgb(self.accent)
+        }
+    }
+
+    /// Subtle translucent scrollbar thumb matching the active mode.
+    pub fn scroll_thumb(self) -> Rgba {
+        let mut c = mix(self.surface, self.muted, if self.is_dark() { 0.36 } else { 0.30 });
+        c.a = if self.is_dark() { 0.78 } else { 0.72 };
+        c
+    }
+
+    pub fn scroll_thumb_hover(self) -> Rgba {
+        let mut c = mix(self.surface, self.muted, if self.is_dark() { 0.56 } else { 0.52 });
+        c.a = if self.is_dark() { 0.88 } else { 0.84 };
+        c
+    }
+
+    pub fn scroll_thumb_active(self) -> Rgba {
+        let mut c = mix(self.surface, self.muted, if self.is_dark() { 0.72 } else { 0.68 });
+        c.a = 0.92;
+        c
     }
 
     /// Clean, modern card surface token derived from theme `surface` (near-white in light mode).
@@ -290,6 +398,22 @@ impl ThemeSettings {
         self.saved.remove("深色");
         self.select("浅色");
     }
+
+    /// Upgrade unmodified legacy built-in palettes to the current Light / Dark defaults
+    /// while leaving any user-saved overrides or custom edits untouched.
+    pub fn migrate_builtin_defaults(&mut self) {
+        if self.active == "浅色"
+            && !self.saved.contains_key("浅色")
+            && self.palette == Palette::LEGACY_LIGHT
+        {
+            self.palette = Palette::light();
+        } else if self.active == "深色"
+            && !self.saved.contains_key("深色")
+            && self.palette == Palette::LEGACY_DARK
+        {
+            self.palette = Palette::dark();
+        }
+    }
 }
 
 thread_local! { static ACTIVE: Cell<Option<Palette>> = const { Cell::new(None) }; }
@@ -373,28 +497,24 @@ fn apply(palette: Palette, cx: &mut App) {
     if Theme::global(cx).mode != mode {
         Theme::change(mode, None, cx);
     }
-    if palette == Palette::light() {
-        // Restore the framework's original light colors as well as Folio's tints.
-        Theme::change(ThemeMode::Light, None, cx);
-        Theme::update(cx, |theme| {
-            theme.font_family = saved_font;
-        });
-        return;
-    }
+    let card_border: Hsla = palette.card_border().into();
+    let elevated: Hsla = palette.elevated_surface().into();
+    let link: Hsla = palette.link_color().into();
+    let selection_alpha = if palette.is_dark() { 0.28 } else { 0.20 };
     Theme::update(cx, |theme| {
         theme.font_family = saved_font;
         let c = &mut theme.colors;
         c.background = rgb(palette.surface).into();
         c.foreground = rgb(palette.text).into();
         c.border = rgb(palette.border).into();
-        c.input = rgb(palette.border).into();
+        c.input = card_border;
         c.muted = rgb(palette.code_background).into();
         c.muted_foreground = rgb(palette.muted).into();
-        c.popover = rgb(palette.surface).into();
+        c.popover = elevated;
         c.popover_foreground = rgb(palette.text).into();
         c.primary = rgb(palette.accent).into();
-        c.primary_hover = rgb(palette.accent).into();
-        c.primary_active = rgb(palette.accent).into();
+        c.primary_hover = palette.accent_hover().into();
+        c.primary_active = palette.accent_active().into();
         c.primary_foreground = rgb(palette.on_accent).into();
         c.accent = rgb(palette.hover).into();
         c.accent_foreground = rgb(palette.text).into();
@@ -406,14 +526,14 @@ fn apply(palette: Palette, cx: &mut App) {
         c.list_hover = rgb(palette.hover).into();
         c.list_active = rgb(palette.selection).into();
         c.list_active_border = rgb(palette.accent).into();
-        c.link = rgb(palette.accent).into();
-        c.link_hover = c.link;
-        c.link_active = c.link;
+        c.link = link;
+        c.link_hover = link;
+        c.link_active = link;
         c.ring = rgb(palette.accent).into();
-        c.caret = rgb(palette.text).into();
-        c.selection = Hsla::from(rgb(palette.accent)).alpha(0.3);
+        c.caret = rgb(palette.accent).into();
+        c.selection = Hsla::from(rgb(palette.accent)).alpha(selection_alpha);
         c.table = rgb(palette.surface).into();
-        c.table_head = rgb(palette.background).into();
+        c.table_head = rgb(palette.code_background).into();
         c.table_head_foreground = rgb(palette.text).into();
         c.table_hover = rgb(palette.hover).into();
         c.table_row_border = rgb(palette.border).into();

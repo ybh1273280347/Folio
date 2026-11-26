@@ -362,8 +362,7 @@ impl Render for MarkdownPane {
                             .when(self.settings.line_width_limited, |content| {
                                 content.max_w(px(850.))
                             })
-                            .pl(px(24.))
-                            .pr_6()
+                            .px(px(36.))
                             .pt_6()
                             .pb(trailing_space)
                             .child(document_title)
@@ -456,9 +455,13 @@ impl Render for MarkdownPane {
                         } else {
                             px(16.)
                         };
-                        let active_bg = gpui_kit::rgb(0xdbeafe);
+                        let active_bg = gpui_kit::rgb(palette.accent).opacity(if palette.is_dark() {
+                            0.22
+                        } else {
+                            0.14
+                        });
                         let active_text = gpui_kit::rgb(palette.accent);
-                        let muted_text = gpui_kit::rgb(0x787774);
+                        let muted_text = gpui_kit::rgb(palette.muted);
                         let case_on = self.search_case_sensitive;
                         let word_on = self.search_whole_word;
                         let replace_on = self.search_replace_open;
@@ -471,10 +474,10 @@ impl Render for MarkdownPane {
                                 .right(right_offset)
                                 .px_2()
                                 .py_1p5()
-                                .rounded(px(8.))
-                                .bg(gpui_kit::rgb(palette.surface))
+                                .rounded(px(10.))
+                                .bg(palette.elevated_surface())
                                 .border_1()
-                                .border_color(gpui_kit::rgb(palette.border))
+                                .border_color(palette.card_border())
                                 .shadow_md()
                                 .flex()
                                 .flex_col()

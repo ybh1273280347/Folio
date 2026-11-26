@@ -92,3 +92,25 @@ fn fenced_code_scales_with_body_size_and_keeps_its_selected_font() {
     assert_eq!(markdown.text.font_family.as_deref(), Some("Consolas"));
     assert_eq!(ai.text.font_family.as_deref(), Some("Consolas"));
 }
+
+#[test]
+fn legacy_builtin_palettes_migrate_without_overwriting_custom_overrides() {
+    let mut light = AppSettings::default();
+    light.theme.active = "浅色".into();
+    light.theme.palette = Palette::LEGACY_LIGHT;
+    light.theme.migrate_builtin_defaults();
+    assert_eq!(light.theme.palette, Palette::light());
+
+    let mut dark = AppSettings::default();
+    dark.theme.active = "深色".into();
+    dark.theme.palette = Palette::LEGACY_DARK;
+    dark.theme.migrate_builtin_defaults();
+    assert_eq!(dark.theme.palette, Palette::dark());
+
+    let mut custom_override = AppSettings::default();
+    custom_override.theme.active = "浅色".into();
+    custom_override.theme.palette = Palette::LEGACY_LIGHT;
+    custom_override.theme.saved.insert("浅色".into(), Palette::LEGACY_LIGHT);
+    custom_override.theme.migrate_builtin_defaults();
+    assert_eq!(custom_override.theme.palette, Palette::LEGACY_LIGHT);
+}

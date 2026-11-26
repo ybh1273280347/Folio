@@ -12,19 +12,19 @@ impl Workspace {
         };
         let palette = crate::theme::palette();
         let trash_open = self.trash.is_open();
-        let header_bg = if palette.is_dark() {
-            palette.background
+        let active_tab_bg = if palette.is_dark() {
+            gpui_kit::rgb(palette.selection)
         } else {
-            palette.hover
+            gpui_kit::rgb(palette.hover)
         };
         let mut bar = div()
-            .h(px(32.))
-            .px_1p5()
+            .h(px(34.))
+            .px_2()
             .flex_shrink_0()
             .flex()
             .items_center()
             .gap_1()
-            .when(!show_background, |bar| bar.bg(gpui_kit::rgb(header_bg)))
+            .when(!show_background, |bar| bar.bg(gpui_kit::rgb(palette.surface)))
             .border_b_1()
             .border_color(gpui_kit::rgb(palette.border));
 
@@ -38,9 +38,10 @@ impl Workspace {
                     .ghost()
                     .compact()
                     .with_size(px(16.))
-                    .w(px(22.))
-                    .h(px(22.))
-                    .when(outline_open, |b| b.bg(fg_alpha(palette.text, 0.08)))
+                    .w(px(24.))
+                    .h(px(24.))
+                    .rounded(px(6.))
+                    .when(outline_open, |b| b.bg(gpui_kit::rgb(palette.selection)))
                     .icon(crate::ui::icon(IconName::ListTree))
                     .tooltip(if outline_open {
                         crate::i18n::workspace::TOOLTIP_COLLAPSE_OUTLINE.get()
@@ -58,28 +59,30 @@ impl Workspace {
             );
         }
 
-        let tab_hover_bg = fg_alpha(palette.text, 0.07);
+        let tab_hover_bg = fg_alpha(palette.text, if palette.is_dark() { 0.08 } else { 0.06 });
         let tab_shell = |id: SharedString, title: String, current: bool| {
             div()
                 .id(id)
-                .w(px(150.))
+                .w(px(156.))
                 .min_w_0()
                 .flex_shrink(1.)
                 .when(current, |tab| tab.flex_shrink_0().max_w(relative(0.65)))
                 .h(px(26.))
-                .px_2()
+                .px_2p5()
                 .rounded(px(6.))
                 .flex()
                 .overflow_hidden()
                 .items_center()
                 .gap_1()
                 .cursor_pointer()
-                .text_color(fg_alpha(palette.text, 0.78))
+                .text_color(gpui_kit::rgb(palette.muted))
                 .when(current, |s| {
-                    s.text_color(gpui_kit::rgb(palette.text))
-                        .when(!show_background, |s| s.bg(gpui_kit::rgb(palette.surface)))
+                    s.font_medium()
+                        .text_color(gpui_kit::rgb(palette.text))
+                        .when(!show_background, |s| s.bg(active_tab_bg))
+                        .when(show_background, |s| s.bg(tab_hover_bg))
                 })
-                .when(!current || show_background, |s| {
+                .when(!current, |s| {
                     s.hover(move |h| {
                         h.bg(tab_hover_bg)
                             .text_color(gpui_kit::rgb(palette.text))
@@ -266,9 +269,10 @@ impl Workspace {
                         .ghost()
                         .compact()
                         .with_size(px(16.))
-                        .w(px(22.))
-                        .h(px(22.))
-                        .when(is_source, |b| b.bg(fg_alpha(palette.text, 0.08)))
+                        .w(px(24.))
+                        .h(px(24.))
+                        .rounded(px(6.))
+                        .when(is_source, |b| b.bg(gpui_kit::rgb(palette.selection)))
                         .icon(crate::ui::icon(IconName::CodeXml))
                         .tooltip(if is_source {
                             crate::i18n::workspace::TOOLTIP_SWITCH_WYSIWYG.get()
