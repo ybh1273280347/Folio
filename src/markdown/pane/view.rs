@@ -559,7 +559,7 @@ impl Render for MarkdownPane {
                         let thumb_active = if dark { 0x72767f } else { 0xa8a8a5 };
                         div().absolute().inset_0().child(
                             Scrollbar::vertical(&self.scroll)
-                                .mode(ScrollbarMode::Always)
+                                .mode(ScrollbarMode::Hover)
                                 .styles(move |styles| {
                                     styles
                                         .thumb(move |style| {
@@ -989,7 +989,8 @@ impl Render for MarkdownPane {
                                                 .child(div().absolute().inset_0().child(
                                                     Scrollbar::vertical(
                                                         &self.annotation_list_scroll,
-                                                    ),
+                                                    )
+                                                    .mode(ScrollbarMode::Hover),
                                                 )),
                                         ),
                                 ),

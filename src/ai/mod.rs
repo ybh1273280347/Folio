@@ -1669,7 +1669,7 @@ impl Render for ChatPane {
                             .right_0()
                             .child(
                                 Scrollbar::vertical(&self.scroll)
-                                    .mode(ScrollbarMode::Always)
+                                    .mode(ScrollbarMode::Hover)
                                     .styles(move |styles| {
                                         styles
                                             .thumb(move |style| {

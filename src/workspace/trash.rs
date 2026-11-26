@@ -733,7 +733,7 @@ impl Workspace {
                     .right_0()
                     .child(
                         Scrollbar::vertical(&self.trash.scroll)
-                            .mode(ScrollbarMode::Always)
+                            .mode(ScrollbarMode::Hover)
                             .styles(move |styles| {
                                 styles
                                     .thumb(move |style| {

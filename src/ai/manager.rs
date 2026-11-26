@@ -772,7 +772,7 @@ impl AiPane {
                             .child(crate::i18n::ai::session_meta_line(pinned, entry.count, status))
                             .child(chrono::DateTime::parse_from_rfc3339(&entry.modified).map(|t| t.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()).unwrap_or_default()))
                 })))
-                .child(div().absolute().right_0().top_0().bottom_0().child(Scrollbar::vertical(&self.history_scroll).mode(ScrollbarMode::Always)
+                .child(div().absolute().right_0().top_0().bottom_0().child(Scrollbar::vertical(&self.history_scroll).mode(ScrollbarMode::Hover)
                     .styles(|styles| styles.thumb(|style| style.bg(gpui_kit::rgb(0xc5c8cc)).width(px(5.)))))))
             .into_any_element()
     }

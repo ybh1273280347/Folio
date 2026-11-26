@@ -2787,7 +2787,7 @@ impl Workspace {
             ))
                 .child(div().absolute().top(px(20.)).bottom(px(20.)).left_0().right_0().child(
                     Scrollbar::vertical(&self.tree.file_scroll)
-                        .mode(ScrollbarMode::Always)
+                        .mode(ScrollbarMode::Hover)
                         .styles(|styles| styles
                             .thumb(move |style| style.bg(drag_palette.scroll_thumb()).width(px(5.)).inset(px(1.)).radius(px(3.)).min_length(px(24.)))
                             .thumb_hover(move |style| style.bg(drag_palette.scroll_thumb_hover()).width(px(5.)).inset(px(1.)).radius(px(3.)))

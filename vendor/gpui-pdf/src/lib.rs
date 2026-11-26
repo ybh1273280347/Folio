@@ -38,7 +38,7 @@ use gpui::{
     AnyView, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Hsla, InteractiveElement,
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Render, RenderImage,
     ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div,
-    hsla, img, point, px,
+    hsla, img, point, prelude::FluentBuilder, px,
 };
 #[cfg(feature = "search")]
 use gpui_kit::component::{
@@ -1988,6 +1988,8 @@ impl PdfView {
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<D>> {
         let m = Self::scroll_handle_metrics(&handle)?;
+        let dragging = get_drag(self).is_some();
+        let track_group: SharedString = format!("{id}-track").into();
         let thumb_bg = Hsla {
             a: 0.45,
             ..style.header_muted
@@ -2003,8 +2005,9 @@ impl PdfView {
                 .absolute()
                 .top_0()
                 .right_0()
-                .w(px(SCROLLBAR_W))
+                .w(px(16.0))
                 .h(px(m.track_h))
+                .group(track_group.clone())
                 .child(
                     div()
                         .id(id)
@@ -2015,6 +2018,10 @@ impl PdfView {
                         .h(px(m.thumb_h))
                         .rounded(px((SCROLLBAR_W - 4.0) / 2.0))
                         .bg(thumb_bg)
+                        .when(!dragging, |s| {
+                            s.opacity(0.)
+                                .group_hover(track_group, |h| h.opacity(1.))
+                        })
                         .hover(|h| h.bg(thumb_hover))
                         .cursor_pointer()
                         .on_mouse_down(
@@ -3231,6 +3238,7 @@ impl Render for PdfView {
         // it only appears when there's something to scroll. The track is transparent
         // and event-transparent (no id/handlers) — only the thumb is grabbable.
         let scrollbar = self.scrollbar_metrics().map(|m| {
+            let dragging = self.scrollbar_drag.is_some();
             let thumb_bg = Hsla {
                 a: 0.45,
                 ..style.header_muted
@@ -3243,8 +3251,9 @@ impl Render for PdfView {
                 .absolute()
                 .top_0()
                 .right_0()
-                .w(px(SCROLLBAR_W))
+                .w(px(16.0))
                 .h(px(m.track_h))
+                .group("pdf-scrollbar-track")
                 .child(
                     div()
                         .id("pdf-scrollbar-thumb")
@@ -3255,6 +3264,10 @@ impl Render for PdfView {
                         .h(px(m.thumb_h))
                         .rounded(px((SCROLLBAR_W - 4.0) / 2.0))
                         .bg(thumb_bg)
+                        .when(!dragging, |s| {
+                            s.opacity(0.)
+                                .group_hover("pdf-scrollbar-track", |h| h.opacity(1.))
+                        })
                         .hover(|h| h.bg(thumb_hover))
                         .cursor_pointer()
                         .on_mouse_down(

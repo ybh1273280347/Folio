@@ -502,6 +502,19 @@ pub fn apply_settings(settings: &crate::model::AppSettings, cx: &mut App) {
     let base = gpui_kit::base::Theme::global_mut(cx);
     base.tokens.typography.mono = document_typography.mono;
     base.tokens.typography.mono_md = document_typography.mono_md;
+    base.scrollbar = base
+        .scrollbar
+        .clone()
+        .with_mode(gpui_kit::base::ScrollbarMode::Hover)
+        .with_motion(
+            gpui_kit::base::ScrollbarMotion::default()
+                .with_idle(std::time::Duration::from_millis(600))
+                .with_enter(std::time::Duration::from_millis(120))
+                .with_exit(std::time::Duration::from_millis(200))
+                .with_expand(std::time::Duration::from_millis(120))
+                .with_entrance(gpui_kit::base::ScrollbarEntrance::Fade)
+                .with_thumb_hover_entrance(gpui_kit::base::ScrollbarEntrance::Fade),
+        );
     gpui_kit::base::set_smooth_caret(
         settings.smooth_caret,
         Some(Hsla::from(rgb(settings.theme.palette.accent))),

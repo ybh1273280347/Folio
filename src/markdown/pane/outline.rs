@@ -629,7 +629,7 @@ fn render_panel_body(
         .child(
             div().absolute().inset_0().child(
                 Scrollbar::vertical(&pane.outline_scroll)
-                    .mode(ScrollbarMode::Always)
+                    .mode(ScrollbarMode::Hover)
                     .styles(move |styles| {
                         styles
                             .thumb(move |style| {

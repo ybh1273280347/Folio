@@ -173,7 +173,7 @@ impl ChatPane {
                                     .child(
                                         div().absolute().inset_0().child(
                                             Scrollbar::vertical(&self.turn_navigation_scroll)
-                                                .mode(ScrollbarMode::Always)
+                                                .mode(ScrollbarMode::Hover)
                                                 .styles(move |styles| {
                                                     styles.thumb(move |style| {
                                                         style
