@@ -185,9 +185,8 @@ struct Geometry {
 }
 
 impl CullState {
-    /// Drop layout-dependent measurements when wrapping or zoom changes.
-    /// The current frame's spacers are stale; the next render measures visible
-    /// units again, starting with a bounded first-frame estimate.
+    /// Detect new wrapping metrics. The unit order and scroll position are
+    /// still valid, and offscreen heights remain estimates until remeasured.
     pub(crate) fn set_geometry(
         &mut self,
         width: Pixels,
@@ -209,24 +208,23 @@ impl CullState {
             .as_ref()
             .is_some_and(|previous| previous != &geometry);
         self.geometry = Some(geometry);
-        if changed {
-            self.heights.clear();
-            self.index.revision = None;
-            self.visible = None;
-            self.measured.clear();
-            return true;
-        }
-        false
+        changed
     }
 
     /// After prepaint: fold this frame's measurements into the heights and
     /// record the visible span. Returns whether the visible span left the
     /// laid-out span (the caller then requests another frame).
-    pub(crate) fn finish_frame(&mut self, editor: Bounds<Pixels>, mask: Bounds<Pixels>) -> bool {
+    pub(crate) fn finish_frame(
+        &mut self,
+        editor: Bounds<Pixels>,
+        mask: Bounds<Pixels>,
+        geometry_changed: bool,
+    ) -> bool {
         let measured = std::mem::take(&mut self.measured);
         for (ix, (id, index, top, bottom)) in measured.iter().enumerate() {
             let height = match measured.get(ix + 1) {
                 Some((_, next_index, next_top, _)) if *next_index == index + 1 => *next_top - *top,
+                _ if geometry_changed => *bottom - *top,
                 _ => self
                     .heights
                     .get(id)

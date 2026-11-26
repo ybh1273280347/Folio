@@ -41,6 +41,8 @@ pub(crate) struct Snapshot {
     pub(crate) blocks: Vec<Rc<ProjectedBlock>>,
     /// All caret leaves, including blocks without a text layout, in document order.
     pub(crate) leaves: Rc<Vec<LeafInfo>>,
+    /// Resolves renderer keys to document order without walking culled leaves.
+    pub(crate) leaf_indices: HashMap<u64, usize>,
     /// Tables and their keyed cells, for node selection (no caret in cells).
     pub(crate) tables: Rc<Vec<(BlockId, Vec<BlockId>)>>,
     pub(crate) code_highlights: HashMap<u64, Vec<(Range<usize>, Hsla)>>,
@@ -80,7 +82,7 @@ impl ProjectionCache {
             blocks.push(block);
         }
         self.nodes.collect_garbage(doc);
-        let leaves = doc
+        let leaves: Vec<_> = doc
             .leaves()
             .iter()
             .filter_map(|id| leaf_info(doc, *id))
@@ -124,9 +126,15 @@ impl ProjectionCache {
             }
         }
         self.by_id = by_id;
+        let leaf_indices = leaves
+            .iter()
+            .enumerate()
+            .map(|(index, leaf)| (leaf.block.as_u64(), index))
+            .collect();
         self.snapshot = Rc::new(Snapshot {
             blocks,
             leaves: Rc::new(leaves),
+            leaf_indices,
             tables: Rc::new(tables),
             code_highlights,
             mark_highlights,

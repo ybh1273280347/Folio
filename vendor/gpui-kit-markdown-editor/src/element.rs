@@ -1552,17 +1552,13 @@ impl Element for EditorRoot {
             // Swap in the complete frame; handlers read it until the next one.
             let mut frame = super::frame::into_frame(
                 geometries,
-                self.snapshot.leaves.clone(),
-                &self.snapshot.tables,
+                &self.atom_bounds.lock().expect("atom bounds"),
+                &self.code_preview_bounds.lock().expect("code preview bounds"),
+                &self.snapshot,
             );
             // The measured content spans the editor column, even when the selected image is narrow.
             let content = self.content_bounds.get();
             frame.content = Some(content);
-            frame.insert_atoms(&self.snapshot.leaves, &self.atom_bounds.lock().expect("atom bounds"));
-            frame.insert_code_previews(
-                &self.snapshot.leaves,
-                &self.code_preview_bounds.lock().expect("code preview bounds"),
-            );
             {
                 let state = self.state.read(cx);
                 let doc = &state.model.doc;
@@ -1627,7 +1623,8 @@ impl Element for EditorRoot {
             // Translate the viewport into this frame's coordinates. The
             // measured blocks still use the pre-scroll content origin.
             mask.origin.y -= scroll_delta;
-            if geometry_changed || cull.borrow_mut().finish_frame(content, mask) || scroll_delta != px(0.) {
+            let viewport_uncovered = cull.borrow_mut().finish_frame(content, mask, geometry_changed);
+            if geometry_changed || viewport_uncovered || scroll_delta != px(0.) {
                 // ScrollHandle changes made during prepaint take effect in the next layout.
                 let state = self.state.clone();
                 window.on_next_frame(move |_, cx| state.update(cx, |_, cx| cx.notify()));
