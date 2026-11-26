@@ -39,6 +39,7 @@ fn main() {
     }
     gpui_kit::application().with_assets(ui::Assets).run(|cx| {
         gpui_kit::init(cx);
+        ui::init(cx);
         math_layout::register_fonts(cx);
         markdown_editor::init(cx);
         canvas::bind_shortcuts(cx);

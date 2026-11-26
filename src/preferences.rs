@@ -10,7 +10,7 @@ use gpui_kit::{
     base::StyledExt,
     component::{
         color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState},
-        input::{Input, InputEvent, InputState, Textarea, TextareaState},
+        input::{InputEvent, InputState, TextareaState},
         radio::{Radio, RadioGroup},
         select::{SearchableVec, Select, SelectEvent, SelectState},
         slider::{Slider, SliderEvent, SliderState},
@@ -825,7 +825,7 @@ impl Preferences {
             .when(self.editing_theme, |section| section
             .child(div().flex().flex_col().gap_1().children(colors))
             .child(div().flex().items_center().gap_2()
-                .child(div().flex_1().min_w_0().child(Input::new(&self.theme_name)))
+                .child(div().flex_1().min_w_0().child(crate::ui::TextField::new(&self.theme_name)))
                 .child(crate::ui::button_secondary("save-theme", p::SAVE_THEME.get())
                     .on_click(cx.listener(|panel, _, _, cx| {
                         let name = panel.theme_name.read(cx).value().to_string();
@@ -1177,7 +1177,7 @@ impl Preferences {
                     .flex_col()
                     .gap_2()
                     .child(p::TERMINAL_SHELL.get())
-                    .child(Input::new(&self.terminal_shell))
+                    .child(crate::ui::TextField::new(&self.terminal_shell))
                     .child(
                         div()
                             .text_xs()
@@ -1191,7 +1191,7 @@ impl Preferences {
                     .flex_col()
                     .gap_2()
                     .child(p::TERMINAL_ARGS.get())
-                    .child(Textarea::new(&self.terminal_args).h(px(112.)))
+                    .child(crate::ui::TextAreaField::new(&self.terminal_args).h(px(112.)))
                     .child(
                         div()
                             .text_xs()
@@ -1343,7 +1343,7 @@ impl Preferences {
                                     .text_color(rgb(0x5b5b58))
                                     .child("Base URL"),
                             )
-                            .child(div().flex_1().min_w_0().child(Input::new(&self.ai_base_url)))
+                            .child(div().flex_1().min_w_0().child(crate::ui::TextField::new(&self.ai_base_url).surface_bg()))
                             .child(copy_btn(
                                 "copy-ai-base-url",
                                 self.settings.ai.base_url.clone(),
@@ -1364,13 +1364,13 @@ impl Preferences {
                     )
                     .child(div().flex().items_center().gap_2()
                         .child(div().w(px(96.)).text_xs().child(p::TITLE_MODEL_ID.get()))
-                        .child(div().flex_1().min_w_0().child(Input::new(&self.ai_title_model))))
+                        .child(div().flex_1().min_w_0().child(crate::ui::TextField::new(&self.ai_title_model).surface_bg())))
                     .child(div().flex().items_center().gap_2()
                         .child(div().w(px(96.)).text_xs().child("Exa API Key"))
-                        .child(div().flex_1().min_w_0().child(Input::new(&self.ai_exa_key).mask_toggle())))
+                        .child(div().flex_1().min_w_0().child(crate::ui::TextField::new(&self.ai_exa_key).surface_bg().mask_toggle())))
                     .child(div().flex().items_center().gap_2()
                         .child(div().w(px(96.)).text_xs().child(p::QIANFAN_API_KEY.get()))
-                        .child(div().flex_1().min_w_0().child(Input::new(&self.ai_qianfan_key).mask_toggle()))),
+                        .child(div().flex_1().min_w_0().child(crate::ui::TextField::new(&self.ai_qianfan_key).surface_bg().mask_toggle()))),
             )
             .child(
                 div()
@@ -1422,13 +1422,13 @@ impl Preferences {
                     .child(div().h(px(1.)).bg(rgb(0xebebe6)))
                     .child(div().flex().items_center().gap_2()
                         .child(div().w(px(108.)).flex_shrink_0().text_xs().text_color(rgb(0x5b5b58)).child("PaddleOCR Token"))
-                        .child(div().flex_1().min_w_0().child(Input::new(&self.rag_ocr_token).mask_toggle())))
+                        .child(div().flex_1().min_w_0().child(crate::ui::TextField::new(&self.rag_ocr_token).surface_bg().mask_toggle())))
                     .child(div().flex().items_center().gap_2()
                         .child(div().w(px(108.)).flex_shrink_0().text_xs().text_color(rgb(0x5b5b58)).child("llama-server"))
-                        .child(div().flex_1().min_w_0().child(Input::new(&self.rag_server_bin))))
+                        .child(div().flex_1().min_w_0().child(crate::ui::TextField::new(&self.rag_server_bin).surface_bg())))
                     .child(div().flex().items_center().gap_2()
                         .child(div().w(px(108.)).flex_shrink_0().text_xs().text_color(rgb(0x5b5b58)).child("Embedding URL"))
-                        .child(div().flex_1().min_w_0().child(Input::new(&self.rag_embed_url)))
+                        .child(div().flex_1().min_w_0().child(crate::ui::TextField::new(&self.rag_embed_url).surface_bg()))
                         .child(
                             crate::ui::button_secondary("reset-rag-embed-url", p::DEFAULT_BTN.get())
                                 .px_2()
@@ -1441,10 +1441,10 @@ impl Preferences {
                         ))
                     .child(div().flex().items_center().gap_2()
                         .child(div().w(px(108.)).flex_shrink_0().text_xs().text_color(rgb(0x5b5b58)).child("Embedding GGUF"))
-                        .child(div().flex_1().min_w_0().child(Input::new(&self.rag_embed_model_path))))
+                        .child(div().flex_1().min_w_0().child(crate::ui::TextField::new(&self.rag_embed_model_path).surface_bg())))
                     .child(div().flex().items_center().gap_2()
                         .child(div().w(px(108.)).flex_shrink_0().text_xs().text_color(rgb(0x5b5b58)).child("Rerank URL"))
-                        .child(div().flex_1().min_w_0().child(Input::new(&self.rag_rerank_url)))
+                        .child(div().flex_1().min_w_0().child(crate::ui::TextField::new(&self.rag_rerank_url).surface_bg()))
                         .child(
                             crate::ui::button_secondary("reset-rag-rerank-url", p::DEFAULT_BTN.get())
                                 .px_2()
@@ -1457,7 +1457,7 @@ impl Preferences {
                         ))
                     .child(div().flex().items_center().gap_2()
                         .child(div().w(px(108.)).flex_shrink_0().text_xs().text_color(rgb(0x5b5b58)).child("Rerank GGUF"))
-                        .child(div().flex_1().min_w_0().child(Input::new(&self.rag_rerank_model_path))))
+                        .child(div().flex_1().min_w_0().child(crate::ui::TextField::new(&self.rag_rerank_model_path).surface_bg())))
                     .child(
                         div()
                             .flex()
@@ -1607,7 +1607,7 @@ impl Preferences {
                                                     .text_color(rgb(0x5b5b58))
                                                     .child("APP ID"),
                                             )
-                                            .child(div().flex_1().min_w_0().child(Input::new(&self.baidu_app_id).mask_toggle()))
+                                            .child(div().flex_1().min_w_0().child(crate::ui::TextField::new(&self.baidu_app_id).surface_bg().mask_toggle()))
                                             .child(copy_btn(
                                                 "copy-baidu-app-id",
                                                 self.settings.translate.baidu_app_id.clone(),
@@ -1627,7 +1627,7 @@ impl Preferences {
                                                     .text_color(rgb(0x5b5b58))
                                                     .child(p::API_KEY_SECRET_LABEL.get()),
                                             )
-                                            .child(div().flex_1().min_w_0().child(Input::new(&self.baidu_api_key).mask_toggle()))
+                                            .child(div().flex_1().min_w_0().child(crate::ui::TextField::new(&self.baidu_api_key).surface_bg().mask_toggle()))
                                             .child(copy_btn(
                                                 "copy-baidu-api-key",
                                                 self.settings.translate.baidu_api_key.clone(),

@@ -198,11 +198,11 @@ impl Workspace {
                     .icon(crate::ui::icon(IconName::ListTree).size(px(14.)))
                     .label(format!("{count}"))
                     .tooltip(crate::i18n::canvas::TOOLTIP_BACKLINKS.get())
-                    .dropdown_menu(move |menu, _, _| {
+                    .folio_dropdown_menu(move |menu, _, _| {
                         backlinks.iter().fold(
-                            menu.item(PopupMenuItem::label(
+                            menu.min_w(px(196.)).label(
                                 crate::i18n::canvas::BACKLINKS_MENU_HEADER.get(),
-                            )),
+                            ),
                             |menu, link| {
                                 let app = app.clone();
                                 let item = link.clone();
@@ -215,13 +215,15 @@ impl Workspace {
                                 } else {
                                     format!("{canvas_name} · {}", link.label)
                                 };
-                                menu.item(PopupMenuItem::new(title).on_click(
-                                    move |_, window, cx| {
-                                        app.update(cx, |app, cx| {
-                                            app.open_canvas_backlink(&item, window, cx);
-                                        });
-                                    },
-                                ))
+                                menu.item(
+                                    FolioMenuItem::new(title)
+                                        .icon(IconName::ListTree)
+                                        .on_click(move |_, window, cx| {
+                                            app.update(cx, |app, cx| {
+                                                app.open_canvas_backlink(&item, window, cx);
+                                            });
+                                        }),
+                                )
                             },
                         )
                     }),

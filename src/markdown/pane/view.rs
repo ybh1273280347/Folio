@@ -1238,41 +1238,50 @@ impl Render for MarkdownPane {
             .on_action(cx.listener(|pane, _: &InsertTable, _, cx| {
                 pane.run_command(EditorCommand::InsertTable { rows: 3, cols: 3 }, cx)
             }))
-            .context_menu(|menu, _, _| {
-                menu.menu(crate::i18n::markdown::CTX_BOLD.get(), Box::new(Bold))
-                    .menu(crate::i18n::markdown::CTX_ITALIC.get(), Box::new(Italic))
-                    .menu(
+            .folio_context_menu(|menu, _, _| {
+                menu.min_w(px(176.))
+                    .action_item(crate::i18n::markdown::CTX_BOLD.get(), Some(IconName::Bold), Box::new(Bold))
+                    .action_item(crate::i18n::markdown::CTX_ITALIC.get(), Some(IconName::Italic), Box::new(Italic))
+                    .action_item(
                         crate::i18n::markdown::CTX_UNDERLINE.get(),
+                        Some(IconName::Underline),
                         Box::new(Underline),
                     )
-                    .menu(
+                    .action_item(
                         crate::i18n::markdown::CTX_STRIKETHROUGH.get(),
+                        Some(IconName::Strikethrough),
                         Box::new(Strikethrough),
                     )
-                    .menu(
+                    .action_item(
                         crate::i18n::markdown::CTX_HIGHLIGHT.get(),
+                        Some(IconName::Highlighter),
                         Box::new(Highlight),
                     )
                     .separator()
-                    .menu(
+                    .action_item(
                         crate::i18n::markdown::CTX_HEADING.get(),
+                        Some(IconName::Heading2),
                         Box::new(HeadingAction),
                     )
-                    .menu(
+                    .action_item(
                         crate::i18n::markdown::CTX_BULLET_LIST.get(),
+                        Some(IconName::List),
                         Box::new(BulletList),
                     )
-                    .menu(
+                    .action_item(
                         crate::i18n::markdown::CTX_TASK_LIST.get(),
+                        Some(IconName::ListTodo),
                         Box::new(TaskList),
                     )
                     .separator()
-                    .menu(
+                    .action_item(
                         crate::i18n::markdown::CTX_INSERT_IMAGE.get(),
+                        Some(IconName::Image),
                         Box::new(InsertImage),
                     )
-                    .menu(
+                    .action_item(
                         crate::i18n::markdown::CTX_INSERT_TABLE.get(),
+                        Some(IconName::Table2),
                         Box::new(InsertTable),
                     )
             })

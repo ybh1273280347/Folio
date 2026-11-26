@@ -421,12 +421,12 @@ impl Workspace {
         let card = div()
             .id("canvas-target-picker-card")
             .w(px(420.))
-            .p_4()
-            .rounded(px(10.))
-            .bg(rgb(palette.surface))
+            .p_5()
+            .rounded(px(12.))
+            .bg(palette.elevated_surface())
             .border_1()
-            .border_color(rgb(palette.border))
-            .shadow_lg()
+            .border_color(palette.card_border())
+            .shadow(palette.modal_shadow())
             .flex()
             .flex_col()
             .gap_3()
@@ -457,12 +457,7 @@ impl Workspace {
                             ),
                     )
                     .child(
-                        Button::new("canvas-picker-close")
-                            .ghost()
-                            .compact()
-                            .h(px(22.))
-                            .w(px(22.))
-                            .icon(crate::ui::icon(IconName::Close))
+                        crate::ui::control_sized("canvas-picker-close", IconName::Close, 24., 13.)
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.documents.pending_canvas_insert = None;
                                 cx.notify();
@@ -472,15 +467,15 @@ impl Workspace {
             .child(list)
             .child(
                 div()
-                    .pt_2()
+                    .pt_2p5()
                     .border_t_1()
-                    .border_color(rgb(palette.border))
+                    .border_color(palette.divider())
                     .flex()
                     .items_center()
                     .gap_2()
                     .child(
                         div().flex_1().min_w_0().child(
-                            gpui_kit::component::input::Input::new(&pending.name_input),
+                            crate::ui::TextField::new(&pending.name_input).compact(),
                         ),
                     )
                     .child(

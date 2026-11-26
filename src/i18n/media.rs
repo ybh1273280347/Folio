@@ -325,6 +325,8 @@ pub const DRAG_OPEN_SPLIT: BiText = BiText::new("右侧分屏打开", "Open to r
 pub const TERM_PROCESS_ENDED: BiText = BiText::new("终端进程已结束", "Terminal process ended");
 pub const TERM_STARTING: BiText = BiText::new("正在启动…", "Starting…");
 pub const TERM_NEW_OR_AGENT: BiText = BiText::new("新建终端或启动 Agent", "New terminal or launch Agent");
+pub const TERM_MENU_SHELL: BiText = BiText::new("终端", "Terminal");
+pub const TERM_MENU_START_AGENT: BiText = BiText::new("启动 Agent", "Start an agent");
 pub const TERM_CLICK_PLUS_HINT: BiText = BiText::new("点击“+”新建终端", "Click \"+\" to start a terminal");
 
 pub fn term_exited_code(code: impl std::fmt::Display) -> String {

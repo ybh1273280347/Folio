@@ -715,13 +715,14 @@ impl AiPane {
 
     fn history(&self, cx: &mut Context<Self>) -> AnyElement {
         let palette = active_palette();
-        let font_size = (self.settings.ai_font_size as f32 - 2.).max(10.);
-        let metadata_color = mix_color(palette.surface, palette.muted, 0.65);
-        let pinned_style = ButtonCustomVariant::new(cx)
-            .color(mix_color(palette.surface, palette.accent, 0.14).into())
-            .foreground(gpui_kit::rgb(palette.accent).into())
-            .hover(mix_color(palette.surface, palette.accent, 0.22).into())
-            .active(gpui_kit::rgb(palette.pressed).into());
+        let ui_font = crate::ui::sans_font(&self.settings.ai_font);
+        let font_size = (self.settings.ai_font_size as f32 - 2.).clamp(11., 13.5);
+        let meta_size = (font_size - 1.5).max(10.);
+        let active_id = self
+            .store
+            .projects
+            .get(&self.project())
+            .and_then(|tabs| tabs.active.as_deref());
         let query = self.search.read(cx).value().to_lowercase();
         let mut rows: Vec<_> = self
             .histories
@@ -733,47 +734,255 @@ impl AiPane {
             })
             .collect();
         rows.sort_by_key(|(rank, _)| *rank);
-        div().w(px(300.)).max_h(px(340.)).p_1().rounded(px(10.)).border_1().text_size(px(font_size))
-            .font_family(crate::ui::sans_font(&self.settings.ai_font))
-            .border_color(subtle_border(palette.border)).bg(gpui_kit::rgb(palette.surface))
-            .shadow(popover_shadow(palette.is_dark())).flex().flex_col().gap_1().occlude()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(div().w_full().px_1().pt_0p5().child(Input::new(&self.search).xsmall().h(px(20.)).text_size(px(font_size))))
-            .child(div().relative().min_h_0().child(div().id("ai-history-list").max_h(px(285.)).overflow_y_scroll().track_scroll(&self.history_scroll)
-                .children(rows.into_iter().map(|(_, entry)| {
-                    let id = entry.id.clone(); let open = id.clone(); let pin = id.clone(); let rename = id.clone(); let delete = id.clone();
-                    let running = entry.running; let waiting = entry.waiting;
-                    let title = entry.title(); let initial = title.clone(); let pinned = entry.pinned;
-                    let status = if waiting {
-                        crate::i18n::ai::SESSION_STATUS_WAITING.get()
-                    } else if running {
-                        crate::i18n::ai::SESSION_STATUS_RUNNING.get()
-                    } else if entry.failed {
-                        crate::i18n::ai::SESSION_STATUS_FAILED.get()
-                    } else {
-                        ""
-                    };
-                    div().id(SharedString::from(format!("history-{id}"))).px_2().py_1p5().rounded(px(6.))
-                        .when(pinned, |row| row.bg(mix_color(palette.surface, palette.accent, 0.045)))
-                        .cursor_pointer().hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
-                        .on_click(cx.listener(move |pane, _, _, cx| {
-                            if pane.renaming.as_ref() != Some(&open) { pane.activate(open.clone(), cx); }
-                        }))
-                        .child(div().flex().items_center().gap_1()
-                            .child(if self.renaming.as_ref() == Some(&id) { div().flex_1().min_w_0().on_mouse_down(MouseButton::Left, |_,_,cx| cx.stop_propagation()).child(Input::new(&self.rename).small().text_size(px(font_size))).into_any_element() }
-                                else { div().flex_1().min_w_0().text_ellipsis().child(title).into_any_element() })
-                            .child(Button::new(SharedString::from(format!("pin-{id}"))).ghost().when(pinned, |button| button.custom(pinned_style)).compact().with_size(px(font_size / 0.75)).w(px(font_size + 6.)).h(px(font_size + 6.)).icon(crate::ui::icon(IconName::Pin)).tooltip(if pinned { crate::i18n::ai::UNPIN.get() } else { crate::i18n::ai::PIN.get() })
-                                .on_click(cx.listener(move |pane, _, _, cx| { cx.stop_propagation(); pane.command(json!({"type":"set_pinned","sessionId":pin,"pinned":!pinned}), cx); })))
-                            .child(Button::new(SharedString::from(format!("rename-{id}"))).ghost().compact().with_size(px(font_size / 0.75)).w(px(font_size + 6.)).h(px(font_size + 6.)).icon(crate::ui::icon(IconName::PencilLine)).tooltip(crate::i18n::ai::RENAME.get())
-                                .on_click(cx.listener(move |pane, _, window, cx| { cx.stop_propagation(); pane.renaming = Some(rename.clone()); pane.rename.update(cx, |input,cx| { input.set_value(initial.clone(),window,cx); input.focus(window,cx); }); cx.notify(); })))
-                            .child(Button::new(SharedString::from(format!("delete-{id}"))).ghost().compact().with_size(px(font_size / 0.75)).w(px(font_size + 6.)).h(px(font_size + 6.)).icon(crate::ui::icon(IconName::Trash)).tooltip(crate::i18n::ai::DELETE_SESSION.get())
-                                .on_click(cx.listener(move |pane, _, _, cx| { cx.stop_propagation(); pane.pending_deletion = Some((delete.clone(), running || waiting)); cx.notify(); }))))
-                        .child(div().flex().justify_between().text_size(px((font_size - 2.).max(9.))).text_color(metadata_color)
-                            .child(crate::i18n::ai::session_meta_line(pinned, entry.count, status))
-                            .child(chrono::DateTime::parse_from_rfc3339(&entry.modified).map(|t| t.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()).unwrap_or_default()))
-                })))
-                .child(div().absolute().right_0().top_0().bottom_0().child(Scrollbar::vertical(&self.history_scroll).mode(ScrollbarMode::Hover)
-                    .styles(|styles| styles.thumb(|style| style.bg(gpui_kit::rgb(0xc5c8cc)).width(px(5.)))))))
+
+        let text_color = gpui_kit::rgb(palette.text);
+        let muted_color = gpui_kit::rgb(palette.muted);
+        let hover_bg = gpui_kit::rgb(palette.hover);
+        let pressed_bg = gpui_kit::rgb(palette.pressed);
+        let accent_color = gpui_kit::rgb(palette.accent);
+        let danger_fg = gpui_kit::rgb(palette.danger);
+        let danger_bg = palette.danger_surface();
+        let pin_tint = mix_color(palette.surface, palette.accent, 0.045);
+
+        crate::ui::popover_card("ai-history-popover")
+            .w(px(316.))
+            .max_h(px(368.))
+            .font_family(ui_font.clone())
+            .text_size(px(font_size))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .child(
+                div()
+                    .px_2p5()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(palette.divider())
+                    .child(
+                        crate::ui::SearchField::new("ai-history-search", &self.search)
+                            .text_size(px(font_size))
+                            .font_family(ui_font.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        div()
+                            .id("ai-history-list")
+                            .max_h(px(310.))
+                            .p_1p5()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .overflow_y_scroll()
+                            .track_scroll(&self.history_scroll)
+                            .children(rows.into_iter().map(|(_, entry)| {
+                                let id = entry.id.clone();
+                                let open = id.clone();
+                                let pin = id.clone();
+                                let rename = id.clone();
+                                let delete = id.clone();
+                                let running = entry.running;
+                                let waiting = entry.waiting;
+                                let failed = entry.failed;
+                                let title = entry.title();
+                                let initial = title.clone();
+                                let pinned = entry.pinned;
+                                let is_active = active_id == Some(id.as_str());
+                                let is_renaming = self.renaming.as_ref() == Some(&id);
+                                let row_group: SharedString = format!("history-row-{id}").into();
+                                let status = if waiting {
+                                    crate::i18n::ai::SESSION_STATUS_WAITING.get()
+                                } else if running {
+                                    crate::i18n::ai::SESSION_STATUS_RUNNING.get()
+                                } else if failed {
+                                    crate::i18n::ai::SESSION_STATUS_FAILED.get()
+                                } else {
+                                    ""
+                                };
+                                let status_dot = if waiting {
+                                    Some(gpui_kit::rgb(0xd97706))
+                                } else if running {
+                                    Some(accent_color)
+                                } else if failed {
+                                    Some(danger_fg)
+                                } else {
+                                    None
+                                };
+                                let pin_tip = if pinned {
+                                    crate::i18n::ai::UNPIN.get()
+                                } else {
+                                    crate::i18n::ai::PIN.get()
+                                };
+                                let modified = chrono::DateTime::parse_from_rfc3339(&entry.modified)
+                                    .map(|t| t.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string())
+                                    .unwrap_or_default();
+
+                                div()
+                                    .id(SharedString::from(format!("history-{id}")))
+                                    .group(row_group.clone())
+                                    .px_2()
+                                    .py_1p5()
+                                    .rounded(px(6.))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(3.))
+                                    .when(is_active, |row| row.bg(gpui_kit::rgb(palette.selection)))
+                                    .when(!is_active && pinned, |row| row.bg(pin_tint))
+                                    .cursor_pointer()
+                                    .hover(move |s| s.bg(hover_bg))
+                                    .on_click(cx.listener(move |pane, _, _, cx| {
+                                        if pane.renaming.as_ref() != Some(&open) {
+                                            pane.activate(open.clone(), cx);
+                                        }
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .child(if is_renaming {
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                                    .child(
+                                                        crate::ui::TextField::new(&self.rename)
+                                                            .compact()
+                                                            .surface_bg()
+                                                            .text_size(px(font_size)),
+                                                    )
+                                                    .into_any_element()
+                                            } else {
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .text_ellipsis()
+                                                    .font_medium()
+                                                    .text_color(text_color)
+                                                    .child(title)
+                                                    .into_any_element()
+                                            })
+                                            .when(!is_renaming, |top| {
+                                                top.child(
+                                                    div()
+                                                        .flex_shrink_0()
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap(px(2.))
+                                                        .child(
+                                                            div()
+                                                                .id(SharedString::from(format!("pin-{id}")))
+                                                                .size(px(22.))
+                                                                .rounded(px(5.))
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_center()
+                                                                .cursor_pointer()
+                                                                .text_color(if pinned { accent_color } else { muted_color })
+                                                                .when(!pinned, |btn| {
+                                                                    btn.opacity(0.0).group_hover(row_group.clone(), |s| s.opacity(1.0))
+                                                                })
+                                                                .hover(move |s| s.bg(pressed_bg).text_color(if pinned { accent_color } else { text_color }))
+                                                                .tooltip(move |w, cx| crate::ui::tooltip(pin_tip, w, cx))
+                                                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                                                .on_click(cx.listener(move |pane, _, _, cx| {
+                                                                    cx.stop_propagation();
+                                                                    pane.command(json!({"type":"set_pinned","sessionId":pin,"pinned":!pinned}), cx);
+                                                                }))
+                                                                .child(crate::ui::icon(IconName::Pin).size(px(12.5))),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .id(SharedString::from(format!("rename-{id}")))
+                                                                .size(px(22.))
+                                                                .rounded(px(5.))
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_center()
+                                                                .cursor_pointer()
+                                                                .text_color(muted_color)
+                                                                .opacity(0.0)
+                                                                .group_hover(row_group.clone(), |s| s.opacity(1.0))
+                                                                .hover(move |s| s.bg(pressed_bg).text_color(text_color))
+                                                                .tooltip(|w, cx| crate::ui::tooltip(crate::i18n::ai::RENAME.get(), w, cx))
+                                                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                                                .on_click(cx.listener(move |pane, _, window, cx| {
+                                                                    cx.stop_propagation();
+                                                                    pane.renaming = Some(rename.clone());
+                                                                    pane.rename.update(cx, |input, cx| {
+                                                                        input.set_value(initial.clone(), window, cx);
+                                                                        input.focus(window, cx);
+                                                                    });
+                                                                    cx.notify();
+                                                                }))
+                                                                .child(crate::ui::icon(IconName::PencilLine).size(px(12.5))),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .id(SharedString::from(format!("delete-{id}")))
+                                                                .size(px(22.))
+                                                                .rounded(px(5.))
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_center()
+                                                                .cursor_pointer()
+                                                                .text_color(muted_color)
+                                                                .opacity(0.0)
+                                                                .group_hover(row_group, |s| s.opacity(1.0))
+                                                                .hover(move |s| s.bg(danger_bg).text_color(danger_fg))
+                                                                .tooltip(|w, cx| crate::ui::tooltip(crate::i18n::ai::DELETE_SESSION.get(), w, cx))
+                                                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                                                .on_click(cx.listener(move |pane, _, _, cx| {
+                                                                    cx.stop_propagation();
+                                                                    pane.pending_deletion = Some((delete.clone(), running || waiting));
+                                                                    cx.notify();
+                                                                }))
+                                                                .child(crate::ui::icon(IconName::Trash).size(px(12.5))),
+                                                        ),
+                                                )
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap_2()
+                                            .text_size(px(meta_size))
+                                            .text_color(muted_color)
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1()
+                                                    .when_some(status_dot, |meta, dot| {
+                                                        meta.child(
+                                                            div()
+                                                                .w(px(5.))
+                                                                .h(px(5.))
+                                                                .rounded_full()
+                                                                .bg(dot),
+                                                        )
+                                                    })
+                                                    .child(crate::i18n::ai::session_meta_line(pinned, entry.count, status)),
+                                            )
+                                            .child(modified),
+                                    )
+                            })),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .right_0()
+                            .top(px(4.))
+                            .bottom(px(4.))
+                            .child(crate::ui::scrollbar_vertical(&self.history_scroll)),
+                    ),
+            )
             .into_any_element()
     }
 }
@@ -1072,49 +1281,51 @@ impl Render for AiPane {
                 } else {
                     crate::i18n::common::DELETE.get()
                 };
+                let confirm_card = crate::ui::popover_card("ai-delete-confirm")
+                    .w(px(284.))
+                    .p_3p5()
+                    .font_family(crate::ui::sans_font(&self.settings.ai_font))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .text_size(px(12.5))
+                    .child(div().text_color(gpui_kit::rgb(palette.text)).child(prompt))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                crate::ui::button_secondary(
+                                    "cancel-ai-delete",
+                                    crate::i18n::common::CANCEL.get(),
+                                )
+                                .text_size(px(12.))
+                                .px_2p5()
+                                .on_click(cx.listener(|pane, _, _, cx| {
+                                    pane.pending_deletion = None;
+                                    cx.notify();
+                                })),
+                            )
+                            .child(
+                                crate::ui::button_danger("confirm-ai-delete", confirm_label)
+                                    .text_size(px(12.))
+                                    .on_click(cx.listener(move |pane, _, _, cx| {
+                                        pane.delete(id.clone(), active_task, cx)
+                                    })),
+                            ),
+                    );
                 root.child(
                     deferred(
                         div()
                             .absolute()
                             .top(px(44.))
                             .left_2()
-                            .p_3()
-                            .rounded(px(10.))
-                            .border_1()
-                            .border_color(subtle_border(palette.border))
-                            .bg(gpui_kit::rgb(palette.surface))
-                            .shadow(popover_shadow(palette.is_dark()))
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .text_xs()
-                            .occlude()
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .child(prompt)
-                            .child(
-                                div()
-                                    .flex()
-                                    .justify_end()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("cancel-ai-delete")
-                                            .small()
-                                            .label(crate::i18n::common::CANCEL.get())
-                                            .on_click(cx.listener(|pane, _, _, cx| {
-                                                pane.pending_deletion = None;
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("confirm-ai-delete")
-                                            .small()
-                                            .danger()
-                                            .label(confirm_label)
-                                            .on_click(cx.listener(move |pane, _, _, cx| {
-                                                pane.delete(id.clone(), active_task, cx)
-                                            })),
-                                    ),
-                            ),
+                            .child(crate::ui::popover_enter(
+                                confirm_card,
+                                "ai-delete-confirm-enter",
+                                crate::ui::PopoverDirection::Down,
+                            )),
                     )
                     .with_priority(6),
                 )

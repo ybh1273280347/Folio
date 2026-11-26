@@ -291,18 +291,8 @@ const CREATABLE_PRESETS: &[CreatablePreset] = &[
     },
 ];
 
-fn new_file_menu_item(label: &'static str, icon: impl Fn() -> AnyElement + 'static) -> PopupMenuItem {
-    PopupMenuItem::element(move |_, _| {
-        div()
-            .w_full()
-            .h(px(20.))
-            .flex()
-            .items_center()
-            .gap_2()
-            .text_xs()
-            .child(icon())
-            .child(label)
-    })
+fn new_file_menu_item(label: &'static str, icon: impl Fn() -> AnyElement + 'static) -> FolioMenuItem {
+    FolioMenuItem::new(label).custom_icon(move |_, _| icon())
 }
 
 impl Workspace {
@@ -350,14 +340,15 @@ impl Workspace {
             NameAction::RenameFolder(_) => crate::i18n::workspace::MODAL_RENAME_FOLDER.get(),
             NameAction::RenameProject(_) => crate::i18n::workspace::MODAL_RENAME_PROJECT.get(),
         };
+        let palette = crate::theme::palette();
         let card = div()
             .w(px(420.))
             .p_6()
-            .rounded(px(8.))
+            .rounded(px(12.))
             .border_1()
-            .border_color(rgb(0xe6e5e1))
-            .shadow_lg()
-            .bg(rgb(0xffffff))
+            .border_color(palette.card_border())
+            .shadow(palette.modal_shadow())
+            .bg(palette.elevated_surface())
             .flex()
             .flex_col()
             .gap_4()
@@ -366,7 +357,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(div().font_semibold().child(title))
+                    .child(div().font_semibold().text_color(gpui_kit::rgb(palette.text)).child(title))
                     .child(
                         crate::ui::control("close-name-dialog", IconName::Close)
                             .on_click(cx.listener(|app, _, _, cx| {
@@ -375,7 +366,7 @@ impl Workspace {
                             })),
                     ),
             )
-            .child(Input::new(&self.tree.name_input))
+            .child(crate::ui::TextField::new(&self.tree.name_input))
             .when(matches!(action, NameAction::Create), |modal| {
                 modal.child(
                     div()
@@ -852,10 +843,10 @@ impl Workspace {
                     .rounded_l_none()
                     .icon(crate::ui::icon(IconName::ChevronDown).size(px(12.)))
                     .tooltip(crate::i18n::workspace::TOOLTIP_NEW_FILE_MENU.get())
-                    .dropdown_menu(move |menu, _, _| {
+                    .folio_dropdown_menu(move |menu, _, _| {
                         let menu = CREATABLE_PRESETS
                             .iter()
-                            .fold(menu.min_w(px(124.)), |menu, preset| {
+                            .fold(menu.min_w(px(148.)), |menu, preset| {
                                 let preset_app = menu_app.clone();
                                 let ext = preset.ext;
                                 let sample_path = preset.sample_path;
@@ -881,21 +872,20 @@ impl Workspace {
                             });
                         let other_app = menu_app.clone();
                         menu.separator().item(
-                            new_file_menu_item(crate::i18n::workspace::MENU_NEW_OTHER.get(), || {
-                                crate::ui::icon(IconName::Plus).size(px(13.)).into_any_element()
-                            })
-                            .on_click(move |_, window, cx| {
-                                other_app.update(cx, |app, cx| {
-                                    let folder = app.tree.focused_folder.clone();
-                                    if let Err(error) = app.start_create_other(
-                                        folder.as_deref(),
-                                        window,
-                                        cx,
-                                    ) {
-                                        app.report(error, cx);
-                                    }
-                                });
-                            }),
+                            FolioMenuItem::new(crate::i18n::workspace::MENU_NEW_OTHER.get())
+                                .icon(IconName::Plus)
+                                .on_click(move |_, window, cx| {
+                                    other_app.update(cx, |app, cx| {
+                                        let folder = app.tree.focused_folder.clone();
+                                        if let Err(error) = app.start_create_other(
+                                            folder.as_deref(),
+                                            window,
+                                            cx,
+                                        ) {
+                                            app.report(error, cx);
+                                        }
+                                    });
+                                }),
                         )
                     }),
             )
@@ -1428,23 +1418,21 @@ impl Workspace {
                 app.switch_to_default(window, cx);
                 cx.notify();
             }))
-            .context_menu({
+            .folio_context_menu({
                 let app = cx.entity();
                 move |menu, _, _| {
                     let app = app.clone();
-                    menu.min_w(px(120.)).item(
-                        compact_menu_icon_item(
-                            IconName::NotebookPen,
-                            crate::i18n::workspace::MENU_NEW_DEFAULT_MD.get(),
-                        )
-                        .on_click(move |_, window, cx| {
-                            app.update(cx, |app, cx| {
-                                app.trash.dismiss();
-                                if let Err(error) = app.new_default_markdown(window, cx) {
-                                    app.report(error, cx);
-                                }
-                            });
-                        }),
+                    menu.min_w(px(164.)).item(
+                        FolioMenuItem::new(crate::i18n::workspace::MENU_NEW_DEFAULT_MD.get())
+                            .icon(IconName::NotebookPen)
+                            .on_click(move |_, window, cx| {
+                                app.update(cx, |app, cx| {
+                                    app.trash.dismiss();
+                                    if let Err(error) = app.new_default_markdown(window, cx) {
+                                        app.report(error, cx);
+                                    }
+                                });
+                            }),
                     )
                 }
             });
@@ -1874,7 +1862,7 @@ impl Workspace {
                             }
                             app.select_tab_from_tree(&key, event.click_count() >= 2, window, cx);
                         }))
-                        .context_menu(move |menu, _, _| {
+                        .folio_context_menu(move |menu, _, _| {
                             let app = rename_app.clone();
                             let path = rename_key.clone();
                             let name = rename_name.clone();
@@ -1882,18 +1870,34 @@ impl Workspace {
                             let copy = copy.clone();
                             let tags_app = tags_app.clone();
                             let tag_path = tag_path.clone();
-                            menu.min_w(px(90.))
-                                .item(compact_menu_item(crate::i18n::workspace::MENU_REVEAL_IN_EXPLORER.get()).on_click(move |_, _, cx| reveal_path(&reveal, cx)))
-                                .item(compact_menu_item(crate::i18n::workspace::MENU_COPY_FULL_PATH.get()).on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(copy.to_string_lossy().into_owned()));
-                                }))
-                                .item(compact_menu_item(crate::i18n::workspace::MENU_EDIT_TAGS.get()).on_click(move |_, window, cx| {
-                                    tags_app.update(cx, |app, cx| app.edit_file_tags(vec![tag_path.clone()], window, cx));
-                                }))
+                            menu.min_w(px(176.))
+                                .item(
+                                    FolioMenuItem::new(crate::i18n::workspace::MENU_REVEAL_IN_EXPLORER.get())
+                                        .icon(IconName::FolderOpen)
+                                        .on_click(move |_, _, cx| reveal_path(&reveal, cx)),
+                                )
+                                .item(
+                                    FolioMenuItem::new(crate::i18n::workspace::MENU_COPY_FULL_PATH.get())
+                                        .icon(IconName::Copy)
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(copy.to_string_lossy().into_owned()));
+                                        }),
+                                )
+                                .item(
+                                    FolioMenuItem::new(crate::i18n::workspace::MENU_EDIT_TAGS.get())
+                                        .icon(IconName::Tag)
+                                        .on_click(move |_, window, cx| {
+                                            tags_app.update(cx, |app, cx| app.edit_file_tags(vec![tag_path.clone()], window, cx));
+                                        }),
+                                )
                                 .when(path.to_lowercase().ends_with(".md"), |menu| {
-                                    menu.item(compact_menu_item(crate::i18n::workspace::MENU_RENAME.get()).on_click(move |_, window, cx| {
-                                        app.update(cx, |app, cx| app.start_name(NameAction::RenameFile(path.clone()), &name, window, cx));
-                                    }))
+                                    menu.separator().item(
+                                        FolioMenuItem::new(crate::i18n::workspace::MENU_RENAME.get())
+                                            .icon(IconName::PencilLine)
+                                            .on_click(move |_, window, cx| {
+                                                app.update(cx, |app, cx| app.start_name(NameAction::RenameFile(path.clone()), &name, window, cx));
+                                            }),
+                                    )
                                 })
                         })
                         .into_any_element();
@@ -2000,7 +2004,7 @@ impl Workspace {
                             app.tree.file_tree_focus.focus(window, cx);
                             cx.notify();
                         }))
-                        .context_menu(move |menu, _, _| {
+                        .folio_context_menu(move |menu, _, _| {
                             let full = full.clone();
                             let deleted = deleted.clone();
                             let renamed_path = deleted.clone();
@@ -2019,7 +2023,7 @@ impl Workspace {
                             let paste_folder = deleted.clone();
                             let tag_folder = deleted.clone();
                             let tags_app = app.clone();
-                            let menu = CREATABLE_PRESETS.iter().fold(menu.min_w(px(130.)), |menu, preset| {
+                            let menu = CREATABLE_PRESETS.iter().fold(menu.min_w(px(184.)), |menu, preset| {
                                 let preset_app = app.clone();
                                 let preset_folder = deleted.clone();
                                 let ext = preset.ext;
@@ -2042,10 +2046,10 @@ impl Workspace {
                                     },
                                 ))
                             });
-                            menu.item(new_file_menu_item(crate::i18n::workspace::MENU_NEW_FILE.get(), || {
-                                    crate::ui::icon(IconName::Plus).size(px(13.)).into_any_element()
-                                }).on_click(
-                                    move |_, window, cx| {
+                            menu.item(
+                                FolioMenuItem::new(crate::i18n::workspace::MENU_NEW_FILE.get())
+                                    .icon(IconName::Plus)
+                                    .on_click(move |_, window, cx| {
                                         create_file_app.update(cx, |app, cx| {
                                             app.start_name(
                                                 NameAction::Create,
@@ -2054,55 +2058,68 @@ impl Workspace {
                                                 cx,
                                             )
                                         })
-                                    },
-                                ))
-                                .item(compact_menu_item(crate::i18n::workspace::MENU_NEW_FOLDER.get()).on_click(
-                                    move |_, window, cx| {
-                                        create_folder_app.update(cx, |app, cx| {
-                                            app.start_name(
-                                                NameAction::CreateFolder,
-                                                &folder_prefix_dir,
-                                                window,
-                                                cx,
-                                            )
-                                        })
-                                    },
-                                ))
-                                .item(compact_menu_item(crate::i18n::workspace::MENU_PASTE_IMAGE.get()).on_click(
-                                    move |_, window, cx| {
-                                        paste_app.update(cx, |app, cx| {
-                                            app.paste_into_folder(&paste_folder, false, window, cx)
-                                        })
-                                    },
-                                ))
+                                    }),
+                            )
+                                .item(
+                                    FolioMenuItem::new(crate::i18n::workspace::MENU_NEW_FOLDER.get())
+                                        .icon(IconName::FolderPlus)
+                                        .on_click(move |_, window, cx| {
+                                            create_folder_app.update(cx, |app, cx| {
+                                                app.start_name(
+                                                    NameAction::CreateFolder,
+                                                    &folder_prefix_dir,
+                                                    window,
+                                                    cx,
+                                                )
+                                            })
+                                        }),
+                                )
+                                .item(
+                                    FolioMenuItem::new(crate::i18n::workspace::MENU_PASTE_IMAGE.get())
+                                        .icon(IconName::Image)
+                                        .on_click(move |_, window, cx| {
+                                            paste_app.update(cx, |app, cx| {
+                                                app.paste_into_folder(&paste_folder, false, window, cx)
+                                            })
+                                        }),
+                                )
                                 .separator()
                                 .item(
-                                    compact_menu_item(crate::i18n::workspace::MENU_REVEAL_IN_EXPLORER.get())
+                                    FolioMenuItem::new(crate::i18n::workspace::MENU_REVEAL_IN_EXPLORER.get())
+                                        .icon(IconName::FolderOpen)
                                         .on_click(move |_, _, cx| reveal_path(&full, cx)),
                                 )
-                                .item(compact_menu_icon_item(IconName::Tag, crate::i18n::workspace::MENU_BATCH_FOLDER_TAGS.get())
-                                    .on_click(move |_, window, cx| {
-                                        tags_app.update(cx, |app, cx| app.edit_folder_tags(&tag_folder, window, cx));
-                                    }))
+                                .item(
+                                    FolioMenuItem::new(crate::i18n::workspace::MENU_BATCH_FOLDER_TAGS.get())
+                                        .icon(IconName::Tag)
+                                        .on_click(move |_, window, cx| {
+                                            tags_app.update(cx, |app, cx| app.edit_folder_tags(&tag_folder, window, cx));
+                                        }),
+                                )
                                 .separator()
                                 .item(
-                                    compact_menu_item(crate::i18n::workspace::MENU_RENAME.get()).on_click(move |_, window, cx| {
-                                        rename_app.update(cx, |app, cx| {
-                                            app.start_name(
-                                                NameAction::RenameFolder(renamed_path.clone()),
-                                                &renamed_name,
-                                                window,
-                                                cx,
-                                            )
-                                        })
-                                    }),
+                                    FolioMenuItem::new(crate::i18n::workspace::MENU_RENAME.get())
+                                        .icon(IconName::PencilLine)
+                                        .on_click(move |_, window, cx| {
+                                            rename_app.update(cx, |app, cx| {
+                                                app.start_name(
+                                                    NameAction::RenameFolder(renamed_path.clone()),
+                                                    &renamed_name,
+                                                    window,
+                                                    cx,
+                                                )
+                                            })
+                                        }),
                                 )
                                 .item(
-                                    compact_menu_item(crate::i18n::workspace::MENU_DELETE_FOLDER.get()).on_click(move |_, window, cx| {
-                                        app.update(cx, |app, cx| {
-                                            app.delete_folder(&deleted, window, cx)
-                                        })
-                                    }),
+                                    FolioMenuItem::new(crate::i18n::workspace::MENU_DELETE_FOLDER.get())
+                                        .icon(IconName::Trash)
+                                        .danger()
+                                        .on_click(move |_, window, cx| {
+                                            app.update(cx, |app, cx| {
+                                                app.delete_folder(&deleted, window, cx)
+                                            })
+                                        }),
                                 )
                         })
                         .into_any_element();
@@ -2296,7 +2313,7 @@ impl Workspace {
                             app.tree.file_tree_focus.focus(window, cx);
                         }
                     }))
-                    .context_menu(move |menu, _, _| {
+                    .folio_context_menu(move |menu, _, _| {
                         let reveal = full.clone();
                         let copied = full.to_string_lossy().to_string();
                         let rename = rename.clone();
@@ -2313,72 +2330,95 @@ impl Workspace {
                         let tags_app = app.clone();
                         let batch_tags_app = app.clone();
                         let tag_path = rename.clone();
-                        menu.min_w(px(90.))
+                        menu.min_w(px(184.))
                             .item(
-                                compact_menu_item(crate::i18n::workspace::MENU_REVEAL_IN_EXPLORER.get())
+                                FolioMenuItem::new(crate::i18n::workspace::MENU_REVEAL_IN_EXPLORER.get())
+                                    .icon(IconName::FolderOpen)
                                     .on_click(move |_, _, cx| reveal_path(&reveal, cx)),
                             )
                             .item(
-                                compact_menu_item(crate::i18n::workspace::MENU_COPY_FULL_PATH.get()).on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))
-                                }),
+                                FolioMenuItem::new(crate::i18n::workspace::MENU_COPY_FULL_PATH.get())
+                                    .icon(IconName::Copy)
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))
+                                    }),
                             )
                             .item(
-                                compact_menu_item(crate::i18n::workspace::MENU_PASTE_IMAGE.get()).on_click(move |_, window, cx| {
-                                    paste_app.update(cx, |app, cx| {
-                                        app.paste_into_folder(&paste_folder, false, window, cx)
-                                    })
-                                }),
+                                FolioMenuItem::new(crate::i18n::workspace::MENU_PASTE_IMAGE.get())
+                                    .icon(IconName::Image)
+                                    .on_click(move |_, window, cx| {
+                                        paste_app.update(cx, |app, cx| {
+                                            app.paste_into_folder(&paste_folder, false, window, cx)
+                                        })
+                                    }),
                             )
                             .when(batch_tags, |menu| {
-                                menu.item(compact_menu_icon_item(IconName::Tag, crate::i18n::workspace::MENU_BATCH_TAGS.get())
-                                    .on_click(move |_, window, cx| {
-                                        batch_tags_app.update(cx, |app, cx| {
-                                            let paths = app.tree.selected_files.iter().cloned().collect();
-                                            app.edit_file_tags(paths, window, cx);
-                                        });
-                                    }))
+                                menu.item(
+                                    FolioMenuItem::new(crate::i18n::workspace::MENU_BATCH_TAGS.get())
+                                        .icon(IconName::Tag)
+                                        .on_click(move |_, window, cx| {
+                                            batch_tags_app.update(cx, |app, cx| {
+                                                let paths = app.tree.selected_files.iter().cloned().collect();
+                                                app.edit_file_tags(paths, window, cx);
+                                            });
+                                        }),
+                                )
                             })
-                            .item(compact_menu_item(crate::i18n::workspace::MENU_EDIT_FILE_TAGS.get()).on_click(move |_, window, cx| {
-                                tags_app.update(cx, |app, cx| app.edit_file_tags(vec![tag_path.clone()], window, cx));
-                            }))
+                            .item(
+                                FolioMenuItem::new(crate::i18n::workspace::MENU_EDIT_FILE_TAGS.get())
+                                    .icon(IconName::Tag)
+                                    .on_click(move |_, window, cx| {
+                                        tags_app.update(cx, |app, cx| app.edit_file_tags(vec![tag_path.clone()], window, cx));
+                                    }),
+                            )
                             .when(
                                 Self::supports_split_pane(&split.path),
                                 |menu| {
-                                    menu.item(compact_menu_item(crate::i18n::workspace::MENU_OPEN_IN_SPLIT.get()).on_click(
-                                        move |_, window, cx| {
-                                            split_app.update(cx, |app, cx| {
-                                                app.open_reading_pane(&split, window, cx)
-                                            })
-                                        },
-                                    ))
+                                    menu.item(
+                                        FolioMenuItem::new(crate::i18n::workspace::MENU_OPEN_IN_SPLIT.get())
+                                            .icon(IconName::Columns2)
+                                            .on_click(move |_, window, cx| {
+                                                split_app.update(cx, |app, cx| {
+                                                    app.open_reading_pane(&split, window, cx)
+                                                })
+                                            }),
+                                    )
                                 },
                             )
                             .when(user_project && main.to_lowercase().ends_with(".tex"), |menu| {
-                                menu.item(compact_menu_item(crate::i18n::workspace::MENU_SET_MAIN_FILE.get()).on_click(
-                                    move |_, _, cx| {
-                                        main_app.update(cx, |app, cx| {
-                                            app.set_main_file(&main, cx);
-                                        })
-                                    },
-                                ))
+                                menu.item(
+                                    FolioMenuItem::new(crate::i18n::workspace::MENU_SET_MAIN_FILE.get())
+                                        .icon(IconName::Sparkles)
+                                        .on_click(move |_, _, cx| {
+                                            main_app.update(cx, |app, cx| {
+                                                app.set_main_file(&main, cx);
+                                            })
+                                        }),
+                                )
                             })
                             .separator()
                             .item(
-                                compact_menu_item(crate::i18n::workspace::MENU_RENAME.get()).on_click(move |_, window, cx| {
-                                    rename_app.update(cx, |app, cx| {
-                                        app.start_name(
-                                            NameAction::RenameFile(rename.clone()),
-                                            &name,
-                                            window,
-                                            cx,
-                                        )
-                                    })
-                                }),
+                                FolioMenuItem::new(crate::i18n::workspace::MENU_RENAME.get())
+                                    .icon(IconName::PencilLine)
+                                    .on_click(move |_, window, cx| {
+                                        rename_app.update(cx, |app, cx| {
+                                            app.start_name(
+                                                NameAction::RenameFile(rename.clone()),
+                                                &name,
+                                                window,
+                                                cx,
+                                            )
+                                        })
+                                    }),
                             )
-                            .item(compact_menu_item(crate::i18n::workspace::MENU_DELETE.get()).on_click(move |_, window, cx| {
-                                delete_app.update(cx, |app, cx| app.delete_file(&delete, window, cx))
-                            }))
+                            .item(
+                                FolioMenuItem::new(crate::i18n::workspace::MENU_DELETE.get())
+                                    .icon(IconName::Trash)
+                                    .danger()
+                                    .on_click(move |_, window, cx| {
+                                        delete_app.update(cx, |app, cx| app.delete_file(&delete, window, cx))
+                                    }),
+                            )
                     })
                     .into_any_element()
                 })();
@@ -2538,16 +2578,14 @@ impl Workspace {
                         .px_3()
                         .pb_2()
                         .child(
-                            Input::new(&self.tree.search_input)
-                                .xsmall()
-                                .h(px(22.))
-                                .text_size(px(12.))
-                                .flex_1()
-                                .min_w_0(),
+                            div().flex_1().min_w_0().child(
+                                crate::ui::SearchField::new("file-tree-search", &self.tree.search_input)
+                                    .surface_bg(),
+                            ),
                         )
                         .child(
                             crate::ui::control("close-file-search", IconName::Close)
-                                .size(px(20.))
+                                .size(px(22.))
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.tree.searching = false;
                                     cx.notify();
@@ -2780,10 +2818,11 @@ impl Workspace {
                                 app.tree.file_tree_focus.focus(window, cx);
                                 cx.notify();
                             }))
-                            .context_menu(move |menu, _, _| {
+                            .folio_context_menu(move |menu, _, _| {
                                 let app = paste_root_app.clone();
-                                menu.min_w(px(110.)).item(
-                                    compact_menu_item(crate::i18n::workspace::MENU_PASTE_IMAGE.get())
+                                menu.min_w(px(156.)).item(
+                                    FolioMenuItem::new(crate::i18n::workspace::MENU_PASTE_IMAGE.get())
+                                        .icon(IconName::Image)
                                         .on_click(move |_, window, cx| {
                                             app.update(cx, |app, cx| {
                                                 app.paste_into_folder("", false, window, cx)
@@ -2800,12 +2839,7 @@ impl Workspace {
                     }),
             ))
                 .child(div().absolute().top(px(20.)).bottom(px(20.)).left_0().right_0().child(
-                    Scrollbar::vertical(&self.tree.file_scroll)
-                        .mode(ScrollbarMode::Hover)
-                        .styles(|styles| styles
-                            .thumb(move |style| style.bg(drag_palette.scroll_thumb()).width(px(5.)).inset(px(1.)).radius(px(3.)).min_length(px(24.)))
-                            .thumb_hover(move |style| style.bg(drag_palette.scroll_thumb_hover()).width(px(5.)).inset(px(1.)).radius(px(3.)))
-                            .thumb_active(move |style| style.bg(drag_palette.scroll_thumb_active()).width(px(5.)).inset(px(1.)).radius(px(3.)))),
+                    crate::ui::scrollbar_vertical(&self.tree.file_scroll),
                 )))
             .into_any_element()
     }
