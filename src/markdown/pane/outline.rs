@@ -20,7 +20,7 @@ pub(super) const ANIMATION_MS: u64 = 200;
 pub(super) struct OutlineNode {
     pub(super) index: usize,
     pub(super) level: u8,
-    pub(super) title: String,
+    pub(super) title: SharedString,
     pub(super) children: Vec<OutlineNode>,
 }
 
@@ -43,7 +43,7 @@ pub(super) fn build_tree(headings: &[OutlineHeading]) -> Vec<OutlineNode> {
         let node = OutlineNode {
             index,
             level: heading.level,
-            title: heading.display_title.clone(),
+            title: heading.display_title.as_str().into(),
             children: Vec::new(),
         };
         while let Some(top) = stack.last() {
@@ -72,7 +72,7 @@ pub(super) fn build_tree(headings: &[OutlineHeading]) -> Vec<OutlineNode> {
 }
 
 /// Collect indices of all headings that have at least one child heading.
-pub(super) fn parent_indices(headings: &[OutlineHeading]) -> BTreeSet<usize> {
+pub(super) fn parent_indices(nodes: &[OutlineNode]) -> BTreeSet<usize> {
     fn walk(nodes: &[OutlineNode], out: &mut BTreeSet<usize>) {
         for node in nodes {
             if !node.children.is_empty() {
@@ -82,7 +82,7 @@ pub(super) fn parent_indices(headings: &[OutlineHeading]) -> BTreeSet<usize> {
         }
     }
     let mut out = BTreeSet::new();
-    walk(&build_tree(headings), &mut out);
+    walk(nodes, &mut out);
     out
 }
 
@@ -527,8 +527,8 @@ fn render_panel_body(
         colors.guide_line = colors.guide_line.opacity(0.55);
         colors.scroll_thumb = colors.scroll_thumb.opacity(0.6);
     }
-    let tree = build_tree(&pane.headings);
-    let all_parents = parent_indices(&pane.headings);
+    let tree = &pane.outline_tree;
+    let all_parents = &pane.outline_parents;
     let has_any_parents = !all_parents.is_empty();
     let all_collapsed = has_any_parents
         && all_parents
@@ -563,7 +563,7 @@ fn render_panel_body(
                             if all_collapsed {
                                 pane.outline_collapsed.clear();
                             } else {
-                                pane.outline_collapsed = parent_indices(&pane.headings);
+                                pane.outline_collapsed.clone_from(&pane.outline_parents);
                             }
                             cx.notify();
                         }))
@@ -599,7 +599,7 @@ fn render_panel_body(
             .border_l_1()
             .border_color(colors.guide_line)
             .child(render_nodes(
-                &tree,
+                tree,
                 0,
                 pane.active_heading,
                 &pane.outline_collapsed,
@@ -712,7 +712,7 @@ fn render_nodes(
         } else {
             colors.item_text_nested
         };
-        let full_title = SharedString::from(node.title.clone());
+        let full_title = node.title.clone();
 
         let row = div()
             .id(("md-outline-item", index))
@@ -1023,10 +1023,10 @@ mod tests {
         assert!(tree[0].children.is_empty());
         assert_eq!(tree[1].children.len(), 2);
         assert_eq!(tree[1].children[0].children.len(), 1);
-        assert_eq!(tree[1].children[0].children[0].title, "2.1.1 Deep");
+        assert_eq!(tree[1].children[0].children[0].title.as_ref(), "2.1.1 Deep");
         assert!(tree[2].children.is_empty());
 
-        let parents = parent_indices(&headings);
+        let parents = parent_indices(&tree);
         assert!(parents.contains(&1));
         assert!(parents.contains(&2));
         assert!(!parents.contains(&0));

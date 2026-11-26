@@ -731,20 +731,16 @@ impl Render for Workspace {
         let sidebar_visible = self.is_sidebar_open();
         let sidebar_target_w = self.settings.sidebar_width.clamp(170., 520.);
         let right_target_w = self.settings.terminal.panel_width.clamp(280., 1600.);
-        let drawer_curve = Easing::CubicBezier {
-            x1: 0.25,
-            y1: 0.9,
-            x2: 0.32,
-            y2: 1.0,
-        };
-        let sidebar_policy = Transition::new(Duration::from_millis(220)).easing(drawer_curve.clone());
+        // Both drawers resize the work area as they move. Ease into the first
+        // few frames so the edge and document do not jump together on startup.
+        let sidebar_policy = Transition::new(Duration::from_millis(240)).easing(Easing::Ease);
         let right_duration_ms = if !right_panel_visible && self.right_panel.snap_close {
             0
         } else {
             (200.0 + right_target_w * 0.16).clamp(240.0, 320.0) as u64
         };
         let right_policy =
-            Transition::new(Duration::from_millis(right_duration_ms)).easing(drawer_curve);
+            Transition::new(Duration::from_millis(right_duration_ms)).easing(Easing::Ease);
 
         let sidebar_progress = transition_with_status(
             "workspace-left-sidebar-motion",
