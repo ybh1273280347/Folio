@@ -70,10 +70,9 @@ impl RenderOnce for CopyDocumentButton {
 }
 
 pub fn inline_code_style(settings: &crate::model::AppSettings, body_size: Pixels) -> StyleRefinement {
-    let mut style = StyleRefinement::default().text_size(body_size * settings.inline_code_scale);
-    if settings.theme.palette != crate::theme::Palette::light() {
-        style = style.bg(gpui_kit::rgb(settings.theme.palette.code_background));
-    }
+    let mut style = StyleRefinement::default()
+        .text_size(body_size * settings.inline_code_scale)
+        .bg(gpui_kit::rgb(settings.theme.palette.code_background));
     if !settings.inline_code_font.is_empty() {
         style = style.font_family(settings.inline_code_font.clone());
     }
@@ -87,10 +86,8 @@ pub const MD_BLOCK_RADIUS: Pixels = px(8.);
 pub fn block_code_style(settings: &crate::model::AppSettings, body_size: Pixels) -> StyleRefinement {
     let mut style = StyleRefinement::default()
         .text_size(body_size * settings.block_code_scale)
-        .rounded(MD_BLOCK_RADIUS);
-    if settings.theme.palette != crate::theme::Palette::light() {
-        style = style.bg(gpui_kit::rgb(settings.theme.palette.code_background));
-    }
+        .rounded(MD_BLOCK_RADIUS)
+        .bg(gpui_kit::rgb(settings.theme.palette.code_background));
     if !settings.block_code_font.is_empty() {
         style = style.font_family(settings.block_code_font.clone());
     }
@@ -199,9 +196,10 @@ impl ZoomHud {
         if !self.visible {
             return None;
         }
-        let mut bg = rgb(0xfafaf9);
-        bg.a = 0.90;
-        let mut border = rgb(0xe6e5e1);
+        let palette = crate::theme::palette();
+        let mut bg = palette.elevated_surface();
+        bg.a = 0.92;
+        let mut border = palette.card_border();
         border.a = 0.90;
 
         let pill = div()
@@ -212,11 +210,12 @@ impl ZoomHud {
             .border_1()
             .border_color(border)
             .shadow(vec![
-                BoxShadow::new(px(0.), px(2.), hsla(0., 0., 0., 0.08)).blur_radius(px(8.)),
+                BoxShadow::new(px(0.), px(2.), hsla(0., 0., 0., if palette.is_dark() { 0.24 } else { 0.06 }))
+                    .blur_radius(px(8.)),
             ])
             .text_xs()
             .font_medium()
-            .text_color(rgb(0x5d5d5a))
+            .text_color(gpui_kit::rgb(palette.text))
             .child(format!("{}px", self.font_size));
 
         let animated = if self.fading {
@@ -253,9 +252,10 @@ impl ZoomHud {
 /// The pill is display-only: without a mouse handler it never takes clicks or
 /// scroll gestures away from the document behind it.
 pub fn char_count_badge(count: usize) -> impl IntoElement {
-    let mut bg = rgb(0xfafaf9);
+    let palette = crate::theme::palette();
+    let mut bg = gpui_kit::rgb(palette.background);
     bg.a = 0.88;
-    let mut border = rgb(0xe6e5e1);
+    let mut border = gpui_kit::rgb(palette.border);
     border.a = 0.88;
 
     div()
@@ -269,7 +269,7 @@ pub fn char_count_badge(count: usize) -> impl IntoElement {
         .border_1()
         .border_color(border)
         .text_size(px(11.))
-        .text_color(rgb(0x7c7c78))
+        .text_color(gpui_kit::rgb(palette.muted))
         .child(format!(
             "{} {}",
             group_digits(count),
@@ -523,7 +523,7 @@ pub fn control(id: impl Into<ElementId>, name: IconName) -> Stateful<Div> {
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(5.))
+        .rounded(px(6.))
         .cursor_pointer()
         .text_color(rgb(0x7d838b))
         .hover(|s| s.bg(rgb(0xe9ebed)).text_color(rgb(0x343a40)))
@@ -540,24 +540,34 @@ pub fn modal_overlay(
     description: impl IntoElement,
     actions: impl IntoElement,
 ) -> impl IntoElement {
+    let palette = crate::theme::palette();
     let card = div()
         .w(px(420.))
         .p_6()
-        .rounded(px(10.))
+        .rounded(px(12.))
         .border_1()
-        .border_color(rgb(0xe6e5e1))
-        .bg(rgb(0xffffff))
+        .border_color(palette.card_border())
+        .bg(palette.elevated_surface())
         .shadow(vec![
-            BoxShadow::new(px(0.), px(16.), hsla(0., 0., 0., 0.16))
-                .blur_radius(px(40.))
-                .spread_radius(px(-8.)),
-            BoxShadow::new(px(0.), px(2.), hsla(0., 0., 0., 0.06)).blur_radius(px(6.)),
+            BoxShadow::new(
+                px(0.),
+                px(16.),
+                hsla(0., 0., 0., if palette.is_dark() { 0.42 } else { 0.12 }),
+            )
+            .blur_radius(px(40.))
+            .spread_radius(px(-8.)),
+            BoxShadow::new(
+                px(0.),
+                px(2.),
+                hsla(0., 0., 0., if palette.is_dark() { 0.22 } else { 0.05 }),
+            )
+            .blur_radius(px(6.)),
         ])
         .flex()
         .flex_col()
         .gap_4()
-        .child(div().font_semibold().child(title))
-        .child(div().text_color(rgb(0x787774)).child(description))
+        .child(div().font_semibold().text_color(gpui_kit::rgb(palette.text)).child(title))
+        .child(div().text_color(gpui_kit::rgb(palette.muted)).child(description))
         .child(actions)
         // Rise in from slightly below while fading in; feels anchored, not popped.
         .relative()
@@ -573,7 +583,7 @@ pub fn modal_overlay(
         .flex()
         .items_center()
         .justify_center()
-        .bg(rgba(0x1c1b1838))
+        .bg(if palette.is_dark() { rgba(0x07090db8) } else { rgba(0x16161640) })
         // Keep hover / clicks from leaking to the UI behind the dialog.
         .occlude()
         .child(card)
@@ -594,7 +604,7 @@ fn button_base(id: impl Into<ElementId>, text: SharedString) -> Stateful<Div> {
         .min_h(px(27.))
         .px_2()
         .py_1()
-        .rounded(px(5.))
+        .rounded(px(6.))
         .cursor_pointer()
         // Pass "" to build a custom body (icon + text) with `.child(...)`.
         .when(!text.is_empty(), |el| el.child(label(text)))
@@ -610,54 +620,54 @@ pub fn button(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Statef
 
 /// Bordered neutral button with a slight lift (e.g. "编译", "取消").
 pub fn button_secondary(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Stateful<Div> {
+    let palette = crate::theme::palette();
+    let card_border = palette.card_border();
     button_base(id, text.into())
-        .text_color(rgb(0x37352f))
-        .bg(rgb(0xffffff))
+        .text_color(gpui_kit::rgb(palette.text))
+        .bg(palette.elevated_surface())
         .border_1()
-        .border_color(rgb(0xdcdbd7))
-        .shadow(raised(0.06, 0.0))
-        .hover(|s| s.bg(rgb(0xf7f7f5)).border_color(rgb(0xcfcec9)))
-        .active(|s| {
-            s.bg(rgb(0xedece9))
-                .border_color(rgb(0xc5c4bf))
+        .border_color(card_border)
+        .shadow(raised(if palette.is_dark() { 0.16 } else { 0.04 }, 0.0))
+        .hover(move |s| s.bg(gpui_kit::rgb(palette.hover)).border_color(card_border))
+        .active(move |s| {
+            s.bg(gpui_kit::rgb(palette.pressed))
+                .border_color(card_border)
                 .shadow(inset_press(0.10))
         })
 }
 
 /// Filled brand button for the main affirmative action.
 pub fn button_primary(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Stateful<Div> {
+    let palette = crate::theme::palette();
+    let hover = palette.accent_hover();
+    let active = palette.accent_active();
     button_base(id, text.into())
         .px_3()
         .font_medium()
-        .text_color(crate::theme::on_accent())
-        .bg(rgb(0x52769a))
+        .text_color(gpui_kit::rgb(palette.on_accent))
+        .bg(gpui_kit::rgb(palette.accent))
         .border_1()
-        .border_color(rgb(0x47698c))
-        .shadow(raised(0.14, 0.14))
-        .hover(|s| s.bg(rgb(0x486c90)).border_color(rgb(0x3f6082)))
-        .active(|s| {
-            s.bg(rgb(0x3d5d7e))
-                .border_color(rgb(0x355373))
-                .shadow(inset_press(0.22))
-        })
+        .border_color(hover)
+        .shadow(raised(0.12, 0.12))
+        .hover(move |s| s.bg(hover).border_color(active))
+        .active(move |s| s.bg(active).border_color(active).shadow(inset_press(0.20)))
 }
 
 /// Filled red button for destructive confirmations ("删除", "移除项目"...).
 pub fn button_danger(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Stateful<Div> {
+    let palette = crate::theme::palette();
+    let hover = palette.danger_hover();
+    let active = palette.danger_active();
     button_base(id, text.into())
         .px_3()
         .font_medium()
-        .text_color(crate::theme::on_accent())
-        .bg(rgb(0xd4373f))
+        .text_color(gpui_kit::rgb(palette.on_accent))
+        .bg(gpui_kit::rgb(palette.danger))
         .border_1()
-        .border_color(rgb(0xbf2f37))
-        .shadow(raised(0.14, 0.14))
-        .hover(|s| s.bg(rgb(0xc42f37)).border_color(rgb(0xae2830)))
-        .active(|s| {
-            s.bg(rgb(0xa9262e))
-                .border_color(rgb(0x962128))
-                .shadow(inset_press(0.25))
-        })
+        .border_color(hover)
+        .shadow(raised(0.12, 0.12))
+        .hover(move |s| s.bg(hover).border_color(active))
+        .active(move |s| s.bg(active).border_color(active).shadow(inset_press(0.22)))
 }
 
 /// Tinted red button for inline destructive actions in toolbars.

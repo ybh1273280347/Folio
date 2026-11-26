@@ -5,7 +5,7 @@ use std::{cell::RefCell, rc::Rc};
 use std::collections::HashMap;
 use std::sync::{Mutex, atomic::{AtomicBool, Ordering}};
 
-const PROJECT_ROW_HEIGHT: f32 = 29.;
+const PROJECT_ROW_HEIGHT: f32 = 28.;
 const FOLDER_LANDING: Duration = Duration::from_millis(220);
 
 /// The fraction of the child rows visible inside a folder's animated clip.
@@ -1790,6 +1790,7 @@ impl Workspace {
                     let dragging = self.tree.dragging_tree_item.clone();
                     let row_bounds = self.tree.tree_row_bounds.clone();
                     let close_id = SharedString::from(format!("close-default-file-{key}"));
+                    let row_group = SharedString::from(format!("tree-standalone-{key}"));
                     let name = Path::new(path)
                         .file_name()
                         .expect("standalone file has a name")
@@ -1797,28 +1798,36 @@ impl Workspace {
                         .into_owned();
                     return div()
                         .id(SharedString::from(format!("default-file-{key}")))
+                        .group(row_group.clone())
                         .on_drag(crate::terminal::DraggedPaths(vec![full], None), move |paths, offset, _, cx| {
                             dragging.store(true, Ordering::Relaxed);
                             cx.new(|_| crate::terminal::PathsPreview { paths: paths.0.clone(), offset, font: preview_font.clone(), font_size: preview_font_size, palette: drag_palette, trash_bounds: trash_bounds.clone(), source_folder: None, can_trash: false, row_bounds: row_bounds.clone() })
                         })
                         .flex()
                         .items_center()
-                        .h(px(32.))
-                        .px_3()
+                        .h(px(PROJECT_ROW_HEIGHT))
+                        .mx(px(6.))
+                        .px_2()
+                        .rounded(px(6.))
                         .gap_2()
                         .cursor_pointer()
-                        .when(active, |row| row.bg(rgb(0xe8e7e4)))
-                        .hover(|style| style.bg(rgb(0xefefed)))
+                        .when(active, |row| row.bg(gpui_kit::rgb(drag_palette.selection)).font_medium())
+                        .hover(move |style| style.bg(gpui_kit::rgb(drag_palette.hover)))
+                        .active(move |style| style.bg(gpui_kit::rgb(drag_palette.pressed)))
                         .child(crate::ui::file_icon(&key, false, false))
                         .child(div().flex_1().min_w_0().text_ellipsis().child(name))
                         .children(self.render_file_tags(&key, depth, cx))
                         .when(is_open, |row| row.child(
-                            crate::ui::control(close_id, IconName::Close).on_click(cx.listener(
-                                move |app, _, window, cx| {
-                                    cx.stop_propagation();
-                                    app.close_tab(&close, window, cx);
-                                },
-                            )),
+                            crate::ui::control(close_id, IconName::Close)
+                                .size(px(22.))
+                                .opacity(0.)
+                                .group_hover(row_group, |s| s.opacity(1.))
+                                .on_click(cx.listener(
+                                    move |app, _, window, cx| {
+                                        cx.stop_propagation();
+                                        app.close_tab(&close, window, cx);
+                                    },
+                                )),
                         ))
                         .on_click(cx.listener(move |app, event: &ClickEvent, window, cx| {
                             cx.stop_propagation();
@@ -1884,13 +1893,16 @@ impl Workspace {
                         .relative()
                         .flex()
                         .h(px(PROJECT_ROW_HEIGHT))
+                        .mx(px(6.))
+                        .rounded(px(6.))
                         .items_center()
                         .gap_2()
-                        .pl(px(12. + depth as f32 * 15.))
+                        .pl(px(6. + depth as f32 * 15.))
+                        .pr_1p5()
                         .cursor_pointer()
-                        .when(is_focused, |row| row.bg(rgb(0xedf2fa)))
-                        .hover(|style| style.bg(rgb(0xefefed)))
-                        .active(|style| style.bg(rgb(crate::ui::PRESSED_BG)))
+                        .when(is_focused, |row| row.bg(gpui_kit::rgb(drag_palette.selection)))
+                        .hover(move |style| style.bg(gpui_kit::rgb(drag_palette.hover)))
+                        .active(move |style| style.bg(gpui_kit::rgb(drag_palette.pressed)))
                         .when(lifted_folder.as_ref() == Some(path), |row| row.opacity(0.45))
                         .when_some(
                             landing.as_ref().filter(|(landed, _)| landed == path),
@@ -2088,8 +2100,19 @@ impl Workspace {
                 let trash_bounds = self.tree.trash_bounds.clone();
                 let dragging = self.tree.dragging_tree_item.clone();
                 let row_bounds = self.tree.tree_row_bounds.clone();
+                let is_active = self.documents.active() == file.path;
+                let any_selected = !self.tree.selected_files.is_empty();
+                let row_group = SharedString::from(format!("tree-file-{}", file.path));
+                let selected_row_bg = gpui_kit::rgb(drag_palette.accent).opacity(if drag_palette.is_dark() {
+                    0.16
+                } else {
+                    0.10
+                });
+                let accent_hover_bg = gpui_kit::rgb(drag_palette.accent).opacity(0.12);
+                let checkbox_border = drag_palette.card_border();
                 div()
                     .id(SharedString::from(format!("file-{}", file.path)))
+                    .group(row_group.clone())
                     .on_drag(crate::terminal::DraggedPaths(dragged_paths, Some(drag_project)), move |paths, offset, _, cx| {
                         dragging.store(true, Ordering::Relaxed);
                         cx.new(|_| crate::terminal::PathsPreview { paths: paths.0.clone(), offset, font: preview_font.clone(), font_size: preview_font_size, palette: drag_palette, trash_bounds: trash_bounds.clone(), source_folder: None, can_trash: true, row_bounds: row_bounds.clone() })
@@ -2098,39 +2121,56 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .h(px(PROJECT_ROW_HEIGHT))
-                    .pl(px(14. + depth as f32 * 15.))
-                    .pr_2()
+                    .mx(px(6.))
+                    .rounded(px(6.))
+                    .pl(px(8. + depth as f32 * 15.))
+                    .pr_1p5()
                     .gap_2()
                     .cursor_pointer()
-                    .when(is_selected, |row| row.bg(rgb(0xdde9f6)))
-                    .when(!is_selected && self.documents.active() == file.path, |row| row.bg(rgb(0xe8e7e4)))
-                    .hover(|style| style.bg(rgb(0xefefed)))
-                    .active(|style| style.bg(rgb(crate::ui::PRESSED_BG)))
+                    .when(is_selected, |row| row.bg(selected_row_bg))
+                    .when(!is_selected && is_active, |row| {
+                        row.bg(gpui_kit::rgb(drag_palette.selection)).font_medium()
+                    })
+                    .hover(move |style| style.bg(gpui_kit::rgb(drag_palette.hover)))
+                    .active(move |style| style.bg(gpui_kit::rgb(drag_palette.pressed)))
                     .child(
                         div()
                             .id(SharedString::from(format!("select-{path}")))
-                            .w(px(15.))
-                            .h(px(15.))
-                            .rounded(px(3.5))
+                            .w(px(14.))
+                            .h(px(14.))
+                            .rounded(px(4.))
                             .flex_shrink_0()
                             .flex()
                             .items_center()
                             .justify_center()
                             .cursor_pointer()
+                            .when(!is_selected && !any_selected, |s| {
+                                s.opacity(0.)
+                                    .group_hover(row_group.clone(), |h| h.opacity(1.))
+                            })
                             .when(is_selected, |s| {
-                                s.bg(rgb(0x165dff))
+                                s.bg(gpui_kit::rgb(drag_palette.accent))
                                     .border_1()
-                                    .border_color(rgb(0x165dff))
-                                    .text_color(crate::theme::on_accent())
-                                    .active(|a| a.bg(rgb(0x0e42d2)).border_color(rgb(0x0e42d2)))
+                                    .border_color(gpui_kit::rgb(drag_palette.accent))
+                                    .text_color(gpui_kit::rgb(drag_palette.on_accent))
+                                    .active(move |a| {
+                                        a.bg(drag_palette.accent_active())
+                                            .border_color(drag_palette.accent_active())
+                                    })
                                     .child(crate::ui::icon(IconName::Check).w(px(10.)).h(px(10.)))
                             })
                             .when(!is_selected, |s| {
-                                s.bg(rgb(0xffffff))
+                                s.bg(gpui_kit::rgb(drag_palette.surface))
                                     .border_1()
-                                    .border_color(rgb(0xc4c7cc))
-                                    .hover(|h| h.border_color(rgb(0x165dff)).bg(rgb(0xf2f7ff)))
-                                    .active(|a| a.border_color(rgb(0x0e42d2)).bg(rgb(0xdde9f6)))
+                                    .border_color(checkbox_border)
+                                    .hover(move |h| {
+                                        h.border_color(gpui_kit::rgb(drag_palette.accent))
+                                            .bg(accent_hover_bg)
+                                    })
+                                    .active(move |a| {
+                                        a.border_color(drag_palette.accent_active())
+                                            .bg(selected_row_bg)
+                                    })
                             })
                             .on_click(cx.listener(move |app, _, window, cx| {
                                 cx.stop_propagation();
@@ -2173,6 +2213,9 @@ impl Workspace {
                                     SharedString::from(format!("split-{path}")),
                                     IconName::Columns2,
                                 )
+                                .size(px(22.))
+                                .opacity(0.)
+                                .group_hover(row_group, |s| s.opacity(1.))
                                 .on_click(cx.listener(
                                     move |app, _, window, cx| {
                                         cx.stop_propagation();
@@ -2346,7 +2389,7 @@ impl Workspace {
             .flex_col()
             .min_h_0()
             .overflow_hidden()
-            .bg(rgb(0xfbfbfa))
+            .bg(rgb(BG))
             .font_family(crate::ui::sans_font(&self.settings.interface_font))
             .text_size(px(self.settings.interface_font_size as f32))
             .border_r_1()
@@ -2677,9 +2720,9 @@ impl Workspace {
                     Scrollbar::vertical(&self.tree.file_scroll)
                         .mode(ScrollbarMode::Always)
                         .styles(|styles| styles
-                            .thumb(|style| style.bg(rgb(0xd9d9d7)).width(px(6.)).inset(px(1.)).radius(px(4.)).min_length(px(24.)))
-                            .thumb_hover(|style| style.bg(rgb(0xbcbcb9)).width(px(6.)).inset(px(1.)).radius(px(4.)))
-                            .thumb_active(|style| style.bg(rgb(0xa8a8a5)).width(px(6.)).inset(px(1.)).radius(px(4.)))),
+                            .thumb(move |style| style.bg(drag_palette.scroll_thumb()).width(px(5.)).inset(px(1.)).radius(px(3.)).min_length(px(24.)))
+                            .thumb_hover(move |style| style.bg(drag_palette.scroll_thumb_hover()).width(px(5.)).inset(px(1.)).radius(px(3.)))
+                            .thumb_active(move |style| style.bg(drag_palette.scroll_thumb_active()).width(px(5.)).inset(px(1.)).radius(px(3.)))),
                 )))
             .into_any_element()
     }

@@ -470,6 +470,7 @@ struct OutlineColors {
     item_bg_active: Rgba,
     item_bg_hover: Rgba,
     item_bg_pressed: Rgba,
+    accent_bar: Rgba,
     chevron: Rgba,
     chevron_hover: Rgba,
     guide_line: Rgba,
@@ -481,46 +482,31 @@ struct OutlineColors {
 impl OutlineColors {
     fn current() -> Self {
         let palette = crate::theme::palette();
-        if palette.is_dark() {
-            Self {
-                panel_bg: gpui_kit::rgb(palette.surface),
-                panel_border: gpui_kit::rgb(palette.border),
-                header_text: gpui_kit::rgb(0x7c7a72),
-                header_hover_text: gpui_kit::rgb(0xb5b3aa),
-                item_text_root: gpui_kit::rgb(0xb8b6ae),
-                item_text_nested: gpui_kit::rgb(0x88867e),
-                item_text_hover: gpui_kit::rgb(0xe4e2da),
-                item_text_active: gpui_kit::rgb(0xe8e6de),
-                item_bg_active: gpui_kit::rgb(palette.hover),
-                item_bg_hover: gpui_kit::rgb(0x2a2926),
-                item_bg_pressed: gpui_kit::rgb(palette.pressed),
-                chevron: gpui_kit::rgb(0x6e6c64),
-                chevron_hover: gpui_kit::rgb(0xb5b3aa),
-                guide_line: gpui_kit::rgb(0x3a3934),
-                scroll_thumb: gpui_kit::rgb(0x45474b),
-                scroll_thumb_hover: gpui_kit::rgb(0x5c5f66),
-                scroll_thumb_active: gpui_kit::rgb(0x72767f),
-            }
-        } else {
-            Self {
-                panel_bg: gpui_kit::rgb(palette.surface),
-                panel_border: gpui_kit::rgb(0xefeeea),
-                header_text: gpui_kit::rgb(0x9a9994),
-                header_hover_text: gpui_kit::rgb(0x4a4945),
-                item_text_root: gpui_kit::rgb(0x52514c),
-                item_text_nested: gpui_kit::rgb(0x7e7d78),
-                item_text_hover: gpui_kit::rgb(0x2c2b28),
-                item_text_active: gpui_kit::rgb(0x2c2b28),
-                item_bg_active: gpui_kit::rgb(0xf1f0ec),
-                item_bg_hover: gpui_kit::rgb(0xf6f5f2),
-                item_bg_pressed: gpui_kit::rgb(0xeae9e4),
-                chevron: gpui_kit::rgb(0xbab9b4),
-                chevron_hover: gpui_kit::rgb(0x52514c),
-                guide_line: gpui_kit::rgb(0xe8e7e2),
-                scroll_thumb: gpui_kit::rgb(0xdcdbd7),
-                scroll_thumb_hover: gpui_kit::rgb(0xc2c1bc),
-                scroll_thumb_active: gpui_kit::rgb(0xa8a7a2),
-            }
+        let dark = palette.is_dark();
+        let text = gpui_kit::rgb(palette.text);
+        let muted = gpui_kit::rgb(palette.muted);
+        let hover = gpui_kit::rgb(palette.hover);
+        let pressed = gpui_kit::rgb(palette.pressed);
+        let border = gpui_kit::rgb(palette.border);
+        Self {
+            panel_bg: palette.elevated_surface(),
+            panel_border: border,
+            header_text: muted.opacity(0.85),
+            header_hover_text: text,
+            item_text_root: text.opacity(if dark { 0.80 } else { 0.78 }),
+            item_text_nested: muted,
+            item_text_hover: text,
+            item_text_active: text,
+            item_bg_active: hover.opacity(if dark { 0.88 } else { 0.76 }),
+            item_bg_hover: hover.opacity(if dark { 0.60 } else { 0.65 }),
+            item_bg_pressed: pressed,
+            accent_bar: gpui_kit::rgb(palette.accent),
+            chevron: muted.opacity(0.58),
+            chevron_hover: text,
+            guide_line: border,
+            scroll_thumb: palette.scroll_thumb(),
+            scroll_thumb_hover: palette.scroll_thumb_hover(),
+            scroll_thumb_active: palette.scroll_thumb_active(),
         }
     }
 }
@@ -780,6 +766,7 @@ fn render_nodes(
 
         let row = div()
             .id(("md-outline-item", index))
+            .relative()
             .flex()
             .items_start()
             .gap(px(4.))
@@ -792,7 +779,18 @@ fn render_nodes(
             .text_size(font_size)
             .line_height(line_height)
             .text_color(rest_color)
-            .when(is_active, |row| row.bg(colors.item_bg_active).font_medium())
+            .when(is_active, |row| {
+                row.bg(colors.item_bg_active).font_medium().child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top(px(5.))
+                        .bottom(px(5.))
+                        .w(px(2.))
+                        .rounded_full()
+                        .bg(colors.accent_bar),
+                )
+            })
             .when(!is_active, |row| {
                 row.hover(move |s| {
                     s.bg(colors.item_bg_hover)
@@ -941,11 +939,16 @@ pub(super) fn render_overlay(pane: &MarkdownPane, cx: &mut Context<MarkdownPane>
     let duration = Duration::from_millis(ANIMATION_MS);
     let panel = render_panel_body(pane, true, cx);
 
+    let scrim = if crate::theme::palette().is_dark() {
+        rgba(0x07090d70)
+    } else {
+        rgba(0x16161622)
+    };
     let backdrop = div()
         .id("md-outline-overlay-backdrop")
         .absolute()
         .inset_0()
-        .bg(rgba(0x1c1b1822))
+        .bg(scrim)
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|pane, _, _, cx| {

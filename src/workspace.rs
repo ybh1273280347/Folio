@@ -975,12 +975,7 @@ impl Render for Workspace {
                     self.projects.active_id().map(str::to_owned)
                 };
                 let hover_bg = gpui_kit::rgb(palette.hover);
-                let pill_tray_bg = if palette.is_dark() {
-                    gpui_kit::rgb(palette.surface)
-                } else {
-                    rgb(0xefeeec)
-                };
-                let pill_active_bg = gpui_kit::rgb(palette.surface);
+                let pill_active_bg = gpui_kit::rgb(palette.selection);
                 let pill_text = gpui_kit::rgb(palette.text);
                 let pill_muted = gpui_kit::rgb(palette.muted);
                 let preview_open = self.build.panels.preview;
@@ -1011,12 +1006,7 @@ impl Render for Workspace {
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(2.))
-                        .p(px(2.))
-                        .rounded(px(7.))
-                        .bg(pill_tray_bg)
-                        .border_1()
-                        .border_color(gpui_kit::rgb(palette.border))
+                        .gap(px(3.))
                         .children(recent_projects.into_iter().map(|project| {
                             let id = project.id.clone();
                             let rename_id = id.clone();
@@ -1028,10 +1018,10 @@ impl Render for Workspace {
                             let is_active = active_project_id.as_deref() == Some(id.as_str());
                             div()
                                 .id(SharedString::from(format!("top-project-{id}")))
-                                .h(px(24.))
+                                .h(px(26.))
                                 .px(px(10.))
                                 .max_w(px(148.))
-                                .rounded(px(5.))
+                                .rounded(px(6.))
                                 .flex()
                                 .items_center()
                                 .cursor_pointer()
@@ -1041,7 +1031,6 @@ impl Render for Workspace {
                                     pill.bg(pill_active_bg)
                                         .font_medium()
                                         .text_color(pill_text)
-                                        .shadow_xs()
                                 })
                                 .when(!is_active, |pill| {
                                     pill.text_color(pill_muted)
@@ -1252,12 +1241,8 @@ impl Render for Workspace {
                     .child(
                         crate::ui::control("top-toggle-preview", IconName::Columns2)
                             .when(preview_open, |c| {
-                                c.bg(if palette.is_dark() {
-                                    gpui_kit::rgb(palette.hover)
-                                } else {
-                                    rgb(0xe8e7e4)
-                                })
-                                .text_color(gpui_kit::rgb(palette.text))
+                                c.bg(gpui_kit::rgb(palette.selection))
+                                    .text_color(gpui_kit::rgb(palette.text))
                             })
                             .tooltip(move |window, cx| {
                                 let label = if preview_open {
@@ -1280,12 +1265,8 @@ impl Render for Workspace {
                         crate::ui::control("top-toggle-logs", IconName::ListTree)
                             .relative()
                             .when(logs_open, |c| {
-                                c.bg(if palette.is_dark() {
-                                    gpui_kit::rgb(palette.hover)
-                                } else {
-                                    rgb(0xe8e7e4)
-                                })
-                                .text_color(gpui_kit::rgb(palette.text))
+                                c.bg(gpui_kit::rgb(palette.selection))
+                                    .text_color(gpui_kit::rgb(palette.text))
                             })
                             .when(build_failed && !logs_open, |c| {
                                 c.text_color(gpui_kit::rgb(palette.danger)).child(
@@ -1325,13 +1306,8 @@ impl Render for Workspace {
                     .child(
                         crate::ui::control("toggle-right-panel", IconName::PanelRightOpen)
                             .when(right_panel_visible, |c| {
-                                let palette = self.settings.theme.palette;
-                                c.bg(if palette.is_dark() {
-                                    gpui_kit::rgb(palette.hover)
-                                } else {
-                                    rgb(0xe8e7e4)
-                                })
-                                .text_color(gpui_kit::rgb(palette.text))
+                                c.bg(gpui_kit::rgb(palette.selection))
+                                    .text_color(gpui_kit::rgb(palette.text))
                             })
                             .tooltip(move |window, cx| {
                                 gpui_kit::component::tooltip::Tooltip::new(if right_panel_visible {
@@ -1550,6 +1526,7 @@ impl Render for Workspace {
             );
         app = app.children(self.render_name_dialog(cx));
         if self.show_preferences {
+            let palette = crate::theme::palette();
             app = app.child(
                 deferred(
                     div()
@@ -1559,7 +1536,7 @@ impl Render for Workspace {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .bg(rgba(0x00000030))
+                        .bg(if palette.is_dark() { rgba(0x07090db8) } else { rgba(0x16161638) })
                         // Occlude background hitboxes while leaving the dialog's
                         // child inputs and scroll container interactive.
                         .occlude()
@@ -1571,11 +1548,11 @@ impl Render for Workspace {
                                 .w(px(680.))
                                 .max_h(relative(0.92))
                                 .p_7()
-                                .rounded(px(8.))
+                                .rounded(px(12.))
                                 .border_1()
-                                .border_color(rgb(0xe6e5e1))
+                                .border_color(palette.card_border())
                                 .shadow_lg()
-                                .bg(rgb(0xffffff))
+                                .bg(palette.elevated_surface())
                                 .child(
                                     crate::ui::control("close-preferences", IconName::Close)
                                         .absolute()

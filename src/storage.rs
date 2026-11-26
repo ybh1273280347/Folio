@@ -66,6 +66,7 @@ pub fn load_settings() -> io::Result<AppSettings> {
         values.entry("aiFontSize").or_insert_with(|| size.clamp(11, 24).into());
     }
     let mut settings: AppSettings = serde_json::from_value(values.into()).map_err(io::Error::other)?;
+    settings.theme.migrate_builtin_defaults();
     settings.background_image_opacity = settings.background_image_opacity.min(100);
     settings.text_color_presets =
         crate::model::sanitize_text_color_presets(std::mem::take(&mut settings.text_color_presets));
