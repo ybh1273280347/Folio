@@ -7,21 +7,26 @@
 //! frame. Everything here maps between the model's offsets and the leaf
 //! indices gpui-kit reports.
 
-use std::{collections::HashMap, ops::Range, rc::Rc};
+use std::{collections::HashMap, ops::Range};
 
 use gpui::{Bounds, Pixels, Point, point, px, size};
 use gpui_kit::base::text::editor_host::{ColumnAlign, LeafGeometry};
 
-use super::{id::BlockId, position::BlockPosition, projection::LeafInfo};
+use super::{
+    id::BlockId,
+    position::BlockPosition,
+    projection::{LeafInfo, Snapshot},
+};
 
 /// Builds the frame from what `collect_leaf_geometry` returned.
 pub(crate) fn into_frame(
-    mut geometries: HashMap<u64, LeafGeometry>,
-    leaves: Rc<Vec<LeafInfo>>,
-    tables: &[(BlockId, Vec<BlockId>)],
+    geometries: HashMap<u64, LeafGeometry>,
+    atoms: &HashMap<BlockId, Bounds<Pixels>>,
+    previews: &HashMap<BlockId, Bounds<Pixels>>,
+    snapshot: &Snapshot,
 ) -> FrameLayout {
     let mut frame = FrameLayout::default();
-    for (table, cells) in tables {
+    for (table, cells) in snapshot.tables.iter() {
         let bounds = cells
             .iter()
             .filter_map(|cell| geometries.get(&cell.as_u64()).map(|g| g.bounds()))
@@ -30,16 +35,40 @@ pub(crate) fn into_frame(
             frame.tables.push((*table, bounds));
         }
     }
-    for info in leaves.iter() {
-        if let Some(geometry) = geometries.remove(&info.block.as_u64()) {
-            frame.index.insert(info.block, frame.leaves.len());
-            frame.leaves.push(LeafGeom {
-                info: *info,
-                bounds: geometry.bounds(),
-                geometry: Some(geometry),
-                align: ColumnAlign::None,
-            });
+    // Only measured leaves enter the frame. Order by the snapshot rank so hit
+    // testing and caret navigation still see text, atoms and previews in source order.
+    let mut measured = Vec::with_capacity(geometries.len() + atoms.len() + previews.len());
+    for (key, geometry) in geometries {
+        if let Some(&index) = snapshot.leaf_indices.get(&key) {
+            measured.push((
+                index,
+                LeafGeom {
+                    info: snapshot.leaves[index],
+                    bounds: geometry.bounds(),
+                    geometry: Some(geometry),
+                    align: ColumnAlign::None,
+                },
+            ));
         }
+    }
+    for (&id, &bounds) in atoms.iter().chain(previews) {
+        let index = snapshot.leaf_indices[&id.as_u64()];
+        measured.push((
+            index,
+            LeafGeom {
+                info: snapshot.leaves[index],
+                bounds,
+                geometry: None,
+                align: ColumnAlign::None,
+            },
+        ));
+    }
+    measured.sort_unstable_by_key(|(index, _)| *index);
+    frame.leaves.reserve(measured.len());
+    frame.index.reserve(measured.len());
+    for (_, leaf) in measured {
+        frame.index.insert(leaf.info.block, frame.leaves.len());
+        frame.leaves.push(leaf);
     }
     frame
 }
@@ -192,45 +221,6 @@ impl FrameLayout {
             }
         }
     }
-
-    /// Merge non-text block boxes into the same document order as text geometry.
-    /// The renderer has no keyed text layout for rules or display formulas.
-    pub(crate) fn insert_atoms(&mut self, leaves: &[LeafInfo], bounds: &HashMap<BlockId, Bounds<Pixels>>) {
-        for info in leaves.iter().filter(|info| info.atomic) {
-            if let Some(bounds) = bounds.get(&info.block) {
-                self.leaves.push(LeafGeom {
-                    info: *info,
-                    geometry: None,
-                    bounds: *bounds,
-                    align: ColumnAlign::None,
-                });
-            }
-        }
-        let order: HashMap<_, _> = leaves.iter().enumerate().map(|(ix, info)| (info.block, ix)).collect();
-        self.leaves.sort_by_key(|leaf| order[&leaf.info.block]);
-        self.index = self.leaves.iter().enumerate().map(|(ix, leaf)| (leaf.info.block, ix)).collect();
-    }
-    /// Insert preview blocks with real bounds but without text geometry.
-    pub(crate) fn insert_code_previews(
-        &mut self,
-        leaves: &[LeafInfo],
-        bounds: &HashMap<BlockId, Bounds<Pixels>>,
-    ) {
-        for info in leaves.iter().filter(|info| !info.atomic) {
-            if let Some(bounds) = bounds.get(&info.block) {
-                self.leaves.push(LeafGeom {
-                    info: *info,
-                    geometry: None,
-                    bounds: *bounds,
-                    align: ColumnAlign::None,
-                });
-            }
-        }
-        let order: HashMap<_, _> = leaves.iter().enumerate().map(|(ix, info)| (info.block, ix)).collect();
-        self.leaves.sort_by_key(|leaf| order[&leaf.info.block]);
-        self.index = self.leaves.iter().enumerate().map(|(ix, leaf)| (leaf.info.block, ix)).collect();
-    }
-
 
     pub(crate) fn leaf(&self, block: BlockId) -> Option<&LeafGeom> {
         self.index.get(&block).map(|ix| &self.leaves[*ix])
