@@ -31,6 +31,7 @@ flowchart LR
 | 文件预览与 Draw.io | [pdf.rs](src/pdf.rs)、[image/](src/image/)、[drawio/](src/drawio/)、[web_view/](src/web_view/) | PDF 与图片各自管理查看器，Draw.io 拥有图表读写、画布通信与导出。WebView2 宿主与本地资源映射由 `web_view` 提供，轻量 HTML 预览也在这里。 |
 | 编译与构建预览 | [build/](src/build/)、[workspace/build.rs](src/workspace/build.rs) | `build` 提供公共的构建结果、LaTeX 执行和后台批量策略。Workspace 的构建模块协调草稿保存，管理前台任务、日志和已发布的 PDF 预览。Markdown、图片各自生成 PDF，通过共享的构建结果回到前台。 |
 | 标签、批注与撤销 | [tags/](src/tags/)、[annotations/](src/annotations/) | 标签查询、变更与撤销规则由 `tags` 管理。批注记录、定位和文件搬移由 `annotations` 管理。Workspace 与面板负责把结果反映到文件树、编辑区或阅读区。 |
+| 知识库索引、搜索与 PDF 精修 | [rag/](src/rag/)、[workspace/knowledge_base.rs](src/workspace/knowledge_base.rs)、[workspace/panels/kb.rs](src/workspace/panels/kb.rs) | `rag` 管索引、检索、解析与 OCR。Workspace 按项目调度同步和精修、处理文件变更，并把结果投影到右栏。AI 通过 [tools/rag.rs](src/workspace/tools/rag.rs) 传入活动项目的上下文并取回工具结果。 |
 | AI 会话、工具和取消 | [ai/](src/ai/)、[workspace/tools/](src/workspace/tools/)、[pi-host/](resources/pi-host/) | Rust AI 层负责面板、会话视图和消息路由。Node 负责 Pi 会话和工具注册。Workspace 工具模块持有待完成的请求，按通道分派，取得当前项目、文档或画布后调用对应功能。 |
 | 设置、主题、文案与终端 | [preferences.rs](src/preferences.rs)、[storage.rs](src/storage.rs)、[workspace/appearance.rs](src/workspace/appearance.rs)、[i18n/](src/i18n/)、[terminal/](src/terminal/) | 设置视图产生变更，`storage` 读取和迁移持久化设置，Workspace 同步各面板。共用配色与 UI 组件见 [theme.rs](src/theme.rs) 和 [ui.rs](src/ui.rs)。终端会话、ConPTY 与退出清理由终端模块负责。 |
 
@@ -46,6 +47,7 @@ flowchart LR
 | 文件标签与批注 | 标签以 SQLite 数据库为准，项目及默认空间使用 `.folio/metadata.sqlite3`，独立文件使用应用数据目录的 `loose-metadata.sqlite3`。批注记录保存在文件旁的 `.folio/annotations.json`，Markdown 内联高亮还写入正文。手动与 AI 操作共用数据和写入规则。 |
 | AI 会话 | Pi JSONL 保存对话和会话名称。Folio 的 `ai-tabs.json` 与 `ai-session-metadata.json` 保存标签、置顶和标题来源等应用状态。面板切换只改变交互视图，运行中任务仍由原会话承接。 |
 | 构建产物、预览和缓存 | 成功的编译或导出发布 PDF，前台预览跟随成功结果。失败时保留上一份有效预览。PDF 页图、图表光栅图、导出布局和文件树索引可从源内容重建。 |
+| 导出产物来源 | [export_provenance.rs](src/export_provenance.rs) 管理项目内的 PDF 和 Markdown 来源指纹。导出方登记生成时的内容，知识库索引读取登记以识别派生副本。PDF 可按指纹识别改名后的副本，Markdown 导出被编辑后可以独立索引。 |
 
 ## 常见改动怎么做
 
@@ -64,7 +66,7 @@ flowchart LR
 ### 修改渲染或导出
 
 - **Markdown** 从同一文档布局生成编辑视图与导出绘制操作。影响布局、字体或 Markdown 节点的改动要检查屏幕和 PDF 两条路径。更新公式或 Callout 扩展时，也检查 AI 文本和批注定位的消费者。在 [markdown/pdf.rs](src/markdown/pdf.rs) 修改分页、字形嵌入或绘制操作转换。
-- **原生知识画布** 由 [canvas/export.rs](src/canvas/export.rs) 从画布模型生成 SVG，再按目标格式输出 SVG、PNG 或 PDF。改动节点可见性或连线几何时，检查屏幕显示、命中检测和导出选区。
+- **原生知识画布** 由 [canvas/export.rs](src/canvas/export.rs) 从画布模型生成 SVG，再按目标格式输出 SVG、PNG 或 PDF。[canvas/routing.rs](src/canvas/routing.rs) 用画布坐标为屏幕绘制、命中检测和导出计算连线。改动节点可见性或连线几何时，检查这三个入口。
 - **图片与 Draw.io** 复用 [svg/](src/svg/) 的预处理和字体，各自保有导出尺寸、选区和错误策略。Draw.io 文件协议在 [drawio/file.rs](src/drawio/file.rs)，当前画布和导出在 [drawio/mod.rs](src/drawio/mod.rs)。Draw.io 的 AI 工具页面侧逻辑位于 vendored [Draw.io App.js](resources/drawio/js/diagramly/App.js) 的应用初始化和画布生命周期中。
 - **维护 vendored 资源** 优先在已有生命周期或 API 边界修复，记录 Rust vendor 补丁到 [vendor/FOLIO-PATCHES.md](vendor/FOLIO-PATCHES.md)。[install-drawio.ps1](scripts/install-drawio.ps1) 会重新解包整个 Draw.io 目录。升级时把 Folio 的本地集成迁到新版源码，再验证离线打开、选区、编辑与导出。
 

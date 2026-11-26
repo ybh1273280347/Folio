@@ -13,6 +13,7 @@ use krilla::{Document, geom::Size as KrillaSize, metadata::Metadata, page::PageS
 use krilla_svg::{SurfaceExt, SvgSettings};
 
 use crate::build::{BuildResult, BuildStatus};
+use crate::export_provenance::{self, DERIVED_PDF_KEYWORD};
 
 const MAX_PDF_POINTS: f32 = 14400.0;
 
@@ -53,7 +54,7 @@ fn svg_bytes_to_pdf(bytes: &[u8]) -> io::Result<Vec<u8>> {
         Metadata::new()
             .creator("Folio".to_owned())
             .producer("Folio-Image".to_owned())
-            .keywords(vec!["folio-derived".to_owned()]),
+            .keywords(vec![DERIVED_PDF_KEYWORD.to_owned()]),
     );
     let mut page = document.start_page_with(settings);
     let mut surface = page.surface();
@@ -103,7 +104,7 @@ fn raster_bytes_to_pdf(bytes: &[u8], ext: &str) -> io::Result<Vec<u8>> {
         Metadata::new()
             .creator("Folio".to_owned())
             .producer("Folio-Image".to_owned())
-            .keywords(vec!["folio-derived".to_owned()]),
+            .keywords(vec![DERIVED_PDF_KEYWORD.to_owned()]),
     );
     let mut page = document.start_page_with(settings);
     let mut surface = page.surface();
@@ -160,7 +161,7 @@ pub fn export_image_to_pdf(
     fs::write(preview, &pdf)?;
     fs::write(destination, &pdf)?;
     if let Some(root) = project_root {
-        let _ = crate::rag::record_derived_pdf(root, source, destination, &pdf, "image");
+        let _ = export_provenance::record_derived_pdf(root, source, destination, &pdf, "image");
     }
 
     Ok(BuildResult {
@@ -199,8 +200,8 @@ mod tests {
         assert_eq!(res.status, BuildStatus::Success);
         let pdf_bytes = fs::read(&dest).unwrap();
         assert!(pdf_bytes.starts_with(b"%PDF-"));
-        assert!(crate::rag::has_folio_pdf_fingerprint(&pdf_bytes));
-        assert!(!crate::rag::load_derived_pdf_hashes(dir.path()).is_empty());
+        assert!(export_provenance::has_folio_pdf_fingerprint(&pdf_bytes));
+        assert!(!export_provenance::load_derived_pdf_hashes(dir.path()).is_empty());
         assert!(fs::read(&preview).unwrap().starts_with(b"%PDF-"));
     }
 

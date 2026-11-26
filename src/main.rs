@@ -6,6 +6,7 @@ mod annotations;
 mod build;
 mod canvas;
 mod drawio;
+mod export_provenance;
 mod files;
 mod http;
 mod image;

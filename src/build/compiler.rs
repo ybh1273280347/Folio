@@ -142,7 +142,7 @@ fn run_latexmk(
     fs::copy(&pdf, &preview)?;
     fs::copy(&pdf, destination)?;
     if let Ok(bytes) = fs::read(&pdf) {
-        let _ = crate::rag::record_derived_pdf(
+        let _ = crate::export_provenance::record_derived_pdf(
             Path::new(&project.folder),
             &source,
             destination,

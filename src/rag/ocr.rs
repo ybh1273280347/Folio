@@ -4,9 +4,10 @@ use super::{
     AccuratePdfMode, PdfPageMarkdown, PdfReadResult, RagConfig, RagError,
     chunker::{chunk_pdf_pages, chunk_text_document, extract_pdf_pages},
     client::Endpoint,
-    sha256_hex,
     store::{PdfLibraryItem, RagStore},
 };
+use crate::export_provenance::record_derived_markdown;
+use crate::files::sha256_hex;
 use crate::http::{self, RequestOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -949,7 +950,7 @@ pub fn export_pdf_markdown_to_sibling(
     fs::write(&dest, &markdown).map_err(|e| format!("写入 Markdown 失败: {e}"))?;
     let source_path = crate::files::project_path(root, rel_path)
         .map_err(|err| format!("解析 PDF 路径失败: {err}"))?;
-    super::record_derived_markdown(root, &dest, &source_path, content_hash, &markdown)
+    record_derived_markdown(root, &dest, &source_path, content_hash, &markdown)
         .map_err(|e| format!("记录 PDF 导出来源失败: {e}"))?;
     Ok(target_rel)
 }

@@ -1,10 +1,10 @@
 //! Vector SVG, raster PNG, and vector PDF export for canvas selections or full scenes.
 
 use super::{
-    interaction::{EdgeRoute, route_edge_for_doc},
     model::{
         CanvasDocument, CanvasEdge, CanvasNode, CanvasNodeType, EdgeEnd, EdgeKind,
     },
+    routing::{EdgeRoute, route_edge_for_doc},
 };
 use crate::theme::Palette;
 use krilla::{Document, geom::Size as KrillaSize, page::PageSettings};

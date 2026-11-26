@@ -5,11 +5,18 @@ use super::{
     SearchResponse, SubSearchType,
     chunker::{chunk_annotations, chunk_text_document},
     client::{EmbeddingClient, RerankClient},
-    doc_kind, has_folio_pdf_fingerprint, load_derived_markdown_entries,
-    load_derived_pdf_hashes, ocr, sha256_hex,
+    doc_kind, ocr,
     store::{RagStore, ScoredChunk, is_near_duplicate, path_matches_filters},
 };
-use crate::{annotations::AnnotationItem, storage};
+use crate::{
+    annotations::AnnotationItem,
+    export_provenance::{
+        DerivedMarkdownEntry, has_folio_pdf_fingerprint, load_derived_markdown_entries,
+        load_derived_pdf_hashes,
+    },
+    files::sha256_hex,
+    storage,
+};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     fs,
@@ -959,7 +966,7 @@ fn collapse_and_format(
     ranked: Vec<(f64, Candidate)>,
     queries: &[String],
     limit: usize,
-    derived_markdowns: &HashMap<String, super::DerivedMarkdownEntry>,
+    derived_markdowns: &HashMap<String, DerivedMarkdownEntry>,
 ) -> Vec<SearchHit> {
     let mut snippet_terms: Vec<String> = Vec::new();
     for lq in queries {
@@ -1552,7 +1559,7 @@ mod tests {
         let distinct = make_candidate("distinct", "papers/book_folio-parse.md", "A separate theorem is explained in this chapter.", "md-hash", "md");
         let entries = HashMap::from([(
             "papers/book_folio-parse.md".into(),
-            super::super::DerivedMarkdownEntry {
+            DerivedMarkdownEntry {
                 source_pdf_path: "papers/book.pdf".into(),
                 source_pdf_hash: "pdf-hash".into(),
                 markdown_hash: "md-hash".into(),
@@ -2092,7 +2099,7 @@ mod tests {
         // Renamed TeX build recorded in `.folio/derived-pdfs.json`.
         let tex_out = b"%PDF-1.4\n% compiled tex output bytes";
         fs::write(root.join("renamed-tex-output.pdf"), tex_out).unwrap();
-        crate::rag::record_derived_pdf(
+        crate::export_provenance::record_derived_pdf(
             root,
             &root.join("notes.tex"),
             &root.join("renamed-tex-output.pdf"),
@@ -2107,11 +2114,11 @@ mod tests {
         )
         .unwrap();
 
-        let eligible = crate::rag::collect_eligible_paths(vec![
-            "notes.tex".into(),
-            "notes.pdf".into(),
-            "renamed-tex-output.pdf".into(),
-            "renamed-md-export.pdf".into(),
+        let eligible = crate::rag::collect_eligible_paths([
+            "notes.tex",
+            "notes.pdf",
+            "renamed-tex-output.pdf",
+            "renamed-md-export.pdf",
         ]);
         assert_eq!(eligible.len(), 4);
 
@@ -2159,7 +2166,14 @@ mod tests {
         let markdown = "# Source\n\nUnique exported passage for retrieval.";
         let markdown_path = root.join("paper_folio-parse.md");
         fs::write(&markdown_path, markdown).unwrap();
-        crate::rag::record_derived_markdown(root, &markdown_path, &pdf_path, &pdf_hash, markdown).unwrap();
+        crate::export_provenance::record_derived_markdown(
+            root,
+            &markdown_path,
+            &pdf_path,
+            &pdf_hash,
+            markdown,
+        )
+        .unwrap();
 
         let cfg = RagConfig::default();
         let mut store = RagStore::open(&root.join(".folio/rag.sqlite3"), &cfg.embed_model, cfg.embed_dim).unwrap();

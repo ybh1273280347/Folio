@@ -9,6 +9,7 @@ pub mod interaction;
 pub mod layout;
 pub mod model;
 pub mod pane;
+mod routing;
 
 pub use anchor::KnowledgeAnchor;
 pub use index::CanvasBacklink;

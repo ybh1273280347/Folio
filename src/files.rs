@@ -173,11 +173,15 @@ pub fn list_files(root: &Path) -> io::Result<Vec<ProjectFile>> {
     Ok(files)
 }
 
-fn revision(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+/// The lowercase SHA-256 used by persisted fingerprints and document version checks.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut out, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    out
 }
 
 pub fn read_document(root: &Path, relative: &str) -> io::Result<DiskDocument> {
@@ -189,7 +193,7 @@ pub fn read_document_at(path: &Path) -> io::Result<DiskDocument> {
     let bytes = fs::read(path)?;
     Ok(DiskDocument {
         text: String::from_utf8_lossy(&bytes).into_owned(),
-        revision: revision(&bytes),
+        revision: sha256_hex(&bytes),
     })
 }
 
@@ -215,7 +219,7 @@ pub fn save_document_at(
     fs::write(path, text.as_bytes())?;
     Ok(Ok(DiskDocument {
         text: text.to_owned(),
-        revision: revision(text.as_bytes()),
+        revision: sha256_hex(text.as_bytes()),
     }))
 }
 
