@@ -2,6 +2,115 @@
 
 use super::*;
 
+pub(super) fn inline_quote_token(
+    context: &gpui_kit::component::input::InlineTokenContext,
+    quote: SelectionQuote,
+    palette: Palette,
+) -> AnyElement {
+    let tip = quote.tooltip();
+    div()
+        .id(("ai-inline-quote", context.range().start))
+        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+        .child(
+            InputToken::new(context)
+                .border_color(gpui::transparent_black())
+                .when(!context.is_selected(), |token| token.bg(gpui::transparent_black()))
+                .text_color(gpui_kit::rgb(palette.accent)),
+        )
+        .into_any_element()
+}
+
+const QUOTE_LINK: &str = "folio-inline-quote:";
+
+#[derive(Clone)]
+pub(super) struct UserMessageBody {
+    pub(super) input: InputContent,
+    markdown: SharedString,
+    quote_tooltips: Arc<[String]>,
+}
+
+impl UserMessageBody {
+    pub(super) fn new(input: InputContent) -> Self {
+        let (markdown, quote_tooltips) = if input.tokens().is_empty() {
+            (input.text().clone(), Arc::default())
+        } else {
+            quoted_markdown(&input)
+        };
+        Self { input, markdown, quote_tooltips }
+    }
+
+    pub(super) fn render(&self, message_index: usize) -> TextView {
+        let id = SharedString::from(format!("ai-user-md-{message_index}"));
+        let view = TextView::markdown(id, self.markdown.clone());
+        if self.quote_tooltips.is_empty() {
+            return view;
+        }
+        let tips = self.quote_tooltips.clone();
+        view.link_tooltip(move |url, window, cx| {
+            let tip = url.strip_prefix(QUOTE_LINK)
+                .and_then(|index| index.parse::<usize>().ok())
+                .and_then(|index| tips.get(index))
+                .cloned()
+                .unwrap_or_else(|| url.to_string());
+            Tooltip::new(tip).build(window, cx)
+        })
+        .on_link_click(|url, _, _, cx| {
+            if !url.starts_with(QUOTE_LINK) {
+                cx.open_url(url);
+            }
+        })
+    }
+}
+
+fn quoted_markdown(body: &InputContent) -> (SharedString, Arc<[String]>) {
+    // Markdown still owns wrapping and formatting of the text between quote tokens.
+    let mut markdown = String::new();
+    let mut tips = Vec::new();
+    let mut excerpts = Vec::new();
+    let mut cursor = 0;
+    for span in body.tokens() {
+        let range = span.range();
+        let quote = SelectionQuote::from_token(span.token()).expect("sent quote token");
+        markdown.push_str(&body.text()[cursor..range.start]);
+        let start = markdown.len();
+        markdown.push('[');
+        for ch in span.token().label().chars() {
+            if ch.is_ascii_punctuation() {
+                markdown.push('\\');
+            }
+            markdown.push(ch);
+        }
+        use std::fmt::Write as _;
+        write!(markdown, "]({QUOTE_LINK}{})", tips.len()).expect("writing to a string");
+        excerpts.push((start..markdown.len(), span.token().label()));
+        tips.push(quote.tooltip());
+        cursor = range.end;
+    }
+    markdown.push_str(&body.text()[cursor..]);
+
+    // A quote inside literal Markdown, such as a code span, remains a visible excerpt.
+    // Do not show the generated Markdown link syntax in a context that cannot parse it.
+    let mut recognized = std::collections::BTreeSet::new();
+    if let Ok(root) = ::markdown::to_mdast(&markdown, &::markdown::ParseOptions::gfm()) {
+        let mut nodes = vec![&root];
+        while let Some(node) = nodes.pop() {
+            if let ::markdown::mdast::Node::Link(link) = node
+                && link.url.starts_with(QUOTE_LINK)
+                && let Some(position) = &link.position
+            {
+                recognized.insert(position.start.offset);
+            }
+            nodes.extend(node.children().into_iter().flatten());
+        }
+    }
+    for (range, label) in excerpts.into_iter().rev() {
+        if !recognized.contains(&range.start) {
+            markdown.replace_range(range, label);
+        }
+    }
+    (markdown.into(), tips.into())
+}
+
 impl ChatPane {
     pub(super) fn render_turn_navigation(
         &self,
@@ -300,7 +409,6 @@ impl ChatPane {
         ui_font: &SharedString,
         palette: Palette,
         typo: AiTypography,
-        answer: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let normalized = markdown_editor::normalize_math(text);
@@ -344,7 +452,6 @@ impl ChatPane {
                                 quote: SelectionQuote {
                                     source: crate::i18n::ai::AI_ANSWER_SOURCE.get().into(),
                                     text: text.to_owned(),
-                                    answer: Some(answer),
                                 },
                                 position,
                                 scroll_offset: pane.scroll.offset(),
@@ -694,7 +801,6 @@ impl ChatPane {
                                 ui_font,
                                 palette,
                                 typo,
-                                run_start,
                                 cx,
                             ))
                             .into_any_element(),
@@ -719,7 +825,6 @@ impl ChatPane {
                 ui_font,
                 palette,
                 typo,
-                run_start,
                 cx,
             )
         });
@@ -2145,15 +2250,12 @@ impl ChatPane {
             .as_ref()
             .is_none_or(|m| m.reasoning);
         let attached_chip = self.effective_attached_file().cloned();
-        let has_chips = attached_chip.is_some()
-            || !self.quoted_selections.is_empty()
-            || !self.pasted_images.is_empty();
+        let has_chips = attached_chip.is_some() || !self.pasted_images.is_empty();
         let slash_items = self.current_slash_items(cx);
         let has_slash_items = !slash_items.is_empty();
         let input_empty = self.input.read(cx).value().is_empty();
         let can_send = !self.session.borrow().is_rewinding
             && (!self.input.read(cx).value().trim().is_empty()
-                || !self.quoted_selections.is_empty()
                 || !self.pasted_images.is_empty());
         let pane_paste = cx.entity();
 
@@ -2163,11 +2265,6 @@ impl ChatPane {
                 .hover(gpui_kit::rgb(palette.hover).into())
                 .active(gpui_kit::rgb(palette.pressed).into())
         };
-        let quote_bg = mix_color(
-            palette.surface,
-            palette.accent,
-            if palette.is_dark() { 0.15 } else { 0.08 },
-        );
         let skill_token_bg = mix_color(
             palette.surface,
             palette.accent,
@@ -2345,49 +2442,6 @@ impl ChatPane {
                                             ),
                                     )
                                 })
-                                .children(self.quoted_selections.iter().enumerate().map(
-                                    |(index, q)| {
-                                        let tip = format!("{}\n{}", q.source, q.text);
-                                        div()
-                                            .id(SharedString::from(format!("ai-quote-{index}")))
-                                            .flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .max_w(px(260.))
-                                            .px_2()
-                                            .py(px(2.))
-                                            .rounded(px(6.))
-                                            .bg(quote_bg)
-                                            .border_1()
-                                            .border_color(skill_token_border)
-                                            .text_size(typo.sm)
-                                            .tooltip(move |window, cx| {
-                                                Tooltip::new(tip.clone()).build(window, cx)
-                                            })
-                                            .child(div().flex_1().min_w_0().text_ellipsis().child(
-                                                crate::i18n::ai::quote_prefix(
-                                                    &q.source,
-                                                    &q.text.replace('\n', " "),
-                                                ),
-                                            ))
-                                            .child(
-                                                div()
-                                                    .id(SharedString::from(format!(
-                                                        "ai-clear-quote-{index}"
-                                                    )))
-                                                    .cursor_pointer()
-                                                    .on_click(cx.listener(move |pane, _, _, cx| {
-                                                        pane.quoted_selections.remove(index);
-                                                        cx.notify();
-                                                    }))
-                                                    .child(
-                                                        crate::ui::icon(IconName::Close)
-                                                            .w(px(11.))
-                                                            .h(px(11.)),
-                                                    ),
-                                            )
-                                    },
-                                ))
                                 .children(self.pasted_images.iter().map(|p| {
                                     let rm_id = p.id;
                                     let preview = p.image.clone();
@@ -2463,24 +2517,29 @@ impl ChatPane {
                                     })
                                     .token(move |ctx, _, _| {
                                         let id = ctx.token().id();
-                                        if id.starts_with("skill:") {
+                                        if let Some(quote) = SelectionQuote::from_token(ctx.token()) {
+                                            inline_quote_token(ctx, quote, palette)
+                                        } else if id.starts_with("skill:") {
                                             InputToken::new(ctx)
                                                 .icon(IconName::Sparkles)
                                                 .bg(skill_token_bg)
                                                 .border_color(skill_token_border)
                                                 .text_color(gpui_kit::rgb(palette.accent))
+                                                .into_any_element()
                                         } else if id.starts_with("dir:") {
                                             InputToken::new(ctx)
                                                 .icon(IconName::FolderOpen)
                                                 .bg(gpui_kit::rgb(palette.background))
                                                 .border_color(subtle_border(palette.border))
                                                 .text_color(gpui_kit::rgb(palette.text))
+                                                .into_any_element()
                                         } else {
                                             InputToken::new(ctx)
                                                 .icon(IconName::FileText)
                                                 .bg(gpui_kit::rgb(palette.background))
                                                 .border_color(subtle_border(palette.border))
                                                 .text_color(gpui_kit::rgb(palette.text))
+                                                .into_any_element()
                                         }
                                     })
                                     .on_token_click(cx.listener(
