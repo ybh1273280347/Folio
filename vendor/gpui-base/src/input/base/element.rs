@@ -4191,6 +4191,14 @@ impl<M: InputModeKind> Element for TextElement<M> {
         }
 
         self.paint_mouse_listeners(&prepaint.hitbox, window, cx);
+        if focused {
+            let state = self.state.clone();
+            window.on_key_event(move |_: &gpui::KeyUpEvent, phase, _, cx| {
+                if phase == gpui::DispatchPhase::Capture {
+                    state.update(cx, |state, cx| state.pause_blink_cursor(cx));
+                }
+            });
+        }
     }
 }
 

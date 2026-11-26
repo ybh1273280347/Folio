@@ -436,6 +436,9 @@ impl WindowsWindowInner {
                 })
             },
         ) else {
+            if VIRTUAL_KEY(wparam.loword()) == VK_PROCESSKEY {
+                let _ = self.with_input_handler(|input_handler| input_handler.on_keyboard_activity());
+            }
             return Some(1);
         };
 
@@ -454,6 +457,9 @@ impl WindowsWindowInner {
         let Some(input) = handle_key_event(wparam, lparam, &self.state, |keystroke, _| {
             PlatformInput::KeyUp(KeyUpEvent { keystroke })
         }) else {
+            if VIRTUAL_KEY(wparam.loword()) == VK_PROCESSKEY {
+                let _ = self.with_input_handler(|input_handler| input_handler.on_keyboard_activity());
+            }
             return Some(1);
         };
 
@@ -727,6 +733,7 @@ impl WindowsWindowInner {
     }
 
     fn handle_ime_composition_inner(&self, ctx: HIMC, lparam: LPARAM) -> Option<isize> {
+        let _ = self.with_input_handler(|input_handler| input_handler.on_keyboard_activity());
         let lparam = lparam.0 as u32;
         if lparam == 0 {
             // Japanese IME may send this message with lparam = 0, which indicates that

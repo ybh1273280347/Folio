@@ -145,6 +145,9 @@ pub trait EntityInputHandler: 'static + Sized {
     ) -> Option<Range<usize>> {
         None
     }
+
+    /// See [`InputHandler::on_keyboard_activity`] for details
+    fn on_keyboard_activity(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
 }
 
 /// The canonical implementation of [`crate::PlatformInputHandler`]. Call [`Window::handle_input`]
@@ -306,6 +309,11 @@ impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
     ) -> TextInputConfiguration {
         self.view
             .update(cx, |view, cx| view.text_input_configuration(window, cx))
+    }
+
+    fn on_keyboard_activity(&mut self, window: &mut Window, cx: &mut App) {
+        self.view
+            .update(cx, |view, cx| view.on_keyboard_activity(window, cx));
     }
 
     fn text_input_editable_range(

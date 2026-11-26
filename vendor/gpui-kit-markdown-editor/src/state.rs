@@ -470,6 +470,15 @@ impl BlockEditorState {
         let blink_cursor = cx.new(|_| BlinkCursor::new());
         // Focus and blink wiring as in `InputBaseState::new_in_mode` (§7.1).
         let subscriptions = vec![
+            cx.intercept_keystrokes({
+                let focus_handle = focus_handle.clone();
+                let blink_cursor = blink_cursor.downgrade();
+                move |_, window, cx| {
+                    if focus_handle.is_focused(window) {
+                        _ = blink_cursor.update(cx, |cursor, cx| cursor.pause(cx));
+                    }
+                }
+            }),
             cx.observe(&blink_cursor, |_, _, cx| cx.notify()),
             cx.on_focus(&focus_handle, window, |this, _, cx| {
                 this.blink_cursor.update(cx, |b, cx| b.start(cx));
@@ -2188,7 +2197,7 @@ impl BlockEditorState {
         cx.notify();
     }
 
-    fn pause_blink(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn pause_blink(&mut self, cx: &mut Context<Self>) {
         self.blink_cursor.update(cx, |b, cx| b.pause(cx));
     }
 
@@ -4345,8 +4354,13 @@ impl EntityInputHandler for BlockEditorState {
         Some(byte_to_utf16(text, m.range.start)..byte_to_utf16(text, m.range.end))
     }
 
-    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
+    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.pause_blink(cx);
         self.end_composition();
+    }
+
+    fn on_keyboard_activity(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.pause_blink(cx);
     }
 
     fn paste(&mut self, item: ClipboardItem, _: &mut Window, cx: &mut Context<Self>) {
@@ -4363,6 +4377,7 @@ impl EntityInputHandler for BlockEditorState {
         if self.readonly {
             return;
         }
+        self.pause_blink(cx);
         let composing = self.marked.is_some();
         self.select_marked_or(range16);
         let origin = if composing {
@@ -4400,6 +4415,7 @@ impl EntityInputHandler for BlockEditorState {
         if self.readonly {
             return;
         }
+        self.pause_blink(cx);
         if new_text.is_empty() {
             // Cancelled composition: remove the marked text, close the group.
             if let Some(marked) = self.marked.clone() {

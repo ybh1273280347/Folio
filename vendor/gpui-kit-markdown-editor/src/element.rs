@@ -1748,6 +1748,14 @@ impl Element for EditorRoot {
             ElementInputHandler::new(bounds, self.state.clone()),
             cx,
         );
+        if focus.is_focused(window) {
+            let state = self.state.clone();
+            window.on_key_event(move |_: &gpui::KeyUpEvent, phase, _, cx| {
+                if phase == gpui::DispatchPhase::Capture {
+                    state.update(cx, |state, cx| state.pause_blink(cx));
+                }
+            });
+        }
         let fold_buttons: Vec<(BlockId, Bounds<Pixels>)> = self
             .fold_bounds
             .lock()

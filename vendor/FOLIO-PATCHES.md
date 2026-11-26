@@ -36,17 +36,19 @@
 - **与 `gpui-base` 协同项**：
   - **列表留白与透明底色**：编辑区和 PDF 共享列表分组与相邻容器的留白；透明编辑区同时淡化行内代码的胶囊底色和标记背景。
   - **行内图片选区与缩放**：复用行内图片的绘制边界处理选区和以中心为基准的等比缩放；正文栏宽度决定放大上限，独立图片段落在编辑器和 PDF 中居中，松手提交一次可撤销编辑，有尺寸的图片以 HTML 图片属性保存，重新打开时交由共用 HTML 解析器恢复图片与尺寸。
-  - **平滑光标**：通过 `gpui-base 0.9.1` 的全局 `SmoothCaretSettings`（`set_smooth_caret` / `smooth_caret_settings`）与 `SmoothCaretMotion` 55ms 帧插值状态机（尊重 `reduce_motion` 与滚动锚点偏移防漂移），在启用时将 Markdown 编辑器与通用 `Input` 的光标绘制为圆角微光样式并平滑滑动。
+  - **平滑光标**：通过 `gpui-base 0.9.1` 的全局 `SmoothCaretSettings`（`set_smooth_caret` / `smooth_caret_settings`）与 `SmoothCaretMotion` 55ms 帧插值状态机（尊重 `reduce_motion` 与滚动锚点偏移防漂移），在启用时将 Markdown 编辑器与通用 `Input` 的光标绘制为圆角微光样式并平滑滑动，并在按键、释放及中文输入法预编辑/候选期间保持 700ms 暂停闪烁缓冲。
 
 ## `gpui-pre 0.3.12`
 
 - **文档绘制捕获**：增加文档绘制捕获，保留字形、原始文字簇、字体、图形、图片及裁剪；捕获期间不创建 GPU 字形纹理。独立文档布局可以覆盖视口裁剪，以包含未滚动到的内容。
 - **矢量 SVG 捕获**：增加 `VectorPaint::Svg` 与 `Window::paint_svg_document`，把图表 SVG 原文连同裁剪区域记录进文档捕获，供 PDF 用 `krilla-svg` 直接写成矢量图形与可选文字；不截图、不引入第二套排版。
+- **IME / 键盘活动透传**：为 `InputHandler`、`EntityInputHandler` 与 `PlatformInputHandler` 增加默认空实现的 `on_keyboard_activity` 钩子，供平台侧通知输入法按键活动以暂停光标闪烁。
 
 ## `gpui-pre-windows 0.3.12`
 
 - **DirectWrite 字体检索**：从 DirectWrite 取得实际字体文件和集合索引，供 PDF 字体嵌入及文字复制使用。
 - **文件剪贴板句柄透传**：读取文件剪贴板时将 `CF_HDROP` 句柄直接传给 `DragQueryFileW`，供资源管理器文件粘贴使用。
+- **IME 按键活动通知**：在 `WM_KEYDOWN`/`WM_KEYUP` 遇到 `VK_PROCESSKEY` 以及 `WM_IME_COMPOSITION` 时调用 `on_keyboard_activity`，避免中文输入法拼写期间光标继续闪烁。
 
 ## `gpui-pdf`
 

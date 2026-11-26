@@ -2178,6 +2178,12 @@ impl PlatformInputHandler {
         self.handler.replace_text_in_range(None, input, window, cx);
     }
 
+    pub fn on_keyboard_activity(&mut self) {
+        self.cx
+            .update(|window, cx| self.handler.on_keyboard_activity(window, cx))
+            .ok();
+    }
+
     pub fn compute_ime_candidate_bounds(
         marked_range: Option<Range<usize>>,
         selection: &UTF16Selection,
@@ -2536,6 +2542,10 @@ pub trait InputHandler: 'static {
     ) -> TextInputConfiguration {
         TextInputConfiguration::default()
     }
+
+    /// Notifies the focused input handler of platform keyboard or IME activity
+    /// (such as `VK_PROCESSKEY` keystrokes consumed before text is committed).
+    fn on_keyboard_activity(&mut self, _window: &mut Window, _cx: &mut App) {}
 }
 
 /// Platform text-assistance preferences for the focused text region.

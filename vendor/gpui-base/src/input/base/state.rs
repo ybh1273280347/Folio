@@ -4284,7 +4284,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.replace_text_in_range_silent(Some(range), &new_text, window, cx);
     }
 
-    pub(super) fn pause_blink_cursor(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn pause_blink_cursor(&mut self, cx: &mut Context<Self>) {
         self.blink_cursor.update(cx, |cursor, cx| {
             cursor.pause(cx);
         });
@@ -4839,9 +4839,14 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
             .map(|range| self.range_to_utf16(&range.into()))
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.pause_blink_cursor(cx);
         self.ime_marked_range = None;
         self.undo_manager.commit_transaction();
+    }
+
+    fn on_keyboard_activity(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.pause_blink_cursor(cx);
     }
 
     /// Replace text in range.
@@ -4859,12 +4864,11 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         if !self.is_editable() {
             return;
         }
+        self.pause_blink_cursor(cx);
         let selection_before = *self.active_selection();
         // Committing a composition ends the transaction it opened, whether or
         // not the platform follows up with `unmark_text`.
         let ends_composition = self.ime_marked_range.is_some();
-
-        self.pause_blink_cursor(cx);
 
         // NOTE: The normalization keeps the UTF-16 length, but may change the
         // UTF-8 byte length, so all the byte-offset calculations below must
@@ -5116,6 +5120,7 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         if !self.is_editable() {
             return;
         }
+        self.pause_blink_cursor(cx);
         let selection_before = *self.active_selection();
 
         let starts_composition = self.ime_marked_range.is_none();
