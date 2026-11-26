@@ -7,8 +7,6 @@ mod drawio;
 mod rag;
 mod tags;
 
-pub(super) use rag::RagSyncState;
-
 use super::Workspace;
 use crate::ai::{WorkspaceToolAction, WorkspaceToolRequest};
 use gpui_kit::{Context, Window};

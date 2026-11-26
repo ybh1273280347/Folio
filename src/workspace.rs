@@ -4,6 +4,7 @@ mod build;
 mod dialogs;
 mod documents;
 mod file_tree;
+mod knowledge_base;
 mod panels;
 mod projects;
 mod tags;
@@ -13,6 +14,7 @@ use build::{Build, BuildPanelVisibility};
 use dialogs::{Dialog, DialogButtons, Dialogs};
 use documents::Documents;
 use file_tree::FileTree;
+use knowledge_base::RagSyncState;
 use panels::{RightPanel, RightPanelView};
 use projects::{ProjectMenu, Projects};
 use trash::TrashView;
@@ -224,7 +226,7 @@ struct ZenSnapshot {
 
 pub struct Workspace {
     tool_requests: tools::ToolRequests,
-    rag_sync: tools::RagSyncState,
+    rag_sync: RagSyncState,
     projects: Projects,
     project_menu: ProjectMenu,
     settings: AppSettings,
@@ -351,7 +353,7 @@ impl Workspace {
         .detach();
         let mut app = Self {
             tool_requests: tools::ToolRequests::default(),
-            rag_sync: tools::RagSyncState::default(),
+            rag_sync: RagSyncState::default(),
             projects,
             project_menu,
             settings,

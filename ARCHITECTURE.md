@@ -31,6 +31,7 @@ flowchart LR
 | 文件预览与 Draw.io | [pdf.rs](src/pdf.rs)、[image/](src/image/)、[drawio/](src/drawio/)、[web_view/](src/web_view/) | PDF 与图片各自管理查看器，Draw.io 拥有图表读写、画布通信与导出。WebView2 宿主与本地资源映射由 `web_view` 提供，轻量 HTML 预览也在这里。 |
 | 编译与构建预览 | [build/](src/build/)、[workspace/build.rs](src/workspace/build.rs) | `build` 提供公共的构建结果、LaTeX 执行和后台批量策略。Workspace 的构建模块协调草稿保存，管理前台任务、日志和已发布的 PDF 预览。Markdown、图片各自生成 PDF，通过共享的构建结果回到前台。 |
 | 标签、批注与撤销 | [tags/](src/tags/)、[annotations/](src/annotations/) | 标签查询、变更与撤销规则由 `tags` 管理。批注记录、定位和文件搬移由 `annotations` 管理。Workspace 与面板负责把结果反映到文件树、编辑区或阅读区。 |
+| 知识库索引、搜索与 PDF 精修 | [rag/](src/rag/)、[workspace/knowledge_base.rs](src/workspace/knowledge_base.rs)、[workspace/panels/kb.rs](src/workspace/panels/kb.rs) | `rag` 管索引、检索、解析与 OCR。Workspace 按项目调度同步和精修、处理文件变更，并把结果投影到右栏。AI 通过 [tools/rag.rs](src/workspace/tools/rag.rs) 传入活动项目的上下文并取回工具结果。 |
 | AI 会话、工具和取消 | [ai/](src/ai/)、[workspace/tools/](src/workspace/tools/)、[pi-host/](resources/pi-host/) | Rust AI 层负责面板、会话视图和消息路由。Node 负责 Pi 会话和工具注册。Workspace 工具模块持有待完成的请求，按通道分派，取得当前项目、文档或画布后调用对应功能。 |
 | 设置、主题、文案与终端 | [preferences.rs](src/preferences.rs)、[storage.rs](src/storage.rs)、[workspace/appearance.rs](src/workspace/appearance.rs)、[i18n/](src/i18n/)、[terminal/](src/terminal/) | 设置视图产生变更，`storage` 读取和迁移持久化设置，Workspace 同步各面板。共用配色与 UI 组件见 [theme.rs](src/theme.rs) 和 [ui.rs](src/ui.rs)。终端会话、ConPTY 与退出清理由终端模块负责。 |
 
