@@ -1935,11 +1935,11 @@ impl Workspace {
 
         let mut titlebar = div()
             .h(px(crate::ui::PANE_HEADER_HEIGHT))
-            .px_2p5()
+            .px_2()
             .flex_shrink_0()
             .flex()
             .items_center()
-            .gap_1p5()
+            .gap_1()
             .when(!show_background, |bar| bar.bg(gpui_kit::rgb(palette.surface)))
             .border_b_1()
             .border_color(gpui_kit::rgb(palette.border));
@@ -1952,11 +1952,11 @@ impl Workspace {
                     .ghost()
                     .compact()
                     .with_size(px(16.))
-                    .w(px(28.))
-                    .h(px(28.))
+                    .w(px(26.))
+                    .h(px(26.))
                     .rounded(px(6.))
                     .when(outline_open, |b| b.bg(gpui_kit::rgb(palette.selection)))
-                    .icon(crate::ui::icon(IconName::ListTree).size(px(16.)))
+                    .icon(crate::ui::icon(IconName::ListTree).size(px(15.)))
                     .tooltip(if outline_open {
                         crate::i18n::workspace::TOOLTIP_COLLAPSE_OUTLINE.get()
                     } else {
@@ -1980,7 +1980,7 @@ impl Workspace {
                     crate::ui::control_sized(
                         SharedString::from(format!("reading-html-back-{path}")),
                         IconName::ChevronLeft,
-                        28.,
+                        26.,
                         15.,
                     )
                     .tooltip(|window, cx| {
@@ -1997,7 +1997,7 @@ impl Workspace {
                     crate::ui::control_sized(
                         SharedString::from(format!("reading-html-forward-{path}")),
                         IconName::ChevronRight,
-                        28.,
+                        26.,
                         15.,
                     )
                     .tooltip(|window, cx| {
@@ -2014,7 +2014,7 @@ impl Workspace {
                     crate::ui::control_sized(
                         SharedString::from(format!("reading-html-reload-{path}")),
                         IconName::RotateCcw,
-                        28.,
+                        26.,
                         15.,
                     )
                     .tooltip(|window, cx| {
@@ -2037,7 +2037,7 @@ impl Workspace {
             .max_w(relative(0.68))
             .min_w_0()
             .px_2p5()
-            .rounded(px(7.))
+            .rounded(px(6.))
             .flex()
             .items_center()
             .gap_1p5()
@@ -2057,7 +2057,7 @@ impl Workspace {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(13.))
+                    .text_size(px(12.5))
                     .whitespace_nowrap()
                     .overflow_hidden()
                     .text_ellipsis()
@@ -2078,10 +2078,10 @@ impl Workspace {
                     .ghost()
                     .compact()
                     .with_size(px(16.))
-                    .w(px(20.))
-                    .h(px(20.))
+                    .w(px(18.))
+                    .h(px(18.))
                     .flex_shrink_0()
-                    .icon(crate::ui::icon(IconName::Close).size(px(13.)))
+                    .icon(crate::ui::icon(IconName::Close).size(px(12.)))
                     .tooltip(crate::i18n::workspace::TOOLTIP_CLOSE_TAB.get())
                     .on_click(cx.listener(move |app, _, window, cx| {
                         cx.stop_propagation();
@@ -2099,7 +2099,7 @@ impl Workspace {
                     div()
                         .id(SharedString::from(format!("reading-md-annotations-{path}")))
                         .px_2p5()
-                        .h(px(26.))
+                        .h(px(24.))
                         .rounded_full()
                         .bg(rgb(0xfef9c3))
                         .border_1()
@@ -2132,11 +2132,11 @@ impl Workspace {
                         .ghost()
                         .compact()
                         .with_size(px(16.))
-                        .w(px(28.))
-                        .h(px(28.))
+                        .w(px(26.))
+                        .h(px(26.))
                         .rounded(px(6.))
                         .when(is_source, |b| b.bg(gpui_kit::rgb(palette.selection)))
-                        .icon(crate::ui::icon(IconName::CodeXml).size(px(16.)))
+                        .icon(crate::ui::icon(IconName::CodeXml).size(px(15.)))
                         .tooltip(if is_source {
                             crate::i18n::workspace::TOOLTIP_SWITCH_WYSIWYG.get()
                         } else {
@@ -2163,7 +2163,7 @@ impl Workspace {
                 crate::ui::control_sized(
                     SharedString::from(format!("reading-html-external-{path}")),
                     IconName::ExternalLink,
-                    28.,
+                    26.,
                     15.,
                 )
                 .tooltip(|window, cx| {

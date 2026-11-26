@@ -611,7 +611,7 @@ impl Default for AppSettings {
             smooth_caret: default_smooth_caret(),
             editor_ratio: 0.5,
             sidebar_open: true,
-            sidebar_width: 248.,
+            sidebar_width: 240.,
             log_width: 360.,
             terminal: TerminalSettings::default(),
             translate: TranslateSettings::default(),

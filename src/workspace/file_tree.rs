@@ -1340,8 +1340,8 @@ impl Workspace {
             div()
                 .id(id)
                 .relative()
-                .size(px(36.))
-                .rounded(px(8.))
+                .size(px(32.))
+                .rounded(px(7.))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1355,14 +1355,14 @@ impl Workspace {
                         div()
                             .absolute()
                             .left(px(-6.))
-                            .top(px(8.))
-                            .bottom(px(8.))
+                            .top(px(7.))
+                            .bottom(px(7.))
                             .w(px(2.5))
                             .rounded_full()
                             .bg(accent),
                     )
                 })
-                .child(crate::ui::icon(icon).size(px(18.)))
+                .child(crate::ui::icon(icon).size(px(17.)))
         };
 
         let sidebar_shortcut =
@@ -1533,9 +1533,9 @@ impl Workspace {
         let trash_btn = div()
             .id("trash-entry")
             .relative()
-            .w(px(36.))
-            .h(px(if dragging_tree_item { 72. } else { 36. }))
-            .rounded(px(8.))
+            .w(px(32.))
+            .h(px(if dragging_tree_item { 72. } else { 32. }))
+            .rounded(px(7.))
             .flex()
             .items_center()
             .justify_center()
@@ -1559,7 +1559,7 @@ impl Workspace {
                 )
                 .build(window, cx)
             })
-            .child(crate::ui::icon(IconName::Trash).size(px(18.)))
+            .child(crate::ui::icon(IconName::Trash).size(px(17.)))
             .child(
                 canvas(
                     move |area, _, _| {
@@ -1630,7 +1630,7 @@ impl Workspace {
             .flex_col()
             .items_center()
             .justify_between()
-            .py_2p5()
+            .py_2()
             .bg(rgb(BG))
             .when(sidebar_rendered, |rail| rail.border_r_1().border_color(rgb(BORDER)))
             .child(
@@ -1638,11 +1638,11 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .items_center()
-                    .gap_1p5()
+                    .gap_1()
                     .child(toggle_sidebar_btn)
                     .child(default_space_btn)
                     .child(loose_files_btn)
-                    .child(div().w(px(22.)).h(px(1.)).my_2().bg(rgb(BORDER)))
+                    .child(div().w(px(20.)).h(px(1.)).my_1p5().bg(rgb(BORDER)))
                     .child(open_file_btn)
                     .child(zen_btn),
             )
@@ -1651,7 +1651,7 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .items_center()
-                    .gap_1p5()
+                    .gap_1()
                     .child(trash_btn)
                     .child(prefs_btn),
             )
@@ -2442,7 +2442,7 @@ impl Workspace {
                     .pt_3()
                     .pb_1()
                     .flex_shrink_0()
-                    .text_size(px(14.))
+                    .text_size(px(13.5))
                     .font_semibold()
                     .text_color(rgb(0x37352f))
                     .text_ellipsis()

@@ -10,9 +10,9 @@ use gpui_kit::{
 use std::borrow::Cow;
 
 pub const DEFAULT_SANS_FONT: &str = "Segoe UI";
-pub const TITLEBAR_HEIGHT: f32 = 44.0;
-pub const PANE_HEADER_HEIGHT: f32 = 40.0;
-pub const TAB_HEIGHT: f32 = 30.0;
+pub const TITLEBAR_HEIGHT: f32 = 40.0;
+pub const PANE_HEADER_HEIGHT: f32 = 36.0;
+pub const TAB_HEIGHT: f32 = 27.0;
 
 pub fn sans_font(family: &str) -> SharedString {
     if family.trim().is_empty() {
@@ -47,7 +47,7 @@ impl RenderOnce for CopyDocumentButton {
             copied: false, reset: Task::ready(()),
         });
         let copied = feedback.read(cx).copied;
-        Button::new(self.id).ghost().compact().w(px(28.)).h(px(28.))
+        Button::new(self.id).ghost().compact().w(px(26.)).h(px(26.))
             .rounded(px(6.))
             .icon(icon(if copied { IconName::Check } else { IconName::Copy }).size(px(15.)))
             .tooltip(if copied {
@@ -487,8 +487,8 @@ pub(crate) fn panel_toolbar_button(
         )
         .compact()
         .with_size(px(16.))
-        .w(px(28.))
-        .h(px(28.))
+        .w(px(26.))
+        .h(px(26.))
         .rounded(px(6.))
 }
 

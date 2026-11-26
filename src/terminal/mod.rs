@@ -169,7 +169,7 @@ impl Render for PathsPreview {
 fn terminal_control(id: impl Into<ElementId>, name: IconName, palette: Palette) -> Stateful<Div> {
     div()
         .id(id)
-        .size(px(20.))
+        .size(px(18.))
         .flex_shrink_0()
         .flex()
         .items_center()
@@ -185,7 +185,7 @@ fn terminal_control(id: impl Into<ElementId>, name: IconName, palette: Palette) 
             s.bg(gpui_kit::rgb(palette.pressed))
                 .text_color(gpui_kit::rgb(palette.text))
         })
-        .child(crate::ui::icon(name).size(px(13.)))
+        .child(crate::ui::icon(name).size(px(12.)))
 }
 
 pub enum TerminalPaneEvent {
@@ -454,12 +454,12 @@ impl Render for TerminalPane {
                 .id(("terminal-tab", id as usize))
                 .flex()
                 .items_center()
-                .gap_1p5()
-                .px_2p5()
+                .gap_1()
+                .px_2()
                 .h(px(crate::ui::TAB_HEIGHT))
-                .rounded(px(7.))
+                .rounded(px(6.))
                 .cursor_pointer()
-                .text_size(px(13.))
+                .text_size(px(12.5))
                 .text_color(gpui_kit::rgb(if active {
                     palette.text
                 } else {
@@ -578,12 +578,12 @@ impl Render for TerminalPane {
                     .h(px(crate::ui::PANE_HEADER_HEIGHT))
                     .flex_shrink_0()
                     .px_2()
-                    .gap_1p5()
+                    .gap_1()
                     .border_b_1()
                     .border_color(gpui_kit::rgb(palette.border))
                     .child(
                         crate::ui::panel_toolbar_button("terminal-back-to-hub", palette, cx)
-                            .icon(crate::ui::icon(IconName::ChevronLeft).size(px(16.)))
+                            .icon(crate::ui::icon(IconName::ChevronLeft).size(px(15.)))
                             .tooltip(crate::i18n::common::BACK_TO_HUB.get())
                             .on_click(cx.listener(|_, _, _, cx| {
                                 cx.emit(TerminalPaneEvent::BackToHub)
@@ -603,7 +603,7 @@ impl Render for TerminalPane {
                     .child(new_menu_btn)
                     .child(
                         crate::ui::panel_toolbar_button("maximize-terminal", palette, cx)
-                            .icon(crate::ui::icon(IconName::Maximize2).size(px(16.)))
+                            .icon(crate::ui::icon(IconName::Maximize2).size(px(15.)))
                             .on_click(cx.listener(|_, _, _, cx| {
                                 cx.emit(TerminalPaneEvent::ToggleMaximize)
                             })),
