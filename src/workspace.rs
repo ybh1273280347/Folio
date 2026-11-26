@@ -595,6 +595,81 @@ impl Workspace {
         self.documents.poll_web_panes(window, cx);
     }
 
+    fn render_work_area_drop_overlay(&self, cx: &mut Context<Self>) -> AnyElement {
+        let palette = crate::theme::palette();
+        let dark = palette.is_dark();
+        let accent = gpui_kit::rgb(palette.accent);
+        let can_split = !self.zen_mode && self.tree.dragged_files_can_split();
+        let bounds = self.tree.work_area_drop_bounds();
+        if !can_split {
+            bounds.lock().expect("work area drop bounds").split = None;
+        }
+        let bounds_main = bounds.clone();
+        let main_zone = div()
+            .id("work-area-drop-main")
+            .relative()
+            .flex_1()
+            .h_full()
+            .drag_over::<crate::terminal::DraggedPaths>(move |style, _, _, _| {
+                let style = style
+                    .bg(accent.opacity(if dark { 0.18 } else { 0.13 }))
+                    .border_color(accent.opacity(if dark { 0.55 } else { 0.45 }));
+                if can_split {
+                    style.border_r_2()
+                } else {
+                    style.border_2()
+                }
+            })
+            .on_drop(cx.listener(|app, dragged: &crate::terminal::DraggedPaths, window, cx| {
+                app.drop_files_to_main_tab(dragged, window, cx);
+            }))
+            .child(
+                canvas(
+                    move |area, _, _| {
+                        bounds_main.lock().expect("work area drop bounds").main = Some(area);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            );
+        let split_zone = can_split.then(|| {
+            let bounds_split = bounds.clone();
+            div()
+                .id("work-area-drop-split")
+                .relative()
+                .flex_1()
+                .h_full()
+                .drag_over::<crate::terminal::DraggedPaths>(move |style, _, _, _| {
+                    style
+                        .bg(accent.opacity(if dark { 0.22 } else { 0.16 }))
+                        .border_l_2()
+                        .border_color(accent.opacity(if dark { 0.65 } else { 0.55 }))
+                })
+                .on_drop(cx.listener(|app, dragged: &crate::terminal::DraggedPaths, window, cx| {
+                    app.drop_files_to_split_pane(dragged, window, cx);
+                }))
+                .child(
+                    canvas(
+                        move |area, _, _| {
+                            bounds_split.lock().expect("work area drop bounds").split = Some(area);
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+        });
+        div()
+            .id("work-area-drop-overlay")
+            .absolute()
+            .inset_0()
+            .flex()
+            .size_full()
+            .child(main_zone)
+            .when_some(split_zone, |overlay, split| overlay.child(split))
+            .into_any_element()
+    }
 }
 
 fn button(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Stateful<Div> {
@@ -625,7 +700,19 @@ impl Render for Workspace {
             || self.tags.is_editing()
             || self.tree.name_dialog_open()
             || self.dialogs.blocks_workspace();
-        self.documents.sync_pane_visibility(self.zen_mode, trash_open, modal_open, window, cx);
+        let right_panel_visible = self.right_panel.open;
+        let maximized = right_panel_visible && self.right_panel.maximized;
+        let has_active_drag = cx.has_active_drag();
+        self.tree.sync_drag_state(has_active_drag);
+        let dragging_files = self.tree.is_dragging_files(has_active_drag);
+        let show_work_area_drop = dragging_files && !modal_open && !maximized;
+        if dragging_files && !show_work_area_drop {
+            self.tree.clear_work_area_drop_bounds();
+        }
+        // Native WebView2 child windows sit above GPUI and would intercept the drop.
+        self.documents.sync_pane_visibility(
+            self.zen_mode, trash_open, modal_open || show_work_area_drop, window, cx,
+        );
         self.build.sync_preview_visibility(!self.zen_mode && !trash_open, window, cx);
         let engine = self.projects.directory().map(|project| project.engine);
         let engine_app = cx.entity();
@@ -641,7 +728,6 @@ impl Render for Workspace {
             .map(|file| file.path.clone())
             .collect();
         let resize_app = cx.entity();
-        let right_panel_visible = self.right_panel.open;
         let sidebar_visible = self.is_sidebar_open();
         let sidebar_target_w = self.settings.sidebar_width.clamp(170., 520.);
         let right_target_w = self.settings.terminal.panel_width.clamp(280., 1600.);
@@ -762,7 +848,20 @@ impl Render for Workspace {
                 });
             }
         })
-        .child(resizable_panel().child(work_area));
+        .child(
+            resizable_panel().child(
+                div()
+                    .id("work-area-drop-host")
+                    .relative()
+                    .size_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(work_area)
+                    .when(show_work_area_drop, |host| {
+                        host.child(self.render_work_area_drop_overlay(cx))
+                    }),
+            ),
+        );
         if self.build.panels.logs {
             work_with_logs = work_with_logs.child(
                 resizable_panel()
@@ -774,7 +873,6 @@ impl Render for Workspace {
         }
         let right_panel_content = right_rendered.then(|| self.render_right_panel(window, cx));
 
-        let maximized = right_panel_visible && self.right_panel.maximized;
         let editor_with_terminal: AnyElement = if maximized {
             div()
                 .flex()

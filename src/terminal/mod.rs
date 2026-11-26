@@ -61,6 +61,12 @@ pub struct DraggedPaths(pub Vec<PathBuf>, pub Option<String>);
 // Tree moves use the relative path and project ID. Terminal drops use the source's full path.
 pub struct DraggedFolder(pub String, pub String, pub PathBuf);
 
+#[derive(Clone, Default)]
+pub struct WorkAreaDropBounds {
+    pub main: Option<Bounds<Pixels>>,
+    pub split: Option<Bounds<Pixels>>,
+}
+
 pub struct PathsPreview {
     pub paths: Vec<PathBuf>,
     pub offset: Point<Pixels>,
@@ -71,6 +77,7 @@ pub struct PathsPreview {
     pub source_folder: Option<String>,
     pub can_trash: bool,
     pub row_bounds: Arc<Mutex<BTreeMap<String, (bool, Bounds<Pixels>)>>>,
+    pub work_area_bounds: Arc<Mutex<WorkAreaDropBounds>>,
 }
 
 impl Render for PathsPreview {
@@ -82,6 +89,12 @@ impl Render for PathsPreview {
         let mouse = window.mouse_position();
         let over_trash = self.trash_bounds.lock().expect("trash bounds")
             .is_some_and(|bounds| bounds.contains(&mouse));
+        let work_area = self.work_area_bounds.lock().expect("work area drop bounds").clone();
+        let over_split = self.source_folder.is_none()
+            && work_area.split.is_some_and(|bounds| bounds.contains(&mouse));
+        let over_main = self.source_folder.is_none()
+            && !over_split
+            && work_area.main.is_some_and(|bounds| bounds.contains(&mouse));
         let rows = self.row_bounds.lock().expect("tree bounds");
         let target = rows.iter()
             .find(|(_, (_, bounds))| bounds.contains(&mouse))
@@ -96,6 +109,10 @@ impl Render for PathsPreview {
         // target the chip only identifies what is being carried.
         let hint = if over_trash {
             Some(if self.can_trash { media::DRAG_TRASH } else { media::DRAG_LOOSE_FILE }.get().into())
+        } else if over_split {
+            Some(format!("→ {}", media::DRAG_OPEN_SPLIT.get()))
+        } else if over_main {
+            Some(format!("→ {}", media::DRAG_OPEN_MAIN.get()))
         } else if invalid_folder {
             Some(media::DRAG_INVALID_FOLDER.get().into())
         } else if self.can_trash {
