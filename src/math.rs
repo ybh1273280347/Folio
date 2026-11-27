@@ -408,6 +408,7 @@ impl MarkdownPlugin for MathPlugin {
                 })
                 .expect("math worker is alive");
         }
+        let canonical = math_source(node, context);
         Some(
             MarkdownNode::new(
                 self.name().to_owned(),
@@ -417,18 +418,8 @@ impl MarkdownPlugin for MathPlugin {
                     display: self.display,
                 },
             )
-            .text(
-                context
-                    .node_source(node)
-                    .expect("parsed math has source")
-                    .to_owned(),
-            )
-            .markdown(
-                context
-                    .node_source(node)
-                    .expect("parsed math has source")
-                    .to_owned(),
-            ),
+            .text(canonical.clone())
+            .markdown(canonical),
         )
     }
     fn render(&self, node: &MarkdownNode, window: &mut Window, cx: &mut App) -> impl IntoElement {
@@ -561,4 +552,73 @@ fn inline_formula_element(
 
 pub fn formula_id(node: &MarkdownNode) -> Option<u64> {
     node.data::<MathContent>().map(|content| content.id)
+}
+
+fn math_source(node: &markdown::mdast::Node, context: &MarkdownParseContext<'_>) -> String {
+    let raw = context.node_source(node).expect("parsed math has source");
+    canonical_math_source(node, context.source(), raw)
+}
+
+fn canonical_math_source(node: &markdown::mdast::Node, full_source: &str, raw: &str) -> String {
+    match node {
+        markdown::mdast::Node::Math(math) => format!("$$\n{}\n$$", math.value),
+        _ => {
+            if !raw.contains('\n') {
+                return raw.to_owned();
+            }
+            let Some(start) = node.position().map(|pos| pos.start.offset) else {
+                return raw.to_owned();
+            };
+            let line_start = full_source[..start]
+                .rfind('\n')
+                .map_or(0, |ix| ix + 1);
+            let continuation: String = full_source[line_start..start]
+                .chars()
+                .map(|ch| if ch == '>' { '>' } else { ' ' })
+                .collect();
+            raw.split('\n')
+                .enumerate()
+                .map(|(ix, line)| {
+                    if ix == 0 || continuation.is_empty() {
+                        line
+                    } else if line.trim_end() == continuation.trim_end() {
+                        ""
+                    } else {
+                        line.strip_prefix(&continuation).unwrap_or(line)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_math_source;
+    use markdown::mdast::Node;
+
+    #[test]
+    fn math_source_strips_enclosing_blockquote_prefixes() {
+        let src = "> [!NOTE]+\n> $$\n> \\alpha = \\frac{n}{s \\cdot m}\n> $$\n> $a +\n> b$\n";
+        let mut opts = markdown::ParseOptions::gfm();
+        opts.constructs.math_flow = true;
+        opts.constructs.math_text = true;
+        let ast = markdown::to_mdast(src, &opts).unwrap();
+        let Node::Root(root) = &ast else { panic!() };
+        let Node::Blockquote(quote) = &root.children[0] else { panic!() };
+        let math_node = quote.children.iter().find(|n| matches!(n, Node::Math(_))).unwrap();
+        let math_pos = math_node.position().unwrap();
+        assert_eq!(
+            canonical_math_source(math_node, src, &src[math_pos.start.offset..math_pos.end.offset]),
+            "$$\n\\alpha = \\frac{n}{s \\cdot m}\n$$"
+        );
+        let Node::Paragraph(para) = quote.children.last().unwrap() else { panic!() };
+        let inline_node = para.children.iter().find(|n| matches!(n, Node::InlineMath(_))).unwrap();
+        let inline_pos = inline_node.position().unwrap();
+        assert_eq!(
+            canonical_math_source(inline_node, src, &src[inline_pos.start.offset..inline_pos.end.offset]),
+            "$a +\nb$"
+        );
+    }
 }

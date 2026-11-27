@@ -69,3 +69,89 @@ fn fold_alert_input_rules_unify_plus_and_minus_and_editing() {
     u.run(EditorCommand::ToggleBlockquote).unwrap();
     assert_eq!(u.source(), "Title\n\nbody");
 }
+
+#[test]
+fn display_math_stays_nested_inside_callouts_and_round_trips() {
+    use gpui_kit::base::text::{MarkdownNode, MarkdownParseContext, MarkdownPlugin};
+    use markdown::mdast::Node;
+
+    struct TestMathPlugin {
+        display: bool,
+    }
+    impl MarkdownPlugin for TestMathPlugin {
+        fn is_block(&self) -> bool {
+            self.display
+        }
+        fn name(&self) -> &str {
+            if self.display { "test-display-math" } else { "test-inline-math" }
+        }
+        fn parse(&self, node: &Node, cx: &MarkdownParseContext<'_>) -> Option<MarkdownNode> {
+            let source = match node {
+                Node::Math(math) if self.display => format!("$$\n{}\n$$", math.value),
+                Node::InlineMath(_) if !self.display => cx.node_source(node)?.to_owned(),
+                _ => return None,
+            };
+            Some(
+                MarkdownNode::new(self.name(), ())
+                    .text(source.clone())
+                    .markdown(source),
+            )
+        }
+    }
+
+    let extensions = MarkdownExtensions::default()
+        .plugin(TestMathPlugin { display: false })
+        .plugin(TestMathPlugin { display: true })
+        .block_surface("note", |_, _| gpui_kit::div());
+
+    let multiline = "> [!NOTE]+ 贯穿全节的量：装填因子 $\\alpha$\n> 装填因子度量散列表\"被填得多满\"：\n> $$\n> \\alpha = \\frac{n}{s \\cdot m}\n> $$\n> $n$ 是已存表项数。";
+    let m = BlockEditorModel::from_markdown(multiline, extensions.clone()).unwrap();
+    assert_eq!(
+        m.source(),
+        "> [!NOTE]+ 贯穿全节的量：装填因子 $\\alpha$\n> 装填因子度量散列表\"被填得多满\"：\n>\n> $$\n> \\alpha = \\frac{n}{s \\cdot m}\n> $$\n>\n> $n$ 是已存表项数。"
+    );
+    assert_eq!(m.document().root().children().count(), 1);
+
+    let single_line = "> [!NOTE]\n> 公式：\n> $$\\alpha = \\frac{n}{s \\cdot m}$$\n> 后续段落。";
+    let m2 = BlockEditorModel::from_markdown(single_line, extensions.clone()).unwrap();
+    assert_eq!(
+        m2.source(),
+        "> [!NOTE]\n> 公式：\n>\n> $$\n> \\alpha = \\frac{n}{s \\cdot m}\n> $$\n>\n> 后续段落。"
+    );
+    assert_eq!(m2.document().root().children().count(), 1);
+
+    let inline_split = "> [!NOTE]+ 标题\n> 公式 $$a = b$$ 后续。";
+    let m3 = BlockEditorModel::from_markdown(inline_split, extensions.clone()).unwrap();
+    assert_eq!(
+        m3.source(),
+        "> [!NOTE]+ 标题\n> 公式\n>\n> $$\n> a = b\n> $$\n>\n> 后续。"
+    );
+    assert_eq!(m3.document().root().children().count(), 1);
+
+    // Interactive insertion/paste of display math inside a callout stays inside the callout.
+    let mut interactive = BlockEditorModel::from_markdown("> [!NOTE]+\n> 引导语", extensions).unwrap();
+    interactive.select_end().unwrap();
+    interactive.split_block().unwrap();
+    assert!(interactive.paste_blocks("$$\nx = y\n$$").unwrap());
+    assert_eq!(interactive.document().root().children().count(), 1);
+    assert_eq!(
+        interactive.source(),
+        "> [!NOTE]+\n> 引导语\n>\n> $$\n> x = y\n> $$\n>"
+    );
+
+    // Direct normalize_math edge cases (AI chat and parser share this path).
+    let nested = "> > \\[x = 1\\]\n> > tail";
+    assert_eq!(
+        markdown_editor::normalize_math(nested),
+        "> > $$\n> > x = 1\n> > $$\n> > tail"
+    );
+    let gt_inside = "> $$\n> x > 0\n> > 1\n> $$";
+    assert_eq!(markdown_editor::normalize_math(gt_inside), gt_inside);
+    let empty_quoted = "> $$\n> $$";
+    assert_eq!(markdown_editor::normalize_math(empty_quoted), empty_quoted);
+    let list_indented = "- item\n  $$a + b$$";
+    assert_eq!(
+        markdown_editor::normalize_math(list_indented),
+        "- item\n  $$\n  a + b\n  $$"
+    );
+}
