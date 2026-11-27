@@ -2,6 +2,10 @@
 
 pub mod chunker;
 pub mod client;
+#[cfg(windows)]
+pub(crate) mod cuda_engine;
+#[cfg(windows)]
+mod cuda_ptx;
 pub mod ocr;
 pub mod pipeline;
 pub mod store;
