@@ -2,7 +2,7 @@
 
 基于 [GPUI](https://www.gpui.rs/) 与 Rust 编写的 Windows 原生 LaTeX / Markdown 个人工作台。
 
-写文档和论文时，希望有一款轻量、启动快、内存占用低的本地编辑工具，于是用 GPUI 做了这套原生工作台。界面、编辑器、公式排版、PDF 预览与导出均在进程内完成。知识画布把 Markdown 选区、PDF 批注与本地文件串成可双向跳转的关系图。AI 助手采用原生 GPUI 面板，模型与工具宿主运行在独立 Node 进程。HTML 预览和离线 Draw.io 按需使用系统 WebView2。
+写文档和论文时，希望有一款轻量、启动快、内存占用低的本地编辑工具，于是用 GPUI 做了这套原生工作台。界面、编辑器、公式排版、PDF 预览与导出均在进程内完成。Markdown 文档之间支持 `[[` 快捷插链与反向引用，文件移动或重命名时引用路径自动重构；知识画布把 Markdown 选区、PDF 批注与本地文件串成可双向跳转的关系图。AI 助手采用原生 GPUI 面板，模型与工具宿主运行在独立 Node 进程。HTML 预览和离线 Draw.io 按需使用系统 WebView2。
 
 [构建与运行](#构建与运行) · [Markdown 写作提示](FOLIO_MARKDOWN.md) · [架构与开发指南](ARCHITECTURE.md)
 
@@ -27,7 +27,7 @@
 
 - 三种空间各自记住标签页与阅读分栏：**默认空间**（用户目录下的 `.Folio` 文件夹）、**项目工作区**（添加文件夹后进入）、**独立文件**（`Ctrl+Shift+O` 打开的外部文件，始终从原路径读写）。
 - 文件树默认折叠并记忆展开状态，永久忽略 `.pi/`；左侧栏「新建」拆分按钮可新建 `.md` / `.tex` / `.drawio` / `.bib` / `.txt` 或其他类型，也可新建文件夹；支持重命名（文件/文件夹/项目）、删除、单击文件夹聚焦（影响新建落点与快捷操作）、按住 `Ctrl` 点击多选与空白处拖拽框选。
-- **应用内拖拽**：把文件/文件夹拖到终端面板会把路径加引号后粘贴进终端；拖到废纸篓图标直接移入废纸篓；同一项目内可拖拽文件夹移动位置。
+- **应用内拖拽**：把文件/文件夹拖到终端面板会把路径加引号后粘贴进终端；拖到废纸篓图标直接移入废纸篓；同一项目内可拖拽文件夹移动位置；把文件拖到主编辑区或右侧分屏可分别在标签页或分屏中打开。
 - **导入外部文件**：从资源管理器把文件拖到文件树行或项目空白根，或在文件树聚焦时按 `Ctrl+V` 粘贴文件，即可按目标目录规则复制到项目：拖到文件夹行进入该文件夹，拖到文件行进入其父目录，空白根进入项目根。批量导入会先整体检查文件类型与同名冲突，先暂存再落盘，完成后自动刷新并选中；目录与非文件会被整批拒绝。
 - **快捷路径操作**（焦点在文件树）：`Ctrl+C` 复制选中项（或聚焦文件夹/当前文件）的完整路径，`Delete` 删除，`Ctrl+Z` 撤销删除，`Ctrl+V` 粘贴外部文件或剪贴板图片。
 - **废纸篓**：删除的文件先落盘到废纸篓（保留 7 天，启动时清理过期项），侧栏“废纸篓”以独立标签页显示，可单项恢复、彻底删除或清空，也可关闭该标签；误删可用 `Ctrl+Z` 整批撤销。
@@ -55,9 +55,12 @@
 - **Mermaid 图表**：`mermaid` 围栏由 Rust 引擎 `merman` 在后台解析与布局为 SVG，`resvg` 光栅化为可缩放预览，同一 SVG 直接写入 PDF；默认图表预览，可就地切换源码，保存仍为 Markdown 围栏。支持缩放与平移，不引入 JS、WebView 或在线服务；兼容范围受 Rust 引擎限制，详见 [Markdown 写作提示](FOLIO_MARKDOWN.md#mermaid-图表)。
 - **数学语法**：原生支持 `$...$`、`$$...$$`、`\(...\)`、`\[...\]`，点击块级公式可在弹窗中就地编辑 LaTeX 正文（无需分隔符）。支持分式、根式、上下标、重音、字体与颜色，以及 `matrix` / `pmatrix` / `bmatrix` / `cases` / `array`、`align` / `gather` / `multline` / `equation`（含 `\tag`、`\label`、`\ref`）及星号无编号版本；完整语法与不支持项见 [LaTeX 支持边界](LATEX_SUPPORT_BOUNDARIES.md) 与 [扩展指南](LATEX_EXTENSION_GUIDE.md)。
 - **HTML 表格**：Markdown 中粘贴或手写原生 `<table>`（`thead` / `tbody` / `tfoot`、`td` / `th`、`rowspan` / `colspan`、`text-align`）在视觉模式下原生渲染为可编辑单元格；单元格内容按与正文相同的 Markdown 解析（`**加粗**`、`` `代码` ``、链接、`$...$` 公式等）并随正文导出到矢量 PDF；双击单元格编辑时原始 HTML 标签被转义，不可渲染的 `script` / `style` 文本被剔除但源文件完整保留以便往返。
+- **任务列表**：`- [x]` 已完成项以删除线显示，源文本仍保持 GFM 任务列表语法。
 - **emoji**：输入 `:` 加关键词调出 emoji 快捷插入（约 150 条，离线数据），斜杠菜单也有“表情符号”项；插入的是普通 Unicode 文本。
 - **划词翻译**：WYSIWYG 选中文字后点工具条“译”按钮（PDF 内选中走同一浮层），先请求 Google、失败后回退百度；自动检测语言（中文→英，其余→中），带词典与复制反馈，凭据在“设置 → API 服务”配置。
 - **链接跳转**：`Ctrl+左键`点击 Markdown 链接，外部链接用系统浏览器打开，工作区内的文件/目录/锚点在应用内打开；打开位置（主编辑区或右侧分屏）可在“设置 → 视图”里选择。
+- **快捷插链**：视觉模式输入 `[[` 唤起补全，可按文件名或 `#标题` 搜索项目内文档（`[[#标题]]` 只搜本文标题），`↑↓` 选择、`Enter` 插入相对路径 Markdown 链接；同名或路径相近的文件按匹配度排序，链接替换单步可撤销。
+- **反向链接与自动重构**：Markdown 链接、图片与引用定义写入 `.folio/metadata.sqlite3` 的 `markdown_links` 索引，与画布反链合并在顶栏反链按钮中列出；点击文档条目跳到源文件的对应行。项目内重命名或移动文件 / 文件夹会自动改写受影响文档的引用路径（外部修改过的文档会跳过并提示），删除与恢复同步更新反链索引。
 - **剪贴板图像与 SVG**：视觉 / 源码模式 `Ctrl+V` 检测到图像或 SVG 文本（如 draw.io「Copy as SVG」）时，自动落盘到 `images/<文档名>/` 并插入 `![图片](<相对路径>)`；png / jpg / webp / gif / svg 原样保存，bmp / tiff / ico / pnm 转为 PNG。打开图片文件进入查看器：`Ctrl+滚轮` 以光标为锚点缩放，`Ctrl+=` / `Ctrl+-` 缩放，`Ctrl+0` 适应窗口，`Ctrl+1` 实际大小，滚轮上下平移、拖拽移动、双击切换 100%。
 
 ### 4\. PDF 预览与批注
@@ -85,7 +88,7 @@
 - 右上角日志图标显示构建输出（可复制全部）；“终端”按钮打开 Windows ConPTY 原生终端，默认启动加载 profile 的 PowerShell，可运行 `codex`、`agy` 等本机命令。
 - 多会话标签、面板宽度拖动、最大化、隐藏（进程继续运行）；关闭会话或退出 Folio 时按进程树结束；终端使用 Folio 配色，切换明暗主题不重启 shell；复制/粘贴为 `Ctrl+Shift+C/V`，`Ctrl+C` 交给前台程序。
 - 在“设置 → 终端”调整 shell、逐行启动参数与面板宽度；终端字体与字号在“设置 → 外观 → 字体”，即时应用到已有会话。
-- **右侧功能中心**：右侧面板可搜索功能、命令与文件（AI 助手、终端、PDF 预览、编译日志、打开文件、偏好设置），集中显示编译 / AI / 终端的“运行中任务”；支持拖拽调宽、最大化 / 还原，并可在 AI 与终端等视图间切换。
+- **右侧功能中心**：右侧面板可搜索功能、命令与文件（AI 助手、终端、PDF 预览、编译日志、打开文件、新建页面、偏好设置），集中显示编译 / AI / 终端的“运行中任务”；支持拖拽调宽、最大化 / 还原，并可在 AI 与终端等视图间切换。“新建页面”在右侧分屏创建 Markdown 页，可套用待办模板。
 
 ### 9\. 本地知识库与 PDF 管理器
 
@@ -100,7 +103,7 @@
 `Ctrl+Shift+A` 打开 AI 面板。会话基于 Pi SDK 的独立 Node 宿主，按项目隔离、多标签并行；切换项目或关闭标签不会中止正在运行的任务，关闭 Folio 时宿主与子进程树通过 Windows 作业对象一起回收。网关与模型在 `设置 → API 服务 → AI 服务（Magpie 网关）` 配置：Base URL、标题模型 ID（默认 `workbuddy-ai/hy4flash-free`）、Exa API Key 与百度千帆 API Key（掩码存储，不进入工具参数）。
 
 - **会话管理**：每个项目的标签与激活状态单独持久化（应用数据目录下的 `ai-tabs.json`），Pi JSONL 仍是对话与名称的唯一来源，Folio 另存置顶与标题来源（`ai-session-metadata.json`）；恢复的标签只在激活时加载，中断的任务不会自动重投。第一条纯文本消息触发一次自动标题，手动命名优先；会话支持置顶、历史搜索/重命名，左侧轮次导航悬停展开可滚动列表，显示时间戳与摘要、随阅读位置高亮当前轮次，点击可跳转。删除运行中的会话需要二次确认；关闭标签只是释放前台占用、保留后台运行。
-- **输入与输出**：可附加当前文件、引用 WYSIWYG/PDF 选区、粘贴剪贴板图片、挂载技能，并选择模型、思考级别与收藏模型；`/` 呼出命令（开关当前上下文、压缩上下文、挂载技能）。回答和待发送附件中的图片可点击打开大图。在 AI 回答中拖选文字会浮出「添加到对话」按钮，可把该段回答作为引用继续追问，引用以 `> 引用自 …` 块随消息发送。用户消息气泡内可直接“重新编辑”，保存后截断该轮及之后的 Pi JSONL 条目并以新文本重发（此前模型、思考级别和会话名保留，工具已经写入磁盘的数据不回滚）。工具调用参数、文件改动 diff、思考过程与耗时分层展示并可展开查看；diff 显示文件真实行号，相隔较远的未改动上下文折叠为分隔线（保留改动前后各 2 行）。消息较长时右下角出现「回到底部」圆形按钮，点击滚到最新并恢复自动跟随；手动上滚会暂停跟随。回答可复制或导出为笔记（同名 Markdown 写入会话所属项目根目录，文件名用标题+时间戳，并自动打开，不覆盖已有文件）。
+- **输入与输出**：可附加当前文件、引用 WYSIWYG/PDF 选区、粘贴剪贴板图片、挂载技能，并选择模型、思考级别与收藏模型；`/` 呼出命令（开关当前上下文、压缩上下文、挂载技能）。回答和待发送附件中的图片可点击打开大图。在 AI 回答中拖选文字会浮出「引用」按钮，选中的回答片段作为行内引用胶囊保留在输入框与会话中的原始位置，发送时连同来源以行内标记随消息传递（历史消息中的 `> 引用自 …` 前缀引用仍可加载）。用户消息气泡内可直接“重新编辑”，保存后截断该轮及之后的 Pi JSONL 条目并以新文本重发（此前模型、思考级别和会话名保留，工具已经写入磁盘的数据不回滚）。工具调用参数、文件改动 diff、思考过程与耗时分层展示并可展开查看；diff 显示文件真实行号，相隔较远的未改动上下文折叠为分隔线（保留改动前后各 2 行）。消息较长时右下角出现「回到底部」圆形按钮，点击滚到最新并恢复自动跟随；手动上滚会暂停跟随。回答可复制或导出为笔记（同名 Markdown 写入会话所属项目根目录，文件名用标题+时间戳，并自动打开，不覆盖已有文件）。
 - **联网与抓取**：`exa_search`（web/academic、时间与域名过滤）和 `baidu_qianfan_search`（中文来源）是显式工具选择；Exa 通过 PowerShell 7/.NET 读取 Windows 系统代理并用 Undici dispatcher 发起请求，未配置代理时直接报错、不回退直连。`web_fetch` 用 Scrapling 抽取 Markdown，`mode: dynamic` 显式启动临时 Chromium；PDF 支持按 1 开始的页码选取，扫描/混合 PDF 返回待 OCR 页码，交给独立的 `paddleocr` MCP 服务（PaddleOCR-VL-1.6）处理，不是内嵌模型或隐藏下载。
 - **工作区工具**：AI 可查看 / 按标签查找当前项目或默认空间内的文件，为文件增删标签、给新标签指定颜色，以及全局重命名标签 / 改色（`folio_tags_list` / `folio_files_query` / `folio_file_tags_update` / `folio_tags_manage`）；`run_python` 将多行 Python 源码直接经 stdin 交给 `python -X utf8 -u` 执行（不经过 shell，避免转义问题，返回合并输出与退出码）。标签改动不经审批，直接在会话时间线生成带「撤销」按钮的回执；仅项目与默认空间可用，独立文件空间不开放。
 - **知识库工具**：AI 可用 `folio_kb_search` 做关键词、向量或混合检索（可指定意图、标签、目录、扩展名和结果数），用 `folio_kb_status` 查询索引与服务状态，用 `folio_kb_reindex` 做增量/全量重建或指定 PDF 精确解析，并用 `folio_pdf_read` 按页读取 PDF Markdown、优先复用精确解析缓存。搜索包含未保存草稿。
@@ -130,11 +133,11 @@
 
 - **主题**：浅色 / 深色 / 自定义，12 个颜色角色可逐项调整并命名保存、随时重置；深色参考暖黑、米白与陶土橙，切换主题保留字体与排版设置。“画布与弹窗”颜色同时作为 AI 面板底色，切换或自定义配色时联动；主题仅含颜色，字体与排版独立。
 - **字体**：按区域独立设置字体与字号——界面（工具栏 / 侧栏 / 设置，11–20 px）、源码编辑器、Markdown 预览、AI 面板、终端（均 11–26 px），均为可搜索的本机字体选择器，默认 14 px。“Markdown 与 AI 共享排版”中可设置行内 / 块级代码字体与字号比例（0.5×–1.5×，默认 87.5% / 92.9%）、数学字体（STIX Two / Latin Modern / TeX Gyre Pagella）与行内 / 块级公式比例（0.5×–3×，默认 1.0× / 1.7×）。“字体回退”可指定全局缺字回退字体，并调整“中西文字体比例”（80%–140%，默认 100%，按比例缩放中文及全角标点以平衡中西文视觉大小）。“恢复默认字体”一键还原全部字体与比例。
-- **视图**：`界面语言`（简体中文 / English）、`背景图` 与 `图片不透明度`（0–100%，默认 35%，设为 0 时隐藏）、源码行号、编辑器行宽限制、内部链接打开位置、`工具执行视图`（极简 / 标准 / 详细，控制 AI 时间线的工具细节层级）与终端面板宽度（280–1600 px）；`Ctrl+滚轮` 调整字号（11–26 px，右下角显示当前值）。
+- **视图**：`界面语言`（简体中文 / English）、`背景图` 与 `图片不透明度`（0–100%，默认 35%，设为 0 时隐藏）、源码行号、编辑器行宽限制（源码模式复用同一限制）、内部链接打开位置、`工具执行视图`（极简 / 标准 / 详细，控制 AI 时间线的工具细节层级）与终端面板宽度（280–1600 px）；左栏、主界面与 AI 栏的滚动条悬停时显隐；`Ctrl+滚轮` 调整字号（11–26 px，右下角显示当前值）。
 - **快捷键**：录制 / 改键，详见下表。
 - **终端**：shell、逐行启动参数与面板宽度；终端字体与字号在“外观 → 字体”设置，即时应用到已有会话。
 - **API 服务**：百度翻译 APP ID / API Key（划词翻译在 Google 不可用时回退百度）；AI 网关 Base URL、标题模型 ID、Exa / 千帆 API Key，详见第 10 节 AI 助手。
-- **本地知识库（RAG）与 PaddleOCR**：可配置 PaddleOCR Token、`llama-server` 路径，以及 Embedding / Rerank 的 URL 与 GGUF 路径；默认端口为 18101 / 18102，默认模型为 Qwen3-Embedding / Reranker-0.6B，空闲 300 秒释放。向量和重排服务只在 AI 检索需要时按需拉起，人类关键词检索不需要它们。
+- **本地知识库（RAG）与 PaddleOCR**：可配置 PaddleOCR Token、`llama-server` 路径，以及 Embedding / Rerank 的 URL 与 GGUF 路径；默认端口为 18101 / 18102，默认模型为 Qwen3-Embedding / Reranker-0.6B，空闲 300 秒释放。向量和重排服务只在 AI 检索需要时按需拉起，人类关键词检索不需要它们。Windows 上对自动管理、回环地址下的受支持 Qwen3 GGUF 模型，Embedding / Rerank 优先走进程内原生 CUDA PTX Tensor Core 推理，条件不满足时回退到 `llama-server` 子进程，仍按配置的空闲时间释放。
 
 ---
 
@@ -223,7 +226,7 @@ Rust 集成测试覆盖折叠标注的 Markdown 往返与输入规则、主题/�
 ## 📌 说明
 
 - **自用分享**：按个人写作与排版习惯搭建，主要满足日常 LaTeX 编译与 Markdown 记笔记需求。
-- **数据存储**：配置保存在 `%APPDATA%\folio-gpui`（可用 `FOLIO_USER_DATA` 覆盖），含 `preferences.json`、`projects.json`、`workspace-sessions.json`、`ai-tabs.json`、`ai-session-metadata.json`、废纸篓与 WebView2 缓存；AI 对话原文由 Pi JSONL 管理，项目文件树永久忽略 `.pi/`；PDF 批注在目标目录下的 `.folio/annotations.json`；标签库为项目下的 `.folio/metadata.sqlite3`（默认空间在 `~/.Folio/.folio/`，独立文件在应用数据目录 `loose-metadata.sqlite3`）；项目知识库索引在 `.folio/rag.sqlite3`，OCR 产物在 `.folio/pdf-cache/<sha256>/`，派生清单在 `.folio/derived-pdfs.json` 与 `.folio/derived-markdowns.json`；粘贴图片保存在文档目录 `images/<文档名>/`；文档源文件与编译 PDF 均留在项目本地目录，不改动用户文件结构。
+- **数据存储**：配置保存在 `%APPDATA%\folio-gpui`（可用 `FOLIO_USER_DATA` 覆盖），含 `preferences.json`、`projects.json`、`workspace-sessions.json`、`ai-tabs.json`、`ai-session-metadata.json`、废纸篓与 WebView2 缓存；AI 对话原文由 Pi JSONL 管理，项目文件树永久忽略 `.pi/`；PDF 批注在目标目录下的 `.folio/annotations.json`；标签库为项目下的 `.folio/metadata.sqlite3`（默认空间在 `~/.Folio/.folio/`，独立文件在应用数据目录 `loose-metadata.sqlite3`），Markdown 链接与画布反链索引（`markdown_links` / `canvas_links`）也在该库；项目知识库索引在 `.folio/rag.sqlite3`，OCR 产物在 `.folio/pdf-cache/<sha256>/`，派生清单在 `.folio/derived-pdfs.json` 与 `.folio/derived-markdowns.json`；粘贴图片保存在文档目录 `images/<文档名>/`；文档源文件与编译 PDF 均留在项目本地目录，不改动用户文件结构。
 - **隐私**：划词翻译会把选中文本发送给 Google（或其百度回退）服务；AI 助手会把输入、附件与选区发送到所配置的网关及启用的联网搜索服务，Exa/千帆凭证只经私有环境变量传给宿主。知识库的扫描 PDF 精确解析会在显式触发后把文档内容发送到配置的 PaddleOCR 服务；本地向量模型路径由用户配置，按需启动。启用前请确认这符合你对相关内容的处理要求。
-- **参考文档**：Markdown 写作提示见 [FOLIO_MARKDOWN.md](FOLIO_MARKDOWN.md)，数学公式支持范围见 [LATEX_SUPPORT_BOUNDARIES.md](LATEX_SUPPORT_BOUNDARIES.md) 与 [LATEX_EXTENSION_GUIDE.md](LATEX_EXTENSION_GUIDE.md)。开发从 [ARCHITECTURE.md](ARCHITECTURE.md) 开始，仓库协作约定见 [AGENTS.md](AGENTS.md)。
+- **参考文档**：Markdown 写作提示见 [FOLIO_MARKDOWN.md](FOLIO_MARKDOWN.md)，数学公式支持范围见 [LATEX_SUPPORT_BOUNDARIES.md](LATEX_SUPPORT_BOUNDARIES.md) 与 [LATEX_EXTENSION_GUIDE.md](LATEX_EXTENSION_GUIDE.md)。开发从 [ARCHITECTURE.md](ARCHITECTURE.md) 开始，前端布局与动效经验见 [FrontExperience.md](FrontExperience.md)，仓库协作约定见 [AGENTS.md](AGENTS.md)。
 
