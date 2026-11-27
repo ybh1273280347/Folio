@@ -239,7 +239,7 @@ struct ChatPane {
     active_file: Option<AttachedFile>,
     attach_active_file: bool,
     quote_popover: Option<AnswerQuotePopover>,
-    quote_drag: Option<(usize, usize, Point<Pixels>)>,
+    quote_drag: Option<Point<Pixels>>,
     quote_bounds: Rc<Cell<Bounds<Pixels>>>,
     pasted_images: Vec<PastedImage>,
     overlay: Option<(Arc<gpui::Image>, Option<FocusHandle>)>,
@@ -1275,6 +1275,38 @@ impl Render for ChatPane {
                     pane.dismiss_quote(cx);
                 }
             }))
+            .capture_any_mouse_up(cx.listener(|pane, event: &MouseUpEvent, window, cx| {
+                if event.button != MouseButton::Left {
+                    return;
+                }
+                let Some(anchor) = pane.quote_drag.take() else { return };
+                let position = point(
+                    anchor.x.min(event.position.x),
+                    anchor.y.min(event.position.y),
+                );
+                let view = cx.entity().downgrade();
+                // A selection can end in a different block or over a child control.
+                // Capture the release here, then read the window selection after dispatch.
+                window.defer(cx, move |window, cx| {
+                    let text = TextSelection::selected_text(window, cx);
+                    let text = text.trim();
+                    if text.is_empty() {
+                        return;
+                    }
+                    let _ = view.update(cx, |pane, cx| {
+                        pane.stick_to_bottom = false;
+                        pane.quote_popover = Some(AnswerQuotePopover {
+                            quote: SelectionQuote {
+                                source: crate::i18n::ai::AI_ANSWER_SOURCE.get().into(),
+                                text: text.to_owned(),
+                            },
+                            position,
+                            scroll_offset: pane.scroll.offset(),
+                        });
+                        cx.notify();
+                    });
+                });
+            }))
             .text_color(gpui_kit::rgb(palette.text))
             .font_family(ui_font.clone())
             .text_size(typo.body)
@@ -1836,7 +1868,12 @@ impl Render for ChatPane {
                 let view = quote_view.clone();
                 window.on_mouse_event(move |event: &ScrollEvent, phase, _, cx| {
                     if phase.capture() && bounds.contains(&event.position) {
-                        let _ = view.update(cx, |pane, cx| pane.dismiss_quote(cx));
+                        let _ = view.update(cx, |pane, cx| {
+                            // Scrolling moves the visible popover, but an active selection can continue.
+                            if pane.quote_popover.take().is_some() {
+                                cx.notify();
+                            }
+                        });
                     }
                 });
             })

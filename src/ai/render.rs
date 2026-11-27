@@ -421,50 +421,13 @@ impl ChatPane {
             .id(SharedString::from(format!(
                 "ai-quote-source-{msg_idx}-{part_idx}"
             )))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |pane, event: &MouseDownEvent, _, _| {
+            .capture_any_mouse_down(cx.listener(|pane, event: &MouseDownEvent, _, _| {
+                if event.button == MouseButton::Left {
                     // Streaming must not scroll the paragraph away while a selection is being made.
                     pane.stick_to_bottom = false;
-                    pane.quote_drag = Some((msg_idx, part_idx, event.position));
-                }),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(move |pane, event: &MouseUpEvent, window, cx| {
-                    let Some((start_msg, start_part, anchor)) = pane.quote_drag.take() else {
-                        return;
-                    };
-                    if (start_msg, start_part) != (msg_idx, part_idx) {
-                        return;
-                    }
-                    let position = point(
-                        anchor.x.min(event.position.x),
-                        anchor.y.min(event.position.y),
-                    );
-                    let view = cx.entity().downgrade();
-                    // Read after the window's selection layer has completed the mouse-up gesture.
-                    window.defer(cx, move |window, cx| {
-                        let text = TextSelection::selected_text(window, cx);
-                        let text = text.trim();
-                        if text.is_empty() {
-                            return;
-                        }
-                        let _ = view.update(cx, |pane, cx| {
-                            pane.stick_to_bottom = false;
-                            pane.quote_popover = Some(AnswerQuotePopover {
-                                quote: SelectionQuote {
-                                    source: crate::i18n::ai::AI_ANSWER_SOURCE.get().into(),
-                                    text: text.to_owned(),
-                                },
-                                position,
-                                scroll_offset: pane.scroll.offset(),
-                            });
-                            cx.notify();
-                        });
-                    });
-                }),
-            )
+                    pane.quote_drag = Some(event.position);
+                }
+            }))
             .font_family(ui_font.clone())
             .text_size(typo.body)
             .line_height(relative(1.6))
