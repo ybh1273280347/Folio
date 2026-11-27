@@ -4,7 +4,7 @@ mod menu;
 mod surface;
 
 pub use input::{SearchField, TextAreaField, TextField};
-pub use menu::{FolioContextMenuExt, FolioDropdownMenuExt, FolioMenuItem};
+pub use menu::{FolioContextMenuExt, FolioDropdownMenuExt, FolioMenu, FolioMenuItem};
 pub use surface::{popover_card, scrollbar_vertical, tooltip};
 
 use crate::theme::color as rgb;
