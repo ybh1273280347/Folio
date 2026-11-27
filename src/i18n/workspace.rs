@@ -514,3 +514,9 @@ pub fn report_relocated_markdown_links_conflict(path: &str) -> String {
         Locale::En => format!("File was modified externally; links not updated: {path}"),
     }
 }
+
+pub const TOOLTIP_BACKLINKS_ALL: BiText = BiText::new(
+    "查看引用此文件的文档与画布",
+    "Documents and canvases referencing this file",
+);
+pub const MARKDOWN_BACKLINKS_MENU_HEADER: BiText = BiText::new("文档反向引用", "Document Backlinks");

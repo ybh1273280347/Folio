@@ -28,6 +28,7 @@ impl Workspace {
         {
             self.report(error, cx);
         }
+        self.refresh_active_markdown_backlinks();
     }
 
     pub(in crate::workspace) fn sync_project_markdown_links(&mut self, cx: &mut Context<Self>) {
@@ -48,6 +49,7 @@ impl Workspace {
         if let Err(error) = md_links::sync_project_markdown_links(&db_path, &root, &md_paths) {
             self.report(error, cx);
         }
+        self.refresh_active_markdown_backlinks();
     }
 
     pub(in crate::workspace) fn remove_markdown_links_index(
@@ -63,6 +65,76 @@ impl Workspace {
         {
             self.report(error, cx);
         }
+        self.refresh_active_markdown_backlinks();
+    }
+
+    pub(in crate::workspace) fn refresh_active_backlinks(&mut self) {
+        self.refresh_active_canvas_backlinks();
+        self.refresh_active_markdown_backlinks();
+    }
+
+    pub(in crate::workspace) fn refresh_active_markdown_backlinks(&mut self) {
+        if self.documents.active.is_empty() {
+            self.documents.active_markdown_backlinks.clear();
+            return;
+        }
+        let Some(db_path) = self.canvas_metadata_db_path() else {
+            self.documents.active_markdown_backlinks.clear();
+            return;
+        };
+        let entries = md_links::backlinks_for(&db_path, &self.documents.active);
+        let mut live = Vec::with_capacity(entries.len());
+        let mut stale = BTreeSet::new();
+        for link in entries {
+            if self.document_path(&link.source_path).is_file() {
+                live.push(link);
+            } else {
+                stale.insert(link.source_path);
+            }
+        }
+        for path in stale {
+            let _ = md_links::remove_markdown_links(&db_path, &path);
+        }
+        self.documents.active_markdown_backlinks = live;
+    }
+
+    pub(in crate::workspace) fn open_markdown_backlink(
+        &mut self,
+        backlink: &md_links::MarkdownBacklink,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let full = self.document_path(&backlink.source_path);
+        if !full.is_file() {
+            self.remove_markdown_links_index(&backlink.source_path, cx);
+            self.report(crate::i18n::workspace::err_file_not_found(&full), cx);
+            return;
+        }
+        let file = ProjectFile {
+            kind: Self::file_kind(&full),
+            path: backlink.source_path.clone(),
+        };
+        let use_split = self.settings.internal_link_open_target == InternalLinkOpenTarget::SplitPane
+            && Self::supports_split_pane(&file.path);
+        let pane_key = if use_split {
+            self.open_reading_pane(&file, window, cx);
+            PaneKey::reading(&file.path)
+        } else {
+            if let Err(error) = self.open_file(&file, window, cx) {
+                self.report(error, cx);
+                return;
+            }
+            PaneKey::tab(&file.path)
+        };
+        if let Some(md) = self.documents.markdown_panes.get(&pane_key).cloned() {
+            let line = backlink.line;
+            let snippet = (!backlink.label.trim().is_empty()).then_some(backlink.label.clone());
+            md.update(cx, |pane, cx| {
+                pane.jump_to_search_hit(Some(line), None, snippet.as_deref(), window, cx);
+            });
+        }
+        self.refresh_active_backlinks();
+        cx.notify();
     }
 
     /// Automatically refactors project-internal Markdown links and image paths after an
@@ -198,6 +270,7 @@ impl Workspace {
                 cx,
             );
         }
+        self.refresh_active_markdown_backlinks();
     }
 
     fn open_internal_link_file(

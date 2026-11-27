@@ -84,6 +84,7 @@ pub(super) struct Documents {
     markdown_changed: BTreeSet<String>,
     canvas_changed: BTreeSet<String>,
     active_canvas_backlinks: Vec<crate::canvas::CanvasBacklink>,
+    active_markdown_backlinks: Vec<crate::markdown::links::MarkdownBacklink>,
     pending_canvas_insert: Option<PendingCanvasInsert>,
     source_version: u64,
     document_watch: DocumentWatch,
@@ -570,6 +571,9 @@ impl Workspace {
         if Self::is_canvas_path(path) {
             self.refresh_active_canvas_backlinks();
         }
+        if Self::is_markdown_path(path) {
+            self.refresh_active_markdown_backlinks();
+        }
     }
 
     pub(super) fn invalidate_document_tree(&mut self) {
@@ -784,7 +788,7 @@ impl Workspace {
             self.documents.tabs.push(file.path.clone());
         }
         self.documents.active = file.path.clone();
-        self.refresh_active_canvas_backlinks();
+        self.refresh_active_backlinks();
         if focus_editor {
             if let Some(pane) = self.documents.markdown_panes.get(&tab) {
                 pane.update(cx, |pane, cx| pane.focus(window, cx));
@@ -1366,7 +1370,7 @@ impl Workspace {
 
     pub(super) fn select_tab_from_tree(&mut self, path: &str, focus_editor: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.documents.active = path.to_owned();
-        self.refresh_active_canvas_backlinks();
+        self.refresh_active_backlinks();
         if focus_editor {
             self.focus_document_tab(path, window, cx);
         } else {
@@ -1385,7 +1389,7 @@ impl Workspace {
         self.trash.dismiss();
         self.documents.focused_markdown = None;
         self.documents.active = path.to_owned();
-        self.refresh_active_canvas_backlinks();
+        self.refresh_active_backlinks();
         self.focus_document_tab(path, window, cx);
         if let Err(error) = self.remember_session() {
             self.report(error, cx);
@@ -1445,7 +1449,7 @@ impl Workspace {
                     .update(cx, |editor, cx| editor.focus(window, cx));
             }
         }
-        self.refresh_active_canvas_backlinks();
+        self.refresh_active_backlinks();
         if let Err(error) = self.remember_session() {
             self.report(error, cx);
         }
