@@ -629,6 +629,68 @@ fn leaf_point(
 }
 
 #[gpui::test]
+fn fold_motion_reverses_without_jumping_or_placing_the_caret_in_the_body(cx: &mut TestAppContext) {
+    let input = "> [!NOTE]+ Title\n> First paragraph\n>\n> Second paragraph\n\nFollowing block";
+    let (editor, cx) = open(cx, input);
+    let duration = crate::state::FoldMotion::DURATION;
+    let fold = editor.read_with(cx, |e, _| e.model.doc.children(e.model.doc.root)[0]);
+    let body = leaf_point(&editor, cx, 1, 5);
+    let open_y = leaf_point(&editor, cx, 3, 0).y;
+    caret_at(&editor, cx, 1, 5);
+
+    editor.update(cx, |e, cx| e.toggle_fold(fold, cx));
+    draw(cx);
+    assert_eq!(caret_leaf(&editor, cx), Some(0));
+    assert!((leaf_point(&editor, cx, 3, 0).y - open_y).abs() <= px(1.));
+
+    cx.executor().advance_clock(duration / 2);
+    draw(cx);
+    let half_closed_y = leaf_point(&editor, cx, 3, 0).y;
+    assert!(half_closed_y < open_y);
+    cx.simulate_mouse_down(body, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(body, MouseButton::Left, Modifiers::none());
+    assert_eq!(caret_leaf(&editor, cx), Some(0));
+
+    editor.update(cx, |e, cx| e.toggle_fold(fold, cx));
+    draw(cx);
+    assert!((leaf_point(&editor, cx, 3, 0).y - half_closed_y).abs() <= px(1.));
+
+    cx.executor().advance_clock(duration);
+    draw(cx);
+    assert!((leaf_point(&editor, cx, 3, 0).y - open_y).abs() <= px(1.));
+    cx.simulate_mouse_down(body, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(body, MouseButton::Left, Modifiers::none());
+    assert_eq!(caret_leaf(&editor, cx), Some(1));
+    assert_eq!(source(&editor, cx), input);
+}
+
+#[gpui::test]
+fn details_fold_animates_its_first_open_and_switches_instantly_with_reduced_motion(cx: &mut TestAppContext) {
+    let input = "<details>\n<summary>Title</summary>\n\nBody paragraph\n\n</details>\n\nFollowing block";
+    let (editor, cx) = open(cx, input);
+    let duration = crate::state::FoldMotion::DURATION;
+    let fold = editor.read_with(cx, |e, _| e.model.doc.children(e.model.doc.root)[0]);
+    let closed_y = leaf_point(&editor, cx, 2, 0).y;
+
+    editor.update(cx, |e, cx| e.toggle_fold(fold, cx));
+    draw(cx);
+    assert!((leaf_point(&editor, cx, 2, 0).y - closed_y).abs() <= px(1.));
+    cx.executor().advance_clock(duration / 2);
+    draw(cx);
+    let half_open_y = leaf_point(&editor, cx, 2, 0).y;
+    assert!(half_open_y > closed_y);
+
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    draw(cx);
+    let open_y = leaf_point(&editor, cx, 2, 0).y;
+    assert!(open_y > half_open_y);
+    editor.update(cx, |e, cx| e.toggle_fold(fold, cx));
+    draw(cx);
+    assert!((leaf_point(&editor, cx, 2, 0).y - closed_y).abs() <= px(1.));
+    assert_eq!(source(&editor, cx), input);
+}
+
+#[gpui::test]
 fn table_cells_click_type_tab_and_cell_selection(cx: &mut TestAppContext) {
     // Leaves: a, x, y, 1, 2, b.
     let (editor, cx) = open(cx, TABLE_DOC);

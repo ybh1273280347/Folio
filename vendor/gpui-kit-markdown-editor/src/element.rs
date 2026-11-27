@@ -17,7 +17,7 @@ use gpui::{
     Element, ElementId, ElementInputHandler, Entity, FontWeight, GlobalElementId, Hitbox,
     HitboxBehavior, Hsla, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Overflow, ParentElement, Pixels,
-    Refineable, RenderOnce, Role, SharedString, StatefulInteractiveElement, Style, StyleRefinement,
+    Refineable, Rems, RenderOnce, Role, SharedString, StatefulInteractiveElement, Style, StyleRefinement,
     Styled, TextStyle, Window, anchored, canvas, deferred, div, fill, point, px, size,
 };
 
@@ -43,7 +43,13 @@ use gpui_kit::{
 };
 
 type AtomBounds = Arc<Mutex<HashMap<BlockId, Bounds<Pixels>>>>;
+type FoldProgress = HashMap<BlockId, Option<f32>>;
 const DRAG_SOURCE_OPACITY: f32 = 0.35;
+
+struct LiveSurfaces<'a> {
+    code_previews: &'a BoundsMap,
+    folds: &'a FoldProgress,
+}
 
 fn noop_surface() -> BlockNode {
     BlockNode::Surface {
@@ -95,12 +101,11 @@ fn with_live_surfaces(
     id: BlockId,
     state: &BlockEditorState,
     editor: &Entity<BlockEditorState>,
-    include_atoms: bool,
-    force_preview: bool,
-    preview_bounds: Option<&BoundsMap>,
+    live: Option<&LiveSurfaces<'_>>,
 ) -> BlockNode {
     let doc = &state.model.doc;
-    if include_atoms
+    let force_preview = live.is_none();
+    if live.is_some()
         && matches!(
             doc.get(id).map(|entry| &entry.content),
             Some(super::document::BlockContent::Atom(_))
@@ -129,7 +134,7 @@ fn with_live_surfaces(
                         doc.block_revision(id),
                         code.clone(),
                         registration.renderer,
-                        preview_bounds.cloned(),
+                        live.map(|live| live.code_previews.clone()),
                         !force_preview,
                     ),
                     state: BlockState::default(),
@@ -177,9 +182,7 @@ fn with_live_surfaces(
                     title_id,
                     state,
                     editor,
-                    include_atoms,
-                    force_preview,
-                    preview_bounds,
+                    live,
                 ));
                 let title_surface = BlockNode::Surface {
                     name: format!("editor-fold-title-{}", id.as_u64()).into(),
@@ -192,7 +195,8 @@ fn with_live_surfaces(
                     span: None,
                 };
                 let mut fold_children = vec![header_surface];
-                if force_preview || state.is_fold_open(id) {
+                let moving = live.is_some_and(|live| live.folds.get(&id).is_some_and(Option::is_some));
+                if force_preview || state.is_fold_open(id) || moving {
                     let body_children: Vec<_> = children[1..]
                         .iter()
                         .zip(&doc_children[1..])
@@ -202,16 +206,18 @@ fn with_live_surfaces(
                                 *child_id,
                                 state,
                                 editor,
-                                include_atoms,
-                                force_preview,
-                                preview_bounds,
+                                live,
                             )
                         })
                         .collect();
                     if !force_preview && !body_children.is_empty() {
                         fold_children.push(BlockNode::Surface {
                             name: format!("editor-fold-body-{}", id.as_u64()).into(),
-                            children: body_children,
+                            children: vec![BlockNode::Surface {
+                                name: "editor-fold-natural-body".into(),
+                                children: body_children,
+                                span: None,
+                            }],
                             span: None,
                         });
                     } else {
@@ -239,9 +245,7 @@ fn with_live_surfaces(
                     *id,
                     state,
                     editor,
-                    include_atoms,
-                    force_preview,
-                    preview_bounds,
+                    live,
                 );
             }
         }
@@ -253,15 +257,20 @@ fn with_live_surfaces(
 fn register_fold_surfaces(
     extensions: &mut MarkdownExtensions,
     state: &BlockEditorState,
-    fold_bounds: Option<&AtomBounds>,
+    live: Option<(&AtomBounds, &AtomBounds, &FoldProgress)>,
     theme: &gpui_kit::base::Theme,
+    paragraph_gap: Rems,
 ) {
     let accent = theme.tokens.colors.primary;
     let border = theme.tokens.colors.border;
     let muted = theme.tokens.colors.muted;
     let is_dark = theme.tokens.colors.background.l < 0.5;
 
-    let interactive = fold_bounds.is_some();
+    let interactive = live.is_some();
+    if interactive {
+        *extensions = std::mem::take(extensions)
+            .block_surface("editor-fold-natural-body", |_, _| div().w_full().flex_shrink_0());
+    }
 
     for (&id, entry) in &state.model.doc.blocks {
         let super::kind::BlockKindData::Fold { syntax, .. } = &entry.kind else {
@@ -269,17 +278,23 @@ fn register_fold_surfaces(
         };
         let open = state.is_fold_open(id);
         let has_body = state.model.doc.children(id).len() > 1;
-        let fold_bounds = fold_bounds.cloned();
-        let opened_at = interactive
-            .then(|| state.fold_open_at.get(&id).copied())
-            .flatten();
+        let fold_bounds = live.map(|(buttons, _, _)| buttons.clone());
+        let progress = live.and_then(|(_, _, folds)| folds.get(&id).copied().flatten());
+        let body_fraction = progress.unwrap_or(if open { 1.0 } else { 0.0 });
+        // The renderer adds a paragraph gap after a header with a body, except
+        // in list items. Account for it before removing the body on the last frame.
+        let gap_adjustment = progress.filter(|_| {
+            !state.model.doc.path(id).into_iter().any(|ancestor| {
+                matches!(state.model.doc.kind(ancestor), Some(BlockKindData::ListItem { .. }))
+            })
+        }).map(|progress| paragraph_gap * (progress - 1.0));
 
         let fold_chevron = move |color: Hsla, window: &mut Window, cx: &mut App| {
             let progress = if interactive {
                 gpui_kit::base::transition_with_status(
                     ElementId::from(("editor-fold-chevron", id.as_u64() as usize)),
                     if open { 1.0_f32 } else { 0.0_f32 },
-                    gpui_kit::base::Transition::new(std::time::Duration::from_millis(160))
+                    gpui_kit::base::Transition::new(FoldMotion::DURATION)
                         .ease(gpui_kit::base::animation::ease_out_cubic),
                     window,
                     cx,
@@ -297,28 +312,44 @@ fn register_fold_surfaces(
                 .rotate(gpui::radians(progress * std::f32::consts::FRAC_PI_2))
         };
 
-        if interactive && open && has_body {
+        if let Some((_, body_bounds, _)) = live
+            && (open || progress.is_some()) && has_body
+        {
+            let heights = state.fold_body_heights.clone();
+            let body_bounds = body_bounds.clone();
             *extensions = std::mem::take(extensions).block_surface(
                 format!("editor-fold-body-{}", id.as_u64()),
-                move |window, cx| {
-                    let Some(started) = opened_at else {
-                        return div().w_full();
-                    };
-                    if cx.reduce_motion() {
-                        return div().w_full();
-                    }
-                    let raw = (started.elapsed().as_secs_f32() / 0.16).clamp(0.0, 1.0);
-                    if raw < 1.0 {
-                        window.request_animation_frame();
-                        let t = gpui_kit::base::animation::ease_out_cubic(raw);
-                        div()
-                            .relative()
-                            .w_full()
-                            .top(px(4.0 * (1.0 - t)))
-                            .opacity(0.25 + 0.75 * t)
-                    } else {
-                        div().w_full()
-                    }
+                move |_, _| {
+                    let height = progress.map(|progress| {
+                        let heights = heights.lock().expect("fold body heights");
+                        heights.get(&id).copied().unwrap_or(Pixels::ZERO) * progress
+                    });
+                    let heights = heights.clone();
+                    let body_bounds = body_bounds.clone();
+                    // The inner surface keeps its natural layout even at a zero-height clip.
+                    // Measuring it also picks up rewraps and changes to nested folds.
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .when_some(height, |body, height| {
+                            body.h(height).overflow_hidden().opacity(0.25 + 0.75 * body_fraction)
+                        })
+                        .on_children_prepainted(move |children, window, _| {
+                            let natural = children[0];
+                            heights.lock().expect("fold body heights").insert(id, natural.size.height);
+                            if let Some(height) = height {
+                                let mut bounds = natural;
+                                bounds.size.height = height;
+                                let bounds = bounds.intersect(&window.content_mask().bounds);
+                                body_bounds.lock().expect("moving fold bounds").insert(id, bounds);
+                                // Insert after the children so their native handlers cannot
+                                // receive clicks through the viewport. Keep document scrolling.
+                                if bounds.size.height > Pixels::ZERO {
+                                    window.insert_hitbox(bounds, HitboxBehavior::BlockMouseExceptScroll);
+                                }
+                            }
+                        })
                 },
             );
         }
@@ -379,10 +410,14 @@ fn register_fold_surfaces(
                             .flex_row()
                             .items_start()
                             .gap(px(8.))
-                            .when(open && has_body, |this| {
-                                this.pb(px(8.))
-                                    .border_b_1()
-                                    .border_color(border.opacity(0.55))
+                            .when_some(gap_adjustment, |header, margin| header.mb(margin))
+                            .when(body_fraction > 0.0 && has_body, |this| {
+                                this.pb(px(8. * body_fraction))
+                                    .map(|mut header| {
+                                        header.style().border_widths.bottom = Some(px(body_fraction).into());
+                                        header
+                                    })
+                                    .border_color(border.opacity(0.55 * body_fraction))
                             })
                             .child(toggle)
                     })
@@ -409,6 +444,7 @@ fn register_fold_surfaces(
                             .flex_row()
                             .items_center()
                             .gap(px(6.))
+                            .when_some(gap_adjustment, |header, margin| header.mb(margin))
                             .rounded(px(4.))
                             .px(px(4.))
                             .ml(px(-4.))
@@ -434,7 +470,7 @@ fn register_fold_surfaces(
                             .flex_row()
                             .items_center()
                             .gap(px(6.))
-                            .when(open && has_body, |this| this.pb(px(6.)))
+                            .when(has_body, |this| this.pb(px(6. * body_fraction)))
                             .child(trigger)
                     })
                     .block_surface(format!("editor-fold-title-{}", id.as_u64()), move |_, _| {
@@ -560,8 +596,9 @@ impl BlockEditor {
         });
         let theme = gpui_kit::base::Theme::global(cx);
         let editor_state = state.read(cx);
-        register_fold_surfaces(&mut extensions, editor_state, None, &theme);
-        let context = editor_state.render_context(cx)
+        let context = editor_state.render_context(cx);
+        register_fold_surfaces(&mut extensions, editor_state, None, &theme, context.style().paragraph_gap());
+        let context = context
             .with_markdown_extensions(Arc::new(extensions))
             .with_body_font_size(window.text_style().font_size.to_pixels(window.rem_size()));
         let nodes: Vec<BlockNode> = snapshot
@@ -576,8 +613,6 @@ impl BlockEditor {
                         block.id,
                         editor_state,
                         state,
-                        false,
-                        true,
                         None,
                     ))
             })
@@ -735,9 +770,20 @@ impl RenderOnce for BlockEditor {
                         .is_some_and(|caret| handle.bounds().contains(&caret.center()))
                 })
         };
-        let (focus, snapshot, backgrounds, extensions, keep, list_items) =
+        let now = cx.background_executor().now();
+        let reduce_motion = cx.reduce_motion();
+        let (focus, snapshot, backgrounds, extensions, keep, list_items, folds) =
             self.state.update(cx, |state, _| {
                 let snapshot = state.snapshot();
+                let folds: FoldProgress = state.fold_motion.iter().map(|(&id, motion)| {
+                    let progress = if reduce_motion {
+                        None
+                    } else {
+                        motion.progress(state.is_fold_open(id), now)
+                    };
+                    (id, progress)
+                }).collect();
+                state.fold_motion.retain(|id, _| folds[id].is_some());
                 let mut backgrounds = snapshot.code_highlights.clone();
                 if let Some((block, _)) = &state.heading_highlight
                     && let Some(len) = state.model.doc.leaf_len(*block)
@@ -777,8 +823,12 @@ impl RenderOnce for BlockEditor {
                             .map(|id| (*id, Rc::<[BlockId]>::from(doc.children(*id))))
                             .collect::<HashMap<_, _>>()
                     }),
+                    folds,
                 )
             });
+        if folds.values().any(Option::is_some) {
+            window.request_animation_frame();
+        }
 
         // Match the native root's effective inherited/instance typography
         // before deriving body-relative node metrics and culling geometry.
@@ -786,6 +836,7 @@ impl RenderOnce for BlockEditor {
         typography.refine(&self.style.text);
         let atom_bounds: AtomBounds = Arc::default();
         let fold_bounds: AtomBounds = Arc::default();
+        let fold_body_bounds: AtomBounds = Arc::default();
         let table_viewports: AtomBounds = Arc::default();
         let html_tables: super::html_table::Layouts = Arc::default();
         let code_preview_bounds: BoundsMap = Arc::default();
@@ -810,7 +861,10 @@ impl RenderOnce for BlockEditor {
                 )
             });
         }
-        register_fold_surfaces(&mut extensions, self.state.read(cx), Some(&fold_bounds), &theme);
+        register_fold_surfaces(
+            &mut extensions, state, Some((&fold_bounds, &fold_body_bounds, &folds)), &theme, text_style.paragraph_gap(),
+        );
+        let live = LiveSurfaces { code_previews: &code_preview_bounds, folds: &folds };
         // The outer surface paints the shared header and code background.
         let code_body_style = text_style.code_block().clone()
             .bg(gpui::transparent_black())
@@ -912,6 +966,14 @@ impl RenderOnce for BlockEditor {
                 .collect();
             wanted.extend(first..last);
             let state = self.state.read(cx);
+            // Keep moving units and their final layout measurable even after scrolling
+            // away. The last measured unit otherwise keeps the larger cached height.
+            for &fold in folds.keys() {
+                if let Some(&ix) = state.model.doc.path(fold).iter().find_map(|id| index.unit_of.get(id)) {
+                    cull_state.heights.remove(&units[ix].id);
+                    wanted.push(ix);
+                }
+            }
             if let Some(target) = state.navigation_jump.get()
                 && let Some(&ix) = state.model.doc.path(target).iter().find_map(|id| index.unit_of.get(id))
             {
@@ -947,9 +1009,7 @@ impl RenderOnce for BlockEditor {
                         unit.id,
                         self.state.read(cx),
                         &self.state,
-                        true,
-                        false,
-                        Some(&code_preview_bounds),
+                        Some(&live),
                     )
                 } else {
                     node.clone()
@@ -972,9 +1032,7 @@ impl RenderOnce for BlockEditor {
                                     *id,
                                     self.state.read(cx),
                                     &self.state,
-                                    true,
-                                    false,
-                                    Some(&code_preview_bounds),
+                                    Some(&live),
                                 ))
                                 .collect(),
                             ordered: *ordered,
@@ -1256,6 +1314,7 @@ impl RenderOnce for BlockEditor {
                 content_bounds,
                 atom_bounds,
                 fold_bounds,
+                fold_body_bounds,
                 table_viewports,
                 html_tables,
                 code_preview_bounds,
@@ -1341,6 +1400,7 @@ struct EditorRoot {
     backgrounds: Option<LeafBackgrounds>,
     atom_bounds: AtomBounds,
     fold_bounds: AtomBounds,
+    fold_body_bounds: AtomBounds,
     table_viewports: AtomBounds,
     html_tables: super::html_table::Layouts,
     code_preview_bounds: BoundsMap,
@@ -1598,8 +1658,34 @@ impl Element for EditorRoot {
         let mut mark_rects = Vec::new();
         if let Some(backgrounds) = self.backgrounds.take() {
             clear_inline_atom_bounds();
-            let (_, geometries) = collect_leaf_geometry(backgrounds, || child.prepaint(window, cx));
+            let (_, mut geometries) = collect_leaf_geometry(backgrounds, || child.prepaint(window, cx));
             let inline_atoms = take_inline_atom_bounds();
+            {
+                let moving_bodies = self.fold_body_bounds.lock().expect("moving fold bounds");
+                if !moving_bodies.is_empty() {
+                    let doc = &self.state.read(cx).model.doc;
+                    let in_moving_body = |mut child| {
+                        while let Some(parent) = doc.parent(child) {
+                            if moving_bodies.contains_key(&parent) && doc.children(parent)[0] != child {
+                                return true;
+                            }
+                            child = parent;
+                        }
+                        false
+                    };
+                    // Editor geometry bypasses GPUI hitboxes. A moving body is paint-only
+                    // until it settles, including nested controls and out-of-clip leaves.
+                    geometries.retain(|key, _| {
+                        self.snapshot.leaf_indices.get(key)
+                            .is_some_and(|&index| !in_moving_body(self.snapshot.leaves[index].block))
+                    });
+                    self.atom_bounds.lock().expect("atom bounds").retain(|id, _| !in_moving_body(*id));
+                    self.fold_bounds.lock().expect("fold bounds").retain(|id, _| !in_moving_body(*id));
+                    self.code_preview_bounds.lock().expect("code preview bounds").retain(|id, _| !in_moving_body(*id));
+                    self.table_viewports.lock().expect("table viewports").retain(|id, _| !in_moving_body(*id));
+                    self.html_tables.lock().expect("HTML table geometry").retain(|id, _| !in_moving_body(*id));
+                }
+            }
             // Swap in the complete frame; handlers read it until the next one.
             let mut frame = super::frame::into_frame(
                 geometries,
@@ -1968,9 +2054,15 @@ impl Element for EditorRoot {
         let grip_hitbox = prepaint.grip_hitbox.clone();
         let image_handle = prepaint.image_handle.clone();
         let preview_bounds = self.code_preview_bounds.clone();
+        let moving_bodies = self.fold_body_bounds.clone();
         let entity = self.state.clone();
         window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
+                return;
+            }
+            if moving_bodies.lock().expect("moving fold bounds").values()
+                .any(|bounds| bounds.contains(&event.position))
+            {
                 return;
             }
             if image_handle.as_ref().is_some_and(|handle| handle.is_hovered(window))
@@ -2044,6 +2136,7 @@ impl Element for EditorRoot {
             });
         });
         let entity = self.state.clone();
+        let moving_bodies = self.fold_body_bounds.clone();
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
             // A host gutter sits above the editor. Continue its drag through capture
             // even when another element handles the pointer in the bubble phase.
@@ -2078,7 +2171,9 @@ impl Element for EditorRoot {
                 if state.move_image_resize(event.position, cx) || state.is_block_dragging() {
                     return;
                 }
-                if state.dragging {
+                if state.dragging && !moving_bodies.lock().expect("moving fold bounds").values()
+                    .any(|bounds| bounds.contains(&event.position))
+                {
                     state.mouse_at(event.position, true, cx);
                 }
             });
