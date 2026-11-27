@@ -2,6 +2,7 @@
 
 use super::input_rule::RuleKind;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use std::{borrow::Cow, cell::RefCell, ops::Range, rc::Rc};
 
 use gpui::{
@@ -393,6 +394,26 @@ struct Marked {
     range: Range<usize>,
 }
 
+/// View-only disclosure motion. Each toggle starts from the sampled height fraction.
+pub(crate) struct FoldMotion {
+    from: f32,
+    started_at: Instant,
+}
+
+impl FoldMotion {
+    pub(crate) const DURATION: Duration = Duration::from_millis(160);
+
+    /// `None` means layout should use the natural open or closed height.
+    pub(crate) fn progress(&self, open: bool, now: Instant) -> Option<f32> {
+        let t = now.saturating_duration_since(self.started_at).as_secs_f32()
+            / Self::DURATION.as_secs_f32();
+        (t < 1.0).then(|| {
+            let target = if open { 1.0 } else { 0.0 };
+            self.from + (target - self.from) * gpui_kit::base::animation::ease_in_out_cubic(t)
+        })
+    }
+}
+
 pub struct BlockEditorState {
     /// Hidden by [`ToggleToolbar`] / [`Self::set_toolbar_hidden`].
     pub(crate) toolbar_hidden: bool,
@@ -412,7 +433,9 @@ pub struct BlockEditorState {
     pub(crate) frame: Rc<RefCell<FrameLayout>>,
     pub(crate) cull: Rc<RefCell<super::cull::CullState>>,
     pub(crate) fold_open: std::collections::HashMap<BlockId, bool>,
-    pub(crate) fold_open_at: std::collections::HashMap<BlockId, std::time::Instant>,
+    pub(crate) fold_motion: std::collections::HashMap<BlockId, FoldMotion>,
+    /// Natural body heights, shared with the block surface's prepaint callback.
+    pub(crate) fold_body_heights: Arc<std::sync::Mutex<std::collections::HashMap<BlockId, Pixels>>>,
     pub(crate) content_folding: bool,
     /// The accessible value (document text), cached per revision (D8).
     pub(crate) a11y_value: RefCell<Option<(u64, SharedString)>>,
@@ -515,7 +538,8 @@ impl BlockEditorState {
             frame: Rc::default(),
             cull: Rc::default(),
             fold_open: Default::default(),
-            fold_open_at: Default::default(),
+            fold_motion: Default::default(),
+            fold_body_heights: Default::default(),
             content_folding: false,
             a11y_value: RefCell::default(),
             scroll_handle: Some(gpui::ScrollHandle::new()),
@@ -807,7 +831,8 @@ impl BlockEditorState {
         let _ = self.model.set_source(source);
         self.reset_code_preview_selection();
         self.fold_open.clear();
-        self.fold_open_at.clear();
+        self.fold_motion.clear();
+        self.fold_body_heights.lock().expect("fold body heights").clear();
         self.reveal_selection_folds();
         self.projection.invalidate();
         self
@@ -832,7 +857,8 @@ impl BlockEditorState {
         self.model.callout_names = callout_names;
         self.reset_code_preview_selection();
         self.fold_open.clear();
-        self.fold_open_at.clear();
+        self.fold_motion.clear();
+        self.fold_body_heights.lock().expect("fold body heights").clear();
         self.reveal_selection_folds();
         self.projection.invalidate();
         cx.notify();
@@ -845,7 +871,8 @@ impl BlockEditorState {
         self.image_resize = None;
         self.reset_code_preview_selection();
         self.fold_open.clear();
-        self.fold_open_at.clear();
+        self.fold_motion.clear();
+        self.fold_body_heights.lock().expect("fold body heights").clear();
         self.reveal_selection_folds();
         self.marked = None;
         self.composition_open = false;
@@ -869,7 +896,8 @@ impl BlockEditorState {
         self.image_resize = None;
         self.reset_code_preview_selection();
         self.fold_open.clear();
-        self.fold_open_at.clear();
+        self.fold_motion.clear();
+        self.fold_body_heights.lock().expect("fold body heights").clear();
         self.reveal_selection_folds();
         self.marked = None;
         self.composition_open = false;
@@ -1972,6 +2000,8 @@ impl BlockEditorState {
                 && !self.is_fold_open(fold)
             {
                 self.fold_open.insert(fold, true);
+                // Explicit navigation needs body geometry in the very next frame.
+                self.fold_motion.remove(&fold);
                 changed = true;
             }
         }
@@ -2014,12 +2044,16 @@ impl BlockEditorState {
                 self.reveal.set(false);
             }
         }
-        self.fold_open.insert(fold, !open);
-        if !open {
-            self.fold_open_at.insert(fold, std::time::Instant::now());
+        if !cx.reduce_motion() && self.model.doc.children(fold).len() > 1 {
+            let now = cx.background_executor().now();
+            let from = self.fold_motion.get(&fold)
+                .and_then(|motion| motion.progress(open, now))
+                .unwrap_or(if open { 1.0 } else { 0.0 });
+            self.fold_motion.insert(fold, FoldMotion { from, started_at: now });
         } else {
-            self.fold_open_at.remove(&fold);
+            self.fold_motion.remove(&fold);
         }
+        self.fold_open.insert(fold, !open);
         self.invalidate_fold_height(&self.model.doc.path(fold));
         cx.notify();
     }
@@ -2042,11 +2076,6 @@ impl BlockEditorState {
             self.table_menu = None;
         }
         self.fold_open.insert(block, !open);
-        if !open {
-            self.fold_open_at.insert(block, std::time::Instant::now());
-        } else {
-            self.fold_open_at.remove(&block);
-        }
         self.invalidate_fold_height(&self.model.doc.path(block));
         cx.notify();
     }
