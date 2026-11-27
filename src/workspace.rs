@@ -253,6 +253,7 @@ pub struct Workspace {
     focus: FocusHandle,
     close_requested: bool,
     dialogs: Dialogs,
+    svg_lightbox: Option<(Entity<crate::image::SvgLightbox>, Subscription)>,
     editor_zoom_hud: crate::ui::ZoomHud,
     _tick: Task<()>,
     _history_escape: Subscription,
@@ -293,6 +294,9 @@ impl Workspace {
                 app.right_panel.maximized = !app.right_panel.maximized;
                 cx.notify();
             }
+            AiPaneEvent::OpenMermaidLightbox { svg, image } => {
+                app.open_svg_lightbox(svg.clone(), image.clone(), window, cx);
+            }
         })
         .detach();
         cx.subscribe_in(&preferences, window, |app, _, event: &SettingsChanged, window, cx| {
@@ -331,6 +335,11 @@ impl Workspace {
                 let key = event.keystroke.key.as_str();
                 if matches!(key, "escape" | "up" | "down") {
                     let _ = this.update(cx, |app, cx| {
+                        if key == "escape" && app.svg_lightbox.is_some() {
+                            app.close_svg_lightbox(cx);
+                            cx.stop_propagation();
+                            return;
+                        }
                         if key == "escape" && app.is_project_menu_open() {
                             app.close_project_menu(cx);
                             cx.stop_propagation();
@@ -379,6 +388,7 @@ impl Workspace {
             focus: cx.focus_handle(),
             close_requested: false,
             dialogs: Dialogs::default(),
+            svg_lightbox: None,
             editor_zoom_hud: crate::ui::ZoomHud::default(),
             _tick: tick,
             _history_escape: history_escape,
@@ -712,7 +722,8 @@ impl Render for Workspace {
             || self.is_project_menu_open()
             || self.tags.is_editing()
             || self.tree.name_dialog_open()
-            || self.dialogs.blocks_workspace();
+            || self.dialogs.blocks_workspace()
+            || self.svg_lightbox.is_some();
         let right_panel_visible = self.right_panel.open;
         let maximized = right_panel_visible && self.right_panel.maximized;
         let has_active_drag = cx.has_active_drag();
@@ -1067,6 +1078,7 @@ impl Render for Workspace {
                 if app.show_preferences
                     || app.dialogs.blocks_workspace()
                     || app.tree.name_dialog_open()
+                    || app.svg_lightbox.is_some()
                 {
                     cx.propagate();
                     return;
@@ -1082,6 +1094,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::find_file))
             .on_action(cx.listener(|app, _: &Dismiss, _, cx| {
                 app.show_preferences = false;
+                app.close_svg_lightbox(cx);
                 app.close_project_menu(cx);
                 app.documents.clear_pending_canvas_insert();
                 app.tree.dismiss_overlays();
@@ -1759,6 +1772,33 @@ impl Render for Workspace {
         app.children(self.render_project_menu_popover(cx))
             .children(self.render_dialog(cx))
             .children(self.render_canvas_target_picker(cx))
+            .when_some(self.svg_lightbox.as_ref(), |app, (lightbox, _)| {
+                app.child(deferred(lightbox.clone()).with_priority(20))
+            })
+    }
+}
+
+impl Workspace {
+    pub(super) fn open_svg_lightbox(
+        &mut self,
+        svg: SharedString,
+        image: std::sync::Arc<RenderImage>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let lightbox = cx.new(|cx| crate::image::SvgLightbox::new(svg, Some(image), window, cx));
+        let subscription =
+            cx.subscribe(&lightbox, |app, _, _: &crate::image::LightboxClose, cx| {
+                app.close_svg_lightbox(cx);
+            });
+        self.svg_lightbox = Some((lightbox, subscription));
+        cx.notify();
+    }
+
+    fn close_svg_lightbox(&mut self, cx: &mut Context<Self>) {
+        if self.svg_lightbox.take().is_some() {
+            cx.notify();
+        }
     }
 }
 

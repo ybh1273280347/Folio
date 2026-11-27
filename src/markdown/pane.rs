@@ -6,7 +6,8 @@ use super::{
 };
 use crate::theme::color as rgb;
 use crate::math::{MathDisplaySize, MathReady, MathRenderer, formula_id};
-use crate::mermaid::{MermaidReady, MermaidRenderer};
+use std::sync::Arc;
+use crate::mermaid::{MermaidEvent, MermaidRenderer};
 use crate::annotations::{self, AnnotationItem, HIGHLIGHT_COLORS};
 use crate::model::AppSettings;
 use comrak::{Arena, Options, nodes::NodeValue, parse_document};
@@ -56,6 +57,10 @@ pub enum MarkdownEvent {
     },
     FilesChanged,
     UpdateTextColorPresets(Vec<String>),
+    OpenMermaidLightbox {
+        svg: SharedString,
+        image: Arc<RenderImage>,
+    },
 }
 
 enum PendingVisualJump {
@@ -632,7 +637,7 @@ impl MarkdownPane {
             }
         }).detach();
         let scroll = ScrollHandle::new();
-        let mermaid = cx.new(MermaidRenderer::new);
+        let mermaid = cx.new(|cx| MermaidRenderer::new(reading, cx));
         let extensions = markdown_extensions(&math, MathDisplaySize::Markdown, cx);
         let callout_styles: Vec<_> = CALLOUTS
             .iter()
@@ -1030,9 +1035,19 @@ impl MarkdownPane {
                 }
                 cx.notify();
             });
-        let mermaid_subscription = cx.subscribe(&mermaid, |pane, _, _: &MermaidReady, cx| {
-            pane.visual_editor.update(cx, |_, cx| cx.notify());
-            cx.notify();
+        let mermaid_subscription = cx.subscribe(&mermaid, |pane, _, event: &MermaidEvent, cx| {
+            match event {
+                MermaidEvent::Ready => {
+                    pane.visual_editor.update(cx, |_, cx| cx.notify());
+                    cx.notify();
+                }
+                MermaidEvent::OpenLightbox { svg, image } => {
+                    cx.emit(MarkdownEvent::OpenMermaidLightbox {
+                        svg: svg.clone(),
+                        image: Arc::clone(image),
+                    });
+                }
+            }
         });
         let annotations = annotations::load_annotations(&path);
         let char_count = crate::model::nonspace_char_count(&text);

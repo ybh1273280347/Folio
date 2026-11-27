@@ -699,6 +699,12 @@ impl AiPane {
             AiPaneEvent::OpenFile(path) => cx.emit(AiPaneEvent::OpenFile(path.clone())),
             AiPaneEvent::BackToHub => cx.emit(AiPaneEvent::BackToHub),
             AiPaneEvent::ToggleMaximize => cx.emit(AiPaneEvent::ToggleMaximize),
+            AiPaneEvent::OpenMermaidLightbox { svg, image } => {
+                cx.emit(AiPaneEvent::OpenMermaidLightbox {
+                    svg: svg.clone(),
+                    image: Arc::clone(image),
+                });
+            }
         });
         let observe = cx.observe(&view, |_, _, cx| cx.notify());
         self.sessions.insert(identity, SessionTab { view, state, _subscriptions: [subscription, observe] });

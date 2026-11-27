@@ -1203,6 +1203,9 @@ impl Workspace {
                         crate::model::sanitize_text_color_presets(presets.clone());
                     app.apply_settings(settings, window, cx);
                 }
+                MarkdownEvent::OpenMermaidLightbox { svg, image } => {
+                    app.open_svg_lightbox(svg.clone(), image.clone(), window, cx);
+                }
             }
             cx.notify();
         })

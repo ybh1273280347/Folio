@@ -1,39 +1,29 @@
 use std::{
-    cell::Cell,
     collections::HashMap,
     hash::{Hash, Hasher},
-    rc::Rc,
     sync::{Arc, LazyLock},
 };
 
 use gpui_kit::{
+    assets::IconName,
     base::text::{
         MarkdownNode, MarkdownParseContext, MarkdownPlugin,
         editor_host::{CodeBlock, Span},
     },
+    component::tooltip::Tooltip,
+    prelude::FluentBuilder,
     *,
 };
-use gpui_kit::prelude::FluentBuilder;
 use image::Frame;
 use markdown_editor::BlockId;
 use merman::svg::SvgPipeline;
-use merman::{
-    OperationControl,
-    RenderOutput,
-    RenderRequest,
-    Renderer,
-    SvgRequest,
-};
+use merman::{OperationControl, RenderOutput, RenderRequest, Renderer, SvgRequest};
 
 use crate::theme::Palette;
 
 const MAX_PREVIEW_HEIGHT: f32 = 360.0;
 const MIN_PREVIEW_HEIGHT: f32 = 48.0;
-const MIN_ZOOM: f32 = 1.0;
-const MAX_ZOOM: f32 = 6.0;
-const ZOOM_STEP: f32 = 1.25;
 const BASE_DENSITY: f32 = 2.0;
-const MAX_DENSITY: f32 = 4.0;
 
 #[derive(Clone, Copy, PartialEq)]
 struct Appearance {
@@ -46,7 +36,6 @@ struct Diagram {
     width: f32,
     height: f32,
     image: Arc<RenderImage>,
-    density: f32,
 }
 
 enum Status {
@@ -56,23 +45,11 @@ enum Status {
     Failed(String),
 }
 
-#[derive(Clone, Copy)]
-enum ZoomAction {
-    In,
-    Out,
-    Reset,
-}
-
 struct BlockState {
     revision: u64,
     appearance: Appearance,
     job: Option<u64>,
-    raster_job: Option<u64>,
     status: Status,
-    zoom: f32,
-    pan: Point<Pixels>,
-    drag: Option<(Point<Pixels>, Point<Pixels>)>,
-    viewport: Rc<Cell<Size<Pixels>>>,
 }
 
 impl BlockState {
@@ -84,50 +61,38 @@ impl BlockState {
                 font_scale: 1.0,
             },
             job: None,
-            raster_job: None,
             status: Status::Pending,
-            zoom: MIN_ZOOM,
-            pan: point(px(0.), px(0.)),
-            drag: None,
-            viewport: Rc::new(Cell::new(Size {
-                width: px(0.),
-                height: px(0.),
-            })),
         }
     }
 
     fn matches(&self, revision: u64, appearance: Appearance) -> bool {
         self.revision == revision && self.appearance == appearance
     }
-
-    fn natural_size(&self) -> Option<Size<Pixels>> {
-        let Status::Ready(diagram) = &self.status else {
-            return None;
-        };
-        Some(Size {
-            width: px(diagram.width * self.appearance.font_scale),
-            height: px(diagram.height * self.appearance.font_scale),
-        })
-    }
 }
 
-pub struct MermaidReady;
+pub enum MermaidEvent {
+    Ready,
+    OpenLightbox {
+        svg: SharedString,
+        image: Arc<RenderImage>,
+    },
+}
 
 pub struct MermaidRenderer {
+    single_click_open: bool,
     blocks: HashMap<u64, BlockState>,
     jobs: HashMap<u64, (u64, Task<()>)>,
-    raster_jobs: HashMap<u64, (u64, Task<()>)>,
     next_job: u64,
 }
 
-impl EventEmitter<MermaidReady> for MermaidRenderer {}
+impl EventEmitter<MermaidEvent> for MermaidRenderer {}
 
 impl MermaidRenderer {
-    pub fn new(_cx: &mut Context<Self>) -> Self {
+    pub fn new(single_click_open: bool, _cx: &mut Context<Self>) -> Self {
         Self {
+            single_click_open,
             blocks: HashMap::new(),
             jobs: HashMap::new(),
-            raster_jobs: HashMap::new(),
             next_job: 0,
         }
     }
@@ -160,8 +125,7 @@ impl MermaidRenderer {
     ) -> AnyElement {
         let appearance = appearance(window);
         let source = code.code().to_string();
-        let zoom = self.blocks.get(&id).map_or(MIN_ZOOM, |state| state.zoom);
-        let density = desired_density(window, zoom);
+        let density = (window.scale_factor() * BASE_DENSITY).max(BASE_DENSITY);
         let stale = self
             .blocks
             .get(&id)
@@ -170,23 +134,11 @@ impl MermaidRenderer {
             self.refresh(id, revision, appearance, density, &source, cx);
         }
 
-        let diagram = match self.blocks.get(&id).map(|state| &state.status) {
-            Some(Status::Ready(diagram)) => Some(Arc::clone(diagram)),
-            _ => None,
-        };
-        if let Some(diagram) = &diagram {
-            let wants_sharper =
-                (diagram.density - density).abs() > diagram.density * 0.2;
-            if wants_sharper && !self.raster_jobs.contains_key(&id) {
-                self.start_raster(id, revision, appearance, diagram.svg.clone(), density, cx);
-            }
-        }
-
         let state = self.blocks.get(&id).expect("Mermaid block state");
         match &state.status {
             Status::Ready(diagram) => {
                 let diagram = Arc::clone(diagram);
-                self.diagram_element(id, state, &diagram, appearance, interactive, cx)
+                self.diagram_element(id, &diagram, appearance, interactive, cx)
             }
             status => status_element(status, appearance.palette),
         }
@@ -196,11 +148,20 @@ impl MermaidRenderer {
         let retained: std::collections::HashSet<_> = ids.into_iter().map(BlockId::as_u64).collect();
         self.blocks.retain(|id, _| retained.contains(id));
         self.jobs.retain(|id, _| retained.contains(id));
-        self.raster_jobs.retain(|id, _| retained.contains(id));
     }
 
     pub fn is_idle(&self) -> bool {
-        self.jobs.is_empty() && self.raster_jobs.is_empty()
+        self.jobs.is_empty()
+    }
+
+    fn open_lightbox(&self, id: u64, cx: &mut Context<Self>) {
+        let Some(Status::Ready(diagram)) = self.blocks.get(&id).map(|state| &state.status) else {
+            return;
+        };
+        cx.emit(MermaidEvent::OpenLightbox {
+            svg: diagram.svg.clone(),
+            image: Arc::clone(&diagram.image),
+        });
     }
 
     fn refresh(
@@ -213,13 +174,11 @@ impl MermaidRenderer {
         cx: &mut Context<Self>,
     ) {
         self.jobs.remove(&id);
-        self.raster_jobs.remove(&id);
 
         let mut state = self.blocks.remove(&id).unwrap_or_else(BlockState::new);
         state.revision = revision;
         state.appearance = appearance;
         state.job = None;
-        state.raster_job = None;
 
         if source.trim().is_empty() {
             state.status = Status::Empty;
@@ -239,8 +198,7 @@ impl MermaidRenderer {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    render_diagram(&source, dark, density)
-                        .map_err(|error| error.to_string())
+                    render_diagram(&source, dark, density).map_err(|error| error.to_string())
                 })
                 .await;
             let _ = this.update(cx, |renderer, cx| {
@@ -275,156 +233,13 @@ impl MermaidRenderer {
         if self.jobs.get(&id).is_some_and(|(current, _)| *current == job) {
             self.jobs.remove(&id);
         }
-        cx.emit(MermaidReady);
+        cx.emit(MermaidEvent::Ready);
         cx.notify();
-    }
-
-    fn start_raster(
-        &mut self,
-        id: u64,
-        revision: u64,
-        appearance: Appearance,
-        svg: SharedString,
-        density: f32,
-        cx: &mut Context<Self>,
-    ) {
-        self.next_job = self.next_job.wrapping_add(1);
-        let job = self.next_job;
-        if let Some(state) = self.blocks.get_mut(&id) {
-            state.raster_job = Some(job);
-        }
-        let task = cx.spawn(async move |this, cx| {
-            let svg = svg;
-            let result = cx
-                .background_executor()
-                .spawn(async move { rasterize(&svg, density) })
-                .await;
-            let _ = this.update(cx, |renderer, cx| {
-                renderer.finish_raster(id, revision, appearance, job, density, result, cx);
-            });
-        });
-        self.raster_jobs.insert(id, (job, task));
-    }
-
-    fn finish_raster(
-        &mut self,
-        id: u64,
-        revision: u64,
-        appearance: Appearance,
-        job: u64,
-        density: f32,
-        result: Result<(Arc<RenderImage>, (f32, f32)), String>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.raster_jobs.get(&id).is_some_and(|(current, _)| *current == job) {
-            self.raster_jobs.remove(&id);
-        }
-        let Some(state) = self.blocks.get_mut(&id) else {
-            return;
-        };
-        if !state.matches(revision, appearance) || state.raster_job != Some(job) {
-            return;
-        }
-        state.raster_job = None;
-        match result {
-            Ok((image, _)) => {
-                if let Status::Ready(diagram) = &state.status {
-                    state.status = Status::Ready(Arc::new(Diagram {
-                        svg: diagram.svg.clone(),
-                        width: diagram.width,
-                        height: diagram.height,
-                        image,
-                        density,
-                    }));
-                }
-            }
-            Err(error) => state.status = Status::Failed(error),
-        }
-        cx.emit(MermaidReady);
-        cx.notify();
-    }
-
-    fn apply_zoom(&mut self, id: u64, action: ZoomAction, cx: &mut Context<Self>) {
-        let Some(state) = self.blocks.get_mut(&id) else {
-            return;
-        };
-        let zoom = match action {
-            ZoomAction::In => (state.zoom * ZOOM_STEP).min(MAX_ZOOM),
-            ZoomAction::Out => (state.zoom / ZOOM_STEP).max(MIN_ZOOM),
-            ZoomAction::Reset => MIN_ZOOM,
-        };
-        if zoom == state.zoom {
-            return;
-        }
-        state.zoom = zoom;
-        if zoom <= MIN_ZOOM {
-            state.drag = None;
-        }
-        state.pan = clamp_pan(state);
-        cx.emit(MermaidReady);
-        cx.notify();
-    }
-
-    fn zoom_by(&mut self, id: u64, factor: f32, cx: &mut Context<Self>) {
-        let Some(state) = self.blocks.get_mut(&id) else {
-            return;
-        };
-        let zoom = (state.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
-        if zoom == state.zoom {
-            return;
-        }
-        state.zoom = zoom;
-        if zoom <= MIN_ZOOM {
-            state.drag = None;
-        }
-        state.pan = clamp_pan(state);
-        cx.emit(MermaidReady);
-        cx.notify();
-    }
-
-    fn begin_pan(&mut self, id: u64, position: Point<Pixels>) -> bool {
-        let Some(state) = self.blocks.get_mut(&id) else {
-            return false;
-        };
-        if state.zoom <= MIN_ZOOM {
-            return false;
-        }
-        state.drag = Some((position, state.pan));
-        true
-    }
-
-    fn pan_to(
-        &mut self,
-        id: u64,
-        position: Point<Pixels>,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(state) = self.blocks.get_mut(&id) else {
-            return false;
-        };
-        let Some((start, origin)) = state.drag else {
-            return false;
-        };
-        state.pan = point(
-            origin.x + (position.x - start.x),
-            origin.y + (position.y - start.y),
-        );
-        state.pan = clamp_pan(state);
-        cx.emit(MermaidReady);
-        cx.notify();
-        true
-    }
-
-    fn end_pan(&mut self, id: u64) {
-        if let Some(state) = self.blocks.get_mut(&id) {
-            state.drag = None;
-        }
     }
 
     fn diagram_element(
         &self,
         id: u64,
-        state: &BlockState,
         diagram: &Arc<Diagram>,
         appearance: Appearance,
         interactive: bool,
@@ -434,27 +249,40 @@ impl MermaidRenderer {
         let natural_h = (diagram.height * appearance.font_scale).max(1.0);
         let height = natural_h.min(MAX_PREVIEW_HEIGHT).max(MIN_PREVIEW_HEIGHT);
         let palette = appearance.palette;
-        let viewport = Rc::clone(&state.viewport);
-        let zoom = state.zoom;
-        let pan = state.pan;
         let image = Arc::clone(&diagram.image);
         let svg = diagram.svg.clone();
         let weak = cx.weak_entity();
+        let single_click = self.single_click_open;
 
-        let overlay = div()
+        let expand_weak = weak.clone();
+        let expand_btn = div()
+            .id(("mermaid-expand", id as usize))
             .absolute()
             .top(px(6.))
             .right(px(6.))
+            .h(px(24.))
+            .w(px(24.))
+            .rounded(px(4.))
             .flex()
-            .gap(px(2.))
-            .child(zoom_button(id, "−".into(), ZoomAction::Out, weak.clone(), palette))
-            .child(zoom_button(id, format!("{:.0}%", zoom * 100.).into(), ZoomAction::Reset, weak.clone(), palette))
-            .child(zoom_button(id, "+".into(), ZoomAction::In, weak.clone(), palette));
-
-        let scroll = weak.clone();
-        let down = weak.clone();
-        let moved = weak.clone();
-        let up = weak;
+            .items_center()
+            .justify_center()
+            .bg(crate::theme::color(palette.surface).opacity(0.9))
+            .border_1()
+            .border_color(crate::theme::color(palette.border))
+            .text_color(crate::theme::color(palette.muted))
+            .hover(|s| {
+                s.bg(crate::theme::color(palette.hover))
+                    .text_color(crate::theme::color(palette.text))
+            })
+            .cursor_pointer()
+            .tooltip(|window, cx| {
+                Tooltip::new(crate::i18n::media::MERMAID_VIEW_FULLSIZE.get()).build(window, cx)
+            })
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                cx.stop_propagation();
+                let _ = expand_weak.update(cx, |renderer, cx| renderer.open_lightbox(id, cx));
+            })
+            .child(crate::ui::icon(IconName::Maximize2).size(px(13.)));
 
         div()
             .relative()
@@ -463,62 +291,27 @@ impl MermaidRenderer {
             .overflow_hidden()
             .rounded(px(4.))
             .bg(crate::theme::color(palette.surface))
-            .on_scroll(move |event, _, cx| {
-                if !(event.modifiers.control || event.modifiers.platform) {
-                    return;
-                }
-                let delta = match event.delta {
-                    ScrollDelta::Pixels(delta) => f32::from(delta.y),
-                    ScrollDelta::Lines(lines) => lines.y,
-                };
-                if delta == 0.0 {
-                    return;
-                }
-                cx.stop_propagation();
-                let factor = if delta > 0.0 {
-                    1.0 / ZOOM_STEP
-                } else {
-                    ZOOM_STEP
-                };
-                let _ = scroll.update(cx, |renderer, cx| renderer.zoom_by(id, factor, cx));
-            })
-            .on_mouse_down(MouseButton::Left, move |event, _, cx| {
-                let started =
-                    down.update(cx, |renderer, _| renderer.begin_pan(id, event.position));
-                if started.is_ok_and(|started| started) {
-                    cx.stop_propagation();
-                }
-            })
-            .on_mouse_move(move |event, _, cx| {
-                let panning = moved.update(cx, |renderer, cx| renderer.pan_to(id, event.position, cx));
-                if panning.is_ok_and(|panning| panning) {
-                    cx.stop_propagation();
-                }
-            })
-            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                let _ = up.update(cx, |renderer, _| renderer.end_pan(id));
+            .when(interactive && single_click, |el| el.cursor_pointer())
+            .when(interactive, |el| {
+                el.on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                    if single_click || event.click_count >= 2 {
+                        cx.stop_propagation();
+                        let _ = weak.update(cx, |renderer, cx| renderer.open_lightbox(id, cx));
+                    }
+                })
             })
             .child(
                 canvas(
-                    move |bounds, _, _| {
-                        viewport.set(bounds.size);
-                    },
+                    |_, _, _| {},
                     move |bounds, _, window, _| {
                         let width = f32::from(bounds.size.width);
                         let height = f32::from(bounds.size.height);
                         let fit = (width / natural_w).min(height / natural_h).min(1.0);
-                        let (scale, offset) = if window.is_vector_capture() {
-                            (fit, point(px(0.), px(0.)))
-                        } else {
-                            (fit * zoom, pan)
-                        };
-                        let drawn_w = natural_w * scale;
-                        let drawn_h = natural_h * scale;
+                        let drawn_w = natural_w * fit;
+                        let drawn_h = natural_h * fit;
                         let origin = point(
-                            px(f32::from(bounds.origin.x) + (width - drawn_w) / 2.0
-                                + f32::from(offset.x)),
-                            px(f32::from(bounds.origin.y) + (height - drawn_h) / 2.0
-                                + f32::from(offset.y)),
+                            px(f32::from(bounds.origin.x) + (width - drawn_w) / 2.0),
+                            px(f32::from(bounds.origin.y) + (height - drawn_h) / 2.0),
                         );
                         let rect = Bounds {
                             origin,
@@ -547,7 +340,7 @@ impl MermaidRenderer {
                 .size_full(),
             )
             // Document capture renders the diagram without interactive controls.
-            .when(interactive, |element| element.child(overlay))
+            .when(interactive, |element| element.child(expand_btn))
             .into_any_element()
     }
 }
@@ -647,53 +440,6 @@ impl MarkdownPlugin for MermaidPlugin {
     }
 }
 
-fn zoom_button(
-    id: u64,
-    label: SharedString,
-    action: ZoomAction,
-    weak: WeakEntity<MermaidRenderer>,
-    palette: Palette,
-) -> AnyElement {
-    div()
-        .h(px(18.))
-        .px(px(5.))
-        .rounded(px(3.))
-        .text_size(px(10.))
-        .text_color(crate::theme::color(palette.muted))
-        .bg(crate::theme::color(palette.surface))
-        .border_1()
-        .border_color(crate::theme::color(palette.border))
-        .cursor_pointer()
-        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-            cx.stop_propagation();
-            let _ = weak.update(cx, |renderer, cx| renderer.apply_zoom(id, action, cx));
-        })
-        .child(label)
-        .into_any_element()
-}
-
-fn clamp_pan(state: &BlockState) -> Point<Pixels> {
-    let Some(natural) = state.natural_size() else {
-        return point(px(0.), px(0.));
-    };
-    let viewport = state.viewport.get();
-    let width = f32::from(viewport.width);
-    let height = f32::from(viewport.height);
-    let natural_w = f32::from(natural.width);
-    let natural_h = f32::from(natural.height);
-    if width <= 0.0 || height <= 0.0 || natural_w <= 0.0 || natural_h <= 0.0 {
-        return point(px(0.), px(0.));
-    }
-    let fit = (width / natural_w).min(height / natural_h).min(1.0);
-    let scale = fit * state.zoom;
-    let slack_x = ((natural_w * scale - width) / 2.0).max(0.0);
-    let slack_y = ((natural_h * scale - height) / 2.0).max(0.0);
-    point(
-        px(f32::from(state.pan.x).clamp(-slack_x, slack_x)),
-        px(f32::from(state.pan.y).clamp(-slack_y, slack_y)),
-    )
-}
-
 fn appearance(window: &Window) -> Appearance {
     let palette = crate::theme::palette();
     let font_size = window
@@ -704,10 +450,6 @@ fn appearance(window: &Window) -> Appearance {
         palette,
         font_scale: f32::from(font_size) / 14.0,
     }
-}
-
-fn desired_density(window: &Window, zoom: f32) -> f32 {
-    (window.scale_factor() * BASE_DENSITY * zoom).clamp(BASE_DENSITY, MAX_DENSITY)
 }
 
 fn status_element(status: &Status, palette: Palette) -> AnyElement {
@@ -755,7 +497,6 @@ fn render_diagram(source: &str, dark: bool, density: f32) -> Result<Diagram, Str
         width,
         height,
         image,
-        density,
     })
 }
 

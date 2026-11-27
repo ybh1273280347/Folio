@@ -18,7 +18,7 @@ use render::{UserMessageBody, inline_quote_token};
 use crate::math::{MathDisplaySize, MathReady, MathRenderer};
 use base64::Engine as _;
 use gpui_kit::component::Sizable;
-use crate::mermaid::{MermaidReady, MermaidRenderer};
+use crate::mermaid::{MermaidEvent, MermaidRenderer};
 use crate::model::{AppSettings, ToolExecutionView};
 use crate::terminal::{DraggedFolder, DraggedPaths};
 use crate::theme::{Palette, color as theme_color, palette as active_palette};
@@ -66,6 +66,10 @@ pub enum AiPaneEvent {
     OpenFile(PathBuf),
     BackToHub,
     ToggleMaximize,
+    OpenMermaidLightbox {
+        svg: SharedString,
+        image: Arc<RenderImage>,
+    },
 }
 impl EventEmitter<AiPaneEvent> for AiPane {}
 impl EventEmitter<AiPaneEvent> for ChatPane {}
@@ -292,7 +296,7 @@ impl ChatPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mermaid = cx.new(MermaidRenderer::new);
+        let mermaid = cx.new(|cx| MermaidRenderer::new(true, cx));
         let md_extensions = crate::markdown::extensions::markdown_extensions(
             &math, MathDisplaySize::Ai, cx,
         )
@@ -302,8 +306,14 @@ impl ChatPane {
                 cx.notify();
             }
         });
-        let sub_mermaid = cx.subscribe(&mermaid, |_, _, _: &MermaidReady, cx| {
-            cx.notify();
+        let sub_mermaid = cx.subscribe(&mermaid, |_, _, event: &MermaidEvent, cx| match event {
+            MermaidEvent::Ready => cx.notify(),
+            MermaidEvent::OpenLightbox { svg, image } => {
+                cx.emit(AiPaneEvent::OpenMermaidLightbox {
+                    svg: svg.clone(),
+                    image: Arc::clone(image),
+                });
+            }
         });
         let quote_view = cx.entity().downgrade();
         let quote_window = window.window_handle();

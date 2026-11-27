@@ -257,6 +257,8 @@ pub const MERMAID_EMPTY: BiText = BiText::new("Mermaid 图表为空", "Mermaid d
 pub const MERMAID_NO_SVG: BiText = BiText::new("未生成 SVG 输出", "No SVG output generated");
 pub const MERMAID_BITMAP_ALLOC: BiText = BiText::new("无法分配图表位图", "Failed to allocate diagram bitmap");
 pub const MERMAID_BITMAP_INVALID: BiText = BiText::new("图表位图数据无效", "Invalid diagram bitmap data");
+pub const MERMAID_VIEW_FULLSIZE: BiText = BiText::new("查看大图", "View full size");
+pub const LIGHTBOX_CLOSE: BiText = BiText::new("关闭 (Esc)", "Close (Esc)");
 
 pub fn mermaid_render_failed(err: &dyn std::fmt::Display) -> String {
     match locale() {
