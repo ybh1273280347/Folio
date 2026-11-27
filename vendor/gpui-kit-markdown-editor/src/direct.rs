@@ -19,9 +19,18 @@ use gpui_kit::base::text::editor_host::{
 /// A paragraph holding `inline`, keyed by `id`.
 pub(crate) fn paragraph(inline: &InlineText, id: BlockId, placeholders: bool) -> Paragraph {
     let mut paragraph = Paragraph::default();
+    let mut backgrounds: Vec<(std::ops::Range<usize>, gpui::Hsla)> = Vec::new();
     for (range, mark, atom) in inline.pieces() {
         let mut mark = mark.clone();
-        mark.highlight = None;
+        if let Some(color) = mark.highlight.take() {
+            if let Some((previous, previous_color)) = backgrounds.last_mut()
+                && *previous_color == color && previous.end == range.start
+            {
+                previous.end = range.end;
+            } else {
+                backgrounds.push((range.clone(), color));
+            }
+        }
         match atom {
             Some(InlineAtom::Image(image)) if placeholders => {
                 paragraph.push(image_placeholder(image).marks(vec![(0..1, mark)]))
@@ -40,7 +49,7 @@ pub(crate) fn paragraph(inline: &InlineText, id: BlockId, placeholders: bool) ->
             }
         }
     }
-    paragraph.with_leaf_key(id.as_u64())
+    paragraph.with_leaf_key_and_mark_backgrounds(id.as_u64(), backgrounds)
 }
 
 /// An image atom shown as its alt text, never loading the image. It is a

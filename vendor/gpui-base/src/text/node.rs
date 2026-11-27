@@ -1103,6 +1103,7 @@ fn set_leaf_key(state: &mut Arc<Mutex<InlineState>>, key: u64) {
     *state = Arc::new(Mutex::new(InlineState {
         text,
         editor_key: Some(key),
+        mark_backgrounds: Vec::new(),
         selection_rows: None,
         cleanup_senders: Vec::new(),
         ..Default::default()
@@ -2418,6 +2419,19 @@ impl Paragraph {
         self
     }
 
+    /// Assigns a leaf key and its persistent mark backgrounds. Ranges use leaf
+    /// UTF-8 bytes, with one U+FFFC per inline object or image. They are painted
+    /// from the layout even when there is no active editor interaction scope.
+    pub fn with_leaf_key_and_mark_backgrounds(
+        self,
+        key: u64,
+        backgrounds: Vec<(Range<usize>, Hsla)>,
+    ) -> Self {
+        let paragraph = self.with_leaf_key(key);
+        paragraph.state.lock().expect("paragraph state").mark_backgrounds = backgrounds;
+        paragraph
+    }
+
     pub(crate) fn push_image(&mut self, image: ImageNode) {
         self.children.push(InlineNode::image(image));
         self.invalidate_render_cache();
@@ -2998,6 +3012,7 @@ impl Paragraph {
         let children = &self.children;
         let fades = node_cx.stream_fades(fade_key);
         let backgrounds = node_cx.range_backgrounds(fade_key);
+        let mark_backgrounds = self.state.lock().expect("paragraph state").mark_backgrounds.clone();
 
         if self.should_render_inline_flow() {
             return InlineFlow::new(
@@ -3006,6 +3021,7 @@ impl Paragraph {
                 node_cx.link_click_handler.clone(),
             )
             .editor_key(self.leaf_key())
+            .mark_backgrounds(mark_backgrounds)
             .into_any_element();
         }
 
@@ -3039,6 +3055,7 @@ impl Paragraph {
                 node_cx.link_click_handler.clone(),
             )
             .range_backgrounds(backgrounds)
+            .mark_backgrounds(mark_backgrounds)
             .reveal(reveal)
             .into_any_element();
         }

@@ -34,6 +34,7 @@ pub(super) struct InlineFlow {
     /// The block editor leaf this flow renders (design D3): its fragments
     /// and atoms are reported to the editor sink as pieces.
     editor_key: Option<u64>,
+    mark_backgrounds: Vec<(Range<usize>, Hsla)>,
 }
 
 /// Bytes an image or custom inline node occupies in an editor leaf (one
@@ -207,6 +208,7 @@ enum PositionedFragment {
         item_ix: usize,
         origin: gpui::Point<Pixels>,
         size: Size<Pixels>,
+        selection_bounds: Bounds<Pixels>,
     },
 }
 
@@ -284,6 +286,7 @@ impl InlineFlow {
             items,
             link_click_handler,
             editor_key: None,
+            mark_backgrounds: Vec::new(),
         }
     }
 
@@ -292,6 +295,11 @@ impl InlineFlow {
             self.id = ("editor-leaf", key).into();
         }
         self.editor_key = key;
+        self
+    }
+
+    pub(super) fn mark_backgrounds(mut self, backgrounds: Vec<(Range<usize>, Hsla)>) -> Self {
+        self.mark_backgrounds = backgrounds;
         self
     }
 
@@ -350,7 +358,7 @@ impl IntoElement for InlineFlow {
 
 impl Element for InlineFlow {
     type RequestLayoutState = InlineFlowLayoutState;
-    type PrepaintState = Vec<FlowPaintItem>;
+    type PrepaintState = (Vec<FlowPaintItem>, Vec<(Bounds<Pixels>, Hsla)>);
 
     fn id(&self) -> Option<ElementId> {
         Some(self.id.clone())
@@ -470,11 +478,12 @@ impl Element for InlineFlow {
     ) -> Self::PrepaintState {
         let frame_state = request_layout.frame_state.clone();
         let Some(layout) = request_layout.current.borrow().clone() else {
-            return Vec::new();
+            return Default::default();
         };
         let typography = request_layout.typography.clone();
         let text_style = &typography.text_style;
         let mut elements = Vec::with_capacity(layout.fragments.len());
+        let mut mark_rects = Vec::new();
 
         // A reveal goes to the fragment it starts in. A line break lays out
         // no fragment, so a reveal starting on one, or on an empty line, goes
@@ -507,9 +516,8 @@ impl Element for InlineFlow {
         // Editor leaf byte offset where each item starts: text items count
         // their bytes, images and custom nodes one U+FFFC.
         let editor = self.editor_key.zip(super::editor_seam::current());
-        // Ordinary TextViews do not allocate editor bookkeeping.
-        let item_starts: Vec<usize> = if let Some((key, sink)) = &editor {
-            sink.begin_pieces(*key);
+        // Ordinary TextViews do not allocate editor leaf offsets.
+        let item_starts: Vec<usize> = if editor.is_some() || !self.mark_backgrounds.is_empty() {
             let mut at = 0;
             self.items
                 .iter()
@@ -526,6 +534,7 @@ impl Element for InlineFlow {
             Vec::new()
         };
         if let Some((key, sink)) = &editor {
+            sink.begin_pieces(*key);
             for (start, line_bounds) in &layout.empty_lines {
                 // Flow layout uses a one-byte object placeholder; the public
                 // leaf coordinate space uses the three-byte U+FFFC instead.
@@ -553,6 +562,14 @@ impl Element for InlineFlow {
             }
         }
         let decorations = editor.as_ref().map(|(key, sink)| sink.backgrounds(*key));
+        let item_starts = item_starts.as_slice();
+        let atom_marks = |item_ix: usize, row: Bounds<Pixels>| {
+            self.mark_backgrounds.iter().filter_map(move |(range, color)| {
+                let start = item_starts[item_ix];
+                (range.start <= start && range.end >= start + EDITOR_ATOM_LEN)
+                    .then(|| (Bounds::new(bounds.origin + row.origin, row.size), *color))
+            })
+        };
         let report_box = |item_ix: usize, bounds: Bounds<Pixels>| {
             let mut overlays = Vec::new();
             if let Some((key, sink)) = &editor {
@@ -591,6 +608,7 @@ impl Element for InlineFlow {
                     let object_size = object.metrics.size;
                     let overlays =
                         report_box(*item_ix, Bounds::new(bounds.origin + *origin, object_size));
+                    mark_rects.extend(atom_marks(*item_ix, *selection_bounds));
                     let mut element = InlineObject::new(
                         ("inline-object", *id),
                         text.clone(),
@@ -676,6 +694,17 @@ impl Element for InlineFlow {
                         source_range.end,
                         |range, color| (range, *color),
                     ))
+                    .mark_backgrounds(if self.mark_backgrounds.is_empty() {
+                        Vec::new()
+                    } else {
+                        let start = item_starts[*item_ix];
+                        slice_ranges(
+                            &self.mark_backgrounds,
+                            start + source_range.start,
+                            start + source_range.end,
+                            |range, color| (range, *color),
+                        )
+                    })
                     .reveal(
                         reveal
                             .as_ref()
@@ -718,6 +747,27 @@ impl Element for InlineFlow {
                             },
                         );
                     });
+                    if !self.mark_backgrounds.is_empty() {
+                        for (mut rect, color) in element
+                            .downcast_mut::<Inline>()
+                            .expect("flow text fragment")
+                            .mark_rects
+                            .drain(..)
+                        {
+                            let left = rect.left();
+                            let right = rect.right();
+                            let text_left = bounds.left() + origin.x + insets.left;
+                            let text_right = bounds.left() + origin.x + fragment_size.width - insets.right;
+                            if left <= text_left + px(0.01) {
+                                rect.origin.x -= insets.left;
+                                rect.size.width += insets.left;
+                            }
+                            if right >= text_right - px(0.01) {
+                                rect.size.width += insets.right;
+                            }
+                            mark_rects.push((rect, color));
+                        }
+                    }
                     elements.push(FlowPaintItem {
                         element,
                         background,
@@ -728,6 +778,7 @@ impl Element for InlineFlow {
                     item_ix,
                     origin,
                     size: fragment_size,
+                    selection_bounds,
                 } => {
                     let InlineFlowItem::Image {
                         source,
@@ -741,6 +792,7 @@ impl Element for InlineFlow {
                     let (origin, fragment_size) = (*origin, *fragment_size);
                     let overlays =
                         report_box(*item_ix, Bounds::new(bounds.origin + origin, fragment_size));
+                    mark_rects.extend(atom_marks(*item_ix, *selection_bounds));
                     let mut element = Self::image_element(
                         elements.len(),
                         source,
@@ -772,7 +824,22 @@ impl Element for InlineFlow {
             .fragment_states
             .truncate(text_fragment_count);
 
-        elements
+        mark_rects.sort_by(|(left, _), (right, _)| {
+            f32::from(left.top()).total_cmp(&f32::from(right.top()))
+                .then_with(|| f32::from(left.left()).total_cmp(&f32::from(right.left())))
+        });
+        let mut merged: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
+        for (rect, color) in mark_rects {
+            if let Some((previous, previous_color)) = merged.last_mut()
+                && *previous_color == color && previous.top() == rect.top()
+                && rect.left() <= previous.right() + px(0.01)
+            {
+                *previous = previous.union(&rect);
+            } else {
+                merged.push((rect, color));
+            }
+        }
+        (elements, merged)
     }
 
     fn paint(
@@ -797,13 +864,9 @@ impl Element for InlineFlow {
             }
         }
         let radius = crate::Theme::global(cx).tokens.radius.sm;
-        for FlowPaintItem {
-            element,
-            background,
-            overlays,
-        } in prepaint
-        {
-            if let Some(code) = background {
+        let (elements, marks) = prepaint;
+        for item in elements.iter() {
+            if let Some(code) = &item.background {
                 let mut style = gpui::Style::default();
                 style.corner_radii = gpui::Corners {
                     top_left: radius.into(),
@@ -814,8 +877,13 @@ impl Element for InlineFlow {
                 style.refine(&code.style);
                 style.paint(code.bounds, window, cx, |_, _| {});
             }
-            element.paint(window, cx);
-            for (bounds, color) in overlays {
+        }
+        for (bounds, color) in marks {
+            window.paint_quad(gpui::fill(*bounds, *color).corner_radii(px(2.)));
+        }
+        for item in elements {
+            item.element.paint(window, cx);
+            for (bounds, color) in &item.overlays {
                 window.paint_quad(gpui::fill(*bounds, *color));
             }
         }
@@ -1264,6 +1332,7 @@ fn layout_measured_flow(
                     item_ix: fragment.item_ix,
                     origin,
                     size: fragment.size,
+                    selection_bounds,
                 },
             };
             x += fragment.size.width;

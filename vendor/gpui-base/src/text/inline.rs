@@ -374,6 +374,8 @@ pub(super) struct Inline {
     selection_source: Option<(Arc<Mutex<InlineState>>, Range<usize>)>,
     /// Range highlight backgrounds, painted behind the text.
     range_backgrounds: Vec<(Range<usize>, Hsla)>,
+    mark_backgrounds: Vec<(Range<usize>, Hsla)>,
+    pub(super) mark_rects: Vec<(Bounds<Pixels>, Hsla)>,
     /// The start of a pending reveal, when it is in this text.
     reveal: Option<RevealAt>,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
@@ -402,6 +404,7 @@ pub(crate) struct InlineState {
     /// the leaf reports its geometry to the collector installed by
     /// `editor_host::collect_leaf_geometry`. `None` for every plain `TextView`.
     pub(crate) editor_key: Option<u64>,
+    pub(super) mark_backgrounds: Vec<(Range<usize>, Hsla)>,
     /// UI owners of retained layouts; cleanup metadata is not document state.
     pub(super) cleanup_senders: Vec<Sender<()>>,
 }
@@ -763,6 +766,8 @@ impl Inline {
             selection_bounds: None,
             selection_source: None,
             range_backgrounds: Vec::new(),
+            mark_backgrounds: Vec::new(),
+            mark_rects: Vec::new(),
             reveal: None,
             link_click_handler,
             link_tooltip: false,
@@ -810,6 +815,11 @@ impl Inline {
     /// runs, so changing them does not shape the text again.
     pub(super) fn range_backgrounds(mut self, backgrounds: Vec<(Range<usize>, Hsla)>) -> Self {
         self.range_backgrounds = backgrounds;
+        self
+    }
+
+    pub(super) fn mark_backgrounds(mut self, backgrounds: Vec<(Range<usize>, Hsla)>) -> Self {
+        self.mark_backgrounds = backgrounds;
         self
     }
 
@@ -1208,6 +1218,24 @@ impl Element for Inline {
         let bounds = Bounds::new(self.paint_origin.unwrap_or(bounds.origin), bounds.size);
         self.styled_text
             .prepaint(id, inspector_id, bounds, &mut (), window, cx);
+        if !self.mark_backgrounds.is_empty() {
+            let layout = self.styled_text.layout();
+            let origin = layout.bounds().origin;
+            let line_height = layout.line_height();
+            let glyphs = glyph_boxes(layout, window.text_style().text_align, layout.bounds().size.width);
+            for (range, color) in &self.mark_backgrounds {
+                for (row, left, right) in range_boxes(&glyphs, range.clone()) {
+                    let (top, height) = self.selection_bounds.map_or(
+                        (origin.y + line_height * row as f32, line_height),
+                        |row_bounds| (row_bounds.top(), row_bounds.size.height),
+                    );
+                    self.mark_rects.push((
+                        Bounds::new(point(origin.x + left, top), size(right - left, height)),
+                        *color,
+                    ));
+                }
+            }
+        }
         self.report_to_editor();
 
         // Report this element's laid-out extent so an ancestor TextView with
@@ -1257,6 +1285,9 @@ impl Element for Inline {
             return;
         }
         let text_layout = self.styled_text.layout().clone();
+        for (bounds, color) in &self.mark_rects {
+            window.paint_quad(gpui::fill(*bounds, *color).corner_radii(px(2.)));
+        }
         if !self.range_backgrounds.is_empty() {
             self.paint_range_highlights(&text_layout, window);
         }

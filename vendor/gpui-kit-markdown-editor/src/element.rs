@@ -651,16 +651,7 @@ impl BlockEditor {
                 block_el
             });
         }
-        let document = div().w_full().children(children).into_any_element();
-        if snapshot.code_highlights.is_empty() {
-            document
-        } else {
-            DocumentHighlights {
-                child: document,
-                backgrounds: snapshot.code_highlights.clone(),
-            }
-            .into_any_element()
-        }
+        div().w_full().children(children).into_any_element()
     }
 
     pub fn new(state: &Entity<BlockEditorState>) -> Self {
@@ -784,7 +775,7 @@ impl RenderOnce for BlockEditor {
                     (id, progress)
                 }).collect();
                 state.fold_motion.retain(|id, _| folds[id].is_some());
-                let mut backgrounds = snapshot.code_highlights.clone();
+                let mut backgrounds = LeafBackgrounds::new();
                 if let Some((block, _)) = &state.heading_highlight
                     && let Some(len) = state.model.doc.leaf_len(*block)
                 {
@@ -1330,70 +1321,6 @@ impl RenderOnce for BlockEditor {
 
 type LeafBackgrounds = HashMap<u64, Vec<(Range<usize>, Hsla)>>;
 
-/// Collect persistent paint ranges for the export view without editor interaction state.
-struct DocumentHighlights {
-    child: AnyElement,
-    backgrounds: LeafBackgrounds,
-}
-
-impl IntoElement for DocumentHighlights {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
-impl Element for DocumentHighlights {
-    type RequestLayoutState = ();
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, ()) {
-        (self.child.request_layout(window, cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        collect_leaf_geometry(std::mem::take(&mut self.backgrounds), || {
-            self.child.prepaint(window, cx)
-        });
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
-        _: &mut (),
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        self.child.paint(window, cx);
-    }
-}
-
 struct EditorRoot {
     state: Entity<BlockEditorState>,
     child: Option<AnyElement>,
@@ -1419,150 +1346,10 @@ impl IntoElement for EditorRoot {
     }
 }
 
-thread_local! {
-    static INLINE_ATOM_BOUNDS: std::cell::RefCell<(bool, Vec<Bounds<Pixels>>)> = const { std::cell::RefCell::new((false, Vec::new())) };
-}
-
-/// Record an inline custom atom's prepainted bounds so mark highlights on the
-/// same line can expand to the max vertical extent of text and inline math.
-pub fn record_inline_atom_bounds(bounds: Bounds<Pixels>) {
-    INLINE_ATOM_BOUNDS.with(|slot| {
-        let mut guard = slot.borrow_mut();
-        if guard.0 {
-            guard.1.push(bounds);
-        }
-    });
-}
-
-fn clear_inline_atom_bounds() {
-    INLINE_ATOM_BOUNDS.with(|slot| {
-        let mut guard = slot.borrow_mut();
-        guard.0 = true;
-        guard.1.clear();
-    });
-}
-
-fn take_inline_atom_bounds() -> Vec<Bounds<Pixels>> {
-    INLINE_ATOM_BOUNDS.with(|slot| {
-        let mut guard = slot.borrow_mut();
-        guard.0 = false;
-        std::mem::take(&mut guard.1)
-    })
-}
-
-struct RowSpan {
-    y: Pixels,
-    min_x: Pixels,
-    max_x: Pixels,
-}
-
-fn compute_mark_rects(
-    frame: &super::frame::FrameLayout,
-    highlights: &HashMap<super::id::BlockId, Vec<(Range<usize>, Hsla)>>,
-    inline_atoms: &[Bounds<Pixels>],
-    opacity_for: impl Fn(BlockId) -> f32,
-) -> Vec<(Bounds<Pixels>, Hsla)> {
-    let mut out = Vec::new();
-    for (&block, ranges) in highlights {
-        let Some(leaf) = frame.leaf(block) else {
-            continue;
-        };
-        let leaf_bounds = leaf.bounds();
-        if leaf_bounds.size.height <= px(0.) {
-            continue;
-        }
-        let opacity = opacity_for(block);
-        if leaf.info.atomic {
-            for (_, color) in ranges {
-                out.push((leaf_bounds, color.opacity(opacity)));
-            }
-            continue;
-        }
-        let lh = leaf.line_height();
-        let max_len = leaf.info.len;
-        for (range, color) in ranges {
-            let start = range.start.min(max_len);
-            let end = range.end.min(max_len);
-            if start >= end {
-                continue;
-            }
-            let mut rows: Vec<RowSpan> = Vec::new();
-            let mut prev_x: Option<Pixels> = None;
-            let mut prev_y: Option<Pixels> = None;
-            let mut last_dx = px(0.);
-            let line_tol = (lh * 0.55).max(px(2.));
-            for offset in start..end {
-                let p = leaf.caret_point(offset);
-                if let (Some(px_prev), Some(py_prev)) = (prev_x, prev_y)
-                    && (p.y - py_prev).abs() < line_tol
-                    && p.x > px_prev
-                {
-                    last_dx = p.x - px_prev;
-                }
-                prev_x = Some(p.x);
-                prev_y = Some(p.y);
-                if let Some(row) = rows.iter_mut().find(|r| (r.y - p.y).abs() < line_tol) {
-                    row.min_x = row.min_x.min(p.x);
-                    row.max_x = row.max_x.max(p.x);
-                } else {
-                    rows.push(RowSpan {
-                        y: p.y,
-                        min_x: p.x,
-                        max_x: p.x,
-                    });
-                }
-            }
-            let end_p = leaf.caret_point(end);
-            if let Some(row) = rows.iter_mut().find(|r| (r.y - end_p.y).abs() < line_tol) {
-                row.max_x = row.max_x.max(end_p.x);
-            } else if let Some(last_row) = rows.last_mut()
-                && last_dx > px(0.)
-            {
-                last_row.max_x = (last_row.max_x + last_dx).min(leaf_bounds.right());
-            }
-            rows.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
-            let left_aligned = matches!(
-                leaf.align,
-                gpui_kit::base::text::editor_host::ColumnAlign::None
-                    | gpui_kit::base::text::editor_host::ColumnAlign::Left
-            );
-            for (row_idx, mut row) in rows.into_iter().enumerate() {
-                // On wrapped continuation lines, the line-start byte index maps
-                // to the end of the previous visual line in `position_for_index`,
-                // so clamp left-aligned continuation lines to `leaf_bounds.left()`.
-                if row_idx > 0 && left_aligned {
-                    row.min_x = row.min_x.min(leaf_bounds.left());
-                }
-                if row.max_x <= row.min_x {
-                    continue;
-                }
-                let mut top = row.y;
-                let mut bottom = row.y + lh;
-                for atom in inline_atoms {
-                    if atom.bottom() > top
-                        && atom.top() < bottom
-                        && atom.right() > row.min_x + px(1.)
-                        && atom.left() < row.max_x - px(1.)
-                    {
-                        top = top.min(atom.top());
-                        bottom = bottom.max(atom.bottom());
-                    }
-                }
-                out.push((
-                    Bounds::from_corners(point(row.min_x, top), point(row.max_x, bottom)),
-                    color.opacity(opacity),
-                ));
-            }
-        }
-    }
-    out
-}
-
 pub(crate) struct Prepaint {
     hitbox: Hitbox,
     grip_hitbox: Hitbox,
     image_handle: Option<Hitbox>,
-    mark_rects: Vec<(Bounds<Pixels>, Hsla)>,
 }
 
 impl EditorRoot {
@@ -1655,11 +1442,8 @@ impl Element for EditorRoot {
         window: &mut Window,
         cx: &mut App,
     ) -> Prepaint {
-        let mut mark_rects = Vec::new();
         if let Some(backgrounds) = self.backgrounds.take() {
-            clear_inline_atom_bounds();
             let (_, mut geometries) = collect_leaf_geometry(backgrounds, || child.prepaint(window, cx));
-            let inline_atoms = take_inline_atom_bounds();
             {
                 let moving_bodies = self.fold_body_bounds.lock().expect("moving fold bounds");
                 if !moving_bodies.is_empty() {
@@ -1727,18 +1511,6 @@ impl Element for EditorRoot {
                 frame.layout_html_tables(&self.html_tables.lock().expect("HTML table geometry"));
             }
             let state = self.state.read(cx);
-            let dragged_block = state.block_drag.filter(|drag| drag.active).map(|drag| drag.block);
-            mark_rects = compute_mark_rects(
-                &frame,
-                &self.snapshot.mark_highlights,
-                &inline_atoms,
-                // Highlights paint behind the block wrapper, so apply its fade here as well.
-                |leaf| if dragged_block.is_some_and(|id| state.model.doc.path(leaf).get(1) == Some(&id)) {
-                    DRAG_SOURCE_OPACITY
-                } else {
-                    1.
-                },
-            );
             *state.frame.borrow_mut() = frame;
             let mut mask = window.content_mask().bounds;
             let cull = self.state.read(cx).cull.clone();
@@ -1782,7 +1554,6 @@ impl Element for EditorRoot {
             hitbox: window.insert_hitbox(bounds, HitboxBehavior::Normal),
             grip_hitbox: window.insert_hitbox(grip_bounds, HitboxBehavior::Normal),
             image_handle,
-            mark_rects,
         }
     }
 
@@ -1897,9 +1668,6 @@ impl Element for EditorRoot {
             .iter()
             .map(|(id, bounds)| (*id, *bounds))
             .collect();
-        for (mark_bounds, color) in &prepaint.mark_rects {
-            window.paint_quad(fill(*mark_bounds, *color).corner_radii(px(2.)));
-        }
         child.paint(window, cx);
 
         let frame = frame.borrow();

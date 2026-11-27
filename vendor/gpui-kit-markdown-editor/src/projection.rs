@@ -16,8 +16,7 @@ use super::{
     id::BlockId,
     kind::BlockKindData,
 };
-use gpui_kit::{Hsla, base::text::editor_host::BlockNode};
-use std::ops::Range;
+use gpui_kit::base::text::editor_host::BlockNode;
 
 /// One projected top-level block.
 pub(crate) struct ProjectedBlock {
@@ -45,8 +44,6 @@ pub(crate) struct Snapshot {
     pub(crate) leaf_indices: HashMap<u64, usize>,
     /// Tables and their keyed cells, for node selection (no caret in cells).
     pub(crate) tables: Rc<Vec<(BlockId, Vec<BlockId>)>>,
-    pub(crate) code_highlights: HashMap<u64, Vec<(Range<usize>, Hsla)>>,
-    pub(crate) mark_highlights: HashMap<BlockId, Vec<(Range<usize>, Hsla)>>,
 }
 
 #[derive(Default)]
@@ -88,27 +85,7 @@ impl ProjectionCache {
             .filter_map(|id| leaf_info(doc, *id))
             .collect();
         let mut tables: Vec<(BlockId, Vec<BlockId>)> = Vec::new();
-        let code_highlights = HashMap::new();
-        let mut mark_highlights = HashMap::new();
         for id in doc.leaves() {
-            if let Some(inline) = doc.inline(*id) {
-                let mut ranges: Vec<(Range<usize>, Hsla)> = Vec::new();
-                for (range, mark, _) in inline.pieces() {
-                    if let Some(color) = mark.highlight {
-                        if let Some((last_range, last_color)) = ranges.last_mut()
-                            && *last_color == color
-                            && last_range.end == range.start
-                        {
-                            last_range.end = range.end;
-                        } else {
-                            ranges.push((range, color));
-                        }
-                    }
-                }
-                if !ranges.is_empty() {
-                    mark_highlights.insert(*id, ranges);
-                }
-            }
             if doc.kind(*id) != Some(&BlockKindData::TableCell) {
                 continue;
             }
@@ -136,8 +113,6 @@ impl ProjectionCache {
             leaves: Rc::new(leaves),
             leaf_indices,
             tables: Rc::new(tables),
-            code_highlights,
-            mark_highlights,
         });
         self.revision = Some(doc.revision);
         self.snapshot.clone()

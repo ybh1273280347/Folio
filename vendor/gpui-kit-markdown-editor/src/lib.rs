@@ -87,7 +87,7 @@ mod toolbar;
 pub use command::{CommandError, EditorCommand};
 pub use document::{BlockRef, DocumentRef};
 pub use editor::BlockEditorModel;
-pub use element::{BlockEditor, record_inline_atom_bounds};
+pub use element::BlockEditor;
 pub use gpui_kit::base::text::editor_host::ColumnAlign;
 pub use input_rule::InputRule;
 pub use math::normalize_math;
