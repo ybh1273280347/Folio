@@ -966,33 +966,70 @@ pub const TAG_COLORS: [(crate::i18n::BiText, u32, u32); 6] = [
     (crate::i18n::tags::TAG_COLOR_PURPLE, 0xebe5f5, 0x624785),
 ];
 
-fn is_code_icon_path(lower: &str) -> bool {
+fn zed_file_icon(lower: &str) -> Option<(&'static [u8], u32)> {
     let filename = lower.rsplit(['/', '\\']).next().unwrap_or(lower);
-    if matches!(
-        filename,
-        "makefile" | "gnumakefile" | "dockerfile" | "containerfile" | "justfile" | "procfile"
-    ) {
-        return true;
+    match filename {
+        "dockerfile" | "containerfile" | ".dockerignore" => {
+            return Some((include_bytes!("../../resources/icons/file_types/docker.svg"), 0x0284c7));
+        }
+        ".gitignore" | ".gitattributes" | ".gitmodules" => {
+            return Some((include_bytes!("../../resources/icons/file_types/git.svg"), 0xde4c36));
+        }
+        ".editorconfig" | ".prettierrc" | ".eslintrc" | ".npmrc" | ".nvmrc" | ".latexmkrc"
+        | ".env" | ".env.example" | ".env.local" => {
+            return Some((include_bytes!("../../resources/icons/file_types/settings.svg"), 0x64748b));
+        }
+        "makefile" | "gnumakefile" | "justfile" | "procfile" => {
+            return Some((include_bytes!("../../resources/icons/file_types/terminal.svg"), 0x16a34a));
+        }
+        _ => {}
     }
-    matches!(
-        std::path::Path::new(filename)
-            .extension()
-            .and_then(|ext| ext.to_str()),
-        Some(
-            "tex"
-                | "ts" | "tsx" | "mts" | "cts"
-                | "js" | "jsx" | "mjs" | "cjs"
-                | "css" | "scss" | "sass" | "less"
-                | "vue" | "svelte" | "astro"
-                | "rs" | "py" | "pyi" | "go" | "java" | "kt" | "kts"
-                | "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx"
-                | "cs" | "swift" | "rb" | "php" | "lua" | "zig" | "scala" | "dart"
-                | "ex" | "exs" | "erl" | "hs" | "ml" | "mli" | "r" | "jl"
-                | "sh" | "bash" | "zsh" | "fish" | "ps1" | "psm1" | "bat" | "cmd"
-                | "sql" | "graphql" | "gql" | "proto" | "cmake" | "mk" | "gradle"
-                | "dockerfile" | "tf" | "hcl" | "nix" | "prisma"
-        )
-    )
+
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|ext| ext.to_str())?;
+    let pair: (&'static [u8], u32) = match ext {
+        "md" | "mdx" => (include_bytes!("../../resources/icons/file_types/book.svg"), 0x4f6bed),
+        "ts" | "mts" | "cts" => (include_bytes!("../../resources/icons/file_types/typescript.svg"), 0x2f74c0),
+        "tsx" | "jsx" => (include_bytes!("../../resources/icons/file_types/react.svg"), 0x0ea5b7),
+        "js" | "mjs" | "cjs" => (include_bytes!("../../resources/icons/file_types/javascript.svg"), 0xc89614),
+        "rs" => (include_bytes!("../../resources/icons/file_types/rust.svg"), 0xc95628),
+        "py" | "pyi" => (include_bytes!("../../resources/icons/file_types/python.svg"), 0x3776ab),
+        "go" => (include_bytes!("../../resources/icons/file_types/go.svg"), 0x00a29c),
+        "java" => (include_bytes!("../../resources/icons/file_types/java.svg"), 0xc2410c),
+        "kt" | "kts" => (include_bytes!("../../resources/icons/file_types/kotlin.svg"), 0x7c3aed),
+        "c" | "h" => (include_bytes!("../../resources/icons/file_types/c.svg"), 0x4b6cb7),
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => {
+            (include_bytes!("../../resources/icons/file_types/cpp.svg"), 0x2563eb)
+        }
+        "swift" => (include_bytes!("../../resources/icons/file_types/swift.svg"), 0xea580c),
+        "rb" => (include_bytes!("../../resources/icons/file_types/ruby.svg"), 0xc82333),
+        "php" => (include_bytes!("../../resources/icons/file_types/php.svg"), 0x6366f1),
+        "lua" => (include_bytes!("../../resources/icons/file_types/lua.svg"), 0x3b5bdb),
+        "zig" => (include_bytes!("../../resources/icons/file_types/zig.svg"), 0xd97706),
+        "vue" => (include_bytes!("../../resources/icons/file_types/vue.svg"), 0x2f9e66),
+        "astro" => (include_bytes!("../../resources/icons/file_types/astro.svg"), 0xc026d3),
+        "css" | "less" => (include_bytes!("../../resources/icons/file_types/css.svg"), 0x264de4),
+        "scss" | "sass" => (include_bytes!("../../resources/icons/file_types/sass.svg"), 0xcf649a),
+        "sh" | "bash" | "zsh" | "fish" | "ps1" | "psm1" | "bat" | "cmd" => {
+            (include_bytes!("../../resources/icons/file_types/terminal.svg"), 0x16a34a)
+        }
+        "sql" | "prisma" => (include_bytes!("../../resources/icons/file_types/database.svg"), 0x6366f1),
+        "graphql" | "gql" => (include_bytes!("../../resources/icons/file_types/graphql.svg"), 0xe11d48),
+        "dockerfile" => (include_bytes!("../../resources/icons/file_types/docker.svg"), 0x0284c7),
+        "toml" => (include_bytes!("../../resources/icons/file_types/toml.svg"), 0x9c4221),
+        "yaml" | "yml" => (include_bytes!("../../resources/icons/file_types/yaml.svg"), 0x9333ea),
+        "json" | "jsonc" | "json5" => (include_bytes!("../../resources/icons/file_types/code.svg"), 0xb45309),
+        "ini" | "conf" | "cfg" | "env" | "properties" => {
+            (include_bytes!("../../resources/icons/file_types/settings.svg"), 0x64748b)
+        }
+        "diff" | "patch" => (include_bytes!("../../resources/icons/file_types/diff.svg"), 0x8b5cf6),
+        "cs" | "scala" | "dart" | "ex" | "exs" | "erl" | "hs" | "ml" | "mli" | "r" | "jl"
+        | "svelte" | "proto" | "cmake" | "mk" | "gradle" | "tf" | "hcl" | "nix" | "xml"
+        | "xsl" | "xsd" => (include_bytes!("../../resources/icons/file_types/code.svg"), 0x64748b),
+        _ => return None,
+    };
+    Some(pair)
 }
 
 pub fn file_icon(path: &str, asset: bool, main: bool) -> AnyElement {
@@ -1027,9 +1064,20 @@ pub fn file_icon(path: &str, asset: bool, main: bool) -> AnyElement {
             .child(icon(IconName::Globe))
             .into_any_element();
     }
+    if !asset
+        && let Some((bytes, color)) = zed_file_icon(&lower)
+    {
+        return Icon::default()
+            .data(bytes)
+            .w(px(15.))
+            .h(px(15.))
+            .text_color(rgb(color))
+            .flex_shrink_0()
+            .into_any_element();
+    }
     let name = if asset {
         IconName::FileImage
-    } else if is_code_icon_path(&lower) {
+    } else if lower.ends_with(".tex") || lower.ends_with(".ltx") {
         IconName::FileCode
     } else if lower.ends_with(".bib") {
         IconName::Library
@@ -1040,8 +1088,12 @@ pub fn file_icon(path: &str, asset: bool, main: bool) -> AnyElement {
         .flex_shrink_0()
         .text_color(rgb(if main {
             MAIN_TEX_COLOR
-        } else if lower.ends_with(".tex") {
-            0x8b989f
+        } else if asset {
+            0x0f766e
+        } else if lower.ends_with(".tex") || lower.ends_with(".ltx") {
+            0x2b7a78
+        } else if lower.ends_with(".bib") {
+            0x9a6700
         } else {
             0x787774
         }))
