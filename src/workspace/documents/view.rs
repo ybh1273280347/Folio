@@ -349,39 +349,10 @@ impl Workspace {
             && let Some(document) = self.documents.open.get(&self.documents.active)
         {
             let editor = document.editor.clone();
-            let ask_editor = document.editor.clone();
-            let ask_path = document.path.clone();
-            let ask_source = document
-                .path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| crate::i18n::workspace::SOURCE_LABEL.get().to_owned());
-            bar = bar
-                .child(
-                    Button::new("ask-ai-source")
-                        .ghost()
-                        .compact()
-                        .with_size(px(16.))
-                        .w(px(26.))
-                        .h(px(26.))
-                        .rounded(px(6.))
-                        .icon(crate::ui::icon(IconName::Sparkles).size(px(15.)))
-                        .tooltip(crate::i18n::workspace::TOOLTIP_SEND_TO_AI.get())
-                        .on_click(cx.listener(move |app, _, window, cx| {
-                            let selected = ask_editor.read(cx).selected_text().to_string();
-                            app.open_ai_with_selection(
-                                ask_source.clone(),
-                                Some(ask_path.clone()),
-                                selected,
-                                window,
-                                cx,
-                            );
-                        })),
-                )
-                .child(crate::ui::copy_document_button(
-                    SharedString::from(format!("copy-document:{}", document.path.display())),
-                    move |cx| editor.read(cx).value().to_string(),
-                ));
+            bar = bar.child(crate::ui::copy_document_button(
+                SharedString::from(format!("copy-document:{}", document.path.display())),
+                move |cx| editor.read(cx).value().to_string(),
+            ));
         }
 
         bar.into_any_element()
@@ -456,8 +427,19 @@ impl Workspace {
                         .child(canvas.clone()),
                 );
             } else {
+                let menu_editor = document.editor.clone();
+                let ask_path = document.path.clone();
+                let ask_source = document
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| crate::i18n::workspace::SOURCE_LABEL.get().to_owned());
+                let ask_shortcut: SharedString =
+                    AppSettings::format_key_badge(&self.settings.key_for("ask_ai")).into();
+                let workspace = cx.entity().downgrade();
                 area = area.child(
                     div()
+                        .id("code-editor-surface")
                         .relative()
                         .flex_1()
                         .min_h_0()
@@ -510,7 +492,31 @@ impl Workspace {
                         .when_some(
                             self.editor_zoom_hud.render("editor-zoom-hud"),
                             |area, hud| area.child(hud),
-                        ),
+                        )
+                        .folio_context_menu(move |menu, _, cx| {
+                            let ask_editor = menu_editor.clone();
+                            let ask_path = ask_path.clone();
+                            let ask_source = ask_source.clone();
+                            let workspace = workspace.clone();
+                            crate::ui::populate_editor_context_menu(
+                                menu,
+                                &menu_editor,
+                                Some(ask_shortcut.clone()),
+                                move |window, cx| {
+                                    let selected = ask_editor.read(cx).selected_text().to_string();
+                                    let _ = workspace.update(cx, |app, cx| {
+                                        app.open_ai_with_selection(
+                                            ask_source.clone(),
+                                            Some(ask_path.clone()),
+                                            selected,
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                },
+                                cx,
+                            )
+                        }),
                 );
             }
         } else if !self.documents.active.is_empty() {

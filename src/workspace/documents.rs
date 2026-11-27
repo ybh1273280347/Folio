@@ -599,6 +599,41 @@ impl Workspace {
             .unwrap_or_else(|| PathBuf::from(key))
     }
 
+    pub(super) fn ask_ai_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.trash.is_open() {
+            return;
+        }
+        if let Some(reading_path) = self.documents.focused_markdown.clone()
+            && let Some(md_pane) = self.documents.markdown_panes.get(&PaneKey::reading(&reading_path))
+        {
+            let full = self.document_path(&reading_path);
+            let source = full
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or(reading_path);
+            let text = md_pane.read(cx).selected_text_for_ai(cx);
+            self.open_ai_with_selection(source, Some(full), text, window, cx);
+            return;
+        }
+        if self.documents.active.is_empty() {
+            return;
+        }
+        let active = self.documents.active.clone();
+        let full = self.document_path(&active);
+        let source = full
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| crate::i18n::workspace::SOURCE_LABEL.get().to_owned());
+        let text = if let Some(md_pane) = self.documents.markdown_panes.get(&PaneKey::tab(&active)) {
+            md_pane.read(cx).selected_text_for_ai(cx)
+        } else if let Some(document) = self.documents.open.get(&active) {
+            document.editor.read(cx).selected_text().to_string()
+        } else {
+            String::new()
+        };
+        self.open_ai_with_selection(source, Some(full), text, window, cx);
+    }
+
     fn release_document_pane(&mut self, key: &PaneKey, window: &mut Window, cx: &mut Context<Self>) {
         self.release_pdf_pane(key, window, cx);
         self.release_html_pane(key, window, cx);
@@ -1008,6 +1043,7 @@ impl Workspace {
                     .language(language)
                     .line_number(self.settings.show_line_numbers)
                     .searchable(true)
+                    .context_menu(false)
                     .default_value(
                         if path.to_ascii_lowercase().ends_with(".md") || Self::is_canvas_path(path) {
                             String::new()

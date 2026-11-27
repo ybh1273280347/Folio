@@ -770,6 +770,7 @@ impl MarkdownPane {
                 .soft_wrap(true)
                 .background_wrap_for_large_values(PREVIEW_BYTES)
                 .searchable(true)
+                .context_menu(false)
         });
         let source_heading_highlight = source_editor.update(cx, |editor, cx| {
             editor.create_range_decorations_collection(Vec::new(), cx)
@@ -1298,6 +1299,17 @@ impl MarkdownPane {
 
     pub fn source_text(&self) -> String {
         self.text.clone()
+    }
+
+    pub fn selected_text_for_ai(&self, cx: &App) -> String {
+        if self.source {
+            self.source_editor.read(cx).selected_text().to_string()
+        } else {
+            self.visual_editor
+                .read(cx)
+                .selected_plain_text()
+                .unwrap_or_default()
+        }
     }
 
     pub fn annotation_count(&self) -> usize {

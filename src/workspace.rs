@@ -63,6 +63,7 @@ actions!(
         Compile,
         ToggleSidebar,
         ToggleAi,
+        AskAi,
         ToggleTerminal,
         ToggleZen,
         FindFile,
@@ -152,6 +153,7 @@ pub fn bind_shortcuts(settings: &AppSettings, cx: &mut App) {
     push_key(&mut bindings, settings.key_for("close_tab"), CloseTab, None);
     // Panel shortcuts remain available inside terminal TUIs, unlike document-editing shortcuts.
     push_key(&mut bindings, settings.key_for("toggle_ai"), ToggleAi, Some("FolioWorkspace"));
+    push_key(&mut bindings, settings.key_for("ask_ai"), AskAi, None);
     push_key(&mut bindings, settings.key_for("toggle_terminal"), ToggleTerminal, Some("FolioWorkspace"));
     push_key(&mut bindings, settings.key_for("toggle_zen"), ToggleZen, Some("FolioWorkspace"));
     push_key(
@@ -1066,6 +1068,16 @@ impl Render for Workspace {
                     return;
                 }
                 app.toggle_right_shortcut(RightPanelView::Ai, window, cx);
+            }))
+            .on_action(cx.listener(|app, _: &AskAi, window, cx| {
+                if app.show_preferences
+                    || app.dialogs.blocks_workspace()
+                    || app.tree.name_dialog_open()
+                {
+                    cx.propagate();
+                    return;
+                }
+                app.ask_ai_active(window, cx);
             }))
             .on_action(cx.listener(|app, _: &ToggleTerminal, window, cx| {
                 if app.show_preferences {

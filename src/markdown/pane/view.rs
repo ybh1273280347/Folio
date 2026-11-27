@@ -75,6 +75,10 @@ impl Render for MarkdownPane {
                 });
             }
             let pane = cx.entity();
+            let menu_editor = self.source_editor.clone();
+            let menu_pane = cx.entity().downgrade();
+            let ask_shortcut: SharedString =
+                crate::model::AppSettings::format_key_badge(&self.settings.key_for("ask_ai")).into();
             let editor = Editor::new(&self.source_editor)
                 .appearance(false)
                 .bordered(false)
@@ -89,7 +93,7 @@ impl Render for MarkdownPane {
                     pane.update(cx, |pane, cx| pane.handle_source_paste(item, window, cx))
                 });
             content = content.child(
-                div().relative().flex_1().min_w_0().min_h_0().p_2().flex().justify_center()
+                div().id("md-source-editor-surface").relative().flex_1().min_w_0().min_h_0().p_2().flex().justify_center()
                     // Mount the empty editor during preparation so it can measure the
                     // actual text area without shaping the entire source in prepaint.
                     .child(div().size_full().min_w_0()
@@ -99,6 +103,22 @@ impl Render for MarkdownPane {
                     .when(loading, |source| {
                         source.child(div().absolute().inset_2().text_sm().text_color(rgb(0x787774))
                             .child(crate::i18n::markdown::LOADING_MORE_CONTENT.get()))
+                    })
+                    .folio_context_menu(move |menu, _, cx| {
+                        let ask_editor = menu_editor.clone();
+                        let ask_pane = menu_pane.clone();
+                        crate::ui::populate_editor_context_menu(
+                            menu,
+                            &menu_editor,
+                            Some(ask_shortcut.clone()),
+                            move |_, cx| {
+                                let selected = ask_editor.read(cx).selected_text().to_string();
+                                let _ = ask_pane.update(cx, |_, cx| {
+                                    cx.emit(MarkdownEvent::AskAi(selected));
+                                });
+                            },
+                            cx,
+                        )
                     }),
             );
         } else {

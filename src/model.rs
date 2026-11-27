@@ -61,6 +61,12 @@ pub const SHORTCUT_DEFS: &[ShortcutDef] = &[
         default_key: "ctrl-shift-a",
     },
     ShortcutDef {
+        id: "ask_ai",
+        category: pref_i18n::CAT_WORKSPACE,
+        label: pref_i18n::SC_ASK_AI,
+        default_key: "ctrl-shift-l",
+    },
+    ShortcutDef {
         id: "toggle_terminal",
         category: pref_i18n::CAT_WORKSPACE,
         label: pref_i18n::SC_TOGGLE_TERMINAL,

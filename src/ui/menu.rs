@@ -93,6 +93,13 @@ impl FolioMenuItem {
         self
     }
 
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        if let Self::Action(entry) = &mut self {
+            entry.disabled = disabled;
+        }
+        self
+    }
+
     pub fn danger(mut self) -> Self {
         if let Self::Action(entry) = &mut self {
             entry.danger = true;
@@ -981,4 +988,74 @@ impl<T: Selectable + IntoElement + 'static> RenderOnce for FolioDropdownMenu<T> 
                 div().child(menu)
             })
     }
+}
+
+/// Populate a Folio-styled context menu for code / plain-text `EditorState` views.
+///
+/// Replaces `gpui-component`'s native OS context menu with paper-chrome styling
+/// and puts "Ask AI" first alongside Cut / Copy / Paste / Select All.
+pub fn populate_editor_context_menu(
+    menu: FolioMenu,
+    editor: &Entity<gpui_kit::component::input::EditorState>,
+    ask_ai_shortcut: Option<SharedString>,
+    on_ask_ai: impl Fn(&mut Window, &mut App) + 'static,
+    cx: &App,
+) -> FolioMenu {
+    let has_selection = !editor.read(cx).selected_range().is_empty();
+    let editor_focus = editor.read(cx).focus_handle(cx);
+
+    let dispatch_to_editor = |focus: FocusHandle, action: fn() -> Box<dyn Action>| {
+        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            focus.focus(window, cx);
+            window.dispatch_action(action(), cx);
+        }
+    };
+
+    let mut ask_item = FolioMenuItem::new(crate::i18n::workspace::MENU_ASK_AI.get())
+        .icon(IconName::Sparkles)
+        .on_click(move |_, window, cx| on_ask_ai(window, cx));
+    if let Some(shortcut) = ask_ai_shortcut
+        && !shortcut.is_empty()
+    {
+        ask_item = ask_item.shortcut(shortcut);
+    }
+
+    menu.min_w(px(180.))
+        .item(ask_item)
+        .separator()
+        .item(
+            FolioMenuItem::new(crate::i18n::workspace::MENU_CUT.get())
+                .icon(IconName::Scissors)
+                .shortcut("Ctrl+X")
+                .disabled(!has_selection)
+                .on_click(dispatch_to_editor(editor_focus.clone(), || {
+                    Box::new(gpui_kit::component::input::Cut)
+                })),
+        )
+        .item(
+            FolioMenuItem::new(crate::i18n::common::COPY.get())
+                .icon(IconName::Copy)
+                .shortcut("Ctrl+C")
+                .disabled(!has_selection)
+                .on_click(dispatch_to_editor(editor_focus.clone(), || {
+                    Box::new(gpui_kit::component::input::Copy)
+                })),
+        )
+        .item(
+            FolioMenuItem::new(crate::i18n::workspace::MENU_PASTE.get())
+                .icon(IconName::ClipboardPaste)
+                .shortcut("Ctrl+V")
+                .on_click(dispatch_to_editor(editor_focus.clone(), || {
+                    Box::new(gpui_kit::component::input::Paste)
+                })),
+        )
+        .separator()
+        .item(
+            FolioMenuItem::new(crate::i18n::workspace::MENU_SELECT_ALL.get())
+                .icon(IconName::SquareDashed)
+                .shortcut("Ctrl+A")
+                .on_click(dispatch_to_editor(editor_focus, || {
+                    Box::new(gpui_kit::component::input::SelectAll)
+                })),
+        )
 }

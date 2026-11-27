@@ -350,6 +350,10 @@ pub const MENU_EDIT_FILE_TAGS: BiText = BiText::new("编辑此文件的标签…
 pub const MENU_OPEN_IN_SPLIT: BiText = BiText::new("在分屏中打开", "Open in Split Pane");
 pub const MENU_SET_MAIN_FILE: BiText = BiText::new("设为编译主文件", "Set as Main File");
 pub const MENU_DELETE: BiText = BiText::new("删除…", "Delete…");
+pub const MENU_ASK_AI: BiText = BiText::new("问 AI", "Ask AI");
+pub const MENU_CUT: BiText = BiText::new("剪切", "Cut");
+pub const MENU_PASTE: BiText = BiText::new("粘贴", "Paste");
+pub const MENU_SELECT_ALL: BiText = BiText::new("全选", "Select All");
 
 // Sidebar & editor area
 pub const TOOLTIP_COLLAPSE_OUTLINE: BiText = BiText::new("收起文档大纲", "Collapse outline");
@@ -358,7 +362,6 @@ pub const TOOLTIP_CLOSE_TAB: BiText = BiText::new("关闭标签", "Close tab");
 pub const TOOLTIP_SWITCH_WYSIWYG: BiText = BiText::new("切换到可视化视图", "Switch to WYSIWYG view");
 pub const TOOLTIP_SWITCH_SOURCE: BiText = BiText::new("切换到源码视图", "Switch to source view");
 pub const SOURCE_LABEL: BiText = BiText::new("源码", "Source");
-pub const TOOLTIP_SEND_TO_AI: BiText = BiText::new("将当前选中内容（或当前文件）发送到 AI 助手", "Send selection (or current file) to AI Assistant");
 pub const BANNER_FILE_DELETED: BiText = BiText::new("文件已从磁盘删除，草稿已保留。", "File was deleted from disk; draft preserved.");
 pub const BANNER_DISK_MODIFIED: BiText = BiText::new("磁盘文件已被外部修改。", "File on disk was modified externally.");
 pub const BTN_LOAD_DISK: BiText = BiText::new("使用磁盘版本", "Load Disk Version");

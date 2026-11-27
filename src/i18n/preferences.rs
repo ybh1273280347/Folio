@@ -203,6 +203,7 @@ pub const SC_COMPILE: BiText = BiText::new("编译文档", "Compile document");
 pub const SC_TOGGLE_SIDEBAR: BiText = BiText::new("显示 / 隐藏左侧栏", "Toggle left sidebar");
 pub const SC_FIND_FILE: BiText = BiText::new("查找项目文件", "Find project file");
 pub const SC_TOGGLE_AI: BiText = BiText::new("打开 / 收起 AI 助手", "Toggle AI Assistant");
+pub const SC_ASK_AI: BiText = BiText::new("发送选中内容 / 文件到 AI 助手", "Ask AI (Selection / File)");
 pub const SC_TOGGLE_TERMINAL: BiText = BiText::new("打开 / 收起终端", "Toggle Terminal");
 pub const SC_TOGGLE_ZEN: BiText = BiText::new("进入 / 退出 Zen 模式", "Toggle Zen Mode");
 pub const SC_CLOSE_TAB: BiText = BiText::new("关闭当前标签页", "Close current tab");
