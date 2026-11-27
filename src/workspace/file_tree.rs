@@ -472,6 +472,7 @@ impl Workspace {
         self.relocate_tags(&relocated, false, cx);
         self.relocate_rag_paths(&relocated, false, cx);
         self.relocate_canvas_links(&relocated, false, cx);
+        self.relocate_markdown_links(&relocated, false, window, cx);
         self.projects.save()?;
         self.remember_session()?;
         cx.notify();
@@ -501,6 +502,7 @@ impl Workspace {
         self.relocate_tags(&relocated, true, cx);
         self.relocate_rag_paths(&relocated, true, cx);
         self.relocate_canvas_links(&relocated, true, cx);
+        self.relocate_markdown_links(&relocated, true, window, cx);
         self.projects.save()?;
         self.remember_session()?;
         if !cx.reduce_motion() {
@@ -934,6 +936,7 @@ impl Workspace {
                     self.relocate_tags(&relocated, true, cx);
                     self.relocate_rag_paths(&relocated, true, cx);
                     self.relocate_canvas_links(&relocated, true, cx);
+                    self.relocate_markdown_links(&relocated, true, window, cx);
                     self.projects.save()?;
                 }
             }
