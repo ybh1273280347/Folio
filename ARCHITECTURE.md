@@ -25,7 +25,7 @@ flowchart LR
 | 打开、保存和同步文档 | [workspace/documents.rs](src/workspace/documents.rs)、[workspace/documents/](src/workspace/documents/) | 管理草稿、来源版本、文件监听、页签和阅读分栏。编辑区与阅读分栏共享文档缓冲，关闭、移动和批注写回在此更新窗格。 |
 | 文件树、选区、筛选和回收站 | [workspace/file_tree.rs](src/workspace/file_tree.rs) | 管理目录索引、选区、折叠、搜索、拖放和回收站视图。文件操作成功后通知文档、项目和标签模块更新各自的记录。 |
 | 窗口布局、右侧面板和弹窗 | [workspace.rs](src/workspace.rs)、[workspace/panels.rs](src/workspace/panels.rs)、[workspace/dialogs.rs](src/workspace/dialogs.rs) | Workspace 组合各视图并协调专注模式。右侧面板管理功能中心、AI 和终端的切换及搜索焦点。确认弹窗保存待恢复的动作，选择后由原动作消费结果。 |
-| Markdown 编辑、内容扩展与导出 | [markdown/](src/markdown/) | `pane` 管编辑、选区、大纲与面板交互，`extensions` 提供编辑器、AI 和批注共用的公式与 Callout 扩展，`pdf` 消费 GPUI 文档绘制操作。通用块模型与输入行为在 [vendored 编辑器](vendor/gpui-kit-markdown-editor/)。 |
+| Markdown 编辑、内容扩展与导出 | [markdown/](src/markdown/) | `pane` 管编辑、选区、大纲、`[[` 快捷插链与面板交互，`links` 负责 Markdown 链接提取、相对路径自动重构与 SQLite 反链索引，`extensions` 提供编辑器、AI 和批注共用的公式与 Callout 扩展，`pdf` 消费 GPUI 文档绘制操作。通用块模型与输入行为在 [vendored 编辑器](vendor/gpui-kit-markdown-editor/)。 |
 | 公式、Mermaid、SVG 和字体 | [math.rs](src/math.rs)、[math_layout.rs](src/math_layout.rs)、[mermaid.rs](src/mermaid.rs)、[svg/](src/svg/) | 公式排版和图表各自维护渲染生命周期。通用 SVG 字节清理、兼容预处理与 `usvg` 字体配置由 `svg` 提供，图片、Draw.io、Mermaid 与 PDF 出口按需要直接调用。 |
 | 原生知识画布 | [canvas/](src/canvas/)、[workspace/documents/canvas_links.rs](src/workspace/documents/canvas_links.rs) | `canvas` 管理 `.canvas` 模型、交互、树布局、撤销和导出。Workspace 管理共享草稿、文件移动、文档跳转和反链刷新。 |
 | 文件预览与 Draw.io | [pdf.rs](src/pdf.rs)、[image/](src/image/)、[drawio/](src/drawio/)、[web_view/](src/web_view/) | PDF 与图片各自管理查看器，Draw.io 拥有图表读写、画布通信与导出。WebView2 宿主与本地资源映射由 `web_view` 提供，轻量 HTML 预览也在这里。 |
@@ -42,7 +42,7 @@ flowchart LR
 | 数据 | 权威来源与写入入口 |
 | --- | --- |
 | 文档与草稿 | 文档保存于原路径，未保存内容由打开的文档缓冲维护。编辑保存与 AI 批注正文写入复用磁盘版本校验。外部修改冲突或文件删除时保留草稿并走冲突流程。编辑面板和阅读面板是同一文档的不同视图。 |
-| 知识画布与反链 | 打开的画布以共享文档缓冲为准，关闭的画布以磁盘上的 `.canvas` 文件为准。文件采用 JSON Canvas 格式，Folio 扩展保存 `parentId`、视图模式、自由视图坐标和文档锚点等状态。SQLite 的 `canvas_links` 从已保存的画布内容派生，Workspace 在保存、监测到外部改动和删除时同步反链。项目及默认空间使用 `.folio/metadata.sqlite3`，独立文件使用应用数据目录的 `loose-metadata.sqlite3`。 |
+| 知识画布与反链 | 打开的画布以共享文档缓冲为准，关闭的画布以磁盘上的 `.canvas` 文件为准。文件采用 JSON Canvas 格式，Folio 扩展保存 `parentId`、视图模式、自由视图坐标和文档锚点等状态。SQLite 的 `canvas_links` 与 `markdown_links` 分别从已保存的画布和 Markdown 链接派生，Workspace 在打开项目、保存、重命名/移动、监测到外部改动和删除时同步反链并自动重构 Markdown 引用路径。项目及默认空间使用 `.folio/metadata.sqlite3`，独立文件使用应用数据目录的 `loose-metadata.sqlite3`。 |
 | 空间、标签页和设置 | 默认空间 `~/.Folio`、已登记项目和独立文件分别保存导航状态。`projects.json`、`workspace-sessions.json` 与 `preferences.json` 在 Folio 数据目录，默认 `%APPDATA%\folio-gpui`，可通过 `FOLIO_USER_DATA` 指定。打开的面板和文件树可从配置与磁盘重建。 |
 | 文件标签与批注 | 标签以 SQLite 数据库为准，项目及默认空间使用 `.folio/metadata.sqlite3`，独立文件使用应用数据目录的 `loose-metadata.sqlite3`。批注记录保存在文件旁的 `.folio/annotations.json`，Markdown 内联高亮还写入正文。手动与 AI 操作共用数据和写入规则。 |
 | AI 会话 | Pi JSONL 保存对话和会话名称。Folio 的 `ai-tabs.json` 与 `ai-session-metadata.json` 保存标签、置顶和标题来源等应用状态。面板切换只改变交互视图，运行中任务仍由原会话承接。 |
