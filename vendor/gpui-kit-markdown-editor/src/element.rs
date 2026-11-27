@@ -1442,6 +1442,14 @@ impl Element for EditorRoot {
         window: &mut Window,
         cx: &mut App,
     ) -> Prepaint {
+        // Insert the editor hitboxes before prepainting children so child controls
+        // that block mouse events sit in front of the editor surface.
+        let grip_bounds = Bounds::from_corners(
+            point(bounds.left() - px(24.), bounds.top() - px(20.)),
+            point(bounds.right() + px(12.), bounds.bottom() + px(12.)),
+        );
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        let grip_hitbox = window.insert_hitbox(grip_bounds, HitboxBehavior::Normal);
         if let Some(backgrounds) = self.backgrounds.take() {
             let (_, mut geometries) = collect_leaf_geometry(backgrounds, || child.prepaint(window, cx));
             {
@@ -1541,18 +1549,12 @@ impl Element for EditorRoot {
         } else {
             child.prepaint(window, cx);
         }
-        // Table row/column grips and whole-table corner handles sit just outside
-        // the editor bounds in the host gutter; give them a matching hitbox.
-        let grip_bounds = Bounds::from_corners(
-            point(bounds.left() - px(24.), bounds.top() - px(20.)),
-            point(bounds.right() + px(12.), bounds.bottom() + px(12.)),
-        );
         let image_handle = self.state.read(cx).image_resize_bounds().map(|bounds| {
             window.insert_hitbox(BlockEditorState::image_resize_handle(bounds), HitboxBehavior::Normal)
         });
         Prepaint {
-            hitbox: window.insert_hitbox(bounds, HitboxBehavior::Normal),
-            grip_hitbox: window.insert_hitbox(grip_bounds, HitboxBehavior::Normal),
+            hitbox,
+            grip_hitbox,
             image_handle,
         }
     }
@@ -1668,6 +1670,136 @@ impl Element for EditorRoot {
             .iter()
             .map(|(id, bounds)| (*id, *bounds))
             .collect();
+        // Register bubble-phase mouse-down and mouse-move listeners before painting
+        // children so child controls run first and can stop propagation.
+        let hitbox = prepaint.hitbox.clone();
+        let grip_hitbox = prepaint.grip_hitbox.clone();
+        let image_handle = prepaint.image_handle.clone();
+        let preview_bounds = self.code_preview_bounds.clone();
+        let moving_bodies = self.fold_body_bounds.clone();
+        let entity = self.state.clone();
+        window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+            if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
+                return;
+            }
+            if moving_bodies.lock().expect("moving fold bounds").values()
+                .any(|bounds| bounds.contains(&event.position))
+            {
+                return;
+            }
+            if image_handle.as_ref().is_some_and(|handle| handle.is_hovered(window))
+                && entity.update(cx, |state, cx| state.start_image_resize(event.position, cx))
+            {
+                let focus = entity.read(cx).focus_handle.clone();
+                window.focus(&focus, cx);
+                cx.stop_propagation();
+                return;
+            }
+            let in_editor = hitbox.is_hovered(window);
+            let in_grip_gutter = grip_hitbox.is_hovered(window);
+            if !in_editor && !in_grip_gutter {
+                return;
+            }
+            // Preview controls and selection handle their own clicks; hit-testing
+            // their synthetic text leaf would otherwise open the source editor.
+            if preview_bounds.lock().expect("code preview bounds")
+                .values().any(|bounds| bounds.contains(&event.position))
+            {
+                return;
+            }
+            if let Some((fold, _)) = fold_buttons.iter().find(|(_, bounds)| bounds.contains(&event.position)) {
+                entity.update(cx, |state, cx| state.toggle_fold(*fold, cx));
+                cx.stop_propagation();
+                return;
+            }
+            // A table grip selects its row / column and opens the menu;
+            // any other click closes an open menu.
+            if !event.modifiers.shift
+                && entity.update(cx, |state, cx| {
+                    let hit = state.click_table_grip(event.position, cx);
+                    if !hit {
+                        state.close_table_menu(cx);
+                    }
+                    hit
+                })
+            {
+                let focus = entity.read(cx).focus_handle.clone();
+                window.focus(&focus, cx);
+                cx.stop_propagation();
+                return;
+            }
+            if !in_editor && entity.read(cx).block_handle_at(event.position).is_none() {
+                return;
+            }
+            // A task checkbox toggles without moving the caret or starting
+            // a drag; nothing else handles this mouse-down.
+            if !event.modifiers.shift
+                && entity.update(cx, |state, cx| state.click_checkbox(event.position, cx))
+            {
+                cx.stop_propagation();
+                return;
+            }
+            entity.update(cx, |state, cx| {
+                let focus = state.focus_handle.clone();
+                window.focus(&focus, cx);
+                if secondary_modifier().is_subset_of(&event.modifiers)
+                    && state.follow_link_at(event.position, cx)
+                {
+                    return;
+                }
+                state.dragging = true;
+                if !event.modifiers.shift {
+                    state.arm_block_drag(event.position);
+                }
+                state.mouse_at(event.position, event.modifiers.shift, cx);
+                if !event.modifiers.shift && event.click_count >= 2 {
+                    state.select_unit(event.click_count >= 3, cx);
+                }
+            });
+        });
+        let entity = self.state.clone();
+        let moving_bodies = self.fold_body_bounds.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            // A host gutter sits above the editor. Continue its drag through capture
+            // even when another element handles the pointer in the bubble phase.
+            if phase == DispatchPhase::Capture
+                && event.pressed_button == Some(MouseButton::Left)
+                && entity.read(cx).block_drag.is_some()
+            {
+                entity.update(cx, |state, cx| {
+                    let was_dragging = state.is_block_dragging();
+                    if state.block_drag_to(event.position, cx) && !was_dragging {
+                        window.focus(&state.focus_handle, cx);
+                    }
+                });
+            }
+            if phase != DispatchPhase::Bubble {
+                return;
+            }
+            if event.pressed_button.is_none() {
+                entity.update(cx, |state, cx| {
+                    state.hover_at(
+                        event.position,
+                        secondary_modifier().is_subset_of(&event.modifiers),
+                        cx,
+                    )
+                });
+                return;
+            }
+            if event.pressed_button != Some(MouseButton::Left) {
+                return;
+            }
+            entity.update(cx, |state, cx| {
+                if state.move_image_resize(event.position, cx) || state.is_block_dragging() {
+                    return;
+                }
+                if state.dragging && !moving_bodies.lock().expect("moving fold bounds").values()
+                    .any(|bounds| bounds.contains(&event.position))
+                {
+                    state.mouse_at(event.position, true, cx);
+                }
+            });
+        });
         child.paint(window, cx);
 
         let frame = frame.borrow();
@@ -1817,135 +1949,8 @@ impl Element for EditorRoot {
         }
         drop(frame);
 
-        // Mouse: handlers update the entity at event time, never in paint.
-        let hitbox = prepaint.hitbox.clone();
-        let grip_hitbox = prepaint.grip_hitbox.clone();
-        let image_handle = prepaint.image_handle.clone();
-        let preview_bounds = self.code_preview_bounds.clone();
-        let moving_bodies = self.fold_body_bounds.clone();
-        let entity = self.state.clone();
-        window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-            if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
-                return;
-            }
-            if moving_bodies.lock().expect("moving fold bounds").values()
-                .any(|bounds| bounds.contains(&event.position))
-            {
-                return;
-            }
-            if image_handle.as_ref().is_some_and(|handle| handle.is_hovered(window))
-                && entity.update(cx, |state, cx| state.start_image_resize(event.position, cx))
-            {
-                let focus = entity.read(cx).focus_handle.clone();
-                window.focus(&focus, cx);
-                cx.stop_propagation();
-                return;
-            }
-            let in_editor = hitbox.is_hovered(window);
-            let in_grip_gutter = grip_hitbox.is_hovered(window);
-            if !in_editor && !in_grip_gutter {
-                return;
-            }
-            // Preview controls and selection handle their own clicks; hit-testing
-            // their synthetic text leaf would otherwise open the source editor.
-            if preview_bounds.lock().expect("code preview bounds")
-                .values().any(|bounds| bounds.contains(&event.position))
-            {
-                return;
-            }
-            if let Some((fold, _)) = fold_buttons.iter().find(|(_, bounds)| bounds.contains(&event.position)) {
-                entity.update(cx, |state, cx| state.toggle_fold(*fold, cx));
-                cx.stop_propagation();
-                return;
-            }
-            // A table grip selects its row / column and opens the menu;
-            // any other click closes an open menu.
-            if !event.modifiers.shift
-                && entity.update(cx, |state, cx| {
-                    let hit = state.click_table_grip(event.position, cx);
-                    if !hit {
-                        state.close_table_menu(cx);
-                    }
-                    hit
-                })
-            {
-                let focus = entity.read(cx).focus_handle.clone();
-                window.focus(&focus, cx);
-                cx.stop_propagation();
-                return;
-            }
-            if !in_editor && entity.read(cx).block_handle_at(event.position).is_none() {
-                return;
-            }
-            // A task checkbox toggles without moving the caret or starting
-            // a drag; nothing else handles this mouse-down.
-            if !event.modifiers.shift
-                && entity.update(cx, |state, cx| state.click_checkbox(event.position, cx))
-            {
-                cx.stop_propagation();
-                return;
-            }
-            entity.update(cx, |state, cx| {
-                let focus = state.focus_handle.clone();
-                window.focus(&focus, cx);
-                if secondary_modifier().is_subset_of(&event.modifiers)
-                    && state.follow_link_at(event.position, cx)
-                {
-                    return;
-                }
-                state.dragging = true;
-                if !event.modifiers.shift {
-                    state.arm_block_drag(event.position);
-                }
-                state.mouse_at(event.position, event.modifiers.shift, cx);
-                if !event.modifiers.shift && event.click_count >= 2 {
-                    state.select_unit(event.click_count >= 3, cx);
-                }
-            });
-        });
-        let entity = self.state.clone();
-        let moving_bodies = self.fold_body_bounds.clone();
-        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-            // A host gutter sits above the editor. Continue its drag through capture
-            // even when another element handles the pointer in the bubble phase.
-            if phase == DispatchPhase::Capture
-                && event.pressed_button == Some(MouseButton::Left)
-                && entity.read(cx).block_drag.is_some()
-            {
-                entity.update(cx, |state, cx| {
-                    let was_dragging = state.is_block_dragging();
-                    if state.block_drag_to(event.position, cx) && !was_dragging {
-                        window.focus(&state.focus_handle, cx);
-                    }
-                });
-            }
-            if phase != DispatchPhase::Bubble {
-                return;
-            }
-            if event.pressed_button.is_none() {
-                entity.update(cx, |state, cx| {
-                    state.hover_at(
-                        event.position,
-                        secondary_modifier().is_subset_of(&event.modifiers),
-                        cx,
-                    )
-                });
-                return;
-            }
-            if event.pressed_button != Some(MouseButton::Left) {
-                return;
-            }
-            entity.update(cx, |state, cx| {
-                if state.move_image_resize(event.position, cx) || state.is_block_dragging() {
-                    return;
-                }
-                if state.dragging && !moving_bodies.lock().expect("moving fold bounds").values()
-                    .any(|bounds| bounds.contains(&event.position))
-                {
-                    state.mouse_at(event.position, true, cx);
-                }
-            });
-        });
+        // Keep MouseUpEvent after child.paint so drag state still clears even
+        // when a child click handler calls stop_propagation().
         let entity = self.state.clone();
         window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
             if event.button != MouseButton::Left {

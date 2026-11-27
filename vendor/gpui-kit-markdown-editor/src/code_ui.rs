@@ -170,6 +170,7 @@ pub(crate) fn header(
         .border_color(theme.border.opacity(0.5));
     let header = if state.read(cx).is_fold_open(block) { header.border_b_1() } else { header };
     header
+        .block_mouse_except_scroll()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(
             div()

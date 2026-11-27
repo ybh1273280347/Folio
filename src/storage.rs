@@ -70,6 +70,8 @@ pub fn load_settings() -> io::Result<AppSettings> {
     settings.background_image_opacity = settings.background_image_opacity.min(100);
     settings.text_color_presets =
         crate::model::sanitize_text_color_presets(std::mem::take(&mut settings.text_color_presets));
+    settings.extra_text_extensions =
+        files::sanitize_extra_text_extensions(std::mem::take(&mut settings.extra_text_extensions));
     Ok(settings)
 }
 

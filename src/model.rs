@@ -540,6 +540,9 @@ pub struct AppSettings {
     /// User-editable foreground text color presets for the Markdown floating toolbar.
     #[serde(default = "default_text_color_presets")]
     pub text_color_presets: Vec<String>,
+    /// Extra file extensions (lowercase, without leading dot) treated as editable text files.
+    #[serde(default)]
+    pub extra_text_extensions: Vec<String>,
 }
 
 fn default_smooth_caret() -> bool {
@@ -619,6 +622,7 @@ impl Default for AppSettings {
             rag: RagConfig::default(),
             keybindings: BTreeMap::new(),
             text_color_presets: default_text_color_presets(),
+            extra_text_extensions: Vec::new(),
         }
     }
 }

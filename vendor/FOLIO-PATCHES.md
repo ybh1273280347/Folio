@@ -43,6 +43,8 @@
   - **行内图片选区与缩放**：复用行内图片的绘制边界处理选区和以中心为基准的等比缩放；正文栏宽度决定放大上限，独立图片段落在编辑器和 PDF 中居中，松手提交一次可撤销编辑，有尺寸的图片以 HTML 图片属性保存，重新打开时交由共用 HTML 解析器恢复图片与尺寸。
   - **平滑光标**：通过 `gpui-base 0.9.1` 的全局 `SmoothCaretSettings`（`set_smooth_caret` / `smooth_caret_settings`）与 `SmoothCaretMotion` 55ms 帧插值状态机（尊重 `reduce_motion` 与滚动锚点偏移防漂移），在启用时将 Markdown 编辑器与通用 `Input` 的光标绘制为圆角微光样式并平滑滑动，并在按键、释放及中文输入法预编辑/候选期间保持 700ms 暂停闪烁缓冲。
 
+- **代码块与控件鼠标隔离**：调整 `EditorRoot` 在 `prepaint`/`paint` 中注册命中盒与 `MouseDownEvent`/`MouseMoveEvent` 监听的顺序（先于子元素，保持 `MouseUpEvent` 在后以清理拖拽态），确保子控件的 `stop_propagation()` 与遮挡命中盒先于编辑器正文生效；并为代码块工具栏 `code_ui::header` 添加 `block_mouse_except_scroll()`，防止连续点击语言下拉框等工具栏控件时误触编辑器选区。
+
 ## `gpui-pre 0.3.12`
 
 - **文档绘制捕获**：增加文档绘制捕获，保留字形、原始文字簇、字体、图形、图片及裁剪；捕获期间不创建 GPU 字形纹理。独立文档布局可以覆盖视口裁剪，以包含未滚动到的内容。

@@ -53,7 +53,7 @@ impl SettingsChanged {
             interface_font_size, editor_font_size, markdown_font_size, ai_font_size,
             math_scale, inline_math_scale, math_font, line_width_limited,
             internal_link_open_target, tool_execution_view, show_line_numbers, smooth_caret,
-            terminal, translate, ai, rag, keybindings,
+            terminal, translate, ai, rag, keybindings, extra_text_extensions,
         );
         merged
     }
@@ -85,6 +85,7 @@ pub struct Preferences {
     background_image_error: Option<String>,
     theme_name: Entity<InputState>,
     theme_colors: Vec<(ColorRole, Entity<ColorPickerState>)>,
+    extra_text_extensions: Entity<InputState>,
     terminal_shell: Entity<InputState>,
     terminal_args: Entity<TextareaState>,
     terminal_font_family: Entity<SelectState<SearchableVec<String>>>,
@@ -156,6 +157,25 @@ impl Preferences {
             }).detach();
             (role, picker)
         }).collect();
+        let extra_text_extensions = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(p::EXTRA_TEXT_EXTENSIONS_PLACEHOLDER.get())
+        });
+        if !settings.extra_text_extensions.is_empty() {
+            let formatted = crate::files::format_extra_text_extensions(&settings.extra_text_extensions);
+            extra_text_extensions.update(cx, |input, cx| {
+                input.set_value(formatted, window, cx);
+            });
+        }
+        cx.subscribe(&extra_text_extensions, |panel, state, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let parsed = crate::files::parse_extra_text_extensions(&state.read(cx).value());
+                if panel.settings.extra_text_extensions != parsed {
+                    panel.settings.extra_text_extensions = parsed;
+                    panel.changed(cx);
+                }
+            }
+        })
+        .detach();
         let terminal_shell = cx.new(|cx| InputState::new(window, cx).placeholder(p::TERMINAL_SHELL_PLACEHOLDER.get()));
         if !settings.terminal.shell.is_empty() {
             terminal_shell.update(cx, |input, cx| {
@@ -565,6 +585,7 @@ impl Preferences {
             sizes,
             theme_name,
             theme_colors,
+            extra_text_extensions,
             terminal_shell,
             terminal_args,
             terminal_font_family,
@@ -659,6 +680,13 @@ impl Preferences {
         self.math_font.update(cx, |state, cx| {
             state.set_selected_value(&settings.math_font.family().to_owned(), window, cx)
         });
+        let current_extra = crate::files::parse_extra_text_extensions(&self.extra_text_extensions.read(cx).value());
+        if current_extra != settings.extra_text_extensions {
+            let formatted = crate::files::format_extra_text_extensions(&settings.extra_text_extensions);
+            self.extra_text_extensions.update(cx, |input, cx| {
+                input.set_value(formatted, window, cx);
+            });
+        }
         self.terminal_shell.update(cx, |input, cx| {
             input.set_value(settings.terminal.shell.clone(), window, cx);
         });
@@ -710,6 +738,9 @@ impl Preferences {
     pub fn refresh_locale(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.theme_name.update(cx, |input, cx| {
             input.set_placeholder(p::THEME_NAME_PLACEHOLDER.get(), window, cx);
+        });
+        self.extra_text_extensions.update(cx, |input, cx| {
+            input.set_placeholder(p::EXTRA_TEXT_EXTENSIONS_PLACEHOLDER.get(), window, cx);
         });
         self.terminal_shell.update(cx, |input, cx| {
             input.set_placeholder(p::TERMINAL_SHELL_PLACEHOLDER.get(), window, cx);
@@ -1160,6 +1191,21 @@ impl Preferences {
                             .text_xs()
                             .text_color(rgb(0x787774))
                             .child(p::INTERNAL_LINK_HINT.get()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(p::EXTRA_TEXT_EXTENSIONS.get())
+                    .child(crate::ui::TextField::new(&self.extra_text_extensions))
+                    .child(
+                        div()
+                            .w_full()
+                            .text_xs()
+                            .text_color(rgb(0x787774))
+                            .child(p::EXTRA_TEXT_EXTENSIONS_HINT.get()),
                     ),
             )
             .into_any_element()

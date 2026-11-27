@@ -107,6 +107,15 @@ pub const INTERNAL_LINK_HINT: BiText = BiText::new(
     "Ctrl+左键点击 Markdown 内部文件链接时的打开方式（非分屏类型仍在主编辑区打开）",
     "Where Ctrl+Click opens internal Markdown file links (unsupported split types still open in the main editor)",
 );
+pub const EXTRA_TEXT_EXTENSIONS: BiText = BiText::new("额外文本文件白名单（扩展名）", "Extra Text File Extensions");
+pub const EXTRA_TEXT_EXTENSIONS_PLACEHOLDER: BiText = BiText::new(
+    "例如：vue, svelte, zig, wgsl（逗号或空格分隔）",
+    "e.g. vue, svelte, zig, wgsl (comma or space separated)",
+);
+pub const EXTRA_TEXT_EXTENSIONS_HINT: BiText = BiText::new(
+    "除内置文档与常见代码后缀外，追加允许在文件树显示并按纯文本打开/编辑的扩展名，修改后立即生效。",
+    "Additional extensions allowed in the file tree and text editor beyond built-in document and code types. Applies immediately.",
+);
 
 // Terminal section
 pub const PAGE_TERMINAL_TITLE: BiText = BiText::new("终端设置", "Terminal Settings");

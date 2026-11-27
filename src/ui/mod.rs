@@ -966,6 +966,35 @@ pub const TAG_COLORS: [(crate::i18n::BiText, u32, u32); 6] = [
     (crate::i18n::tags::TAG_COLOR_PURPLE, 0xebe5f5, 0x624785),
 ];
 
+fn is_code_icon_path(lower: &str) -> bool {
+    let filename = lower.rsplit(['/', '\\']).next().unwrap_or(lower);
+    if matches!(
+        filename,
+        "makefile" | "gnumakefile" | "dockerfile" | "containerfile" | "justfile" | "procfile"
+    ) {
+        return true;
+    }
+    matches!(
+        std::path::Path::new(filename)
+            .extension()
+            .and_then(|ext| ext.to_str()),
+        Some(
+            "tex"
+                | "ts" | "tsx" | "mts" | "cts"
+                | "js" | "jsx" | "mjs" | "cjs"
+                | "css" | "scss" | "sass" | "less"
+                | "vue" | "svelte" | "astro"
+                | "rs" | "py" | "pyi" | "go" | "java" | "kt" | "kts"
+                | "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx"
+                | "cs" | "swift" | "rb" | "php" | "lua" | "zig" | "scala" | "dart"
+                | "ex" | "exs" | "erl" | "hs" | "ml" | "mli" | "r" | "jl"
+                | "sh" | "bash" | "zsh" | "fish" | "ps1" | "psm1" | "bat" | "cmd"
+                | "sql" | "graphql" | "gql" | "proto" | "cmake" | "mk" | "gradle"
+                | "dockerfile" | "tf" | "hcl" | "nix" | "prisma"
+        )
+    )
+}
+
 pub fn file_icon(path: &str, asset: bool, main: bool) -> AnyElement {
     let lower = path.to_lowercase();
     if lower.ends_with(".pdf") {
@@ -1000,7 +1029,7 @@ pub fn file_icon(path: &str, asset: bool, main: bool) -> AnyElement {
     }
     let name = if asset {
         IconName::FileImage
-    } else if lower.ends_with(".tex") {
+    } else if is_code_icon_path(&lower) {
         IconName::FileCode
     } else if lower.ends_with(".bib") {
         IconName::Library

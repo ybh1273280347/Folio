@@ -45,6 +45,7 @@ fn main() {
         markdown_editor::init(cx);
         canvas::bind_shortcuts(cx);
         let initial_settings = storage::load_settings().expect(i18n::workspace::ERR_LOAD_SETTINGS.get());
+        files::set_extra_text_extensions(&initial_settings.extra_text_extensions);
         i18n::apply_settings(&initial_settings);
         cx.set_global(initial_settings.translate.clone());
         theme::apply_settings(&initial_settings, cx);

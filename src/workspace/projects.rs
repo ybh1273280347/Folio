@@ -481,14 +481,14 @@ impl Workspace {
     }
 
     pub(super) fn open_file_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let supported = files::supported_dialog_extensions();
+        let supported_refs: Vec<&str> = supported.iter().map(String::as_str).collect();
         let dialog = rfd::AsyncFileDialog::new()
             .set_parent(window)
             .set_title(crate::i18n::workspace::DIALOG_OPEN_DOCUMENT.get())
             .add_filter(
                 crate::i18n::workspace::DIALOG_SUPPORTED_FILES.get(),
-                &[
-                    "pdf", "md", "tex", "ltx", "bib", "sty", "cls", "html", "htm", "drawio",
-                ],
+                &supported_refs,
             );
         self.dialogs.set_native_open(true);
         cx.spawn_in(window, async move |this, cx| {

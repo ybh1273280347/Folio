@@ -152,6 +152,12 @@ impl Workspace {
         if previous.rag != self.settings.rag {
             self.refresh_kb_snapshot(cx);
         }
+        if previous.extra_text_extensions != self.settings.extra_text_extensions {
+            crate::files::set_extra_text_extensions(&self.settings.extra_text_extensions);
+            if let Err(error) = self.refresh_files(window, cx) {
+                self.report(error, cx);
+            }
+        }
         self.persist_settings(cx);
         cx.notify();
     }

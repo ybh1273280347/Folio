@@ -1,20 +1,66 @@
 use std::{
+    collections::BTreeSet,
     fs::{self, File},
     io,
     path::{Component, Path, PathBuf},
+    sync::{OnceLock, RwLock},
 };
 
 use sha2::{Digest, Sha256};
 
 use crate::model::{DiskDocument, FileKind, ProjectFile};
 
-const TEXT_EXTENSIONS: &[&str] = &[
+const MAX_TEXT_DOCUMENT_BYTES: u64 = 4 * 1024 * 1024;
+const BINARY_SNIFF_BYTES: usize = 8192;
+
+const DOCUMENT_TEXT_EXTENSIONS: &[&str] = &[
     "tex", "ltx", "bib", "sty", "cls", "bst", "bbx", "cbx", "cfg", "def", "clo", "ist", "glsdefs",
-    "txt", "md", "canvas", "csv", "tsv", "dat", "tikz", "pgf", "asy", "json", "yaml", "yml", "toml", "eps",
+    "txt", "md", "mdx", "rst", "adoc", "org", "canvas", "csv", "tsv", "dat", "tikz", "pgf", "asy",
+    "json", "jsonc", "json5", "yaml", "yml", "toml", "eps", "ini", "conf", "env", "properties",
+    "xml", "xsl", "xsd", "diff", "patch", "log",
 ];
+
+const CODE_EXTENSIONS: &[&str] = &[
+    "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "css", "scss", "sass", "less", "vue",
+    "svelte", "astro", "rs", "py", "pyi", "go", "java", "kt", "kts", "c", "h", "cpp", "cc", "cxx",
+    "hpp", "hh", "hxx", "cs", "swift", "rb", "php", "lua", "zig", "scala", "dart", "ex", "exs",
+    "erl", "hs", "ml", "mli", "r", "jl", "sh", "bash", "zsh", "fish", "ps1", "psm1", "bat", "cmd",
+    "sql", "graphql", "gql", "proto", "cmake", "mk", "gradle", "dockerfile", "tf", "hcl", "nix",
+    "prisma",
+];
+
+const SPECIAL_TEXT_FILENAMES: &[&str] = &[
+    ".latexmkrc",
+    "Makefile",
+    "GNUmakefile",
+    "Dockerfile",
+    "Containerfile",
+    "Justfile",
+    "Procfile",
+    "LICENSE",
+    "README",
+    "CHANGELOG",
+    "CONTRIBUTING",
+    "AUTHORS",
+    "NOTICE",
+    ".gitignore",
+    ".gitattributes",
+    ".gitmodules",
+    ".editorconfig",
+    ".prettierrc",
+    ".eslintrc",
+    ".npmrc",
+    ".nvmrc",
+    ".dockerignore",
+    ".env",
+    ".env.example",
+    ".env.local",
+];
+
 const ASSET_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "webp", "gif", "svg", "pdf", "html", "htm", "drawio",
 ];
+
 pub const EXCLUDED_DIRECTORIES: &[&str] = &[
     ".git",
     ".pi",
@@ -26,7 +72,95 @@ pub const EXCLUDED_DIRECTORIES: &[&str] = &[
     "dist",
     "target",
     "runtime",
+    "__pycache__",
+    ".venv",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".cache",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "coverage",
 ];
+
+fn extra_text_extensions_store() -> &'static RwLock<BTreeSet<String>> {
+    static STORE: OnceLock<RwLock<BTreeSet<String>>> = OnceLock::new();
+    STORE.get_or_init(|| RwLock::new(BTreeSet::new()))
+}
+
+fn normalize_extra_extension(raw: &str) -> Option<String> {
+    let ext = raw.trim().trim_start_matches('.').to_ascii_lowercase();
+    if ext.is_empty()
+        || ext.len() > 24
+        || !ext
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'_'))
+        || ASSET_EXTENSIONS.contains(&ext.as_str())
+    {
+        return None;
+    }
+    Some(ext)
+}
+
+pub fn sanitize_extra_text_extensions(raw: impl IntoIterator<Item = String>) -> Vec<String> {
+    let set: BTreeSet<String> = raw
+        .into_iter()
+        .filter_map(|item| normalize_extra_extension(&item))
+        .collect();
+    set.into_iter().collect()
+}
+
+pub fn parse_extra_text_extensions(raw: &str) -> Vec<String> {
+    let tokens = raw
+        .split(|ch: char| matches!(ch, ',' | '，' | ';' | '；') || ch.is_whitespace())
+        .map(str::to_owned);
+    sanitize_extra_text_extensions(tokens)
+}
+
+pub fn format_extra_text_extensions(extensions: &[String]) -> String {
+    extensions.join(", ")
+}
+
+pub fn set_extra_text_extensions(extensions: &[String]) {
+    let sanitized: BTreeSet<String> = extensions
+        .iter()
+        .filter_map(|item| normalize_extra_extension(item))
+        .collect();
+    *extra_text_extensions_store()
+        .write()
+        .expect("extra text extensions lock poisoned") = sanitized;
+}
+
+fn extension_in_extra_text(path: &Path) -> bool {
+    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+        return false;
+    };
+    let extension = extension.to_ascii_lowercase();
+    extra_text_extensions_store()
+        .read()
+        .expect("extra text extensions lock poisoned")
+        .contains(extension.as_str())
+}
+
+pub fn supported_dialog_extensions() -> Vec<String> {
+    let mut set = BTreeSet::new();
+    for ext in ASSET_EXTENSIONS
+        .iter()
+        .chain(DOCUMENT_TEXT_EXTENSIONS.iter())
+        .chain(CODE_EXTENSIONS.iter())
+    {
+        set.insert((*ext).to_owned());
+    }
+    for ext in extra_text_extensions_store()
+        .read()
+        .expect("extra text extensions lock poisoned")
+        .iter()
+    {
+        set.insert(ext.clone());
+    }
+    set.into_iter().collect()
+}
 
 pub fn percent_decode(input: &str) -> String {
     let bytes = input.as_bytes();
@@ -61,11 +195,14 @@ pub fn is_drawio(path: &Path) -> bool {
     lower.ends_with(".drawio") || lower.ends_with(".drawio.svg")
 }
 
+fn is_special_text_filename(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| SPECIAL_TEXT_FILENAMES.contains(&name))
+}
+
 pub fn is_relevant(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| name == ".latexmkrc")
-        || is_drawio(path)
-        || extension_in(path, TEXT_EXTENSIONS)
-        || extension_in(path, ASSET_EXTENSIONS)
+    is_drawio(path) || is_asset(path) || is_text(path)
 }
 
 fn extension_in(path: &Path, extensions: &[&str]) -> bool {
@@ -79,8 +216,11 @@ fn extension_in(path: &Path, extensions: &[&str]) -> bool {
 
 pub(crate) fn is_text(path: &Path) -> bool {
     !is_drawio(path)
-        && (path.file_name().is_some_and(|name| name == ".latexmkrc")
-            || extension_in(path, TEXT_EXTENSIONS))
+        && !is_asset(path)
+        && (is_special_text_filename(path)
+            || extension_in(path, DOCUMENT_TEXT_EXTENSIONS)
+            || extension_in(path, CODE_EXTENSIONS)
+            || extension_in_extra_text(path))
 }
 
 pub(crate) fn is_asset(path: &Path) -> bool {
@@ -190,7 +330,21 @@ pub fn read_document(root: &Path, relative: &str) -> io::Result<DiskDocument> {
 
 /// Reads a document directly by its canonical path for files in the default space.
 pub fn read_document_at(path: &Path) -> io::Result<DiskDocument> {
+    let metadata = fs::metadata(path)?;
+    if metadata.len() > MAX_TEXT_DOCUMENT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            crate::i18n::workspace::err_file_too_large(MAX_TEXT_DOCUMENT_BYTES / (1024 * 1024)),
+        ));
+    }
     let bytes = fs::read(path)?;
+    let sniff_len = bytes.len().min(BINARY_SNIFF_BYTES);
+    if bytes[..sniff_len].contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            crate::i18n::workspace::ERR_BINARY_FILE_UNSUPPORTED.get(),
+        ));
+    }
     Ok(DiskDocument {
         text: String::from_utf8_lossy(&bytes).into_owned(),
         revision: sha256_hex(&bytes),
@@ -785,5 +939,57 @@ mod tests {
         let nested = create_named_canvas_in(temp.path(), Some("Notes/第一章"), "复杂度.canvas").unwrap();
         assert_eq!(nested.path, "Notes/第一章/复杂度.canvas");
         assert!(temp.path().join("Notes/第一章/复杂度.canvas").is_file());
+    }
+
+    #[test]
+    fn code_files_and_special_project_files_are_editable_text() {
+        for path in [
+            "src/index.ts",
+            "src/App.tsx",
+            "src/main.rs",
+            "scripts/build.py",
+            "Dockerfile",
+            "Makefile",
+            ".gitignore",
+        ] {
+            let p = Path::new(path);
+            assert!(is_relevant(p), "expected {path} to be relevant");
+            assert!(is_text(p), "expected {path} to be text");
+            assert!(is_creatable(p), "expected {path} to be creatable");
+        }
+    }
+
+    #[test]
+    fn extra_text_extensions_parse_and_hot_reload() {
+        let parsed = parse_extra_text_extensions(" .WGSL, custom_ext; pdf ， ../bad  foo-bar ");
+        assert_eq!(parsed, vec!["custom_ext", "foo-bar", "wgsl"]);
+
+        assert!(!is_relevant(Path::new("shader.wgsl")));
+        set_extra_text_extensions(&parsed);
+        assert!(is_relevant(Path::new("shader.wgsl")));
+        assert!(is_text(Path::new("shader.wgsl")));
+        assert!(supported_dialog_extensions().contains(&"wgsl".to_owned()));
+
+        set_extra_text_extensions(&[]);
+        assert!(!is_relevant(Path::new("shader.wgsl")));
+    }
+
+    #[test]
+    fn read_document_rejects_binary_and_oversized_files() {
+        let temp = tempdir().unwrap();
+        let binary = temp.path().join("fake.ts");
+        fs::write(&binary, b"const a = 1;\0\x01\x02").unwrap();
+        assert_eq!(
+            read_document_at(&binary).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        let huge = temp.path().join("huge.ts");
+        let file = File::create(&huge).unwrap();
+        file.set_len(MAX_TEXT_DOCUMENT_BYTES + 1).unwrap();
+        assert_eq!(
+            read_document_at(&huge).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 }

@@ -365,6 +365,59 @@ impl Workspace {
         }
     }
 
+    fn editor_language_for_path(path: &Path) -> &'static str {
+        if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+            match name {
+                "Makefile" | "GNUmakefile" => return "makefile",
+                "Dockerfile" | "Containerfile" => return "dockerfile",
+                _ => {}
+            }
+        }
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase);
+        match extension.as_deref() {
+            Some("tex" | "ltx" | "sty" | "cls" | "bib") => "latex",
+            Some("md" | "mdx") => "markdown",
+            Some("json" | "jsonc" | "json5") => "json",
+            Some("yaml" | "yml") => "yaml",
+            Some("toml") => "toml",
+            Some("ts" | "mts" | "cts") => "typescript",
+            Some("tsx") => "tsx",
+            Some("js" | "mjs" | "cjs") => "javascript",
+            Some("jsx") => "jsx",
+            Some("rs") => "rust",
+            Some("py" | "pyi") => "python",
+            Some("go") => "go",
+            Some("java") => "java",
+            Some("kt" | "kts") => "kotlin",
+            Some("c" | "h") => "c",
+            Some("cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx") => "cpp",
+            Some("cs") => "csharp",
+            Some("swift") => "swift",
+            Some("rb") => "ruby",
+            Some("php") => "php",
+            Some("lua") => "lua",
+            Some("scala") => "scala",
+            Some("dart") => "dart",
+            Some("css") => "css",
+            Some("scss" | "sass") => "scss",
+            Some("less") => "less",
+            Some("sh" | "bash" | "zsh" | "fish") => "bash",
+            Some("ps1" | "psm1") => "powershell",
+            Some("bat" | "cmd") => "batch",
+            Some("sql") => "sql",
+            Some("graphql" | "gql") => "graphql",
+            Some("xml" | "xsl" | "xsd") => "xml",
+            Some("ini" | "conf" | "cfg" | "properties") => "ini",
+            Some("diff" | "patch") => "diff",
+            Some("mk") => "makefile",
+            Some("dockerfile") => "dockerfile",
+            _ => "plaintext",
+        }
+    }
+
     pub(super) fn is_drawio_path(path: &str) -> bool {
         let lower = path.to_lowercase();
         lower.ends_with(".drawio") || lower.ends_with(".drawio.svg")
@@ -949,18 +1002,7 @@ impl Workspace {
             if self.projects.directory().is_none() {
                 self.sync_markdown_links_from_text(path, &disk.text, cx);
             }
-            let extension = Path::new(path)
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .map(str::to_ascii_lowercase);
-            let language = match extension.as_deref() {
-                Some("tex" | "ltx" | "sty" | "cls" | "bib") => "latex",
-                Some("md") => "markdown",
-                Some("json") => "json",
-                Some("yaml" | "yml") => "yaml",
-                Some("toml") => "toml",
-                _ => "plaintext",
-            };
+            let language = Self::editor_language_for_path(Path::new(path));
             let editor = cx.new(|cx| {
                 EditorState::new(window, cx)
                     .language(language)

@@ -24,6 +24,17 @@ pub const ERR_NAME_ALREADY_EXISTS: BiText = BiText::new("同名文件夹或文�
 pub const ERR_SELECT_PROJECT_FOLDER: BiText = BiText::new("请选择项目内的文件夹。", "Please select a folder inside the project.");
 pub const ERR_MOVE_FOLDER_INTO_SELF: BiText = BiText::new("不能将文件夹移入自身或子文件夹。", "Cannot move a folder into itself or a subfolder.");
 pub const ERR_TARGET_EXISTS_UNMOVED: BiText = BiText::new("目标已存在同名文件或文件夹，未移动。", "Target already exists; item was not moved.");
+pub const ERR_BINARY_FILE_UNSUPPORTED: BiText = BiText::new(
+    "检测到二进制内容，无法作为纯文本打开。",
+    "Binary content detected; cannot open as plain text.",
+);
+
+pub fn err_file_too_large(max_mb: u64) -> String {
+    match locale() {
+        Locale::ZhCn => format!("文件超过 {max_mb} MB 文本编辑上限，已跳过加载以防卡顿。"),
+        Locale::En => format!("File exceeds the {max_mb} MB text editor limit and was skipped."),
+    }
+}
 
 pub fn untitled_ext(ext: &str, number: Option<usize>) -> String {
     match (locale(), number) {
