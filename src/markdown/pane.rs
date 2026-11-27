@@ -291,6 +291,55 @@ fn quick_insert_items(prefix: &str) -> Option<(usize, String, Vec<&'static Slash
     Some((len, query, items))
 }
 
+#[derive(Clone, Debug)]
+struct WikiLinkCandidate {
+    title: String,
+    subtitle: String,
+    target_rel: String,
+    anchor: Option<String>,
+    icon: IconName,
+}
+
+enum QuickInsertMenu {
+    Slash {
+        token_len: usize,
+        query: String,
+        items: Vec<&'static SlashCommand>,
+    },
+    WikiLink {
+        token_len: usize,
+        query: String,
+        items: Vec<WikiLinkCandidate>,
+    },
+}
+
+impl QuickInsertMenu {
+    fn len(&self) -> usize {
+        match self {
+            Self::Slash { items, .. } => items.len(),
+            Self::WikiLink { items, .. } => items.len(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+fn wikilink_file_icon(rel_path: &str) -> IconName {
+    match std::path::Path::new(rel_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("md") => IconName::FileText,
+        Some("canvas") => IconName::ListTree,
+        Some("png" | "jpg" | "jpeg" | "webp" | "gif" | "svg") => IconName::Image,
+        _ => IconName::FileCode,
+    }
+}
+
 fn hsla_for_color_name(name: &str) -> Hsla {
     rgb(crate::annotations::highlight_mark_rgb(name)).into()
 }
@@ -339,6 +388,9 @@ pub struct MarkdownPane {
     /// Whitespace-free characters of `text`, kept current for the corner badge.
     char_count: usize,
     path: PathBuf,
+    project_root: Option<PathBuf>,
+    wiki_file_cache: RefCell<Option<(std::time::Instant, Vec<String>)>>,
+    wiki_heading_cache: RefCell<Option<(PathBuf, Vec<(u8, String)>)>>,
     title_input: Entity<InputState>,
     headings: Vec<OutlineHeading>,
     outline_tree: Vec<outline::OutlineNode>,
@@ -636,23 +688,28 @@ impl MarkdownPane {
                 let Some(prefix) = editor.caret_prefix().map(str::to_owned) else {
                     return false;
                 };
-                let Some((token_len, _, items)) = quick_insert_items(&prefix) else {
-                    return false;
-                };
-                if items.is_empty() {
-                    return false;
-                }
                 let Some(pane) = weak_pane.upgrade() else {
                     return false;
                 };
-                let (source, dismissed, slash_index) = {
+                let (source, dismissed, slash_index, menu) = {
                     let p = pane.read(cx);
-                    (p.source, p.dismissed_slash_prefix.clone(), p.slash_index)
+                    (
+                        p.source,
+                        p.dismissed_slash_prefix.clone(),
+                        p.slash_index,
+                        p.quick_insert_menu(&prefix),
+                    )
                 };
                 if source || dismissed.as_deref() == Some(prefix.as_str()) {
                     return false;
                 }
-                let count = items.len();
+                let Some(menu) = menu else {
+                    return false;
+                };
+                if menu.is_empty() {
+                    return false;
+                }
+                let count = menu.len();
                 match key {
                     "up" => {
                         pane.update(cx, |pane, cx| {
@@ -671,15 +728,30 @@ impl MarkdownPane {
                         true
                     }
                     "enter" | "tab" => {
-                        let cmd_id = items[slash_index.min(count - 1)].id;
+                        let chosen = slash_index.min(count - 1);
                         let weak_for_defer = weak_pane.clone();
-                        window.defer(cx, move |window, cx| {
-                            if let Some(pane) = weak_for_defer.upgrade() {
-                                pane.update(cx, |pane, cx| {
-                                    pane.execute_slash_command(cmd_id, token_len, window, cx);
+                        match menu {
+                            QuickInsertMenu::Slash { token_len, items, .. } => {
+                                let cmd_id = items[chosen].id;
+                                window.defer(cx, move |window, cx| {
+                                    if let Some(pane) = weak_for_defer.upgrade() {
+                                        pane.update(cx, |pane, cx| {
+                                            pane.execute_slash_command(cmd_id, token_len, window, cx);
+                                        });
+                                    }
                                 });
                             }
-                        });
+                            QuickInsertMenu::WikiLink { token_len, items, .. } => {
+                                let candidate = items[chosen].clone();
+                                window.defer(cx, move |window, cx| {
+                                    if let Some(pane) = weak_for_defer.upgrade() {
+                                        pane.update(cx, |pane, cx| {
+                                            pane.execute_wikilink_insert(&candidate, token_len, window, cx);
+                                        });
+                                    }
+                                });
+                            }
+                        }
                         true
                     }
                     _ => false,
@@ -970,6 +1042,9 @@ impl MarkdownPane {
             text,
             char_count,
             path,
+            project_root: None,
+            wiki_file_cache: RefCell::new(None),
+            wiki_heading_cache: RefCell::new(None),
             title_input,
             headings: Vec::new(),
             outline_tree: Vec::new(),
@@ -1710,12 +1785,250 @@ impl MarkdownPane {
         }
     }
 
-    fn active_slash_state(&self, cx: &App) -> Option<(usize, String, Vec<&'static SlashCommand>)> {
+    pub fn with_project_root(mut self, root: Option<PathBuf>) -> Self {
+        self.project_root = root;
+        self
+    }
+
+    fn current_rel_path(&self) -> Option<String> {
+        let root = self.project_root.as_ref()?;
+        if let Ok(rel) = self.path.strip_prefix(root) {
+            return Some(rel.to_string_lossy().replace('\\', "/"));
+        }
+        let canon_root = dunce::canonicalize(root).ok()?;
+        let canon_path = dunce::canonicalize(&self.path).ok()?;
+        canon_path
+            .strip_prefix(&canon_root)
+            .ok()
+            .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+    }
+
+    fn cached_project_files(&self) -> Vec<String> {
+        let Some(root) = self.project_root.as_ref() else {
+            return Vec::new();
+        };
+        const TTL: std::time::Duration = std::time::Duration::from_secs(2);
+        if let Some((ts, ref cached)) = *self.wiki_file_cache.borrow()
+            && ts.elapsed() < TTL
+        {
+            return cached.clone();
+        }
+        let files: Vec<String> = crate::files::list_files(root)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        *self.wiki_file_cache.borrow_mut() = Some((std::time::Instant::now(), files.clone()));
+        files
+    }
+
+    fn cached_file_headings(&self, full_path: &std::path::Path) -> Vec<(u8, String)> {
+        if let Some((ref cached_path, ref headings)) = *self.wiki_heading_cache.borrow()
+            && cached_path == full_path
+        {
+            return headings.clone();
+        }
+        let headings = std::fs::read_to_string(full_path)
+            .map(|text| crate::markdown::links::extract_markdown_headings(&text))
+            .unwrap_or_default();
+        *self.wiki_heading_cache.borrow_mut() = Some((full_path.to_path_buf(), headings.clone()));
+        headings
+    }
+
+    fn wikilink_candidates(&self, query: &str) -> Vec<WikiLinkCandidate> {
+        let current_rel = self.current_rel_path().unwrap_or_default();
+        if let Some((file_part, heading_part)) = query.split_once('#') {
+            let file_q = file_part.trim();
+            let heading_q = heading_part.trim().to_lowercase();
+            if file_q.is_empty() {
+                return self
+                    .headings
+                    .iter()
+                    .filter(|h| {
+                        heading_q.is_empty()
+                            || h.display_title.to_lowercase().contains(&heading_q)
+                            || h.title.to_lowercase().contains(&heading_q)
+                    })
+                    .take(20)
+                    .map(|h| WikiLinkCandidate {
+                        title: h.display_title.clone(),
+                        subtitle: format!(
+                            "{} · H{}",
+                            crate::i18n::markdown::WIKILINK_CURRENT_DOC_BADGE.get(),
+                            h.level
+                        ),
+                        target_rel: current_rel.clone(),
+                        anchor: Some(h.title.clone()),
+                        icon: IconName::Heading,
+                    })
+                    .collect();
+            }
+
+            let Some(root) = self.project_root.as_ref() else {
+                return Vec::new();
+            };
+            let files = self.cached_project_files();
+            let file_q_lower = file_q.to_lowercase();
+            let best_md = files
+                .into_iter()
+                .filter(|p| p.to_ascii_lowercase().ends_with(".md"))
+                .filter_map(|rel| {
+                    let stem = std::path::Path::new(&rel)
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_lowercase())
+                        .unwrap_or_default();
+                    let rel_lower = rel.to_lowercase();
+                    let score = if stem == file_q_lower || rel_lower == file_q_lower {
+                        0u8
+                    } else if stem.starts_with(&file_q_lower) {
+                        1
+                    } else if stem.contains(&file_q_lower) {
+                        2
+                    } else if rel_lower.contains(&file_q_lower) {
+                        3
+                    } else {
+                        return None;
+                    };
+                    Some((score, rel))
+                })
+                .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.len().cmp(&b.1.len())));
+
+            let Some((_, target_rel)) = best_md else {
+                return Vec::new();
+            };
+            let full = root.join(target_rel.replace('/', "\\"));
+            let stem = std::path::Path::new(&target_rel)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| target_rel.clone());
+            return self
+                .cached_file_headings(&full)
+                .into_iter()
+                .filter(|(_, title)| heading_q.is_empty() || title.to_lowercase().contains(&heading_q))
+                .take(20)
+                .map(|(depth, title)| WikiLinkCandidate {
+                    title: title.clone(),
+                    subtitle: format!("{stem} · H{depth}"),
+                    target_rel: target_rel.clone(),
+                    anchor: Some(title),
+                    icon: IconName::Heading,
+                })
+                .collect();
+        }
+
+        if self.project_root.is_none() {
+            return Vec::new();
+        }
+        let q = query.trim().to_lowercase();
+        let mut scored: Vec<(u8, u8, String, WikiLinkCandidate)> = self
+            .cached_project_files()
+            .into_iter()
+            .filter(|rel| {
+                #[cfg(windows)]
+                {
+                    !rel.eq_ignore_ascii_case(&current_rel)
+                }
+                #[cfg(not(windows))]
+                {
+                    rel != &current_rel
+                }
+            })
+            .filter_map(|rel| {
+                let is_md = rel.to_ascii_lowercase().ends_with(".md");
+                let file_name = std::path::Path::new(&rel)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| rel.clone());
+                let stem = std::path::Path::new(&rel)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| file_name.clone());
+                let title = if is_md { stem.clone() } else { file_name.clone() };
+                let stem_lower = stem.to_lowercase();
+                let name_lower = file_name.to_lowercase();
+                let rel_lower = rel.to_lowercase();
+
+                let match_rank = if q.is_empty() {
+                    0u8
+                } else if stem_lower == q || name_lower == q {
+                    0
+                } else if stem_lower.starts_with(&q) || name_lower.starts_with(&q) {
+                    1
+                } else if stem_lower.contains(&q) || name_lower.contains(&q) {
+                    2
+                } else if rel_lower.contains(&q) {
+                    3
+                } else {
+                    return None;
+                };
+                let kind_rank = if is_md { 0u8 } else { 1 };
+                let parent = std::path::Path::new(&rel)
+                    .parent()
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                let subtitle = if parent.is_empty() {
+                    std::path::Path::new(&rel)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| format!(".{e}"))
+                        .unwrap_or_default()
+                } else {
+                    parent
+                };
+                let icon = wikilink_file_icon(&rel);
+                Some((
+                    match_rank,
+                    kind_rank,
+                    rel_lower,
+                    WikiLinkCandidate {
+                        title,
+                        subtitle,
+                        target_rel: rel,
+                        anchor: None,
+                        icon,
+                    },
+                ))
+            })
+            .collect();
+
+        scored.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        scored.into_iter().take(20).map(|(_, _, _, c)| c).collect()
+    }
+
+    fn quick_insert_menu(&self, prefix: &str) -> Option<QuickInsertMenu> {
+        if let Some((token_len, query)) = crate::markdown::links::extract_wikilink_query(prefix) {
+            let items = self.wikilink_candidates(&query);
+            if !items.is_empty() {
+                return Some(QuickInsertMenu::WikiLink {
+                    token_len,
+                    query,
+                    items,
+                });
+            }
+            return None;
+        }
+        let (token_len, query, items) = quick_insert_items(prefix)?;
+        if items.is_empty() {
+            return None;
+        }
+        Some(QuickInsertMenu::Slash {
+            token_len,
+            query,
+            items,
+        })
+    }
+
+    fn active_quick_insert_menu(&self, cx: &App) -> Option<QuickInsertMenu> {
         if self.source {
             return None;
         }
         let editor = self.visual_editor.read(cx);
-        if editor.is_readonly() || editor.is_composing()
+        if editor.is_readonly()
+            || editor.is_composing()
             || editor.block_kind_at_caret() == Some(BlockKind::CodeBlock)
             || editor.selection_window_bounds().is_some()
         {
@@ -1725,11 +2038,45 @@ impl MarkdownPane {
         if self.dismissed_slash_prefix.as_deref() == Some(prefix) {
             return None;
         }
-        let (token_len, query, items) = quick_insert_items(prefix)?;
-        if items.is_empty() {
-            return None;
-        }
-        Some((token_len, query, items))
+        self.quick_insert_menu(prefix)
+    }
+
+    fn execute_wikilink_insert(
+        &mut self,
+        candidate: &WikiLinkCandidate,
+        token_len: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current_rel = self.current_rel_path().unwrap_or_default();
+        let is_same_file = {
+            #[cfg(windows)]
+            {
+                !current_rel.is_empty() && current_rel.eq_ignore_ascii_case(&candidate.target_rel)
+            }
+            #[cfg(not(windows))]
+            {
+                !current_rel.is_empty() && current_rel == candidate.target_rel
+            }
+        };
+        let url = if is_same_file
+            && let Some(anchor) = candidate.anchor.as_deref()
+        {
+            format!("#{anchor}")
+        } else {
+            crate::markdown::links::format_relative_link_url(
+                &current_rel,
+                &candidate.target_rel,
+                candidate.anchor.as_deref(),
+            )
+        };
+        self.visual_editor.update(cx, |editor, cx| {
+            if let Ok(mut range) = editor.capture_suffix(token_len) {
+                let _ = editor.replace_captured_with_link(&mut range, &candidate.title, &url, cx);
+            }
+            editor.focus(window, cx);
+        });
+        cx.notify();
     }
 
     fn scroll_slash_item_into_view(&self, index: usize) {
@@ -3355,120 +3702,239 @@ impl MarkdownPane {
         pane_size: Size<Pixels>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let (token_len, query, items) = self.active_slash_state(cx)?;
+        let menu = self.active_quick_insert_menu(cx)?;
         let caret = self.visual_editor.read(cx).caret_window_bounds()?;
-        let active_ix = self.slash_index.min(items.len().saturating_sub(1));
+        let item_count = menu.len();
+        let active_ix = self.slash_index.min(item_count.saturating_sub(1));
 
-        let menu_w = px(288.);
+        let is_wikilink = matches!(menu, QuickInsertMenu::WikiLink { .. });
+        let menu_w = if is_wikilink { px(336.) } else { px(288.) };
         let rel_x = (caret.origin.x - pane_origin.x)
             .max(px(16.))
             .min((pane_size.width - menu_w - px(16.)).max(px(16.)));
         let below_y = caret.bottom() - pane_origin.y + px(6.);
-        let header_h = if query.is_empty() { 12. } else { 42. };
-        let menu_h = px((items.len().min(8) as f32) * 38. + header_h);
+
+        let (header_label, rows): (Option<String>, Vec<AnyElement>) = match menu {
+            QuickInsertMenu::Slash {
+                token_len,
+                query,
+                items,
+            } => {
+                let header = if let Some(q) = query.strip_prefix(':') {
+                    if q.is_empty() {
+                        Some(crate::i18n::markdown::EMOJI_HEADER_EMPTY.get().to_owned())
+                    } else {
+                        Some(crate::i18n::markdown::emoji_header_query(q))
+                    }
+                } else if query.is_empty() {
+                    None
+                } else {
+                    Some(crate::i18n::markdown::slash_header_query(&query))
+                };
+                let rows = items
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, cmd)| {
+                        let cmd_id = cmd.id;
+                        let selected = ix == active_ix;
+                        div()
+                            .id(SharedString::from(format!("slash-item-{cmd_id}")))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .px_2p5()
+                            .h(px(36.))
+                            .rounded(px(8.))
+                            .cursor_pointer()
+                            .when(selected, |s| {
+                                s.bg(rgb(0xf2f2f0)).active(|a| a.bg(rgb(0xeae9e6)))
+                            })
+                            .when(!selected, |s| {
+                                s.hover(|h| h.bg(rgb(0xf7f7f5)))
+                                    .active(|a| a.bg(rgb(0xeae9e6)))
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2p5()
+                                    .child(
+                                        div()
+                                            .w(px(20.))
+                                            .h(px(20.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .text_color(if selected {
+                                                rgb(0x37352f)
+                                            } else {
+                                                rgb(0x5c5b57)
+                                            })
+                                            .child(if cmd.id.starts_with("emoji:") {
+                                                div()
+                                                    .font_family("Segoe UI Emoji")
+                                                    .text_size(px(16.))
+                                                    .child(cmd.hint)
+                                                    .into_any_element()
+                                            } else {
+                                                crate::ui::icon(cmd.icon)
+                                                    .w(px(15.))
+                                                    .h(px(15.))
+                                                    .into_any_element()
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(13.5))
+                                            .text_color(rgb(0x37352f))
+                                            .child(slash_command_title(cmd)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .font_family("Consolas")
+                                    .min_w(px(24.))
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .bg(if selected {
+                                        rgb(0xe6e6e3)
+                                    } else {
+                                        rgb(0xf5f5f4)
+                                    })
+                                    .text_color(if selected {
+                                        rgb(0x8c8b87)
+                                    } else {
+                                        rgb(0xa8a7a3)
+                                    })
+                                    .child(cmd.id.strip_prefix("emoji:").unwrap_or(cmd.hint)),
+                            )
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |pane, _, window, cx| {
+                                pane.execute_slash_command(cmd_id, token_len, window, cx);
+                            }))
+                            .into_any_element()
+                    })
+                    .collect();
+                (header, rows)
+            }
+            QuickInsertMenu::WikiLink {
+                token_len,
+                query,
+                items,
+            } => {
+                let header = if query.is_empty() {
+                    Some(crate::i18n::markdown::WIKILINK_HEADER_EMPTY.get().to_owned())
+                } else {
+                    Some(crate::i18n::markdown::wikilink_header_query(&query))
+                };
+                let rows = items
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, item)| {
+                        let selected = ix == active_ix;
+                        let candidate = item.clone();
+                        div()
+                            .id(("wikilink-item", ix))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .px_2p5()
+                            .h(px(36.))
+                            .rounded(px(8.))
+                            .cursor_pointer()
+                            .when(selected, |s| {
+                                s.bg(rgb(0xf2f2f0)).active(|a| a.bg(rgb(0xeae9e6)))
+                            })
+                            .when(!selected, |s| {
+                                s.hover(|h| h.bg(rgb(0xf7f7f5)))
+                                    .active(|a| a.bg(rgb(0xeae9e6)))
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .w(px(18.))
+                                            .h(px(18.))
+                                            .flex_shrink_0()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .text_color(if selected {
+                                                rgb(0x37352f)
+                                            } else {
+                                                rgb(0x5c5b57)
+                                            })
+                                            .child(
+                                                crate::ui::icon(item.icon)
+                                                    .w(px(14.))
+                                                    .h(px(14.)),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .whitespace_nowrap()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .text_size(px(13.))
+                                            .text_color(rgb(0x37352f))
+                                            .child(item.title),
+                                    ),
+                            )
+                            .when(!item.subtitle.is_empty(), |row| {
+                                row.child(
+                                    div()
+                                        .max_w(px(128.))
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .text_size(px(11.))
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded(px(4.))
+                                        .bg(if selected {
+                                            rgb(0xe6e6e3)
+                                        } else {
+                                            rgb(0xf5f5f4)
+                                        })
+                                        .text_color(if selected {
+                                            rgb(0x6b6a65)
+                                        } else {
+                                            rgb(0x9b9a97)
+                                        })
+                                        .child(item.subtitle),
+                                )
+                            })
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |pane, _, window, cx| {
+                                pane.execute_wikilink_insert(&candidate, token_len, window, cx);
+                            }))
+                            .into_any_element()
+                    })
+                    .collect();
+                (header, rows)
+            }
+        };
+
+        let header_h = if header_label.is_none() { 12. } else { 42. };
+        let menu_h = px((item_count.min(8) as f32) * 38. + header_h);
         let rel_y = if below_y + menu_h > pane_size.height && caret.origin.y - pane_origin.y > menu_h
         {
             caret.origin.y - pane_origin.y - menu_h - px(6.)
         } else {
             below_y
-        };
-
-        let rows = items.iter().enumerate().map(|(ix, cmd)| {
-            let cmd_id = cmd.id;
-            let selected = ix == active_ix;
-            div()
-                .id(SharedString::from(format!("slash-item-{cmd_id}")))
-                .flex()
-                .items_center()
-                .justify_between()
-                .px_2p5()
-                .h(px(36.))
-                .rounded(px(8.))
-                .cursor_pointer()
-                .when(selected, |s| {
-                    s.bg(rgb(0xf2f2f0))
-                        .active(|a| a.bg(rgb(0xeae9e6)))
-                })
-                .when(!selected, |s| {
-                    s.hover(|h| h.bg(rgb(0xf7f7f5)))
-                        .active(|a| a.bg(rgb(0xeae9e6)))
-                })
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2p5()
-                        .child(
-                            div()
-                                .w(px(20.))
-                                .h(px(20.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_color(if selected {
-                                    rgb(0x37352f)
-                                } else {
-                                    rgb(0x5c5b57)
-                                })
-                                .child(if cmd.id.starts_with("emoji:") {
-                                    div()
-                                        .font_family("Segoe UI Emoji")
-                                        .text_size(px(16.))
-                                        .child(cmd.hint)
-                                        .into_any_element()
-                                } else {
-                                    crate::ui::icon(cmd.icon)
-                                        .w(px(15.))
-                                        .h(px(15.))
-                                        .into_any_element()
-                                }),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(13.5))
-                                .text_color(rgb(0x37352f))
-                                .child(slash_command_title(cmd)),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .font_family("Consolas")
-                        .min_w(px(24.))
-                        .px_2()
-                        .py_0p5()
-                        .rounded_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(if selected {
-                            rgb(0xe6e6e3)
-                        } else {
-                            rgb(0xf5f5f4)
-                        })
-                        .text_color(if selected {
-                            rgb(0x8c8b87)
-                        } else {
-                            rgb(0xa8a7a3)
-                        })
-                        .child(cmd.id.strip_prefix("emoji:").unwrap_or(cmd.hint)),
-                )
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |pane, _, window, cx| {
-                    pane.execute_slash_command(cmd_id, token_len, window, cx);
-                }))
-        });
-
-        let header_label = if let Some(query) = query.strip_prefix(':') {
-            if query.is_empty() {
-                Some(crate::i18n::markdown::EMOJI_HEADER_EMPTY.get().to_owned())
-            } else {
-                Some(crate::i18n::markdown::emoji_header_query(query))
-            }
-        } else if query.is_empty() {
-            None
-        } else {
-            Some(crate::i18n::markdown::slash_header_query(&query))
         };
 
         let slash_card = div()

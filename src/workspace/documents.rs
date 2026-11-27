@@ -1075,9 +1075,13 @@ impl Workspace {
     ) {
         let text = self.documents.open[path].buffer.text.clone();
         let full = self.documents.open[path].path.clone();
+        let project_root = self.projects.directory().map(|project| PathBuf::from(&project.folder));
         let settings = self.settings.clone();
         let math = self.math.clone();
-        let pane = cx.new(|cx| MarkdownPane::new(text, full, settings, math, reading, window, cx));
+        let pane = cx.new(|cx| {
+            MarkdownPane::new(text, full, settings, math, reading, window, cx)
+                .with_project_root(project_root)
+        });
         if self.has_visible_background() {
             pane.update(cx, |pane, cx| pane.set_backdrop_visible(true, cx));
         }

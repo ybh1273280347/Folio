@@ -74,6 +74,18 @@ pub fn slash_header_query(query: &str) -> String {
     }
 }
 
+pub const WIKILINK_HEADER_EMPTY: BiText = BiText::new(
+    "插入文件链接 · 输入文件名或 #标题 搜索",
+    "Insert File Link · Type filename or #heading",
+);
+pub fn wikilink_header_query(query: &str) -> String {
+    match locale() {
+        Locale::ZhCn => format!("链接: [[{query} (↑↓选择 · Enter确认)"),
+        Locale::En => format!("Link: [[{query} (↑↓ select · Enter)"),
+    }
+}
+pub const WIKILINK_CURRENT_DOC_BADGE: BiText = BiText::new("本文标题", "This doc");
+
 pub const TURN_INTO_TEXT: BiText = BiText::new("转为正文", "Turn into Text");
 pub const TURN_INTO_H1: BiText = BiText::new("转为一级标题 H1", "Turn into Heading 1");
 pub const TURN_INTO_H2: BiText = BiText::new("转为二级标题 H2", "Turn into Heading 2");

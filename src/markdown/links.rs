@@ -328,6 +328,62 @@ fn parse_local_target(source_path: &str, raw_dest: &str) -> Option<ParsedLocalTa
     })
 }
 
+/// Computes a standard Markdown link destination from `source_rel` to `target_rel`,
+/// preserving readable UTF-8 paths while percent-encoding spaces and delimiters.
+pub fn format_relative_link_url(
+    source_rel: &str,
+    target_rel: &str,
+    anchor: Option<&str>,
+) -> String {
+    let source_norm = normalize_slash(source_rel);
+    let target_norm = normalize_slash(target_rel);
+    let rel = relative_path(parent_dir(&source_norm), &target_norm);
+    let encoded = encode_bare_destination(&rel);
+    match anchor.map(str::trim).filter(|a| !a.is_empty()) {
+        Some(a) => format!("{encoded}#{a}"),
+        None => encoded,
+    }
+}
+
+/// Extracts `(depth, title)` headings from Markdown text while skipping code blocks and math.
+pub fn extract_markdown_headings(text: &str) -> Vec<(u8, String)> {
+    let Ok(root) = markdown::to_mdast(text, &markdown_parse_options()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    collect_headings(&root, &mut out);
+    out
+}
+
+fn collect_headings(node: &Node, out: &mut Vec<(u8, String)>) {
+    match node {
+        Node::Code(_) | Node::InlineCode(_) | Node::Math(_) | Node::InlineMath(_) => return,
+        Node::Heading(h) => {
+            let title = extract_plain_text(node);
+            if !title.is_empty() {
+                out.push((h.depth, title));
+            }
+            return;
+        }
+        _ => {}
+    }
+    if let Some(children) = node.children() {
+        for child in children {
+            collect_headings(child, out);
+        }
+    }
+}
+
+/// Detects an active `[[query` trigger at the end of `prefix`, returning `(token_bytes, query)`.
+pub fn extract_wikilink_query(prefix: &str) -> Option<(usize, String)> {
+    let open_pos = prefix.rfind("[[")?;
+    let query = &prefix[open_pos + 2..];
+    if query.len() > 80 || query.contains("]]") || query.contains('\n') || query.contains('\r') {
+        return None;
+    }
+    Some((prefix.len() - open_pos, query.to_owned()))
+}
+
 fn normalize_lexical(base_dir: &str, rel: &str) -> Option<String> {
     let mut parts: Vec<&str> = base_dir
         .split('/')
@@ -1283,5 +1339,46 @@ External: [web](https://example.com/a.md), [mail](mailto:a@b.com), [local](#Over
         trash_markdown_links(&db, "docs/a.md", "trash-2").unwrap();
         purge_trashed_markdown_links(&db, "trash-2").unwrap();
         assert!(backlinks_for(&db, "notes/b.md").is_empty());
+    }
+
+    #[test]
+    fn wikilink_query_relative_url_and_heading_extraction() {
+        assert_eq!(
+            extract_wikilink_query("参考[[设计文档#架构"),
+            Some(("[[设计文档#架构".len(), "设计文档#架构".to_owned()))
+        );
+        assert_eq!(extract_wikilink_query("已完成[[a]]后续"), None);
+        assert_eq!(
+            format_relative_link_url("notes/sub/a.md", "docs/my guide.md", Some("快速开始")),
+            "../../docs/my%20guide.md#快速开始"
+        );
+        let headings = extract_markdown_headings("# 一级\n```md\n# 忽略\n```\n## 二级 *强调*\n");
+        assert_eq!(
+            headings,
+            vec![(1, "一级".to_owned()), (2, "二级 强调".to_owned())]
+        );
+    }
+
+    #[test]
+    fn editor_replace_captured_with_link_roundtrip_and_undo() {
+        let mut editor = markdown_editor::BlockEditorModel::from_markdown(
+            "参考 [[引导",
+            gpui_kit::base::text::MarkdownExtensions::default(),
+        )
+        .unwrap();
+        editor.select_end().unwrap();
+        let mut capture = editor.capture_suffix("[[引导".len()).unwrap();
+        editor
+            .replace_captured_with_link(&mut capture, "引导", "../docs/guide.md")
+            .unwrap();
+        assert_eq!(editor.source(), "参考 [引导](../docs/guide.md)");
+        editor
+            .insert_text(" 后续", markdown_editor::EditOrigin::Typing)
+            .unwrap();
+        assert_eq!(editor.source(), "参考 [引导](../docs/guide.md) 后续");
+        assert!(editor.undo());
+        assert_eq!(editor.source(), "参考 [引导](../docs/guide.md)");
+        assert!(editor.undo());
+        assert_eq!(editor.caret_prefix(), Some("参考 [[引导"));
     }
 }

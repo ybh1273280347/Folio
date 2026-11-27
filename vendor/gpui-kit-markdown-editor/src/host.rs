@@ -185,6 +185,63 @@ impl BlockEditorModel {
         Ok(())
     }
 
+    /// Replaces a captured range with a linked inline text span in one undoable
+    /// transaction, leaving the caret collapsed after the link with link mark cleared.
+    pub fn replace_captured_with_link(
+        &mut self,
+        capture: &mut CapturedRange,
+        text: &str,
+        url: &str,
+    ) -> Result<(), CapturedRangeError> {
+        if !self.is_capture_current(capture) {
+            return Err(CapturedRangeError::Stale);
+        }
+        let range = self
+            .doc
+            .resolve_selection(&capture.range)
+            .map_err(|_| CapturedRangeError::InvalidRange)?;
+        let before = self.selection.clone();
+        self.break_coalescing();
+        self.history.begin_transaction();
+        self.selection = capture.range.clone();
+        if let Err(error) = self.insert_text(text, EditOrigin::Api) {
+            self.selection = before;
+            self.history.commit_transaction();
+            return Err(CapturedRangeError::Edit(error));
+        }
+        let head = match self.caret() {
+            Some(head) => head,
+            None => {
+                self.history.commit_transaction();
+                return Err(CapturedRangeError::NotText);
+            }
+        };
+        let url_trimmed = url.trim();
+        if !url_trimmed.is_empty() && range.start != head {
+            self.selection = BlockSelection::Text {
+                anchor: range.start,
+                head,
+            };
+            let change = super::marks::MarkChange::new().with_link(url_trimmed.to_owned(), None);
+            if let Err(error) = self.run(super::EditorCommand::ApplyMark(change)) {
+                self.history.commit_transaction();
+                return Err(CapturedRangeError::Edit(error));
+            }
+        }
+        self.selection = BlockSelection::caret(head);
+        let next_marks = super::marks::MarkChange::new()
+            .clear(super::marks::MarkKind::Link)
+            .apply(&self.active_marks().0);
+        self.stored_marks = Some(next_marks);
+        self.history.commit_transaction();
+        self.break_coalescing();
+        *capture = self.capture(BlockSelection::Text {
+            anchor: range.start,
+            head,
+        });
+        Ok(())
+    }
+
     /// Invalidate outstanding host captures without changing document/source.
     /// Hosts call this when the external owner (session/window/request) changes.
     pub fn invalidate_captures(&mut self) {
