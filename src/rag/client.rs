@@ -1,8 +1,12 @@
-//! Local llama-server HTTP clients (Embedding & Reranker) with port probing and idle release.
+//! Embedding and reranking clients for native CUDA and llama-server endpoints.
 
 use super::RagConfig;
+#[cfg(windows)]
+use super::cuda_engine;
 use crate::http::{self, RequestOptions};
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::{HashMap, hash_map::Entry},
     process::{Child, Command, Stdio},
@@ -10,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const QUERY_INSTRUCT: &str =
+pub(super) const QUERY_INSTRUCT: &str =
     "Instruct: Given a search query, retrieve relevant passages from personal notes and papers\nQuery: ";
 const EMBED_BATCH_SIZE: usize = 16;
 const RERANK_BATCH_SIZE: usize = 25;
@@ -75,7 +79,7 @@ fn server_registry() -> &'static Mutex<HashMap<u16, ManagedChild>> {
 
 pub fn reap_idle_servers() {
     #[cfg(windows)]
-    super::cuda_engine::reap_idle_models();
+    cuda_engine::reap_idle_models();
     let mut map = server_registry().lock().expect("server registry poisoned");
     map.retain(|_, entry| {
         if entry.child.try_wait().ok().flatten().is_some() {
@@ -94,7 +98,7 @@ pub fn reap_idle_servers() {
 
 pub fn shutdown_managed_servers() {
     #[cfg(windows)]
-    super::cuda_engine::shutdown_models();
+    cuda_engine::shutdown_models();
     let mut map = server_registry().lock().expect("server registry poisoned");
     for (_, mut entry) in map.drain() {
         let _ = entry.child.kill();
@@ -155,6 +159,7 @@ fn probe_or_spawn(
     let mut cmd = Command::new(bin);
     cmd.args(["-m", model_path])
         .args(mode_args)
+        .args(["-b", "4096", "-ub", "4096", "-np", "1", "-fa", "on", "--no-warmup"])
         .args([
             "-ngl",
             "99",
@@ -210,6 +215,8 @@ pub struct EmbeddingClient {
     model_path: String,
     auto_manage: bool,
     idle_release_secs: u64,
+    #[cfg(windows)]
+    cuda_failed: AtomicBool,
 }
 
 impl EmbeddingClient {
@@ -222,29 +229,22 @@ impl EmbeddingClient {
             model_path: config.embed_model_path.trim().to_owned(),
             auto_manage: config.auto_manage_server,
             idle_release_secs: config.idle_release_secs,
+            #[cfg(windows)]
+            cuda_failed: AtomicBool::new(false),
         })
     }
 
+    #[cfg(windows)]
     fn can_use_native_cuda(&self) -> bool {
-        #[cfg(windows)]
-        {
-            self.auto_manage
-                && self.endpoint.is_loopback()
-                && self.dim == 1024
-                && super::cuda_engine::is_supported_model(&self.model_path, false)
-        }
-        #[cfg(not(windows))]
-        {
-            false
-        }
+        self.auto_manage
+            && self.endpoint.is_loopback()
+            && self.dim == cuda_engine::HIDDEN_DIM
+            && !self.cuda_failed.load(Ordering::Relaxed)
     }
 
     pub fn health_check(&self) -> bool {
         #[cfg(windows)]
-        if self.auto_manage
-            && self.endpoint.is_loopback()
-            && super::cuda_engine::is_model_loaded(&self.model_path, false)
-        {
+        if self.can_use_native_cuda() && cuda_engine::is_model_loaded(&self.model_path, false) {
             return true;
         }
         check_health(&self.endpoint)
@@ -252,18 +252,26 @@ impl EmbeddingClient {
 
     pub fn ensure_ready(&self) -> bool {
         #[cfg(windows)]
-        if self.can_use_native_cuda()
-            && super::cuda_engine::ensure_ready(&self.model_path, false, self.idle_release_secs)
-        {
-            return true;
+        if self.can_use_native_cuda() {
+            if cuda_engine::ensure_ready(&self.model_path, false, self.idle_release_secs) {
+                return true;
+            }
+            // The sync operation can issue many batches through this client.
+            let ready = self.ensure_http_ready();
+            self.cuda_failed.store(ready, Ordering::Relaxed);
+            return ready;
         }
+        self.ensure_http_ready()
+    }
+
+    fn ensure_http_ready(&self) -> bool {
         probe_or_spawn(
             &self.endpoint,
             &self.server_bin,
             &self.model_path,
             self.auto_manage,
             self.idle_release_secs,
-            &["--embedding", "-b", "4096", "-ub", "4096", "-np", "1", "-fa", "on", "--no-warmup"],
+            &["--embedding"],
         )
     }
 
@@ -280,13 +288,20 @@ impl EmbeddingClient {
             return Ok(Vec::new());
         }
         #[cfg(windows)]
-        if self.can_use_native_cuda() {
-            return super::cuda_engine::embed_texts(
+        if self.can_use_native_cuda() && cuda_engine::is_supported_model(&self.model_path, false) {
+            match cuda_engine::embed_texts(
                 &self.model_path,
                 texts,
                 is_query,
                 self.idle_release_secs,
-            );
+            ) {
+                Ok(vectors) => return Ok(vectors),
+                Err(err) if self.ensure_http_ready() => {
+                    self.cuda_failed.store(true, Ordering::Relaxed);
+                    eprintln!("CUDA Embedding 失败，改用 llama-server: {err}");
+                }
+                Err(err) => return Err(err),
+            }
         }
         let mut all = Vec::with_capacity(texts.len());
         let path = self.endpoint.join("/v1/embeddings");
@@ -369,6 +384,8 @@ pub struct RerankClient {
     model_path: String,
     auto_manage: bool,
     idle_release_secs: u64,
+    #[cfg(windows)]
+    cuda_failed: AtomicBool,
 }
 
 impl RerankClient {
@@ -380,28 +397,19 @@ impl RerankClient {
             model_path: config.rerank_model_path.trim().to_owned(),
             auto_manage: config.auto_manage_server,
             idle_release_secs: config.idle_release_secs,
+            #[cfg(windows)]
+            cuda_failed: AtomicBool::new(false),
         })
     }
 
+    #[cfg(windows)]
     fn can_use_native_cuda(&self) -> bool {
-        #[cfg(windows)]
-        {
-            self.auto_manage
-                && self.endpoint.is_loopback()
-                && super::cuda_engine::is_supported_model(&self.model_path, true)
-        }
-        #[cfg(not(windows))]
-        {
-            false
-        }
+        self.auto_manage && self.endpoint.is_loopback() && !self.cuda_failed.load(Ordering::Relaxed)
     }
 
     pub fn health_check(&self) -> bool {
         #[cfg(windows)]
-        if self.auto_manage
-            && self.endpoint.is_loopback()
-            && super::cuda_engine::is_model_loaded(&self.model_path, true)
-        {
+        if self.can_use_native_cuda() && cuda_engine::is_model_loaded(&self.model_path, true) {
             return true;
         }
         check_health(&self.endpoint)
@@ -409,18 +417,25 @@ impl RerankClient {
 
     pub fn ensure_ready(&self) -> bool {
         #[cfg(windows)]
-        if self.can_use_native_cuda()
-            && super::cuda_engine::ensure_ready(&self.model_path, true, self.idle_release_secs)
-        {
-            return true;
+        if self.can_use_native_cuda() {
+            if cuda_engine::ensure_ready(&self.model_path, true, self.idle_release_secs) {
+                return true;
+            }
+            let ready = self.ensure_http_ready();
+            self.cuda_failed.store(ready, Ordering::Relaxed);
+            return ready;
         }
+        self.ensure_http_ready()
+    }
+
+    fn ensure_http_ready(&self) -> bool {
         probe_or_spawn(
             &self.endpoint,
             &self.server_bin,
             &self.model_path,
             self.auto_manage,
             self.idle_release_secs,
-            &["--reranking", "--pooling", "rank", "-b", "4096", "-ub", "4096", "-np", "1", "-fa", "on", "--no-warmup"],
+            &["--reranking", "--pooling", "rank"],
         )
     }
 
@@ -429,13 +444,20 @@ impl RerankClient {
             return Ok(Vec::new());
         }
         #[cfg(windows)]
-        if self.can_use_native_cuda() {
-            return super::cuda_engine::rerank_documents(
+        if self.can_use_native_cuda() && cuda_engine::is_supported_model(&self.model_path, true) {
+            match cuda_engine::rerank_documents(
                 &self.model_path,
                 query,
                 documents,
                 self.idle_release_secs,
-            );
+            ) {
+                Ok(scores) => return Ok(scores),
+                Err(err) if self.ensure_http_ready() => {
+                    self.cuda_failed.store(true, Ordering::Relaxed);
+                    eprintln!("CUDA Reranker 失败，改用 llama-server: {err}");
+                }
+                Err(err) => return Err(err),
+            }
         }
         let path = self.endpoint.join("/v1/rerank");
         let mut scores = Vec::with_capacity(documents.len());

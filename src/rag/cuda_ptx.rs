@@ -1317,8 +1317,11 @@ pub fn f32_to_f16_bits(val: f32) -> u16 {
         if new_exp < -10 {
             return sign;
         }
-        let m = (mant | 0x0080_0000) >> (14 - new_exp);
-        return sign | ((m + 1) >> 1) as u16;
+        let significand = mant | 0x0080_0000;
+        let shift = 14 - new_exp;
+        // Keep the full significand until rounding, including the sticky bits at the zero boundary.
+        let bias = (1 << (shift - 1)) - 1 + ((significand >> shift) & 1);
+        return sign | ((significand + bias) >> shift) as u16;
     }
     let rounded = mant + 0x0fff + ((mant >> 13) & 1);
     if (rounded & 0x0080_0000) != 0 {
