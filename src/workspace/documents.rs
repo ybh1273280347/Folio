@@ -571,9 +571,6 @@ impl Workspace {
         if Self::is_canvas_path(path) {
             self.refresh_active_canvas_backlinks();
         }
-        if Self::is_markdown_path(path) {
-            self.refresh_active_markdown_backlinks();
-        }
     }
 
     pub(super) fn invalidate_document_tree(&mut self) {
@@ -788,7 +785,7 @@ impl Workspace {
             self.documents.tabs.push(file.path.clone());
         }
         self.documents.active = file.path.clone();
-        self.refresh_active_backlinks();
+        self.refresh_active_backlinks(cx);
         if focus_editor {
             if let Some(pane) = self.documents.markdown_panes.get(&tab) {
                 pane.update(cx, |pane, cx| pane.focus(window, cx));
@@ -949,6 +946,9 @@ impl Workspace {
             } else {
                 files::read_document_at(&full)?
             };
+            if self.projects.directory().is_none() {
+                self.sync_markdown_links_from_text(path, &disk.text, cx);
+            }
             let extension = Path::new(path)
                 .extension()
                 .and_then(|extension| extension.to_str())
@@ -1078,9 +1078,13 @@ impl Workspace {
         let project_root = self.projects.directory().map(|project| PathBuf::from(&project.folder));
         let settings = self.settings.clone();
         let math = self.math.clone();
+        let workspace = cx.weak_entity();
         let pane = cx.new(|cx| {
             MarkdownPane::new(text, full, settings, math, reading, window, cx)
-                .with_project_root(project_root)
+                .with_project_files(project_root, Box::new(move |cx| {
+                    // Completion uses the same file listing as the sidebar.
+                    workspace.upgrade().map_or(&[], |app| app.read(cx).tree.files())
+                }))
         });
         if self.has_visible_background() {
             pane.update(cx, |pane, cx| pane.set_backdrop_visible(true, cx));
@@ -1207,7 +1211,10 @@ impl Workspace {
                 document.buffer.revision = saved.revision;
                 document.buffer.conflict = None;
                 self.sync_canvas_index_from_text(path, &saved_text, cx);
-                self.sync_markdown_links_from_text(path, &saved_text, true, cx);
+                if Self::is_markdown_path(path) {
+                    self.sync_markdown_links_from_text(path, &saved_text, cx);
+                    self.refresh_active_markdown_backlinks(cx);
+                }
                 self.schedule_rag_sync();
                 cx.notify();
                 Ok(true)
@@ -1215,6 +1222,7 @@ impl Workspace {
             Err(disk) => {
                 document.buffer.conflict = Some(disk);
                 self.documents.active = path.to_owned();
+                self.refresh_active_backlinks(cx);
                 cx.notify();
                 Ok(false)
             }
@@ -1244,14 +1252,15 @@ impl Workspace {
             }
         }
         if let Some(key) = open_key {
-            self.sync_markdown_links_from_text(key, text, true, cx);
+            self.sync_markdown_links_from_text(key, text, cx);
         } else if let Some(project) = self.projects.directory()
             && let Ok(canon_root) = dunce::canonicalize(&project.folder)
             && let Ok(rel) = path.strip_prefix(&canon_root)
         {
             let rel_key = rel.to_string_lossy().replace('\\', "/");
-            self.sync_markdown_links_from_text(&rel_key, text, true, cx);
+            self.sync_markdown_links_from_text(&rel_key, text, cx);
         }
+        self.refresh_active_markdown_backlinks(cx);
         self.schedule_rag_sync();
         Ok(true)
     }
@@ -1374,7 +1383,7 @@ impl Workspace {
 
     pub(super) fn select_tab_from_tree(&mut self, path: &str, focus_editor: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.documents.active = path.to_owned();
-        self.refresh_active_backlinks();
+        self.refresh_active_backlinks(cx);
         if focus_editor {
             self.focus_document_tab(path, window, cx);
         } else {
@@ -1393,7 +1402,7 @@ impl Workspace {
         self.trash.dismiss();
         self.documents.focused_markdown = None;
         self.documents.active = path.to_owned();
-        self.refresh_active_backlinks();
+        self.refresh_active_backlinks(cx);
         self.focus_document_tab(path, window, cx);
         if let Err(error) = self.remember_session() {
             self.report(error, cx);
@@ -1453,7 +1462,7 @@ impl Workspace {
                     .update(cx, |editor, cx| editor.focus(window, cx));
             }
         }
-        self.refresh_active_backlinks();
+        self.refresh_active_backlinks(cx);
         if let Err(error) = self.remember_session() {
             self.report(error, cx);
         }
@@ -1516,8 +1525,10 @@ impl Workspace {
             self.refresh_tags(cx);
         }
         let changed = std::mem::take(&mut self.documents.document_watch.paths);
-        let mut changed_canvases: BTreeSet<_> = changed.iter()
-            .filter(|path| path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("canvas")))
+        let mut changed_link_sources: BTreeSet<_> = changed.iter()
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("canvas")
+            }))
             .map(|path| {
                 let key = root.as_ref().map_or(path.as_path(), |root| {
                     path.strip_prefix(root).expect("watch paths are scoped to the current project")
@@ -1527,57 +1538,50 @@ impl Workspace {
             .collect();
         if refresh_tree && root.is_some() {
             // Folder notifications may omit their individual files.
-            let current_canvases: BTreeSet<_> = self.tree.files().iter()
-                .filter(|file| Self::is_canvas_path(&file.path)).map(|file| &file.path).collect();
-            let previous_canvases: BTreeSet<_> = previous.iter()
-                .filter(|path| Self::is_canvas_path(path)).collect();
-            changed_canvases.extend(current_canvases.symmetric_difference(&previous_canvases).map(|path| (*path).clone()));
+            let current: BTreeSet<_> = self.tree.files().iter().map(|file| &file.path).collect();
+            let previous: BTreeSet<_> = previous.iter().collect();
+            changed_link_sources.extend(
+                current.symmetric_difference(&previous).copied()
+                    .filter(|path| Self::is_canvas_path(path) || Self::is_markdown_path(path))
+                    .cloned(),
+            );
         }
-        for key in changed_canvases {
+        let mut refresh_markdown_backlinks = false;
+        let mut indexed_open_documents = BTreeMap::new();
+        for key in changed_link_sources {
+            let is_markdown = Self::is_markdown_path(&key);
             let disk = if let Some(root) = &root {
                 files::read_document(root, &key)
             } else {
                 files::read_document_at(Path::new(&key))
             };
-            match disk {
+            match &disk {
                 Ok(disk) if self.documents.open_buffer(&key).is_none_or(|buffer| buffer.revision != disk.revision) => {
-                    self.sync_canvas_index_from_text(&key, &disk.text, cx);
+                    if is_markdown {
+                        self.sync_markdown_links_from_text(&key, &disk.text, cx);
+                        refresh_markdown_backlinks = true;
+                    } else {
+                        self.sync_canvas_index_from_text(&key, &disk.text, cx);
+                    }
                 }
                 Ok(_) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => self.remove_canvas_index(&key, cx),
-                Err(error) => self.report(error, cx),
-            }
-        }
-        let mut changed_markdowns: BTreeSet<_> = changed.iter()
-            .filter(|path| path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("md")))
-            .map(|path| {
-                let key = root.as_ref().map_or(path.as_path(), |root| {
-                    path.strip_prefix(root).expect("watch paths are scoped to the current project")
-                });
-                key.to_string_lossy().replace('\\', "/")
-            })
-            .collect();
-        if refresh_tree && root.is_some() {
-            let current_markdowns: BTreeSet<_> = self.tree.files().iter()
-                .filter(|file| Self::is_markdown_path(&file.path)).map(|file| &file.path).collect();
-            let previous_markdowns: BTreeSet<_> = previous.iter()
-                .filter(|path| Self::is_markdown_path(path)).collect();
-            changed_markdowns.extend(current_markdowns.symmetric_difference(&previous_markdowns).map(|path| (*path).clone()));
-        }
-        for key in changed_markdowns {
-            let disk = if let Some(root) = &root {
-                files::read_document(root, &key)
-            } else {
-                files::read_document_at(Path::new(&key))
-            };
-            match disk {
-                Ok(disk) if self.documents.open_buffer(&key).is_none_or(|buffer| buffer.revision != disk.revision) => {
-                    self.sync_markdown_links_from_text(&key, &disk.text, true, cx);
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    if is_markdown {
+                        self.remove_markdown_links_index(&key, cx);
+                        refresh_markdown_backlinks = true;
+                    } else {
+                        self.remove_canvas_index(&key, cx);
+                    }
                 }
-                Ok(_) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => self.remove_markdown_links_index(&key, cx),
                 Err(error) => self.report(error, cx),
             }
+            // Refresh the editor from the same disk snapshot used by the backlink index.
+            if self.documents.open.contains_key(&key) {
+                indexed_open_documents.insert(key, disk);
+            }
+        }
+        if refresh_markdown_backlinks {
+            self.refresh_active_markdown_backlinks(cx);
         }
         if refresh_tree {
             self.reconcile_rag_on_tree_change(&previous);
@@ -1602,14 +1606,13 @@ impl Workspace {
         self.documents.document_watch.tree = false;
         let mut updated_sources = Vec::new();
         for (path, document) in &mut self.documents.open {
-            // notify gives absolute paths; read only drafts touched by this event.
-            if !changed.is_empty() && !changed.contains(&document.path) {
-                continue;
-            }
-            let disk = if let Some(root) = &root {
-                files::read_document(root, path)
-            } else {
-                files::read_document_at(&document.path)
+            let disk = match indexed_open_documents.remove(path) {
+                Some(disk) => disk,
+                // Folder notifications can omit files. Those identified by their change in the
+                // tree have already been read above.
+                None if !changed.is_empty() && !changed.contains(&document.path) => continue,
+                None if let Some(root) = &root => files::read_document(root, path),
+                None => files::read_document_at(&document.path),
             };
             match disk {
                 Ok(disk) => {
@@ -1686,15 +1689,7 @@ impl Workspace {
 
     pub(super) fn poll_documents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for path in std::mem::take(&mut self.documents.markdown_changed) {
-            if let Some(document) = self.documents.open.get(&path) {
-                for role in [PaneRole::Tab, PaneRole::Reading] {
-                    if let Some(pane) = self.documents.markdown_panes.get(&PaneKey::new(&path, role)) {
-                        pane.update(cx, |pane, cx| {
-                            pane.sync(&document.buffer.text, window, cx)
-                        });
-                    }
-                }
-            }
+            self.sync_markdown_panes(&path, window, cx);
         }
         for path in std::mem::take(&mut self.documents.canvas_changed) {
             self.sync_canvas_panes(&path, cx);
@@ -1928,6 +1923,9 @@ impl Workspace {
         if let Err(error) = self.mount_document_pane(&key, file.kind, window, cx) {
             self.report(error, cx);
             return;
+        }
+        if self.projects.directory().is_none() && Self::is_markdown_path(&file.path) {
+            self.refresh_active_markdown_backlinks(cx);
         }
         if let Some(width) = initial_width {
             self.documents

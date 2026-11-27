@@ -186,7 +186,6 @@ impl Workspace {
         let canvas_backlink_count = self.documents.active_canvas_backlinks.len();
         let total_backlinks = md_backlink_count + canvas_backlink_count;
         if !trash_open && total_backlinks > 0 {
-            let md_backlinks = self.documents.active_markdown_backlinks.clone();
             let canvas_backlinks = self.documents.active_canvas_backlinks.clone();
             let app = cx.entity();
             let pill_icon = if md_backlink_count > 0 {
@@ -211,13 +210,14 @@ impl Workspace {
                     .icon(crate::ui::icon(pill_icon).size(px(14.)))
                     .label(format!("{total_backlinks}"))
                     .tooltip(tooltip)
-                    .folio_dropdown_menu(move |mut menu, _, _| {
+                    .folio_dropdown_menu(move |mut menu, _, cx| {
+                        let md_backlinks = &app.read(cx).documents.active_markdown_backlinks;
                         menu = menu.min_w(px(236.));
                         if !md_backlinks.is_empty() {
                             menu = menu.label(
                                 crate::i18n::workspace::MARKDOWN_BACKLINKS_MENU_HEADER.get(),
                             );
-                            for link in &md_backlinks {
+                            for link in md_backlinks {
                                 let app = app.clone();
                                 let item = link.clone();
                                 let source_name = Path::new(&link.source_path)
