@@ -1025,6 +1025,20 @@ impl BlockEditorState {
         self.after_edit(EditOrigin::Api, cx);
         Ok(())
     }
+    pub fn replace_captured_with_link(
+        &mut self,
+        range: &mut super::CapturedRange,
+        text: &str,
+        url: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), super::CapturedRangeError> {
+        if self.readonly || self.marked.is_some() {
+            return Err(super::CapturedRangeError::Stale);
+        }
+        self.model.replace_captured_with_link(range, text, url)?;
+        self.after_edit(EditOrigin::Api, cx);
+        Ok(())
+    }
     pub fn select_end(&mut self, cx: &mut Context<Self>) -> Result<(), super::SelectionError> {
         self.model.select_end()?;
         self.selection_changed(cx);

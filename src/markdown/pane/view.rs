@@ -1131,7 +1131,7 @@ impl Render for MarkdownPane {
             .on_key_down(cx.listener(|pane, ev: &KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" {
                     if let Some(prefix) = pane.visual_editor.read(cx).caret_prefix()
-                        && quick_insert_items(prefix).is_some()
+                        && pane.quick_insert_menu(prefix).is_some()
                     {
                         pane.dismissed_slash_prefix = Some(prefix.to_owned());
                         cx.stop_propagation();

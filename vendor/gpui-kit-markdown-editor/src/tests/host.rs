@@ -66,6 +66,24 @@ fn completion_edits_leaf_ranges_not_escaped_source_offsets() {
 }
 
 #[test]
+fn replace_captured_with_link_inserts_link_clears_stored_link_and_undoes_in_one_step() {
+    let mut editor = model("参考 [[引导");
+    editor.select_end().unwrap();
+    let mut capture = editor.capture_suffix("[[引导".len()).unwrap();
+    editor
+        .replace_captured_with_link(&mut capture, "引导", "../docs/guide.md")
+        .unwrap();
+    assert_eq!(editor.source(), "参考 [引导](../docs/guide.md)");
+    editor.insert_text(" 后续", EditOrigin::Typing).unwrap();
+    assert_eq!(editor.source(), "参考 [引导](../docs/guide.md) 后续");
+    assert!(editor.undo());
+    assert_eq!(editor.source(), "参考 [引导](../docs/guide.md)");
+    assert!(editor.undo());
+    assert_eq!(editor.caret_prefix(), Some("参考 [[引导"));
+    assert_invariants(&editor);
+}
+
+#[test]
 fn long_nested_source_is_shared_per_revision_not_per_selection() {
     let source = (0..1500)
         .map(|ix| format!("- **item {ix}**\n  - nested `code`\n"))

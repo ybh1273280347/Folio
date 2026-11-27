@@ -1,9 +1,278 @@
 //! Markdown link resolution and navigation into a tab or a reading pane.
 
 use super::*;
+use crate::markdown::links as md_links;
 use crate::model::InternalLinkOpenTarget;
 
 impl Workspace {
+    pub(in crate::workspace) fn is_markdown_path(path: &str) -> bool {
+        path.to_ascii_lowercase().ends_with(".md")
+    }
+
+    pub(in crate::workspace) fn sync_markdown_links_from_text(
+        &mut self,
+        rel_path: &str,
+        text: &str,
+        disk_synced: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !Self::is_markdown_path(rel_path) {
+            return;
+        }
+        let Some(db_path) = self.canvas_metadata_db_path() else {
+            return;
+        };
+        let full = disk_synced.then(|| self.document_path(rel_path));
+        if let Err(error) =
+            md_links::sync_markdown_links(&db_path, rel_path, text, full.as_deref())
+        {
+            self.report(error, cx);
+        }
+        self.refresh_active_markdown_backlinks();
+    }
+
+    pub(in crate::workspace) fn sync_project_markdown_links(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.projects.directory() else {
+            return;
+        };
+        let Some(db_path) = self.canvas_metadata_db_path() else {
+            return;
+        };
+        let root = PathBuf::from(&project.folder);
+        let md_paths: Vec<String> = self
+            .tree
+            .files()
+            .iter()
+            .filter(|f| Self::is_markdown_path(&f.path))
+            .map(|f| f.path.clone())
+            .collect();
+        if let Err(error) = md_links::sync_project_markdown_links(&db_path, &root, &md_paths) {
+            self.report(error, cx);
+        }
+        self.refresh_active_markdown_backlinks();
+    }
+
+    pub(in crate::workspace) fn remove_markdown_links_index(
+        &mut self,
+        rel_path: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if !Self::is_markdown_path(rel_path) {
+            return;
+        }
+        if let Some(db_path) = self.canvas_metadata_db_path()
+            && let Err(error) = md_links::remove_markdown_links(&db_path, rel_path)
+        {
+            self.report(error, cx);
+        }
+        self.refresh_active_markdown_backlinks();
+    }
+
+    pub(in crate::workspace) fn refresh_active_backlinks(&mut self) {
+        self.refresh_active_canvas_backlinks();
+        self.refresh_active_markdown_backlinks();
+    }
+
+    pub(in crate::workspace) fn refresh_active_markdown_backlinks(&mut self) {
+        if self.documents.active.is_empty() {
+            self.documents.active_markdown_backlinks.clear();
+            return;
+        }
+        let Some(db_path) = self.canvas_metadata_db_path() else {
+            self.documents.active_markdown_backlinks.clear();
+            return;
+        };
+        let entries = md_links::backlinks_for(&db_path, &self.documents.active);
+        let mut live = Vec::with_capacity(entries.len());
+        let mut stale = BTreeSet::new();
+        for link in entries {
+            if self.document_path(&link.source_path).is_file() {
+                live.push(link);
+            } else {
+                stale.insert(link.source_path);
+            }
+        }
+        for path in stale {
+            let _ = md_links::remove_markdown_links(&db_path, &path);
+        }
+        self.documents.active_markdown_backlinks = live;
+    }
+
+    pub(in crate::workspace) fn open_markdown_backlink(
+        &mut self,
+        backlink: &md_links::MarkdownBacklink,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let full = self.document_path(&backlink.source_path);
+        if !full.is_file() {
+            self.remove_markdown_links_index(&backlink.source_path, cx);
+            self.report(crate::i18n::workspace::err_file_not_found(&full), cx);
+            return;
+        }
+        let file = ProjectFile {
+            kind: Self::file_kind(&full),
+            path: backlink.source_path.clone(),
+        };
+        let use_split = self.settings.internal_link_open_target == InternalLinkOpenTarget::SplitPane
+            && Self::supports_split_pane(&file.path);
+        let pane_key = if use_split {
+            self.open_reading_pane(&file, window, cx);
+            PaneKey::reading(&file.path)
+        } else {
+            if let Err(error) = self.open_file(&file, window, cx) {
+                self.report(error, cx);
+                return;
+            }
+            PaneKey::tab(&file.path)
+        };
+        if let Some(md) = self.documents.markdown_panes.get(&pane_key).cloned() {
+            let line = backlink.line;
+            let snippet = (!backlink.label.trim().is_empty()).then_some(backlink.label.clone());
+            md.update(cx, |pane, cx| {
+                pane.jump_to_search_hit(Some(line), None, snippet.as_deref(), window, cx);
+            });
+        }
+        self.refresh_active_backlinks();
+        cx.notify();
+    }
+
+    /// Automatically refactors project-internal Markdown links and image paths after an
+    /// in-app file or folder rename/move. Updates both inbound references and outbound
+    /// relative paths of moved Markdown documents.
+    pub(in crate::workspace) fn relocate_markdown_links(
+        &mut self,
+        moves: &[(String, String)],
+        is_folder: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if moves.is_empty() {
+            return;
+        }
+        let Some(project) = self.projects.directory() else {
+            return;
+        };
+        let root = PathBuf::from(&project.folder);
+        let Some(db_path) = self.canvas_metadata_db_path() else {
+            return;
+        };
+
+        let mut candidates = BTreeSet::new();
+        match md_links::sources_referencing_moves(&db_path, moves, is_folder) {
+            Ok(sources) => {
+                for src in sources {
+                    let current = md_links::remap_rel_path_compat(&src, moves, is_folder)
+                        .unwrap_or(src);
+                    if Self::is_markdown_path(&current) {
+                        candidates.insert(current);
+                    }
+                }
+            }
+            Err(error) => self.report(error, cx),
+        }
+        for file in self.tree.files() {
+            if Self::is_markdown_path(&file.path)
+                && md_links::reverse_remap_rel_path(&file.path, moves, is_folder).is_some()
+            {
+                candidates.insert(file.path.clone());
+            }
+        }
+        for path in self.documents.open.keys() {
+            if Self::is_markdown_path(path) {
+                candidates.insert(path.clone());
+            }
+        }
+
+        if let Err(error) = md_links::relocate_source_paths(&db_path, moves, is_folder) {
+            self.report(error, cx);
+        }
+
+        let mut updated_files = 0usize;
+        let mut updated_links = 0usize;
+        let mut conflict_files = Vec::new();
+
+        for current_path in candidates {
+            let old_source = md_links::reverse_remap_rel_path(&current_path, moves, is_folder)
+                .unwrap_or_else(|| current_path.clone());
+
+            if let Some(buffer) = self.documents.open_buffer(&current_path) {
+                let current_text = buffer.text.clone();
+                if let Some((next_text, count)) = md_links::rewrite_markdown_links(
+                    &current_text,
+                    &old_source,
+                    &current_path,
+                    moves,
+                    is_folder,
+                ) {
+                    self.edit_document(&current_path, next_text.clone());
+                    self.sync_markdown_panes(&current_path, window, cx);
+                    if let Err(error) =
+                        md_links::sync_markdown_links(&db_path, &current_path, &next_text, None)
+                    {
+                        self.report(error, cx);
+                    }
+                    updated_files += 1;
+                    updated_links += count;
+                }
+                continue;
+            }
+
+            let Ok(disk) = files::read_document(&root, &current_path) else {
+                continue;
+            };
+            let Some((next_text, count)) = md_links::rewrite_markdown_links(
+                &disk.text,
+                &old_source,
+                &current_path,
+                moves,
+                is_folder,
+            ) else {
+                continue;
+            };
+            match files::save_document(&root, &current_path, &next_text, &disk.revision) {
+                Ok(Ok(saved)) => {
+                    let full = self.document_path(&current_path);
+                    if let Err(error) = md_links::sync_markdown_links(
+                        &db_path,
+                        &current_path,
+                        &saved.text,
+                        Some(&full),
+                    ) {
+                        self.report(error, cx);
+                    }
+                    updated_files += 1;
+                    updated_links += count;
+                }
+                Ok(Err(_)) => conflict_files.push(current_path),
+                Err(error) => self.report(error, cx),
+            }
+        }
+
+        if updated_links > 0 {
+            self.schedule_rag_sync();
+            let message = if conflict_files.is_empty() {
+                crate::i18n::workspace::report_relocated_markdown_links(
+                    updated_files,
+                    updated_links,
+                )
+            } else {
+                crate::i18n::workspace::report_relocated_markdown_links_with_conflicts(
+                    updated_files,
+                    updated_links,
+                    conflict_files.len(),
+                )
+            };
+            self.report(message, cx);
+        } else if let Some(first) = conflict_files.first() {
+            self.report(
+                crate::i18n::workspace::report_relocated_markdown_links_conflict(first),
+                cx,
+            );
+        }
+        self.refresh_active_markdown_backlinks();
+    }
+
     fn open_internal_link_file(
         &mut self,
         file: &ProjectFile,

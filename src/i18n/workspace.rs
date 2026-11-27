@@ -477,3 +477,46 @@ pub fn report_pasted_images(count: usize) -> String {
         Locale::En => format!("Pasted {count} image files"),
     }
 }
+
+pub fn report_relocated_markdown_links(files: usize, links: usize) -> String {
+    match locale() {
+        Locale::ZhCn => format!("已自动更新 {files} 个文档中的 {links} 处引用"),
+        Locale::En => {
+            let link_word = if links == 1 { "link" } else { "links" };
+            let file_word = if files == 1 { "file" } else { "files" };
+            format!("Updated {links} {link_word} across {files} {file_word}")
+        }
+    }
+}
+
+pub fn report_relocated_markdown_links_with_conflicts(
+    files: usize,
+    links: usize,
+    conflicts: usize,
+) -> String {
+    match locale() {
+        Locale::ZhCn => {
+            format!("已自动更新 {files} 个文档中的 {links} 处引用（{conflicts} 个文档因外部修改已跳过）")
+        }
+        Locale::En => {
+            let link_word = if links == 1 { "link" } else { "links" };
+            let file_word = if files == 1 { "file" } else { "files" };
+            format!(
+                "Updated {links} {link_word} across {files} {file_word} ({conflicts} skipped due to external changes)"
+            )
+        }
+    }
+}
+
+pub fn report_relocated_markdown_links_conflict(path: &str) -> String {
+    match locale() {
+        Locale::ZhCn => format!("文档已被外部修改，未更新引用：{path}"),
+        Locale::En => format!("File was modified externally; links not updated: {path}"),
+    }
+}
+
+pub const TOOLTIP_BACKLINKS_ALL: BiText = BiText::new(
+    "查看引用此文件的文档与画布",
+    "Documents and canvases referencing this file",
+);
+pub const MARKDOWN_BACKLINKS_MENU_HEADER: BiText = BiText::new("文档反向引用", "Document Backlinks");

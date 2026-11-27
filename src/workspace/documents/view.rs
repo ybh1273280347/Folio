@@ -182,10 +182,23 @@ impl Workspace {
                 }),
         );
 
-        if !trash_open && !self.documents.active_canvas_backlinks.is_empty() {
-            let backlinks = self.documents.active_canvas_backlinks.clone();
-            let count = backlinks.len();
+        let md_backlink_count = self.documents.active_markdown_backlinks.len();
+        let canvas_backlink_count = self.documents.active_canvas_backlinks.len();
+        let total_backlinks = md_backlink_count + canvas_backlink_count;
+        if !trash_open && total_backlinks > 0 {
+            let md_backlinks = self.documents.active_markdown_backlinks.clone();
+            let canvas_backlinks = self.documents.active_canvas_backlinks.clone();
             let app = cx.entity();
+            let pill_icon = if md_backlink_count > 0 {
+                IconName::Link
+            } else {
+                IconName::ListTree
+            };
+            let tooltip = if md_backlink_count > 0 {
+                crate::i18n::workspace::TOOLTIP_BACKLINKS_ALL.get()
+            } else {
+                crate::i18n::canvas::TOOLTIP_BACKLINKS.get()
+            };
             bar = bar.child(
                 Button::new("canvas-backlinks-pill")
                     .ghost()
@@ -195,15 +208,50 @@ impl Workspace {
                     .px_2()
                     .rounded(px(6.))
                     .text_size(px(12.))
-                    .icon(crate::ui::icon(IconName::ListTree).size(px(14.)))
-                    .label(format!("{count}"))
-                    .tooltip(crate::i18n::canvas::TOOLTIP_BACKLINKS.get())
-                    .folio_dropdown_menu(move |menu, _, _| {
-                        backlinks.iter().fold(
-                            menu.min_w(px(196.)).label(
-                                crate::i18n::canvas::BACKLINKS_MENU_HEADER.get(),
-                            ),
-                            |menu, link| {
+                    .icon(crate::ui::icon(pill_icon).size(px(14.)))
+                    .label(format!("{total_backlinks}"))
+                    .tooltip(tooltip)
+                    .folio_dropdown_menu(move |mut menu, _, _| {
+                        menu = menu.min_w(px(236.));
+                        if !md_backlinks.is_empty() {
+                            menu = menu.label(
+                                crate::i18n::workspace::MARKDOWN_BACKLINKS_MENU_HEADER.get(),
+                            );
+                            for link in &md_backlinks {
+                                let app = app.clone();
+                                let item = link.clone();
+                                let source_name = Path::new(&link.source_path)
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| link.source_path.clone());
+                                let title = if link.label.is_empty() {
+                                    format!("{source_name} : L{}", link.line)
+                                } else {
+                                    format!("{source_name} · {}", link.label)
+                                };
+                                let icon = match link.kind {
+                                    crate::markdown::links::MarkdownLinkKind::Image => {
+                                        IconName::Image
+                                    }
+                                    _ => IconName::FileText,
+                                };
+                                menu = menu.item(
+                                    FolioMenuItem::new(title)
+                                        .icon(icon)
+                                        .on_click(move |_, window, cx| {
+                                            app.update(cx, |app, cx| {
+                                                app.open_markdown_backlink(&item, window, cx);
+                                            });
+                                        }),
+                                );
+                            }
+                        }
+                        if !md_backlinks.is_empty() && !canvas_backlinks.is_empty() {
+                            menu = menu.separator();
+                        }
+                        if !canvas_backlinks.is_empty() {
+                            menu = menu.label(crate::i18n::canvas::BACKLINKS_MENU_HEADER.get());
+                            for link in &canvas_backlinks {
                                 let app = app.clone();
                                 let item = link.clone();
                                 let canvas_name = Path::new(&link.canvas_path)
@@ -215,7 +263,7 @@ impl Workspace {
                                 } else {
                                     format!("{canvas_name} · {}", link.label)
                                 };
-                                menu.item(
+                                menu = menu.item(
                                     FolioMenuItem::new(title)
                                         .icon(IconName::ListTree)
                                         .on_click(move |_, window, cx| {
@@ -223,9 +271,10 @@ impl Workspace {
                                                 app.open_canvas_backlink(&item, window, cx);
                                             });
                                         }),
-                                )
-                            },
-                        )
+                                );
+                            }
+                        }
+                        menu
                     }),
             );
         }

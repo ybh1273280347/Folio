@@ -210,6 +210,9 @@ pub fn put(
     if entry.relative.to_ascii_lowercase().ends_with(".canvas") {
         let meta_db = crate::canvas::index::metadata_db_path(Some(root))?;
         crate::canvas::index::trash_canvas_links(&meta_db, &entry.relative, &entry.id)?;
+    } else if entry.relative.to_ascii_lowercase().ends_with(".md") {
+        let meta_db = crate::markdown::links::metadata_db_path(Some(root))?;
+        crate::markdown::links::trash_markdown_links(&meta_db, &entry.relative, &entry.id)?;
     }
     Ok(entry)
 }
@@ -260,6 +263,9 @@ pub fn restore(entry: &TrashEntry, target: &Path) -> crate::tags::Result<()> {
     if relative.to_ascii_lowercase().ends_with(".canvas") {
         let meta_db = crate::canvas::index::metadata_db_path(Some(&entry.project_root))?;
         crate::canvas::index::restore_canvas_links(&meta_db, &entry.id, &relative, target)?;
+    } else if relative.to_ascii_lowercase().ends_with(".md") {
+        let meta_db = crate::markdown::links::metadata_db_path(Some(&entry.project_root))?;
+        crate::markdown::links::restore_markdown_links(&meta_db, &entry.id, &relative, target)?;
     }
     let rag_db = entry.project_root.join(".folio").join("rag.sqlite3");
     if let Some(mut rag) = crate::rag::store::RagStore::open_existing(&rag_db)? {
@@ -288,6 +294,9 @@ pub fn purge(entry: &TrashEntry) -> crate::tags::Result<()> {
     if entry.relative.to_ascii_lowercase().ends_with(".canvas") {
         let meta_db = crate::canvas::index::metadata_db_path(Some(&entry.project_root))?;
         crate::canvas::index::purge_trashed_canvas_links(&meta_db, &entry.id)?;
+    } else if entry.relative.to_ascii_lowercase().ends_with(".md") {
+        let meta_db = crate::markdown::links::metadata_db_path(Some(&entry.project_root))?;
+        crate::markdown::links::purge_trashed_markdown_links(&meta_db, &entry.id)?;
     }
     let rag_db = entry.project_root.join(".folio").join("rag.sqlite3");
     if let Some(mut rag) = crate::rag::store::RagStore::open_existing(&rag_db)? {
