@@ -99,23 +99,12 @@ pub const DELETE_BLOCK: BiText = BiText::new("删除该块", "Delete block");
 pub const SAVE_ANNOTATION: BiText = BiText::new("保存批注", "Save annotation");
 pub const LOADING_MORE_CONTENT: BiText = BiText::new("正在加载后续内容…", "Loading remaining content…");
 
-// YAML Front Matter card
-pub const FRONTMATTER_TITLE: BiText = BiText::new("文档属性", "Properties");
+// YAML Front Matter
 pub const FRONTMATTER_EDIT_YAML: BiText = BiText::new("编辑 YAML", "Edit YAML");
-pub const FRONTMATTER_DONE: BiText = BiText::new("完成", "Done");
+pub const FRONTMATTER_DONE: BiText = BiText::new("完成编辑", "Done");
+pub const FRONTMATTER_COLLAPSE: BiText = BiText::new("收起属性", "Collapse properties");
+pub const FRONTMATTER_EXPAND: BiText = BiText::new("展开属性", "Expand properties");
 pub const FRONTMATTER_EMPTY: BiText = BiText::new("无属性字段", "No properties");
-pub fn frontmatter_count(count: usize) -> String {
-    match locale() {
-        Locale::ZhCn => format!("{count} 项"),
-        Locale::En => {
-            if count == 1 {
-                "1 property".to_owned()
-            } else {
-                format!("{count} properties")
-            }
-        }
-    }
-}
 
 pub fn link_tooltip_click(is_mac: bool, is_anchor: bool) -> String {
     match (locale(), is_mac, is_anchor) {
