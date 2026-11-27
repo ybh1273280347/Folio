@@ -70,12 +70,6 @@ pub fn dialog_agent_delete_tag_body(name: &str, affected: usize) -> String {
 }
 
 pub const TAGS_TITLE: BiText = BiText::new("标签", "Tags");
-pub fn filter_tag(name: &str) -> String {
-    match locale() {
-        Locale::ZhCn => format!("筛选 · {name}"),
-        Locale::En => format!("Filter · {name}"),
-    }
-}
 pub const CLEAR_TAG_FILTER: BiText = BiText::new("清除标签筛选", "Clear tag filter");
 pub fn mode_edit_files_tags(count: usize) -> String {
     match locale() {
@@ -84,7 +78,6 @@ pub fn mode_edit_files_tags(count: usize) -> String {
     }
 }
 pub const MODE_RENAME_TAG: BiText = BiText::new("重命名标签", "Rename Tag");
-pub const MODE_TAG_COLORS: BiText = BiText::new("标签颜色", "Tag Color");
 pub const MODE_RECOVER_FILE: BiText = BiText::new("选择新的关联文件", "Select New Target File");
 pub const BACK_TO_TAG_LIST: BiText = BiText::new("返回标签列表", "Back to tag list");
 pub const CLOSE_TAG_EDIT: BiText = BiText::new("关闭标签编辑", "Close tag editor");
@@ -97,13 +90,24 @@ pub fn folder_with_subfolders(folder: &str) -> String {
 }
 pub const SAVE_TAG_NAME: BiText = BiText::new("保存标签名称", "Save tag name");
 pub const OPEN_TARGET_FILE: BiText = BiText::new("打开目标文件…", "Open Target File…");
-pub const CREATE_TYPED_TAG: BiText = BiText::new("新建输入的标签", "Create tag");
 pub const PENDING_RELINK: BiText = BiText::new("待重新关联", "Missing file");
 pub const RELINK_BTN: BiText = BiText::new("重新关联", "Relink");
-pub const ADD_TAG: BiText = BiText::new("添加标签", "Add tag");
 pub const REMOVE_TAG: BiText = BiText::new("移除标签", "Remove tag");
 pub const CHANGE_TAG_COLOR: BiText = BiText::new("更改标签颜色", "Change tag color");
 pub const DELETE_TAG: BiText = BiText::new("删除标签", "Delete tag");
+pub const EDIT_TAG_PLACEHOLDER: BiText = BiText::new("输入标签名，回车添加或新建…", "Type tag name to add or create…");
+pub const NEW_TAG_BTN: BiText = BiText::new("新建标签", "New tag");
+pub const NEW_TAG_PLACEHOLDER: BiText = BiText::new("输入标签名称…", "New tag name…");
+pub const NO_ASSIGNED_TAGS: BiText = BiText::new("暂无标签，在下方选择或输入以创建", "No tags yet — pick below or type to create");
+pub const NO_MATCHING_TAGS: BiText = BiText::new("没有匹配的标签", "No matching tags");
+pub const MORE_TAG_ACTIONS: BiText = BiText::new("更多操作", "More actions");
+pub const APPLY_TAG_TO_ALL: BiText = BiText::new("应用到全部选中文件", "Apply to all selected files");
+pub fn create_and_add_tag(name: &str) -> String {
+    match locale() {
+        Locale::ZhCn => format!("创建并添加 “{name}”"),
+        Locale::En => format!("Create and add \"{name}\""),
+    }
+}
 
 // Agent tags & annotations
 pub const ERR_AGENT_TAG_MAX_QUERY: BiText = BiText::new("每次最多查询 20 个标签。", "At most 20 tags can be queried at once.");

@@ -336,8 +336,7 @@ impl Workspace {
                             cx.stop_propagation();
                             return;
                         }
-                        if key == "escape" && app.tags.is_editing() {
-                            app.close_tag_panel(window, cx);
+                        if app.handle_tag_keys(key, window, cx) {
                             cx.stop_propagation();
                             return;
                         }
