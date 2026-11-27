@@ -18,7 +18,7 @@ use super::{
     frame::FrameLayout,
     id::BlockId,
     inline::{ATOM_LEN, InlineAtom, InlineText},
-    kind::BlockKind,
+    kind::{BlockKind, BlockKindData},
     marks::MarkKind,
     position::BlockPosition,
     projection::{ProjectionCache, Snapshot},
@@ -1425,11 +1425,25 @@ impl BlockEditorModel {
     ) -> Option<T> {
         let doc = &self.doc;
         let excerpt = super::import::parse_document(quote, doc.extensions.clone()).ok()?;
-        if excerpt.leaves().len() < 2 {
+        let [first, ..] = excerpt.leaves() else {
+            return None;
+        };
+        // A body-only excerpt keeps the fold marker, so parsing gives it an
+        // empty title. Match the selected body in the same kind of fold.
+        let body_fold = match excerpt.index_in_parent(*first) {
+            Some((parent, 0)) if excerpt.leaf_text(*first) == Some("") => {
+                match excerpt.kind(parent) {
+                    Some(BlockKindData::Fold { syntax, .. }) => Some(syntax),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let leaves = &excerpt.leaves()[usize::from(body_fold.is_some())..];
+        if leaves.len() < 2 {
             return None;
         }
-        let parts = excerpt
-            .leaves()
+        let parts = leaves
             .iter()
             .map(|&block| {
                 let text = excerpt.leaf_text(block).unwrap_or_default();
@@ -1477,7 +1491,11 @@ impl BlockEditorModel {
                     }
                 },
             );
-            if matches {
+            if matches && body_fold.is_none_or(|syntax| {
+                std::iter::successors(doc.parent(blocks[0]), |&block| doc.parent(block)).any(
+                    |block| matches!(doc.kind(block), Some(BlockKindData::Fold { syntax: candidate, .. }) if candidate == syntax),
+                )
+            }) {
                 if let Some(result) = find(index, ResolvedSelection { start, end }) {
                     return Some(result);
                 }

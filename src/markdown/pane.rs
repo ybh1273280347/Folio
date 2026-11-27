@@ -767,8 +767,9 @@ impl MarkdownPane {
         )
         .detach();
         let note_input = cx.new(|cx| {
+            // The popover supplies a fixed viewport. Let the textarea scroll
+            // within it instead of increasing its minimum height with the text.
             TextareaState::new(window, cx)
-                .auto_grow(2, 8)
                 .submit_on_enter(true)
                 .placeholder(crate::i18n::markdown::ANNOTATION_PLACEHOLDER.get())
         });
