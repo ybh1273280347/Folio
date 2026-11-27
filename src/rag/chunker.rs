@@ -24,6 +24,11 @@ static TOKENIZER: LazyLock<Tokenizer> = LazyLock::new(|| {
     Tokenizer::from_bytes(json).expect("the bundled Qwen3-Embedding tokenizer is valid")
 });
 
+#[cfg(windows)]
+pub(crate) fn shared_tokenizer() -> &'static Tokenizer {
+    &TOKENIZER
+}
+
 fn encode(text: &str) -> Encoding {
     TOKENIZER
         .encode(text, false)

@@ -74,6 +74,8 @@ fn server_registry() -> &'static Mutex<HashMap<u16, ManagedChild>> {
 }
 
 pub fn reap_idle_servers() {
+    #[cfg(windows)]
+    super::cuda_engine::reap_idle_models();
     let mut map = server_registry().lock().expect("server registry poisoned");
     map.retain(|_, entry| {
         if entry.child.try_wait().ok().flatten().is_some() {
@@ -91,6 +93,8 @@ pub fn reap_idle_servers() {
 }
 
 pub fn shutdown_managed_servers() {
+    #[cfg(windows)]
+    super::cuda_engine::shutdown_models();
     let mut map = server_registry().lock().expect("server registry poisoned");
     for (_, mut entry) in map.drain() {
         let _ = entry.child.kill();
@@ -221,18 +225,45 @@ impl EmbeddingClient {
         })
     }
 
+    fn can_use_native_cuda(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.auto_manage
+                && self.endpoint.is_loopback()
+                && self.dim == 1024
+                && super::cuda_engine::is_supported_model(&self.model_path, false)
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
     pub fn health_check(&self) -> bool {
+        #[cfg(windows)]
+        if self.auto_manage
+            && self.endpoint.is_loopback()
+            && super::cuda_engine::is_model_loaded(&self.model_path, false)
+        {
+            return true;
+        }
         check_health(&self.endpoint)
     }
 
     pub fn ensure_ready(&self) -> bool {
+        #[cfg(windows)]
+        if self.can_use_native_cuda()
+            && super::cuda_engine::ensure_ready(&self.model_path, false, self.idle_release_secs)
+        {
+            return true;
+        }
         probe_or_spawn(
             &self.endpoint,
             &self.server_bin,
             &self.model_path,
             self.auto_manage,
             self.idle_release_secs,
-            &["--embedding", "-b", "512", "-ub", "512"],
+            &["--embedding", "-b", "4096", "-ub", "4096", "-np", "1", "-fa", "on", "--no-warmup"],
         )
     }
 
@@ -247,6 +278,15 @@ impl EmbeddingClient {
     fn embed_batches(&self, texts: &[&str], is_query: bool) -> Result<Vec<Vec<f32>>, String> {
         if texts.is_empty() {
             return Ok(Vec::new());
+        }
+        #[cfg(windows)]
+        if self.can_use_native_cuda() {
+            return super::cuda_engine::embed_texts(
+                &self.model_path,
+                texts,
+                is_query,
+                self.idle_release_secs,
+            );
         }
         let mut all = Vec::with_capacity(texts.len());
         let path = self.endpoint.join("/v1/embeddings");
@@ -343,24 +383,59 @@ impl RerankClient {
         })
     }
 
+    fn can_use_native_cuda(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.auto_manage
+                && self.endpoint.is_loopback()
+                && super::cuda_engine::is_supported_model(&self.model_path, true)
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
     pub fn health_check(&self) -> bool {
+        #[cfg(windows)]
+        if self.auto_manage
+            && self.endpoint.is_loopback()
+            && super::cuda_engine::is_model_loaded(&self.model_path, true)
+        {
+            return true;
+        }
         check_health(&self.endpoint)
     }
 
     pub fn ensure_ready(&self) -> bool {
+        #[cfg(windows)]
+        if self.can_use_native_cuda()
+            && super::cuda_engine::ensure_ready(&self.model_path, true, self.idle_release_secs)
+        {
+            return true;
+        }
         probe_or_spawn(
             &self.endpoint,
             &self.server_bin,
             &self.model_path,
             self.auto_manage,
             self.idle_release_secs,
-            &["--reranking", "--pooling", "rank"],
+            &["--reranking", "--pooling", "rank", "-b", "4096", "-ub", "4096", "-np", "1", "-fa", "on", "--no-warmup"],
         )
     }
 
     pub fn rerank(&self, query: &str, documents: &[&str]) -> Result<Vec<f64>, String> {
         if documents.is_empty() {
             return Ok(Vec::new());
+        }
+        #[cfg(windows)]
+        if self.can_use_native_cuda() {
+            return super::cuda_engine::rerank_documents(
+                &self.model_path,
+                query,
+                documents,
+                self.idle_release_secs,
+            );
         }
         let path = self.endpoint.join("/v1/rerank");
         let mut scores = Vec::with_capacity(documents.len());
