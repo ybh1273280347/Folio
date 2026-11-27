@@ -1066,6 +1066,7 @@ impl Workspace {
             return;
         }
         self.documents.select_last_tab_if_closed();
+        self.promote_first_reading_pane_if_tabs_empty(false, window, cx);
         let main = project.main_file.clone();
         if deleted.iter().any(|path| path == &main) {
             if let Err(error) = self.projects.remove_main_file(&project.id) {
@@ -2383,7 +2384,7 @@ impl Workspace {
                                             .icon(IconName::Columns2)
                                             .on_click(move |_, window, cx| {
                                                 split_app.update(cx, |app, cx| {
-                                                    app.open_reading_pane(&split, window, cx)
+                                                    app.open_reading_pane(&split, window, cx);
                                                 })
                                             }),
                                     )

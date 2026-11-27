@@ -28,7 +28,7 @@ enum PaneRole {
 
 /// A pane's role is independent of the path persisted in workspace sessions.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct PaneKey {
+pub(super) struct PaneKey {
     path: String,
     role: PaneRole,
 }
@@ -75,6 +75,8 @@ pub(super) struct Documents {
     reading_panes: Vec<String>,
     reading_pane_initial_widths: BTreeMap<String, f32>,
     focused_markdown: Option<String>,
+    focused_reading_editor: Option<String>,
+    reading_editors: BTreeMap<String, (Entity<EditorState>, Subscription)>,
     markdown_panes: BTreeMap<PaneKey, Entity<MarkdownPane>>,
     canvas_panes: BTreeMap<PaneKey, Entity<CanvasPane>>,
     pdf_panes: BTreeMap<PaneKey, Entity<PdfPane>>,
@@ -83,6 +85,7 @@ pub(super) struct Documents {
     image_panes: BTreeMap<PaneKey, Entity<crate::image::ImagePane>>,
     markdown_changed: BTreeSet<String>,
     canvas_changed: BTreeSet<String>,
+    text_changed: BTreeSet<String>,
     active_canvas_backlinks: Vec<crate::canvas::CanvasBacklink>,
     active_markdown_backlinks: Vec<crate::markdown::links::MarkdownBacklink>,
     pending_canvas_insert: Option<PendingCanvasInsert>,
@@ -109,6 +112,26 @@ impl Documents {
 
     pub(super) fn focused_markdown(&self) -> Option<&str> {
         self.focused_markdown.as_deref()
+    }
+
+    pub(super) fn focused_reading_document(&self) -> Option<&str> {
+        self.focused_markdown
+            .as_deref()
+            .or(self.focused_reading_editor.as_deref())
+    }
+
+    pub(super) fn clear_reading_focus(&mut self) {
+        self.focused_markdown = None;
+        self.focused_reading_editor = None;
+    }
+
+    fn clear_reading_focus_for(&mut self, path: &str) {
+        if self.focused_markdown.as_deref() == Some(path) {
+            self.focused_markdown = None;
+        }
+        if self.focused_reading_editor.as_deref() == Some(path) {
+            self.focused_reading_editor = None;
+        }
     }
 
     pub(super) fn clear_pending_canvas_insert(&mut self) {
@@ -178,6 +201,9 @@ impl Documents {
         if previous.show_line_numbers != settings.show_line_numbers {
             for document in self.open.values() {
                 document.editor.update(cx, |editor, cx| editor.set_line_number(settings.show_line_numbers, window, cx));
+            }
+            for (editor, _) in self.reading_editors.values() {
+                editor.update(cx, |editor, cx| editor.set_line_number(settings.show_line_numbers, window, cx));
             }
         }
         if previous.show_line_numbers != settings.show_line_numbers || previous.line_width_limited != settings.line_width_limited
@@ -264,10 +290,13 @@ impl Documents {
     }
 
     fn source_changed(&mut self, path: &str) {
-        if path.to_ascii_lowercase().ends_with(".canvas") {
+        let lower = path.to_ascii_lowercase();
+        if lower.ends_with(".canvas") {
             self.canvas_changed.insert(path.to_owned());
-        } else {
+        } else if lower.ends_with(".md") {
             self.markdown_changed.insert(path.to_owned());
+        } else {
+            self.text_changed.insert(path.to_owned());
         }
         self.source_version += 1;
     }
@@ -343,6 +372,22 @@ impl Workspace {
                     });
                 }
             }
+        }
+    }
+
+    fn sync_text_editors(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.documents.text_changed.remove(path);
+        let Some(document) = self.documents.open.get(path) else {
+            return;
+        };
+        let text = document.buffer.text.clone();
+        if document.editor.read(cx).value().as_ref() != text.as_str() {
+            document.editor.update(cx, |editor, cx| editor.set_value(text.clone(), window, cx));
+        }
+        if let Some((reading_editor, _)) = self.documents.reading_editors.get(path)
+            && reading_editor.read(cx).value().as_ref() != text.as_str()
+        {
+            reading_editor.update(cx, |editor, cx| editor.set_value(text.clone(), window, cx));
         }
     }
 }
@@ -615,6 +660,18 @@ impl Workspace {
             self.open_ai_with_selection(source, Some(full), text, window, cx);
             return;
         }
+        if let Some(reading_path) = self.documents.focused_reading_editor.clone()
+            && let Some((editor, _)) = self.documents.reading_editors.get(&reading_path)
+        {
+            let full = self.document_path(&reading_path);
+            let source = full
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or(reading_path);
+            let text = editor.read(cx).selected_text().to_string();
+            self.open_ai_with_selection(source, Some(full), text, window, cx);
+            return;
+        }
         if self.documents.active.is_empty() {
             return;
         }
@@ -641,6 +698,9 @@ impl Workspace {
         self.documents.image_panes.remove(key);
         self.documents.markdown_panes.remove(key);
         self.documents.canvas_panes.remove(key);
+        if key.role == PaneRole::Reading {
+            self.documents.reading_editors.remove(&key.path);
+        }
     }
 
     /// The file tree calls this only after moving the file to trash succeeds.
@@ -653,9 +713,8 @@ impl Workspace {
         self.documents.reading_pane_initial_widths.remove(path);
         self.documents.tabs.retain(|tab| tab != path);
         self.documents.canvas_changed.remove(path);
-        if self.documents.focused_markdown.as_deref() == Some(path) {
-            self.documents.focused_markdown = None;
-        }
+        self.documents.text_changed.remove(path);
+        self.documents.clear_reading_focus_for(path);
         if Self::is_canvas_path(path) {
             self.refresh_active_canvas_backlinks();
         }
@@ -678,15 +737,17 @@ impl Workspace {
         self.release_all_drawio_panes(window, cx);
         self.documents.image_panes.clear();
         self.documents.open.clear();
+        self.documents.reading_editors.clear();
         self.documents.tabs.clear();
         self.documents.active.clear();
         self.documents.reading_panes.clear();
         self.documents.reading_pane_initial_widths.clear();
         self.documents.markdown_panes.clear();
         self.documents.canvas_panes.clear();
-        self.documents.focused_markdown = None;
+        self.documents.clear_reading_focus();
         self.documents.markdown_changed.clear();
         self.documents.canvas_changed.clear();
+        self.documents.text_changed.clear();
     }
 
     fn prepare_standalone_file(&mut self, path: &Path) -> io::Result<ProjectFile> {
@@ -732,13 +793,7 @@ impl Workspace {
     }
 
     pub(super) fn supports_split_pane(path: &str) -> bool {
-        let lower = path.to_ascii_lowercase();
-        lower.ends_with(".md")
-            || lower.ends_with(".canvas")
-            || lower.ends_with(".pdf")
-            || Self::is_html_path(&lower)
-            || Self::is_drawio_path(&lower)
-            || Self::is_image_path(&lower)
+        files::is_relevant(Path::new(path))
     }
 
     fn resolve_dropped_files(
@@ -841,7 +896,25 @@ impl Workspace {
     ) -> Subscription {
         cx.subscribe(editor, move |app, state, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Focus) {
+                app.documents.clear_reading_focus();
+            }
+            if matches!(event, InputEvent::Change) {
+                app.edit_document(&path, state.read(cx).value().to_string());
+                cx.notify();
+            }
+        })
+    }
+
+    fn subscribe_reading_editor(
+        &mut self,
+        path: String,
+        editor: &Entity<EditorState>,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe(editor, move |app, state, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Focus) {
                 app.documents.focused_markdown = None;
+                app.documents.focused_reading_editor = Some(path.clone());
             }
             if matches!(event, InputEvent::Change) {
                 app.edit_document(&path, state.read(cx).value().to_string());
@@ -866,7 +939,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> io::Result<()> {
         self.trash.dismiss();
-        self.documents.focused_markdown = None;
+        self.documents.clear_reading_focus();
         let tab = PaneKey::tab(&file.path);
         self.mount_document_pane(&tab, file.kind, window, cx)?;
         if !self.documents.tabs.contains(&file.path) {
@@ -1077,6 +1150,27 @@ impl Workspace {
         if Self::is_canvas_path(path) && !self.documents.canvas_panes.contains_key(key) {
             self.add_canvas_pane(path, key.role == PaneRole::Reading, window, cx);
         }
+        if kind == FileKind::Text
+            && key.role == PaneRole::Reading
+            && !path.to_ascii_lowercase().ends_with(".md")
+            && !Self::is_canvas_path(path)
+            && !self.documents.reading_editors.contains_key(path)
+        {
+            let text = self.documents.open[path].buffer.text.clone();
+            let language = Self::editor_language_for_path(Path::new(path));
+            let editor = cx.new(|cx| {
+                EditorState::new(window, cx)
+                    .language(language)
+                    .line_number(self.settings.show_line_numbers)
+                    .searchable(true)
+                    .context_menu(false)
+                    .default_value(text)
+            });
+            let subscription = self.subscribe_reading_editor(path.clone(), &editor, cx);
+            self.documents
+                .reading_editors
+                .insert(path.clone(), (editor, subscription));
+        }
         Ok(())
     }
 
@@ -1108,7 +1202,7 @@ impl Workspace {
                     }
                 }
                 CanvasEvent::Focus => {
-                    app.documents.focused_markdown = None;
+                    app.documents.clear_reading_focus();
                 }
                 CanvasEvent::FilesChanged => {
                     if let Err(error) = app.refresh_files(window, cx) {
@@ -1196,7 +1290,10 @@ impl Workspace {
                         app.report(error.0["error"]["message"].as_str().expect("annotation error message"), cx);
                     }
                 }
-                MarkdownEvent::Focus => app.documents.focused_markdown = reading.then(|| file.clone()),
+                MarkdownEvent::Focus => {
+                    app.documents.focused_reading_editor = None;
+                    app.documents.focused_markdown = reading.then(|| file.clone());
+                }
                 MarkdownEvent::Zoom(size) => {
                     let mut settings = app.settings.clone();
                     settings.markdown_font_size = *size;
@@ -1418,8 +1515,8 @@ impl Workspace {
     }
 
     pub(super) fn save_active(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
-        let path = self.documents.focused_markdown
-            .clone()
+        let path = self.documents.focused_reading_document()
+            .map(str::to_owned)
             .unwrap_or_else(|| self.documents.active.clone());
         if self.documents.open.contains_key(&path) {
             if let Err(error) = self.save_file(&path, false, cx) {
@@ -1481,7 +1578,7 @@ impl Workspace {
             return;
         }
         self.trash.dismiss();
-        self.documents.focused_markdown = None;
+        self.documents.clear_reading_focus();
         self.documents.active = path.to_owned();
         self.refresh_active_backlinks(cx);
         self.focus_document_tab(path, window, cx);
@@ -1491,7 +1588,50 @@ impl Workspace {
         cx.notify();
     }
 
+    /// When the main editor tab bar is empty, promote the first split pane into the main editor.
+    pub(super) fn promote_first_reading_pane_if_tabs_empty(
+        &mut self,
+        focus_editor: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.documents.tabs.is_empty() || self.documents.reading_panes.is_empty() {
+            return false;
+        }
+        let path = self.documents.reading_panes.remove(0);
+        let width = self.documents.reading_pane_initial_widths.remove(&path);
+        let full = self.document_path(&path);
+        let kind = Self::file_kind(&full);
+        if let Err(error) = self.mount_document_pane(&PaneKey::tab(&path), kind, window, cx) {
+            self.documents.reading_panes.insert(0, path.clone());
+            if let Some(width) = width {
+                self.documents.reading_pane_initial_widths.insert(path, width);
+            }
+            self.report(error, cx);
+            return false;
+        }
+        self.release_document_pane(&PaneKey::reading(&path), window, cx);
+        self.documents.clear_reading_focus_for(&path);
+        self.documents.tabs.push(path.clone());
+        self.documents.active = path.clone();
+        self.refresh_active_backlinks(cx);
+        if focus_editor {
+            self.focus_document_tab(&path, window, cx);
+        }
+        true
+    }
+
     pub(super) fn close_tab(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_tab_inner(path, true, window, cx);
+    }
+
+    fn close_tab_inner(
+        &mut self,
+        path: &str,
+        promote_split: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.documents.reading_panes.iter().any(|pane| pane == path)
             && (self.documents.open
                 .get(path)
@@ -1530,18 +1670,16 @@ impl Workspace {
         if !self.documents.reading_panes.iter().any(|pane| pane == path) {
             self.documents.open.remove(path);
         }
-        if self.documents.focused_markdown.as_deref() == Some(path) {
-            self.documents.focused_markdown = None;
-        }
+        self.documents.clear_reading_focus_for(path);
         if self.documents.active == path {
             self.documents.active = self.documents.tabs.last().cloned().unwrap_or_default();
-            if !self.trash.is_open()
-                && let Some(document) = self.documents.open.get(&self.documents.active)
-            {
-                document
-                    .editor
-                    .update(cx, |editor, cx| editor.focus(window, cx));
+            if !self.trash.is_open() && !self.documents.active.is_empty() {
+                let active = self.documents.active.clone();
+                self.focus_document_tab(&active, window, cx);
             }
+        }
+        if promote_split && self.documents.tabs.is_empty() && !self.trash.is_open() {
+            self.promote_first_reading_pane_if_tabs_empty(true, window, cx);
         }
         self.refresh_active_backlinks(cx);
         if let Err(error) = self.remember_session() {
@@ -1775,6 +1913,9 @@ impl Workspace {
         for path in std::mem::take(&mut self.documents.canvas_changed) {
             self.sync_canvas_panes(&path, cx);
         }
+        for path in std::mem::take(&mut self.documents.text_changed) {
+            self.sync_text_editors(&path, window, cx);
+        }
         let events: Vec<_> = self.documents.document_watch.transport
             .iter()
             .flat_map(|(_, receiver)| receiver.try_iter())
@@ -1918,6 +2059,15 @@ impl Workspace {
             document.subscription = self.subscribe_editor(renamed.clone(), &document.editor, cx);
             self.documents.open.insert(renamed.clone(), document);
         }
+        if let Some((editor, _)) = self.documents.reading_editors.remove(key)
+            && !renamed.to_ascii_lowercase().ends_with(".md")
+            && !Self::is_canvas_path(&renamed)
+        {
+            let subscription = self.subscribe_reading_editor(renamed.clone(), &editor, cx);
+            self.documents
+                .reading_editors
+                .insert(renamed.clone(), (editor, subscription));
+        }
         for role in [PaneRole::Tab, PaneRole::Reading] {
             let old_key = PaneKey::new(key, role);
             let new_key = PaneKey::new(&renamed, role);
@@ -1964,6 +2114,7 @@ impl Workspace {
         }
         if self.documents.active == key { self.documents.active = renamed.clone(); }
         if self.documents.focused_markdown.as_deref() == Some(key) { self.documents.focused_markdown = Some(renamed.clone()); }
+        if self.documents.focused_reading_editor.as_deref() == Some(key) { self.documents.focused_reading_editor = Some(renamed.clone()); }
         if let Some(width) = self.documents.reading_pane_initial_widths.remove(key) {
             self.documents.reading_pane_initial_widths.insert(renamed.clone(), width);
         }
@@ -1973,6 +2124,9 @@ impl Workspace {
         if self.documents.canvas_changed.remove(key) {
             self.documents.canvas_changed.insert(renamed.clone());
         }
+        if self.documents.text_changed.remove(key) {
+            self.documents.text_changed.insert(renamed.clone());
+        }
     }
 
     pub(super) fn open_reading_pane(
@@ -1980,8 +2134,8 @@ impl Workspace {
         file: &ProjectFile,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        self.open_reading_pane_with_width(file, None, window, cx);
+    ) -> Option<PaneKey> {
+        self.open_reading_pane_with_width(file, None, window, cx)
     }
 
     pub(super) fn open_reading_pane_with_width(
@@ -1990,20 +2144,31 @@ impl Workspace {
         initial_width: Option<f32>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Option<PaneKey> {
+        if self.documents.tabs.is_empty() {
+            return match self.open_file(file, window, cx) {
+                Ok(()) => Some(PaneKey::tab(&file.path)),
+                Err(error) => {
+                    self.report(error, cx);
+                    None
+                }
+            };
+        }
         if self.documents.reading_panes.contains(&file.path) {
             let key = PaneKey::reading(&file.path);
             if let Some(pane) = self.documents.markdown_panes.get(&key) {
                 pane.update(cx, |pane, cx| pane.focus(window, cx));
             } else if let Some(pane) = self.documents.canvas_panes.get(&key) {
                 pane.update(cx, |pane, cx| pane.focus(window, cx));
+            } else if let Some((editor, _)) = self.documents.reading_editors.get(&file.path) {
+                editor.update(cx, |editor, cx| editor.focus(window, cx));
             }
-            return;
+            return Some(key);
         }
         let key = PaneKey::reading(&file.path);
         if let Err(error) = self.mount_document_pane(&key, file.kind, window, cx) {
             self.report(error, cx);
-            return;
+            return None;
         }
         if self.projects.directory().is_none() && Self::is_markdown_path(&file.path) {
             self.refresh_active_markdown_backlinks(cx);
@@ -2014,22 +2179,25 @@ impl Workspace {
                 .insert(file.path.clone(), width);
         }
         self.documents.reading_panes.push(file.path.clone());
-        self.documents.focused_markdown = None;
+        self.documents.clear_reading_focus();
         if let Some(pane) = self.documents.markdown_panes.get(&key) {
             pane.update(cx, |pane, cx| pane.focus(window, cx));
         } else if let Some(pane) = self.documents.canvas_panes.get(&key) {
             pane.update(cx, |pane, cx| pane.focus(window, cx));
+        } else if let Some((editor, _)) = self.documents.reading_editors.get(&file.path) {
+            editor.update(cx, |editor, cx| editor.focus(window, cx));
         }
         if let Err(error) = self.remember_session() {
             self.report(error, cx);
         }
         cx.notify();
+        Some(key)
     }
 
     pub(super) fn close_reading_pane(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.documents.reading_panes.retain(|pane| pane != path);
         if !self.documents.tabs.iter().any(|tab| tab == path) {
-            self.close_tab(path, window, cx);
+            self.close_tab_inner(path, false, window, cx);
             // A cancelled draft close keeps its document accessible.
             if self.documents.open.contains_key(path) {
                 self.documents.reading_panes.push(path.to_owned());
@@ -2038,9 +2206,7 @@ impl Workspace {
         }
         self.documents.reading_pane_initial_widths.remove(path);
         self.release_document_pane(&PaneKey::reading(path), window, cx);
-        if self.documents.focused_markdown.as_deref() == Some(path) {
-            self.documents.focused_markdown = None;
-        }
+        self.documents.clear_reading_focus_for(path);
         if let Err(error) = self.remember_session() {
             self.report(error, cx);
         }
@@ -2055,7 +2221,10 @@ impl Workspace {
         let markdown = self.documents.markdown_panes.get(&key);
         let html = self.documents.html_panes.get(&key);
         let canvas = self.documents.canvas_panes.get(&key);
-        let show_background = self.has_visible_background() && markdown.is_some();
+        let reading_editor = self.documents.reading_editors.get(path).map(|(editor, _)| editor);
+        let document = self.documents.open.get(path);
+        let show_background =
+            self.has_visible_background() && (markdown.is_some() || reading_editor.is_some());
         let source = self.document_path(path);
         let filename = Path::new(path)
             .file_name()
@@ -2329,6 +2498,12 @@ impl Workspace {
                 SharedString::from(format!("reading-canvas-copy-{path}")),
                 move |cx| copy_pane.read(cx).document().to_json_pretty().unwrap_or_default(),
             ));
+        } else if let Some(editor) = reading_editor {
+            let editor = editor.clone();
+            titlebar = titlebar.child(crate::ui::copy_document_button(
+                SharedString::from(format!("reading-text-copy-{path}")),
+                move |cx| editor.read(cx).value().to_string(),
+            ));
         }
 
         pane = pane.child(titlebar);
@@ -2344,6 +2519,18 @@ impl Workspace {
             pane = pane.child(div().flex_1().min_h_0().child(markdown.clone()));
         } else if let Some(canvas) = canvas {
             pane = pane.child(div().flex_1().min_h_0().child(canvas.clone()));
+        } else if let (Some(editor), Some(document)) = (reading_editor, document) {
+            if let Some(banner) = self.render_document_status_banner(path, document, cx) {
+                pane = pane.child(banner);
+            }
+            pane = pane.child(self.render_code_editor_surface(
+                SharedString::from(format!("reading-code-editor-{path}")),
+                editor,
+                document,
+                (self.documents.focused_reading_editor.as_deref() == Some(path))
+                    .then_some("reading-editor-zoom-hud"),
+                cx,
+            ));
         }
         pane.into_any_element()
     }
@@ -2354,7 +2541,7 @@ mod tests {
     use super::Workspace;
 
     #[test]
-    fn supports_split_pane_includes_images_and_existing_types() {
+    fn supports_split_pane_allows_all_relevant_files() {
         for path in [
             "notes.md",
             "NOTES.MD",
@@ -2370,10 +2557,17 @@ mod tests {
             "photo.webp",
             "photo.gif",
             "vector.svg",
+            "main.tex",
+            "notes.txt",
+            "refs.bib",
+            "config.json",
+            "src/lib.rs",
+            "script.py",
+            "Makefile",
         ] {
             assert!(Workspace::supports_split_pane(path), "{path} should support split pane");
         }
-        for path in ["main.tex", "notes.txt", "refs.bib", "config.json"] {
+        for path in ["archive.zip", "app.exe", "blob.bin"] {
             assert!(!Workspace::supports_split_pane(path), "{path} should not support split pane");
         }
     }

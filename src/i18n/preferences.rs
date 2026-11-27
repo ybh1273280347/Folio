@@ -104,8 +104,8 @@ pub const INTERNAL_LINK_TARGET: BiText = BiText::new("内部文件链接跳转�
 pub const TARGET_MAIN_EDITOR: BiText = BiText::new("主编辑区", "Main Editor");
 pub const TARGET_SPLIT_PANE: BiText = BiText::new("右侧分屏", "Right Split Pane");
 pub const INTERNAL_LINK_HINT: BiText = BiText::new(
-    "Ctrl+左键点击 Markdown 内部文件链接时的打开方式（非分屏类型仍在主编辑区打开）",
-    "Where Ctrl+Click opens internal Markdown file links (unsupported split types still open in the main editor)",
+    "Ctrl+左键点击 Markdown 内部文件链接时的打开方式",
+    "Where Ctrl+Click opens internal Markdown file links",
 );
 pub const EXTRA_TEXT_EXTENSIONS: BiText = BiText::new("额外文本文件白名单（扩展名）", "Extra Text File Extensions");
 pub const EXTRA_TEXT_EXTENSIONS_PLACEHOLDER: BiText = BiText::new(

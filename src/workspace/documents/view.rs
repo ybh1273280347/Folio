@@ -374,7 +374,7 @@ impl Workspace {
             .when(!show_background, |area| area.bg(rgb(0xffffff)))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|app, _, _, _| app.documents.focused_markdown = None),
+                cx.listener(|app, _, _, _| app.documents.clear_reading_focus()),
             );
         if !self.zen_mode && (!self.documents.tabs.is_empty() || trash_open) {
             area = area.child(self.render_editor_tab_bar(show_background, cx));
@@ -382,38 +382,8 @@ impl Workspace {
         if trash_open {
             area = area.child(div().flex_1().min_h_0().child(self.render_trash(window, cx)));
         } else if let Some(document) = document {
-            if document.buffer.deleted {
-                area = area.child(
-                    div()
-                        .px_4()
-                        .py_2()
-                        .bg(rgb(0xfff4e5))
-                        .child(crate::i18n::workspace::BANNER_FILE_DELETED.get()),
-                );
-            } else if document.buffer.conflict.is_some() {
-                let reload = self.documents.active.clone();
-                let overwrite = self.documents.active.clone();
-                area =
-                    area.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .px_4()
-                            .py_2()
-                            .bg(rgb(0xfff4e5))
-                            .child(crate::i18n::workspace::BANNER_DISK_MODIFIED.get())
-                            .child(button("load-disk", crate::i18n::workspace::BTN_LOAD_DISK.get()).on_click(cx.listener(
-                                move |app, _, window, cx| app.reload_disk(&reload, window, cx),
-                            )))
-                            .child(button("overwrite-disk", crate::i18n::workspace::BTN_OVERWRITE_DISK.get()).on_click(
-                                cx.listener(move |app, _, _, cx| {
-                                    if let Err(error) = app.save_file(&overwrite, true, cx) {
-                                        app.report(error, cx);
-                                    }
-                                }),
-                            )),
-                    );
+            if let Some(banner) = self.render_document_status_banner(&self.documents.active, document, cx) {
+                area = area.child(banner);
             }
             if let Some(markdown) = self.documents.markdown_panes.get(&PaneKey::tab(&self.documents.active)) {
                 area = area.child(div().flex_1().min_h_0().child(markdown.clone()));
@@ -427,97 +397,13 @@ impl Workspace {
                         .child(canvas.clone()),
                 );
             } else {
-                let menu_editor = document.editor.clone();
-                let ask_path = document.path.clone();
-                let ask_source = document
-                    .path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| crate::i18n::workspace::SOURCE_LABEL.get().to_owned());
-                let ask_shortcut: SharedString =
-                    AppSettings::format_key_badge(&self.settings.key_for("ask_ai")).into();
-                let workspace = cx.entity().downgrade();
-                area = area.child(
-                    div()
-                        .id("code-editor-surface")
-                        .relative()
-                        .flex_1()
-                        .min_h_0()
-                        .min_w_0()
-                        .p_2()
-                        .flex()
-                        .justify_center()
-                        .child(crate::ui::ctrl_scroll_capture(cx.listener(|app, event: &ScrollEvent, window, cx| {
-                            if event.modifiers.control {
-                                let delta = if event.delta.pixel_delta(px(20.)).y > px(0.) {
-                                    1
-                                } else {
-                                    -1
-                                };
-                                let mut settings = app.settings.clone();
-                                settings.editor_font_size =
-                                    (settings.editor_font_size as i16 + delta).clamp(11, 26) as u8;
-                                app.apply_settings(settings, window, cx);
-                                app.editor_zoom_hud.show(
-                                    app.settings.editor_font_size,
-                                    cx,
-                                    |app| &mut app.editor_zoom_hud,
-                                );
-                                cx.stop_propagation();
-                                cx.notify();
-                            }
-                        })))
-                        .child(
-                            div()
-                                .size_full()
-                                .when(self.settings.line_width_limited, |editor| {
-                                    editor.max_w(px(850.))
-                                })
-                                .child(
-                                    Editor::new(&document.editor)
-                                        .appearance(false)
-                                        .bordered(false)
-                                        .size_full()
-                                        .text_size(px(self.settings.editor_font_size as f32))
-                                        .font_family(if self.settings.editor_font.is_empty() {
-                                            SharedString::from("Consolas")
-                                        } else {
-                                            self.settings.editor_font.clone().into()
-                                        }),
-                                ),
-                        )
-                        .when(document.buffer.char_count > 0, |area| {
-                            area.child(crate::ui::char_count_badge(document.buffer.char_count))
-                        })
-                        .when_some(
-                            self.editor_zoom_hud.render("editor-zoom-hud"),
-                            |area, hud| area.child(hud),
-                        )
-                        .folio_context_menu(move |menu, _, cx| {
-                            let ask_editor = menu_editor.clone();
-                            let ask_path = ask_path.clone();
-                            let ask_source = ask_source.clone();
-                            let workspace = workspace.clone();
-                            crate::ui::populate_editor_context_menu(
-                                menu,
-                                &menu_editor,
-                                Some(ask_shortcut.clone()),
-                                move |window, cx| {
-                                    let selected = ask_editor.read(cx).selected_text().to_string();
-                                    let _ = workspace.update(cx, |app, cx| {
-                                        app.open_ai_with_selection(
-                                            ask_source.clone(),
-                                            Some(ask_path.clone()),
-                                            selected,
-                                            window,
-                                            cx,
-                                        );
-                                    });
-                                },
-                                cx,
-                            )
-                        }),
-                );
+                area = area.child(self.render_code_editor_surface(
+                    SharedString::from("code-editor-surface"),
+                    &document.editor,
+                    document,
+                    Some("editor-zoom-hud"),
+                    cx,
+                ));
             }
         } else if !self.documents.active.is_empty() {
             let full = self.document_path(&self.documents.active);
@@ -614,5 +500,161 @@ impl Workspace {
             );
         }
         area.into_any_element()
+    }
+
+    pub(super) fn render_document_status_banner(
+        &self,
+        path: &str,
+        document: &OpenDocument,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if document.buffer.deleted {
+            return Some(
+                div()
+                    .px_4()
+                    .py_2()
+                    .bg(rgb(0xfff4e5))
+                    .child(crate::i18n::workspace::BANNER_FILE_DELETED.get())
+                    .into_any_element(),
+            );
+        }
+        if document.buffer.conflict.is_some() {
+            let reload = path.to_owned();
+            let overwrite = path.to_owned();
+            return Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_4()
+                    .py_2()
+                    .bg(rgb(0xfff4e5))
+                    .child(crate::i18n::workspace::BANNER_DISK_MODIFIED.get())
+                    .child(
+                        button(
+                            SharedString::from(format!("load-disk-{path}")),
+                            crate::i18n::workspace::BTN_LOAD_DISK.get(),
+                        )
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            app.reload_disk(&reload, window, cx)
+                        })),
+                    )
+                    .child(
+                        button(
+                            SharedString::from(format!("overwrite-disk-{path}")),
+                            crate::i18n::workspace::BTN_OVERWRITE_DISK.get(),
+                        )
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            if let Err(error) = app.save_file(&overwrite, true, cx) {
+                                app.report(error, cx);
+                            }
+                        })),
+                    )
+                    .into_any_element(),
+            );
+        }
+        None
+    }
+
+    pub(super) fn render_code_editor_surface(
+        &self,
+        id: SharedString,
+        editor: &Entity<EditorState>,
+        document: &OpenDocument,
+        zoom_hud_id: Option<&'static str>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let menu_editor = editor.clone();
+        let ask_path = document.path.clone();
+        let ask_source = document
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| crate::i18n::workspace::SOURCE_LABEL.get().to_owned());
+        let ask_shortcut: SharedString =
+            AppSettings::format_key_badge(&self.settings.key_for("ask_ai")).into();
+        let workspace = cx.entity().downgrade();
+        div()
+            .id(id)
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .p_2()
+            .flex()
+            .justify_center()
+            .child(crate::ui::ctrl_scroll_capture(cx.listener(
+                |app, event: &ScrollEvent, window, cx| {
+                    if event.modifiers.control {
+                        let delta = if event.delta.pixel_delta(px(20.)).y > px(0.) {
+                            1
+                        } else {
+                            -1
+                        };
+                        let mut settings = app.settings.clone();
+                        settings.editor_font_size =
+                            (settings.editor_font_size as i16 + delta).clamp(11, 26) as u8;
+                        app.apply_settings(settings, window, cx);
+                        app.editor_zoom_hud.show(
+                            app.settings.editor_font_size,
+                            cx,
+                            |app| &mut app.editor_zoom_hud,
+                        );
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                },
+            )))
+            .child(
+                div()
+                    .size_full()
+                    .when(self.settings.line_width_limited, |editor| {
+                        editor.max_w(px(850.))
+                    })
+                    .child(
+                        Editor::new(editor)
+                            .appearance(false)
+                            .bordered(false)
+                            .size_full()
+                            .text_size(px(self.settings.editor_font_size as f32))
+                            .font_family(if self.settings.editor_font.is_empty() {
+                                SharedString::from("Consolas")
+                            } else {
+                                self.settings.editor_font.clone().into()
+                            }),
+                    ),
+            )
+            .when(document.buffer.char_count > 0, |area| {
+                area.child(crate::ui::char_count_badge(document.buffer.char_count))
+            })
+            .when_some(
+                zoom_hud_id.and_then(|hud_id| self.editor_zoom_hud.render(hud_id)),
+                |area, hud| area.child(hud),
+            )
+            .folio_context_menu(move |menu, _, cx| {
+                let ask_editor = menu_editor.clone();
+                let ask_path = ask_path.clone();
+                let ask_source = ask_source.clone();
+                let workspace = workspace.clone();
+                crate::ui::populate_editor_context_menu(
+                    menu,
+                    &menu_editor,
+                    Some(ask_shortcut.clone()),
+                    move |window, cx| {
+                        let selected = ask_editor.read(cx).selected_text().to_string();
+                        let _ = workspace.update(cx, |app, cx| {
+                            app.open_ai_with_selection(
+                                ask_source.clone(),
+                                Some(ask_path.clone()),
+                                selected,
+                                window,
+                                cx,
+                            );
+                        });
+                    },
+                    cx,
+                )
+            })
+            .into_any_element()
     }
 }

@@ -307,7 +307,13 @@ impl Workspace {
             return;
         }
         self.trash.dismiss();
-        self.focus_active_or_workspace(window, cx);
+        if self.promote_first_reading_pane_if_tabs_empty(true, window, cx) {
+            if let Err(error) = self.remember_session() {
+                self.report(error, cx);
+            }
+        } else {
+            self.focus_active_or_workspace(window, cx);
+        }
         cx.notify();
     }
 

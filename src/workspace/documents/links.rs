@@ -111,8 +111,10 @@ impl Workspace {
         let use_split = self.settings.internal_link_open_target == InternalLinkOpenTarget::SplitPane
             && Self::supports_split_pane(&file.path);
         let pane_key = if use_split {
-            self.open_reading_pane(&file, window, cx);
-            PaneKey::reading(&file.path)
+            let Some(pane_key) = self.open_reading_pane(&file, window, cx) else {
+                return;
+            };
+            pane_key
         } else {
             if let Err(error) = self.open_file(&file, window, cx) {
                 self.report(error, cx);
@@ -300,12 +302,12 @@ impl Workspace {
         if self.settings.internal_link_open_target == InternalLinkOpenTarget::SplitPane
             && Self::supports_split_pane(&file.path)
         {
-            self.open_reading_pane(file, window, cx);
-            let reading_key = PaneKey::reading(&file.path);
-            if let Some(pane) = self.documents.markdown_panes.get(&reading_key).cloned() {
-                pane.update(cx, |pane, cx| pane.focus(window, cx));
+            if let Some(pane_key) = self.open_reading_pane(file, window, cx) {
+                if let Some(pane) = self.documents.markdown_panes.get(&pane_key).cloned() {
+                    pane.update(cx, |pane, cx| pane.focus(window, cx));
+                }
+                self.jump_markdown_anchor(&pane_key, anchor, window, cx);
             }
-            self.jump_markdown_anchor(&reading_key, anchor, window, cx);
             return Ok(());
         }
         self.open_file(file, window, cx)?;

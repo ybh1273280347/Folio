@@ -233,7 +233,7 @@ impl Workspace {
     }
 
     pub(super) fn focused_attached_file(&self) -> Option<AttachedFile> {
-        let clean_key = self.documents.focused_markdown().unwrap_or(self.documents.active());
+        let clean_key = self.documents.focused_reading_document().unwrap_or(self.documents.active());
         if clean_key.is_empty() {
             return None;
         }

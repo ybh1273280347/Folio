@@ -576,8 +576,10 @@ impl Workspace {
             == crate::model::InternalLinkOpenTarget::SplitPane
             && Self::supports_split_pane(&file.path);
         let pane_key = if use_split {
-            self.open_reading_pane(&file, window, cx);
-            PaneKey::reading(&file.path)
+            let Some(pane_key) = self.open_reading_pane(&file, window, cx) else {
+                return;
+            };
+            pane_key
         } else {
             if let Err(error) = self.open_file(&file, window, cx) {
                 self.report(error, cx);
