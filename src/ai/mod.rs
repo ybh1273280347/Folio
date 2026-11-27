@@ -67,7 +67,7 @@ pub enum AiPaneEvent {
     BackToHub,
     ToggleMaximize,
     OpenMermaidLightbox {
-        svg: SharedString,
+        tree: Arc<usvg::Tree>,
         image: Arc<RenderImage>,
     },
 }
@@ -308,9 +308,9 @@ impl ChatPane {
         });
         let sub_mermaid = cx.subscribe(&mermaid, |_, _, event: &MermaidEvent, cx| match event {
             MermaidEvent::Ready => cx.notify(),
-            MermaidEvent::OpenLightbox { svg, image } => {
+            MermaidEvent::OpenLightbox { tree, image } => {
                 cx.emit(AiPaneEvent::OpenMermaidLightbox {
-                    svg: svg.clone(),
+                    tree: Arc::clone(tree),
                     image: Arc::clone(image),
                 });
             }

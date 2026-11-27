@@ -436,6 +436,39 @@ const BRAND_MISTRAL_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" wi
 
 const BRAND_META_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24"><path d="M6.897 4h-.024l-.031 2.615h.022c1.715 0 3.046 1.357 5.94 6.246l.175.297.012.02 1.62-2.438-.012-.019a48.763 48.763 0 00-1.098-1.716 28.01 28.01 0 00-1.175-1.629C10.413 4.932 8.812 4 6.896 4z" fill="#0867DF"/><path d="M6.873 4C4.95 4.01 3.247 5.258 2.02 7.17a4.352 4.352 0 00-.01.017l2.254 1.231.011-.017c.718-1.083 1.61-1.774 2.568-1.785h.021L6.896 4h-.023z" fill="#0064E0"/><path d="M2.019 7.17l-.011.017C1.2 8.447.598 9.995.274 11.664l-.005.022 2.534.6.004-.022c.27-1.467.786-2.828 1.456-3.845l.011-.017L2.02 7.17z" fill="#0072EC"/><path d="M2.807 12.264l-2.533-.6-.005.022c-.177.918-.267 1.851-.269 2.786v.023l2.598.233v-.023a12.591 12.591 0 01.21-2.44z" fill="#007CF6"/><path d="M2.677 15.537a5.462 5.462 0 01-.079-.813v-.022L0 14.468v.024a8.89 8.89 0 00.146 1.652l2.535-.585a4.106 4.106 0 01-.004-.022z" fill="#007FF9"/><path d="M3.27 16.89c-.284-.31-.484-.756-.589-1.328l-.004-.021-2.535.585.004.021c.192 1.01.568 1.85 1.106 2.487l.014.017 2.018-1.745a2.106 2.106 0 01-.015-.016z" fill="#0082FB"/><path d="M10.78 9.654c-1.528 2.35-2.454 3.825-2.454 3.825-2.035 3.2-2.739 3.917-3.871 3.917a1.545 1.545 0 01-1.186-.508l-2.017 1.744.014.017C2.01 19.518 3.058 20 4.356 20c1.963 0 3.374-.928 5.884-5.33l1.766-3.13a41.283 41.283 0 00-1.227-1.886z" fill="#0082FB"/><path d="M13.502 5.946l-.016.016c-.4.43-.786.908-1.16 1.416.378.483.768 1.024 1.175 1.63.48-.743.928-1.345 1.367-1.807l.016-.016-1.382-1.24z" fill="#007FF8"/><path d="M20.918 5.713C19.853 4.633 18.583 4 17.225 4c-1.432 0-2.637.787-3.723 1.944l-.016.016 1.382 1.24.016-.017c.715-.747 1.408-1.12 2.176-1.12.826 0 1.6.39 2.27 1.075l.015.016 1.589-1.425-.016-.016z" fill="#0082FB"/><path d="M23.998 14.125c-.06-3.467-1.27-6.566-3.064-8.396l-.016-.016-1.588 1.424.015.016c1.35 1.392 2.277 3.98 2.361 6.971v.023h2.292v-.022z" fill="#0081FA"/><path d="M23.998 14.15v-.023h-2.292v.022c.004.14.006.282.006.424 0 .815-.121 1.474-.368 1.95l-.011.022 1.708 1.782.013-.02c.62-.96.946-2.293.946-3.91 0-.083 0-.165-.002-.247z" fill="#0080F9"/><path d="M21.344 16.52l-.011.02c-.214.402-.519.67-.917.787l.778 2.462a3.493 3.493 0 00.438-.182 3.558 3.558 0 001.366-1.218l.044-.065.012-.02-1.71-1.784z" fill="#027AF3"/><path d="M19.92 17.393c-.262 0-.492-.039-.718-.14l-.798 2.522c.449.153.927.222 1.46.222.492 0 .943-.073 1.352-.215l-.78-2.462c-.167.05-.341.075-.517.073z" fill="#0377EF"/><path d="M18.323 16.534l-.014-.017-1.836 1.914.016.017c.637.682 1.246 1.105 1.937 1.337l.797-2.52c-.291-.125-.573-.353-.9-.731z" fill="#0471E9"/><path d="M18.309 16.515c-.55-.642-1.232-1.712-2.303-3.44l-1.396-2.336-.011-.02-1.62 2.438.012.02.989 1.668c.959 1.61 1.74 2.774 2.493 3.585l.016.016 1.834-1.914a2.353 2.353 0 01-.014-.017z" fill="#0867DF"/></svg>"##;
 
+const FILE_TYPE_ICONS: &[(&str, &[u8])] = &[
+    ("file_types/astro.svg", include_bytes!("../../resources/icons/file_types/astro.svg")),
+    ("file_types/book.svg", include_bytes!("../../resources/icons/file_types/book.svg")),
+    ("file_types/c.svg", include_bytes!("../../resources/icons/file_types/c.svg")),
+    ("file_types/code.svg", include_bytes!("../../resources/icons/file_types/code.svg")),
+    ("file_types/cpp.svg", include_bytes!("../../resources/icons/file_types/cpp.svg")),
+    ("file_types/css.svg", include_bytes!("../../resources/icons/file_types/css.svg")),
+    ("file_types/database.svg", include_bytes!("../../resources/icons/file_types/database.svg")),
+    ("file_types/diff.svg", include_bytes!("../../resources/icons/file_types/diff.svg")),
+    ("file_types/docker.svg", include_bytes!("../../resources/icons/file_types/docker.svg")),
+    ("file_types/git.svg", include_bytes!("../../resources/icons/file_types/git.svg")),
+    ("file_types/go.svg", include_bytes!("../../resources/icons/file_types/go.svg")),
+    ("file_types/graphql.svg", include_bytes!("../../resources/icons/file_types/graphql.svg")),
+    ("file_types/java.svg", include_bytes!("../../resources/icons/file_types/java.svg")),
+    ("file_types/javascript.svg", include_bytes!("../../resources/icons/file_types/javascript.svg")),
+    ("file_types/kotlin.svg", include_bytes!("../../resources/icons/file_types/kotlin.svg")),
+    ("file_types/lua.svg", include_bytes!("../../resources/icons/file_types/lua.svg")),
+    ("file_types/php.svg", include_bytes!("../../resources/icons/file_types/php.svg")),
+    ("file_types/python.svg", include_bytes!("../../resources/icons/file_types/python.svg")),
+    ("file_types/react.svg", include_bytes!("../../resources/icons/file_types/react.svg")),
+    ("file_types/ruby.svg", include_bytes!("../../resources/icons/file_types/ruby.svg")),
+    ("file_types/rust.svg", include_bytes!("../../resources/icons/file_types/rust.svg")),
+    ("file_types/sass.svg", include_bytes!("../../resources/icons/file_types/sass.svg")),
+    ("file_types/settings.svg", include_bytes!("../../resources/icons/file_types/settings.svg")),
+    ("file_types/swift.svg", include_bytes!("../../resources/icons/file_types/swift.svg")),
+    ("file_types/terminal.svg", include_bytes!("../../resources/icons/file_types/terminal.svg")),
+    ("file_types/toml.svg", include_bytes!("../../resources/icons/file_types/toml.svg")),
+    ("file_types/typescript.svg", include_bytes!("../../resources/icons/file_types/typescript.svg")),
+    ("file_types/vue.svg", include_bytes!("../../resources/icons/file_types/vue.svg")),
+    ("file_types/yaml.svg", include_bytes!("../../resources/icons/file_types/yaml.svg")),
+    ("file_types/zig.svg", include_bytes!("../../resources/icons/file_types/zig.svg")),
+];
+
 pub struct Assets;
 
 impl AssetSource for Assets {
@@ -458,6 +491,9 @@ impl AssetSource for Assets {
             "brand/hunyuan.svg" => return Ok(Some(Cow::Borrowed(BRAND_HUNYUAN_SVG))),
             _ => {}
         }
+        if let Some((_, bytes)) = FILE_TYPE_ICONS.iter().find(|(name, _)| *name == path) {
+            return Ok(Some(Cow::Borrowed(bytes)));
+        }
         // Features expose icon names; the app must also register their SVG source.
         if let Some(bytes) = FolioIcons.load(path)? {
             return Ok(Some(bytes));
@@ -468,6 +504,9 @@ impl AssetSource for Assets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut paths = gpui_kit::assets::Assets.list(path)?;
         paths.extend(FolioIcons.list(path)?);
+        paths.extend(FILE_TYPE_ICONS.iter().filter_map(|(name, _)| {
+            name.starts_with(path).then(|| SharedString::from(*name))
+        }));
         for brand in [
             "brand/ai-mascot.png",
             "brand/claude.svg",
@@ -972,21 +1011,20 @@ pub const TAG_COLORS: [(crate::i18n::BiText, u32, u32); 6] = [
     (crate::i18n::tags::TAG_COLOR_PURPLE, 0xebe5f5, 0x624785),
 ];
 
-fn zed_file_icon(lower: &str) -> Option<(&'static [u8], u32)> {
-    let filename = lower.rsplit(['/', '\\']).next().unwrap_or(lower);
+fn file_type_icon(filename: &str) -> Option<(&'static str, u32)> {
     match filename {
         "dockerfile" | "containerfile" | ".dockerignore" => {
-            return Some((include_bytes!("../../resources/icons/file_types/docker.svg"), 0x0284c7));
+            return Some(("file_types/docker.svg", 0x0284c7));
         }
         ".gitignore" | ".gitattributes" | ".gitmodules" => {
-            return Some((include_bytes!("../../resources/icons/file_types/git.svg"), 0xde4c36));
+            return Some(("file_types/git.svg", 0xde4c36));
         }
         ".editorconfig" | ".prettierrc" | ".eslintrc" | ".npmrc" | ".nvmrc" | ".latexmkrc"
         | ".env" | ".env.example" | ".env.local" => {
-            return Some((include_bytes!("../../resources/icons/file_types/settings.svg"), 0x64748b));
+            return Some(("file_types/settings.svg", 0x64748b));
         }
         "makefile" | "gnumakefile" | "justfile" | "procfile" => {
-            return Some((include_bytes!("../../resources/icons/file_types/terminal.svg"), 0x16a34a));
+            return Some(("file_types/terminal.svg", 0x16a34a));
         }
         _ => {}
     }
@@ -994,52 +1032,53 @@ fn zed_file_icon(lower: &str) -> Option<(&'static [u8], u32)> {
     let ext = std::path::Path::new(filename)
         .extension()
         .and_then(|ext| ext.to_str())?;
-    let pair: (&'static [u8], u32) = match ext {
-        "md" | "mdx" => (include_bytes!("../../resources/icons/file_types/book.svg"), 0x4f6bed),
-        "ts" | "mts" | "cts" => (include_bytes!("../../resources/icons/file_types/typescript.svg"), 0x2f74c0),
-        "tsx" | "jsx" => (include_bytes!("../../resources/icons/file_types/react.svg"), 0x0ea5b7),
-        "js" | "mjs" | "cjs" => (include_bytes!("../../resources/icons/file_types/javascript.svg"), 0xc89614),
-        "rs" => (include_bytes!("../../resources/icons/file_types/rust.svg"), 0xc95628),
-        "py" | "pyi" => (include_bytes!("../../resources/icons/file_types/python.svg"), 0x3776ab),
-        "go" => (include_bytes!("../../resources/icons/file_types/go.svg"), 0x00a29c),
-        "java" => (include_bytes!("../../resources/icons/file_types/java.svg"), 0xc2410c),
-        "kt" | "kts" => (include_bytes!("../../resources/icons/file_types/kotlin.svg"), 0x7c3aed),
-        "c" | "h" => (include_bytes!("../../resources/icons/file_types/c.svg"), 0x4b6cb7),
+    let pair = match ext {
+        "md" | "mdx" => ("file_types/book.svg", 0x4f6bed),
+        "ts" | "mts" | "cts" => ("file_types/typescript.svg", 0x2f74c0),
+        "tsx" | "jsx" => ("file_types/react.svg", 0x0ea5b7),
+        "js" | "mjs" | "cjs" => ("file_types/javascript.svg", 0xc89614),
+        "rs" => ("file_types/rust.svg", 0xc95628),
+        "py" | "pyi" => ("file_types/python.svg", 0x3776ab),
+        "go" => ("file_types/go.svg", 0x00a29c),
+        "java" => ("file_types/java.svg", 0xc2410c),
+        "kt" | "kts" => ("file_types/kotlin.svg", 0x7c3aed),
+        "c" | "h" => ("file_types/c.svg", 0x4b6cb7),
         "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => {
-            (include_bytes!("../../resources/icons/file_types/cpp.svg"), 0x2563eb)
+            ("file_types/cpp.svg", 0x2563eb)
         }
-        "swift" => (include_bytes!("../../resources/icons/file_types/swift.svg"), 0xea580c),
-        "rb" => (include_bytes!("../../resources/icons/file_types/ruby.svg"), 0xc82333),
-        "php" => (include_bytes!("../../resources/icons/file_types/php.svg"), 0x6366f1),
-        "lua" => (include_bytes!("../../resources/icons/file_types/lua.svg"), 0x3b5bdb),
-        "zig" => (include_bytes!("../../resources/icons/file_types/zig.svg"), 0xd97706),
-        "vue" => (include_bytes!("../../resources/icons/file_types/vue.svg"), 0x2f9e66),
-        "astro" => (include_bytes!("../../resources/icons/file_types/astro.svg"), 0xc026d3),
-        "css" | "less" => (include_bytes!("../../resources/icons/file_types/css.svg"), 0x264de4),
-        "scss" | "sass" => (include_bytes!("../../resources/icons/file_types/sass.svg"), 0xcf649a),
+        "swift" => ("file_types/swift.svg", 0xea580c),
+        "rb" => ("file_types/ruby.svg", 0xc82333),
+        "php" => ("file_types/php.svg", 0x6366f1),
+        "lua" => ("file_types/lua.svg", 0x3b5bdb),
+        "zig" => ("file_types/zig.svg", 0xd97706),
+        "vue" => ("file_types/vue.svg", 0x2f9e66),
+        "astro" => ("file_types/astro.svg", 0xc026d3),
+        "css" | "less" => ("file_types/css.svg", 0x264de4),
+        "scss" | "sass" => ("file_types/sass.svg", 0xcf649a),
         "sh" | "bash" | "zsh" | "fish" | "ps1" | "psm1" | "bat" | "cmd" => {
-            (include_bytes!("../../resources/icons/file_types/terminal.svg"), 0x16a34a)
+            ("file_types/terminal.svg", 0x16a34a)
         }
-        "sql" | "prisma" => (include_bytes!("../../resources/icons/file_types/database.svg"), 0x6366f1),
-        "graphql" | "gql" => (include_bytes!("../../resources/icons/file_types/graphql.svg"), 0xe11d48),
-        "dockerfile" => (include_bytes!("../../resources/icons/file_types/docker.svg"), 0x0284c7),
-        "toml" => (include_bytes!("../../resources/icons/file_types/toml.svg"), 0x9c4221),
-        "yaml" | "yml" => (include_bytes!("../../resources/icons/file_types/yaml.svg"), 0x9333ea),
-        "json" | "jsonc" | "json5" => (include_bytes!("../../resources/icons/file_types/code.svg"), 0xb45309),
+        "sql" | "prisma" => ("file_types/database.svg", 0x6366f1),
+        "graphql" | "gql" => ("file_types/graphql.svg", 0xe11d48),
+        "dockerfile" => ("file_types/docker.svg", 0x0284c7),
+        "toml" => ("file_types/toml.svg", 0x9c4221),
+        "yaml" | "yml" => ("file_types/yaml.svg", 0x9333ea),
+        "json" | "jsonc" | "json5" => ("file_types/code.svg", 0xb45309),
         "ini" | "conf" | "cfg" | "env" | "properties" => {
-            (include_bytes!("../../resources/icons/file_types/settings.svg"), 0x64748b)
+            ("file_types/settings.svg", 0x64748b)
         }
-        "diff" | "patch" => (include_bytes!("../../resources/icons/file_types/diff.svg"), 0x8b5cf6),
+        "diff" | "patch" => ("file_types/diff.svg", 0x8b5cf6),
         "cs" | "scala" | "dart" | "ex" | "exs" | "erl" | "hs" | "ml" | "mli" | "r" | "jl"
         | "svelte" | "proto" | "cmake" | "mk" | "gradle" | "tf" | "hcl" | "nix" | "xml"
-        | "xsl" | "xsd" => (include_bytes!("../../resources/icons/file_types/code.svg"), 0x64748b),
+        | "xsl" | "xsd" => ("file_types/code.svg", 0x64748b),
         _ => return None,
     };
     Some(pair)
 }
 
 pub fn file_icon(path: &str, asset: bool, main: bool) -> AnyElement {
-    let lower = path.to_lowercase();
+    let filename = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let lower = filename.to_ascii_lowercase();
     if lower.ends_with(".pdf") {
         return Icon::default()
             .data(include_bytes!("../../resources/icons/file-pdf.svg"))
@@ -1071,10 +1110,11 @@ pub fn file_icon(path: &str, asset: bool, main: bool) -> AnyElement {
             .into_any_element();
     }
     if !asset
-        && let Some((bytes, color)) = zed_file_icon(&lower)
+        && let Some((icon_path, color)) = file_type_icon(&lower)
     {
+        // Asset paths let GPUI reuse the icon without copying or hashing SVG bytes per row.
         return Icon::default()
-            .data(bytes)
+            .path(icon_path)
             .w(px(15.))
             .h(px(15.))
             .text_color(rgb(color))

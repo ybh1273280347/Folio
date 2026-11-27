@@ -28,11 +28,15 @@ pub const ERR_BINARY_FILE_UNSUPPORTED: BiText = BiText::new(
     "检测到二进制内容，无法作为纯文本打开。",
     "Binary content detected; cannot open as plain text.",
 );
+pub const ERR_NON_UTF8_TEXT: BiText = BiText::new(
+    "文件编码不是有效的 UTF-8，无法打开编辑。",
+    "The file is not valid UTF-8 and cannot be opened for editing.",
+);
 
 pub fn err_file_too_large(max_mb: u64) -> String {
     match locale() {
-        Locale::ZhCn => format!("文件超过 {max_mb} MB 文本编辑上限，已跳过加载以防卡顿。"),
-        Locale::En => format!("File exceeds the {max_mb} MB text editor limit and was skipped."),
+        Locale::ZhCn => format!("文件超过 {max_mb} MB 文本编辑上限。"),
+        Locale::En => format!("The file exceeds the {max_mb} MB text editor limit."),
     }
 }
 

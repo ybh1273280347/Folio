@@ -141,6 +141,11 @@ impl HtmlPane {
         }
     }
 
+    pub(crate) fn promote_to_tab(&mut self, cx: &mut Context<Self>) {
+        self.is_reading = false;
+        cx.notify();
+    }
+
     pub fn release(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.released = true;
         self.init_task = None;

@@ -444,7 +444,6 @@ impl Store {
         read.commit()?;
         let current_root = self.root_key();
         let migrated = origin != current_root;
-        let inventory: BTreeSet<_> = visible.iter().map(String::as_str).collect();
         let mut after = before.clone();
         let mut claimed = BTreeSet::new();
         let mut seen = BTreeMap::new();
@@ -453,8 +452,9 @@ impl Store {
             .filter(|file| file.trash.is_none() && !file.missing)
         {
             let path = self.absolute(&file.path);
-            let exists = (self.root.is_none() || inventory.contains(file.path.as_str()))
-                && file_exists(&path)?;
+            // The inventory is a discovery filter. An extension setting can hide
+            // a tracked file without changing its identity or tag membership.
+            let exists = file_exists(&path)?;
             let disk = exists.then(|| disk_identity(&path)).flatten();
             if exists && (migrated || same_or_unavailable(&file.disk, &disk)) {
                 claimed.insert(file.path.clone());
@@ -471,6 +471,13 @@ impl Store {
             .any(|file| file.missing && file.trash.is_none() && file.disk.is_some())
         {
             let mut paths: BTreeSet<_> = visible.iter().cloned().collect();
+            // Reconcile previously missing records even if their last path has
+            // since been excluded from the file tree.
+            for file in after.iter().filter(|file| file.missing && file.trash.is_none() && file.disk.is_some()) {
+                if file_exists(&self.absolute(&file.path))? {
+                    paths.insert(file.path.clone());
+                }
+            }
             if self.root.is_none() {
                 paths.extend(claimed.iter().cloned());
                 let parents: BTreeSet<_> = after

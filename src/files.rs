@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeSet,
     fs::{self, File},
-    io,
+    io::{self, Read},
     path::{Component, Path, PathBuf},
     sync::{OnceLock, RwLock},
 };
@@ -11,7 +11,6 @@ use sha2::{Digest, Sha256};
 use crate::model::{DiskDocument, FileKind, ProjectFile};
 
 const MAX_TEXT_DOCUMENT_BYTES: u64 = 4 * 1024 * 1024;
-const BINARY_SNIFF_BYTES: usize = 8192;
 
 const DOCUMENT_TEXT_EXTENSIONS: &[&str] = &[
     "tex", "ltx", "bib", "sty", "cls", "bst", "bbx", "cbx", "cfg", "def", "clo", "ist", "glsdefs",
@@ -132,17 +131,6 @@ pub fn set_extra_text_extensions(extensions: &[String]) {
         .expect("extra text extensions lock poisoned") = sanitized;
 }
 
-fn extension_in_extra_text(path: &Path) -> bool {
-    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
-        return false;
-    };
-    let extension = extension.to_ascii_lowercase();
-    extra_text_extensions_store()
-        .read()
-        .expect("extra text extensions lock poisoned")
-        .contains(extension.as_str())
-}
-
 pub fn supported_dialog_extensions() -> Vec<String> {
     let mut set = BTreeSet::new();
     for ext in ASSET_EXTENSIONS
@@ -195,14 +183,27 @@ pub fn is_drawio(path: &Path) -> bool {
     lower.ends_with(".drawio") || lower.ends_with(".drawio.svg")
 }
 
-fn is_special_text_filename(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| SPECIAL_TEXT_FILENAMES.contains(&name))
+pub fn is_relevant(path: &Path) -> bool {
+    relevant_kind(path).is_some()
 }
 
-pub fn is_relevant(path: &Path) -> bool {
-    is_drawio(path) || is_asset(path) || is_text(path)
+pub(crate) fn relevant_kind(path: &Path) -> Option<FileKind> {
+    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    let extension = path.extension().and_then(|extension| extension.to_str()).unwrap_or_default();
+    let extension = extension.to_ascii_lowercase();
+    let extension = extension.as_str();
+    if ASSET_EXTENSIONS.contains(&extension) || name.eq_ignore_ascii_case(".drawio") {
+        return Some(FileKind::Asset);
+    }
+    (SPECIAL_TEXT_FILENAMES.contains(&name)
+        || DOCUMENT_TEXT_EXTENSIONS.contains(&extension)
+        || CODE_EXTENSIONS.contains(&extension)
+        || (!extension.is_empty()
+            && extra_text_extensions_store()
+                .read()
+                .expect("extra text extensions lock poisoned")
+                .contains(extension)))
+    .then_some(FileKind::Text)
 }
 
 fn extension_in(path: &Path, extensions: &[&str]) -> bool {
@@ -215,12 +216,7 @@ fn extension_in(path: &Path, extensions: &[&str]) -> bool {
 }
 
 pub(crate) fn is_text(path: &Path) -> bool {
-    !is_drawio(path)
-        && !is_asset(path)
-        && (is_special_text_filename(path)
-            || extension_in(path, DOCUMENT_TEXT_EXTENSIONS)
-            || extension_in(path, CODE_EXTENSIONS)
-            || extension_in_extra_text(path))
+    matches!(relevant_kind(path), Some(FileKind::Text))
 }
 
 pub(crate) fn is_asset(path: &Path) -> bool {
@@ -281,21 +277,17 @@ pub fn list_files(root: &Path) -> io::Result<Vec<ProjectFile>> {
                 && !EXCLUDED_DIRECTORIES.contains(&entry.file_name().to_string_lossy().as_ref())
             {
                 visit(root, &entry.path(), files)?;
-            } else if file_type.is_file() && is_relevant(&entry.path()) {
-                let path = entry
-                    .path()
+            } else if file_type.is_file() {
+                let entry_path = entry.path();
+                let Some(kind) = relevant_kind(&entry_path) else {
+                    continue;
+                };
+                let path = entry_path
                     .strip_prefix(root)
                     .expect("walked from project root")
                     .to_string_lossy()
                     .replace('\\', "/");
-                files.push(ProjectFile {
-                    kind: if is_text(&entry.path()) {
-                        FileKind::Text
-                    } else {
-                        FileKind::Asset
-                    },
-                    path,
-                });
+                files.push(ProjectFile { kind, path });
             }
         }
         Ok(())
@@ -328,27 +320,41 @@ pub fn read_document(root: &Path, relative: &str) -> io::Result<DiskDocument> {
     read_document_at(&project_path(root, relative)?)
 }
 
-/// Reads a document directly by its canonical path for files in the default space.
-pub fn read_document_at(path: &Path) -> io::Result<DiskDocument> {
-    let metadata = fs::metadata(path)?;
-    if metadata.len() > MAX_TEXT_DOCUMENT_BYTES {
+fn validate_text_size(len: u64) -> io::Result<()> {
+    if len > MAX_TEXT_DOCUMENT_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             crate::i18n::workspace::err_file_too_large(MAX_TEXT_DOCUMENT_BYTES / (1024 * 1024)),
         ));
     }
-    let bytes = fs::read(path)?;
-    let sniff_len = bytes.len().min(BINARY_SNIFF_BYTES);
-    if bytes[..sniff_len].contains(&0) {
+    Ok(())
+}
+
+fn reject_binary_text(bytes: &[u8]) -> io::Result<()> {
+    if bytes.contains(&0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             crate::i18n::workspace::ERR_BINARY_FILE_UNSUPPORTED.get(),
         ));
     }
-    Ok(DiskDocument {
-        text: String::from_utf8_lossy(&bytes).into_owned(),
-        revision: sha256_hex(&bytes),
-    })
+    Ok(())
+}
+
+/// Reads UTF-8 source and bounds the read even if the file grows after the metadata check.
+pub fn read_document_at(path: &Path) -> io::Result<DiskDocument> {
+    let file = File::open(path)?;
+    let len = file.metadata()?.len();
+    validate_text_size(len)?;
+    let mut bytes = Vec::with_capacity(len as usize);
+    file.take(MAX_TEXT_DOCUMENT_BYTES + 1).read_to_end(&mut bytes)?;
+    validate_text_size(bytes.len() as u64)?;
+    reject_binary_text(&bytes)?;
+    let text = String::from_utf8(bytes).map_err(|_| io::Error::new(
+        io::ErrorKind::InvalidData,
+        crate::i18n::workspace::ERR_NON_UTF8_TEXT.get(),
+    ))?;
+    let revision = sha256_hex(text.as_bytes());
+    Ok(DiskDocument { text, revision })
 }
 
 pub fn save_document(
@@ -370,6 +376,9 @@ pub fn save_document_at(
     if current.revision != expected_revision {
         return Ok(Err(current));
     }
+    // Keep every successfully saved document readable through the same entry point.
+    validate_text_size(text.len() as u64)?;
+    reject_binary_text(text.as_bytes())?;
     fs::write(path, text.as_bytes())?;
     Ok(Ok(DiskDocument {
         text: text.to_owned(),

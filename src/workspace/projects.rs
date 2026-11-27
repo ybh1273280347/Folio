@@ -299,19 +299,23 @@ impl Workspace {
             .cloned()
             .unwrap_or_default();
         for path in &session.tabs {
-            if Path::new(path).is_file() {
-                self.open_standalone_file(Path::new(path), window, cx)?;
+            let path = Path::new(path);
+            if files::is_relevant(path) && path.is_file()
+                && let Err(error) = self.open_standalone_file(path, window, cx)
+            {
+                self.report(error, cx);
             }
         }
-        let active = if self.documents.tabs().contains(&session.active) {
-            session.active
-        } else {
-            self.documents.tabs().last().cloned().unwrap_or_default()
-        };
         for path in &session.reading_panes {
-            self.open_reading_key(path, window, cx)?;
+            let path = Path::new(path);
+            if files::is_relevant(path) && path.is_file() {
+                match self.prepare_standalone_file(path) {
+                    Ok(file) => { self.open_reading_pane(&file, window, cx); }
+                    Err(error) => self.report(error, cx),
+                }
+            }
         }
-        self.documents.restore_active_tab(&active);
+        self.documents.restore_active_tab(&session.active);
         self.refresh_tags(cx);
         self.projects.save()?;
         self.remember_session()?;
@@ -375,8 +379,15 @@ impl Workspace {
         let session = self.projects.workspace_sessions.get(id).cloned().unwrap_or_default();
         self.tree.restore_collapsed_folders(session.collapsed_folders);
         for path in &session.tabs {
+            if let Some(file) = self.tree.files().iter().find(|file| &file.path == path).cloned()
+                && let Err(error) = self.open_file(&file, window, cx)
+            {
+                self.report(error, cx);
+            }
+        }
+        for path in &session.reading_panes {
             if let Some(file) = self.tree.files().iter().find(|file| &file.path == path).cloned() {
-                self.open_file(&file, window, cx)?;
+                self.open_reading_pane(&file, window, cx);
             }
         }
         if self.documents.tabs().is_empty() {
@@ -386,13 +397,10 @@ impl Workspace {
                 .find(|file| file.path == project.main_file)
                 .or_else(|| self.tree.files().iter().find(|file| file.kind == FileKind::Text))
                 .cloned();
-            if let Some(first) = first {
-                self.open_file(&first, window, cx)?;
-            }
-        }
-        for path in &session.reading_panes {
-            if let Some(file) = self.tree.files().iter().find(|file| &file.path == path).cloned() {
-                self.open_reading_pane(&file, window, cx);
+            if let Some(first) = first
+                && let Err(error) = self.open_file(&first, window, cx)
+            {
+                self.report(error, cx);
             }
         }
         self.documents.restore_active_tab(&session.active);

@@ -58,7 +58,7 @@ pub enum MarkdownEvent {
     FilesChanged,
     UpdateTextColorPresets(Vec<String>),
     OpenMermaidLightbox {
-        svg: SharedString,
+        tree: Arc<usvg::Tree>,
         image: Arc<RenderImage>,
     },
 }
@@ -1042,9 +1042,9 @@ impl MarkdownPane {
                     pane.visual_editor.update(cx, |_, cx| cx.notify());
                     cx.notify();
                 }
-                MermaidEvent::OpenLightbox { svg, image } => {
+                MermaidEvent::OpenLightbox { tree, image } => {
                     cx.emit(MarkdownEvent::OpenMermaidLightbox {
-                        svg: svg.clone(),
+                        tree: Arc::clone(tree),
                         image: Arc::clone(image),
                     });
                 }

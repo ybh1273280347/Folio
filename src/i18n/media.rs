@@ -256,7 +256,6 @@ pub const MERMAID_PENDING: BiText = BiText::new("图表排版中…", "Rendering
 pub const MERMAID_EMPTY: BiText = BiText::new("Mermaid 图表为空", "Mermaid diagram is empty");
 pub const MERMAID_NO_SVG: BiText = BiText::new("未生成 SVG 输出", "No SVG output generated");
 pub const MERMAID_BITMAP_ALLOC: BiText = BiText::new("无法分配图表位图", "Failed to allocate diagram bitmap");
-pub const MERMAID_BITMAP_INVALID: BiText = BiText::new("图表位图数据无效", "Invalid diagram bitmap data");
 pub const MERMAID_VIEW_FULLSIZE: BiText = BiText::new("查看大图", "View full size");
 pub const LIGHTBOX_CLOSE: BiText = BiText::new("关闭 (Esc)", "Close (Esc)");
 

@@ -57,6 +57,19 @@ struct OpenDocument {
     subscription: Subscription,
 }
 
+impl OpenDocument {
+    fn reload_editors(
+        &self,
+        reading_editor: Option<&(Entity<EditorState>, Subscription)>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        for editor in std::iter::once(&self.editor).chain(reading_editor.map(|(editor, _)| editor)) {
+            editor.update(cx, |editor, cx| editor.set_value(self.buffer.text.as_str(), window, cx));
+        }
+    }
+}
+
 pub(super) struct PendingCanvasInsert {
     pub(super) preview: String,
     pub(super) anchor: crate::canvas::KnowledgeAnchor,
@@ -85,7 +98,6 @@ pub(super) struct Documents {
     image_panes: BTreeMap<PaneKey, Entity<crate::image::ImagePane>>,
     markdown_changed: BTreeSet<String>,
     canvas_changed: BTreeSet<String>,
-    text_changed: BTreeSet<String>,
     active_canvas_backlinks: Vec<crate::canvas::CanvasBacklink>,
     active_markdown_backlinks: Vec<crate::markdown::links::MarkdownBacklink>,
     pending_canvas_insert: Option<PendingCanvasInsert>,
@@ -290,13 +302,10 @@ impl Documents {
     }
 
     fn source_changed(&mut self, path: &str) {
-        let lower = path.to_ascii_lowercase();
-        if lower.ends_with(".canvas") {
+        if Workspace::is_canvas_path(path) {
             self.canvas_changed.insert(path.to_owned());
-        } else if lower.ends_with(".md") {
+        } else if Workspace::is_markdown_path(path) {
             self.markdown_changed.insert(path.to_owned());
-        } else {
-            self.text_changed.insert(path.to_owned());
         }
         self.source_version += 1;
     }
@@ -374,40 +383,11 @@ impl Workspace {
             }
         }
     }
-
-    fn sync_text_editors(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.documents.text_changed.remove(path);
-        let Some(document) = self.documents.open.get(path) else {
-            return;
-        };
-        let text = document.buffer.text.clone();
-        if document.editor.read(cx).value().as_ref() != text.as_str() {
-            document.editor.update(cx, |editor, cx| editor.set_value(text.clone(), window, cx));
-        }
-        if let Some((reading_editor, _)) = self.documents.reading_editors.get(path)
-            && reading_editor.read(cx).value().as_ref() != text.as_str()
-        {
-            reading_editor.update(cx, |editor, cx| editor.set_value(text.clone(), window, cx));
-        }
-    }
 }
 
 impl Workspace {
     pub(super) fn file_kind(path: &Path) -> FileKind {
-        if files::is_drawio(path) {
-            return FileKind::Asset;
-        }
-        match path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .map(str::to_ascii_lowercase)
-            .as_deref()
-        {
-            Some("pdf" | "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg" | "html" | "htm" | "drawio") => {
-                FileKind::Asset
-            }
-            _ => FileKind::Text,
-        }
+        files::relevant_kind(path).unwrap_or(FileKind::Text)
     }
 
     fn editor_language_for_path(path: &Path) -> &'static str {
@@ -515,9 +495,9 @@ impl Workspace {
         cx.subscribe_in(
             &pane,
             window,
-            move |app, _, event: &HtmlPaneEvent, window, cx| match event {
+            move |app, pane, event: &HtmlPaneEvent, window, cx| match event {
                 HtmlPaneEvent::Close => {
-                    if is_reading {
+                    if app.documents.html_panes.get(&PaneKey::reading(&close_key)) == Some(pane) {
                         app.close_reading_pane(&close_key, window, cx);
                     } else {
                         app.close_tab(&close_key, window, cx);
@@ -557,9 +537,9 @@ impl Workspace {
         cx.subscribe_in(
             &pane,
             window,
-            move |app, _, event: &DrawioPaneEvent, window, cx| match event {
+            move |app, pane, event: &DrawioPaneEvent, window, cx| match event {
                 DrawioPaneEvent::Close => {
-                    if is_reading {
+                    if app.documents.drawio_panes.get(&PaneKey::reading(&close_key)) == Some(pane) {
                         app.close_reading_pane(&close_key, window, cx);
                     } else {
                         app.close_tab(&close_key, window, cx);
@@ -648,45 +628,25 @@ impl Workspace {
         if self.trash.is_open() {
             return;
         }
-        if let Some(reading_path) = self.documents.focused_markdown.clone()
-            && let Some(md_pane) = self.documents.markdown_panes.get(&PaneKey::reading(&reading_path))
-        {
-            let full = self.document_path(&reading_path);
-            let source = full
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or(reading_path);
-            let text = md_pane.read(cx).selected_text_for_ai(cx);
-            self.open_ai_with_selection(source, Some(full), text, window, cx);
+        let (path, role) = self.documents.focused_reading_document()
+            .map(|path| (path, PaneRole::Reading))
+            .unwrap_or((&self.documents.active, PaneRole::Tab));
+        if path.is_empty() {
             return;
         }
-        if let Some(reading_path) = self.documents.focused_reading_editor.clone()
-            && let Some((editor, _)) = self.documents.reading_editors.get(&reading_path)
-        {
-            let full = self.document_path(&reading_path);
-            let source = full
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or(reading_path);
-            let text = editor.read(cx).selected_text().to_string();
-            self.open_ai_with_selection(source, Some(full), text, window, cx);
-            return;
-        }
-        if self.documents.active.is_empty() {
-            return;
-        }
-        let active = self.documents.active.clone();
-        let full = self.document_path(&active);
+        let full = self.document_path(path);
         let source = full
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| crate::i18n::workspace::SOURCE_LABEL.get().to_owned());
-        let text = if let Some(md_pane) = self.documents.markdown_panes.get(&PaneKey::tab(&active)) {
+        let text = if let Some(md_pane) = self.documents.markdown_panes.get(&PaneKey::new(path, role)) {
             md_pane.read(cx).selected_text_for_ai(cx)
-        } else if let Some(document) = self.documents.open.get(&active) {
-            document.editor.read(cx).selected_text().to_string()
         } else {
-            String::new()
+            let editor = match role {
+                PaneRole::Tab => self.documents.open.get(path).map(|document| &document.editor),
+                PaneRole::Reading => self.documents.reading_editors.get(path).map(|(editor, _)| editor),
+            };
+            editor.map(|editor| editor.read(cx).selected_text().to_string()).unwrap_or_default()
         };
         self.open_ai_with_selection(source, Some(full), text, window, cx);
     }
@@ -713,7 +673,7 @@ impl Workspace {
         self.documents.reading_pane_initial_widths.remove(path);
         self.documents.tabs.retain(|tab| tab != path);
         self.documents.canvas_changed.remove(path);
-        self.documents.text_changed.remove(path);
+        self.documents.markdown_changed.remove(path);
         self.documents.clear_reading_focus_for(path);
         if Self::is_canvas_path(path) {
             self.refresh_active_canvas_backlinks();
@@ -722,6 +682,12 @@ impl Workspace {
 
     pub(super) fn invalidate_document_tree(&mut self) {
         self.documents.document_watch.invalidate_tree();
+    }
+
+    pub(super) fn schedule_document_tree_refresh(&mut self) {
+        // Coalesce settings edits with watcher refreshes without discarding changed paths.
+        self.documents.document_watch.tree = true;
+        self.documents.document_watch.changed_at = Some(Instant::now());
     }
 
     pub(super) fn refresh_all_files(&mut self, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
@@ -747,10 +713,9 @@ impl Workspace {
         self.documents.clear_reading_focus();
         self.documents.markdown_changed.clear();
         self.documents.canvas_changed.clear();
-        self.documents.text_changed.clear();
     }
 
-    fn prepare_standalone_file(&mut self, path: &Path) -> io::Result<ProjectFile> {
+    pub(super) fn prepare_standalone_file(&mut self, path: &Path) -> io::Result<ProjectFile> {
         let full = dunce::canonicalize(path)?;
         if !full.is_file() || !files::is_relevant(&full) {
             return Err(io::Error::new(
@@ -874,51 +839,38 @@ impl Workspace {
         }
     }
 
-    pub(super) fn open_reading_key(
-        &mut self,
-        path: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> io::Result<()> {
-        let full = self.document_path(path);
-        let file = ProjectFile {
-            path: path.to_owned(),
-            kind: Self::file_kind(&full),
-        };
-        self.open_reading_pane(&file, window, cx);
-        Ok(())
-    }
     fn subscribe_editor(
         &mut self,
         path: String,
+        role: PaneRole,
         editor: &Entity<EditorState>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Subscription {
-        cx.subscribe(editor, move |app, state, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Focus) {
-                app.documents.clear_reading_focus();
-            }
-            if matches!(event, InputEvent::Change) {
-                app.edit_document(&path, state.read(cx).value().to_string());
-                cx.notify();
-            }
-        })
-    }
-
-    fn subscribe_reading_editor(
-        &mut self,
-        path: String,
-        editor: &Entity<EditorState>,
-        cx: &mut Context<Self>,
-    ) -> Subscription {
-        cx.subscribe(editor, move |app, state, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Focus) {
-                app.documents.focused_markdown = None;
-                app.documents.focused_reading_editor = Some(path.clone());
-            }
-            if matches!(event, InputEvent::Change) {
-                app.edit_document(&path, state.read(cx).value().to_string());
-                cx.notify();
+        cx.subscribe_in(editor, window, move |app, state, event: &InputEvent, window, cx| {
+            match event {
+                InputEvent::Focus => {
+                    app.documents.focused_markdown = None;
+                    app.documents.focused_reading_editor = (role == PaneRole::Reading).then(|| path.clone());
+                }
+                InputEvent::Change => {
+                    let text = state.read(cx).text();
+                    if text == app.documents.open[&path].buffer.text.as_str() {
+                        return;
+                    }
+                    app.edit_document(&path, text.to_string());
+                    let document = &app.documents.open[&path];
+                    let peer = match role {
+                        PaneRole::Tab => app.documents.reading_editors.get(&path).map(|(editor, _)| editor),
+                        PaneRole::Reading => Some(&document.editor),
+                    };
+                    // Publish to the peer before the next input event. set_value is silent.
+                    if let Some(peer) = peer {
+                        peer.update(cx, |editor, cx| editor.set_value(document.buffer.text.as_str(), window, cx));
+                    }
+                    cx.notify();
+                }
+                _ => {}
             }
         })
     }
@@ -1128,7 +1080,7 @@ impl Workspace {
             let line_highlight = editor.update(cx, |editor, cx| {
                 editor.create_range_decorations_collection(Vec::new(), cx)
             });
-            let subscription = self.subscribe_editor(path.clone(), &editor, cx);
+            let subscription = self.subscribe_editor(path.clone(), PaneRole::Tab, &editor, window, cx);
             self.documents.open.insert(
                 path.clone(),
                 OpenDocument {
@@ -1166,7 +1118,7 @@ impl Workspace {
                     .context_menu(false)
                     .default_value(text)
             });
-            let subscription = self.subscribe_reading_editor(path.clone(), &editor, cx);
+            let subscription = self.subscribe_editor(path.clone(), PaneRole::Reading, &editor, window, cx);
             self.documents
                 .reading_editors
                 .insert(path.clone(), (editor, subscription));
@@ -1336,8 +1288,8 @@ impl Workspace {
                         crate::model::sanitize_text_color_presets(presets.clone());
                     app.apply_settings(settings, window, cx);
                 }
-                MarkdownEvent::OpenMermaidLightbox { svg, image } => {
-                    app.open_svg_lightbox(svg.clone(), image.clone(), window, cx);
+                MarkdownEvent::OpenMermaidLightbox { tree, image } => {
+                    app.open_svg_lightbox(tree.clone(), image.clone(), window, cx);
                 }
             }
             cx.notify();
@@ -1399,8 +1351,11 @@ impl Workspace {
             }
             Err(disk) => {
                 document.buffer.conflict = Some(disk);
-                self.documents.active = path.to_owned();
-                self.refresh_active_backlinks(cx);
+                // A split-only document shows the conflict in its own pane.
+                if self.documents.tabs.iter().any(|tab| tab == path) {
+                    self.documents.active = path.to_owned();
+                    self.refresh_active_backlinks(cx);
+                }
                 cx.notify();
                 Ok(false)
             }
@@ -1598,19 +1553,32 @@ impl Workspace {
         if !self.documents.tabs.is_empty() || self.documents.reading_panes.is_empty() {
             return false;
         }
-        let path = self.documents.reading_panes.remove(0);
-        let width = self.documents.reading_pane_initial_widths.remove(&path);
-        let full = self.document_path(&path);
-        let kind = Self::file_kind(&full);
-        if let Err(error) = self.mount_document_pane(&PaneKey::tab(&path), kind, window, cx) {
-            self.documents.reading_panes.insert(0, path.clone());
-            if let Some(width) = width {
-                self.documents.reading_pane_initial_widths.insert(path, width);
-            }
+        let path = self.documents.reading_panes[0].clone();
+        let reading = PaneKey::reading(&path);
+        let tab = PaneKey::tab(&path);
+        // Move live viewers with their navigation and pending WebView saves.
+        if let Some(pane) = self.documents.drawio_panes.remove(&reading) {
+            pane.update(cx, |pane, cx| pane.promote_to_tab(cx));
+            self.documents.drawio_panes.insert(tab, pane);
+        } else if let Some(pane) = self.documents.html_panes.remove(&reading) {
+            pane.update(cx, |pane, cx| pane.promote_to_tab(cx));
+            self.documents.html_panes.insert(tab, pane);
+        } else if let Some(pane) = self.documents.pdf_panes.remove(&reading) {
+            self.documents.pdf_panes.insert(tab, pane);
+        } else if let Some(pane) = self.documents.image_panes.remove(&reading) {
+            self.documents.image_panes.insert(tab, pane);
+        } else if let Err(error) = self.mount_document_pane(
+            &tab,
+            Self::file_kind(&self.document_path(&path)),
+            window,
+            cx,
+        ) {
             self.report(error, cx);
             return false;
         }
-        self.release_document_pane(&PaneKey::reading(&path), window, cx);
+        self.documents.reading_panes.remove(0);
+        self.documents.reading_pane_initial_widths.remove(&path);
+        self.release_document_pane(&reading, window, cx);
         self.documents.clear_reading_focus_for(&path);
         self.documents.tabs.push(path.clone());
         self.documents.active = path.clone();
@@ -1622,17 +1590,23 @@ impl Workspace {
     }
 
     pub(super) fn close_tab(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_tab_inner(path, true, window, cx);
+        self.close_document_pane(path, PaneRole::Tab, window, cx);
     }
 
-    fn close_tab_inner(
+    fn close_document_pane(
         &mut self,
         path: &str,
-        promote_split: bool,
+        role: PaneRole,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.documents.reading_panes.iter().any(|pane| pane == path)
+        let other_panes = match role {
+            PaneRole::Tab => &self.documents.reading_panes,
+            PaneRole::Reading => &self.documents.tabs,
+        };
+        let has_other_pane = other_panes.iter().any(|pane| pane == path);
+        // Keep the pane in place until the last view's draft has been resolved.
+        if !has_other_pane
             && (self.documents.open
                 .get(path)
                 .is_some_and(|document| document.buffer.is_dirty())
@@ -1645,13 +1619,7 @@ impl Workspace {
                 crate::i18n::workspace::DIALOG_UNSAVED_FILE_BODY.get().into(),
                 DialogButtons::SaveDiscardCancel,
                 cx,
-                move |app, window, cx| {
-                    if app.documents.reading_panes.contains(&retry_path) && !app.documents.tabs.contains(&retry_path) {
-                        app.close_reading_pane(&retry_path, window, cx);
-                    } else {
-                        app.close_tab(&retry_path, window, cx);
-                    }
-                },
+                move |app, window, cx| app.close_document_pane(&retry_path, role, window, cx),
             ) {
                 Some(rfd::MessageDialogResult::Yes) => match self.save_file(path, false, cx) {
                     Ok(true) => {}
@@ -1665,23 +1633,28 @@ impl Workspace {
                 _ => return,
             }
         }
-        self.documents.tabs.retain(|tab| tab != path);
-        self.release_document_pane(&PaneKey::tab(path), window, cx);
-        if !self.documents.reading_panes.iter().any(|pane| pane == path) {
+        match role {
+            PaneRole::Tab => self.documents.tabs.retain(|tab| tab != path),
+            PaneRole::Reading => {
+                self.documents.reading_panes.retain(|pane| pane != path);
+                self.documents.reading_pane_initial_widths.remove(path);
+                self.documents.clear_reading_focus_for(path);
+            }
+        }
+        self.release_document_pane(&PaneKey::new(path, role), window, cx);
+        if !has_other_pane {
             self.documents.open.remove(path);
         }
-        self.documents.clear_reading_focus_for(path);
-        if self.documents.active == path {
+        if role == PaneRole::Tab && self.documents.active == path {
             self.documents.active = self.documents.tabs.last().cloned().unwrap_or_default();
             if !self.trash.is_open() && !self.documents.active.is_empty() {
                 let active = self.documents.active.clone();
                 self.focus_document_tab(&active, window, cx);
             }
         }
-        if promote_split && self.documents.tabs.is_empty() && !self.trash.is_open() {
-            self.promote_first_reading_pane_if_tabs_empty(true, window, cx);
+        if self.trash.is_open() || !self.promote_first_reading_pane_if_tabs_empty(true, window, cx) {
+            self.refresh_active_backlinks(cx);
         }
-        self.refresh_active_backlinks(cx);
         if let Err(error) = self.remember_session() {
             self.report(error, cx);
         }
@@ -1698,12 +1671,10 @@ impl Workspace {
                 let document = self.documents.open
                     .get_mut(path)
                     .expect("reload only open documents");
-                if !path.to_ascii_lowercase().ends_with(".md") && !Self::is_canvas_path(path) {
-                    document.editor.update(cx, |editor, cx| {
-                        editor.set_value(disk.text.clone(), window, cx)
-                    });
-                }
                 document.buffer.replace_from_disk(disk);
+                if !Self::is_markdown_path(path) && !Self::is_canvas_path(path) {
+                    document.reload_editors(self.documents.reading_editors.get(path), window, cx);
+                }
                 self.documents.source_changed(path);
                 cx.notify();
             }
@@ -1842,12 +1813,10 @@ impl Workspace {
                     if document.buffer.is_dirty() {
                         document.buffer.conflict = Some(disk);
                     } else {
-                        if !path.to_lowercase().ends_with(".md") && !Self::is_canvas_path(path) {
-                            document.editor.update(cx, |editor, cx| {
-                                editor.set_value(disk.text.clone(), window, cx)
-                            });
-                        }
                         document.buffer.replace_from_disk(disk);
+                        if !Self::is_markdown_path(path) && !Self::is_canvas_path(path) {
+                            document.reload_editors(self.documents.reading_editors.get(path), window, cx);
+                        }
                         updated_sources.push(path.clone());
                     }
                 }
@@ -1913,9 +1882,6 @@ impl Workspace {
         for path in std::mem::take(&mut self.documents.canvas_changed) {
             self.sync_canvas_panes(&path, cx);
         }
-        for path in std::mem::take(&mut self.documents.text_changed) {
-            self.sync_text_editors(&path, window, cx);
-        }
         let events: Vec<_> = self.documents.document_watch.transport
             .iter()
             .flat_map(|(_, receiver)| receiver.try_iter())
@@ -1946,12 +1912,14 @@ impl Workspace {
                                             .iter()
                                             .any(|name| part.as_os_str() == *name)
                                     })
-                                    && (directory_event || path.is_dir() || files::is_relevant(path)
+                                    && (directory_event || files::is_relevant(path)
+                                        || self.documents.open.values().any(|document| document.path == *path)
+                                        || path.is_dir()
                                         || (tree && self.tree.folders().iter().any(|folder| root.join(folder) == *path)))
                                 })
                             } else {
-                                files::is_relevant(path)
-                                && ((tree && path.parent().is_some_and(|parent| self.documents.document_watch.parents.contains(parent))) || self.documents.open
+                                (tree && files::is_relevant(path) && path.parent().is_some_and(|parent| self.documents.document_watch.parents.contains(parent)))
+                                    || self.documents.open
                                         .values()
                                         .any(|document| document.path == *path)
                                         || self.documents.pdf_panes.keys().any(|key| {
@@ -1965,7 +1933,7 @@ impl Workspace {
                                         })
                                         || self.documents.image_panes.values().any(|pane| {
                                             pane.read(cx).file_path() == *path
-                                        }))
+                                        })
                             }
                         })
                         .collect();
@@ -2056,14 +2024,22 @@ impl Workspace {
         let renamed = renamed.to_owned();
         if let Some(mut document) = self.documents.open.remove(key) {
             document.path = full.clone();
-            document.subscription = self.subscribe_editor(renamed.clone(), &document.editor, cx);
+            if (Self::is_markdown_path(key) || Self::is_canvas_path(key))
+                && !Self::is_markdown_path(&renamed)
+                && !Self::is_canvas_path(&renamed)
+                && Self::file_kind(&full) == FileKind::Text
+            {
+                // The dormant code editor must start from the live Markdown or canvas draft.
+                document.reload_editors(None, window, cx);
+            }
+            document.subscription = self.subscribe_editor(renamed.clone(), PaneRole::Tab, &document.editor, window, cx);
             self.documents.open.insert(renamed.clone(), document);
         }
         if let Some((editor, _)) = self.documents.reading_editors.remove(key)
             && !renamed.to_ascii_lowercase().ends_with(".md")
             && !Self::is_canvas_path(&renamed)
         {
-            let subscription = self.subscribe_reading_editor(renamed.clone(), &editor, cx);
+            let subscription = self.subscribe_editor(renamed.clone(), PaneRole::Reading, &editor, window, cx);
             self.documents
                 .reading_editors
                 .insert(renamed.clone(), (editor, subscription));
@@ -2123,9 +2099,6 @@ impl Workspace {
         }
         if self.documents.canvas_changed.remove(key) {
             self.documents.canvas_changed.insert(renamed.clone());
-        }
-        if self.documents.text_changed.remove(key) {
-            self.documents.text_changed.insert(renamed.clone());
         }
     }
 
@@ -2195,22 +2168,7 @@ impl Workspace {
     }
 
     pub(super) fn close_reading_pane(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.documents.reading_panes.retain(|pane| pane != path);
-        if !self.documents.tabs.iter().any(|tab| tab == path) {
-            self.close_tab_inner(path, false, window, cx);
-            // A cancelled draft close keeps its document accessible.
-            if self.documents.open.contains_key(path) {
-                self.documents.reading_panes.push(path.to_owned());
-                return;
-            }
-        }
-        self.documents.reading_pane_initial_widths.remove(path);
-        self.release_document_pane(&PaneKey::reading(path), window, cx);
-        self.documents.clear_reading_focus_for(path);
-        if let Err(error) = self.remember_session() {
-            self.report(error, cx);
-        }
-        cx.notify();
+        self.close_document_pane(path, PaneRole::Reading, window, cx);
     }
 
     pub(super) fn render_reading_pane(&self, path: &str, cx: &mut Context<Self>) -> AnyElement {

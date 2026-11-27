@@ -3,7 +3,7 @@ use std::{cell::Cell, rc::Rc, sync::Arc};
 use gpui_kit::{
     Bounds, Context, CursorStyle, EventEmitter, FocusHandle, Focusable, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, RenderImage, ScrollDelta,
-    ScrollEvent, SharedString, Window,
+    ScrollEvent, Window,
     assets::IconName,
     canvas,
     component::{
@@ -15,14 +15,12 @@ use gpui_kit::{
     prelude::FluentBuilder,
     px, *,
 };
-use image::Frame;
 
 const MIN_SCALE: f32 = 0.1;
 const MAX_SCALE: f32 = 16.0;
 const ZOOM_STEP: f32 = 1.25;
 const WHEEL_ZOOM_STEP: f32 = 1.12;
 const FIT_PADDING: f32 = 96.0;
-const MAX_SVG_RASTER_DIM: f32 = 4096.0;
 const CARD_PADDING: f32 = 24.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -34,76 +32,71 @@ enum ZoomMode {
 pub struct LightboxClose;
 
 pub struct SvgLightbox {
-    natural_size: Option<(f32, f32)>,
-    svg_tree: Option<Arc<usvg::Tree>>,
-    rendered: Option<(u32, Arc<RenderImage>)>,
-    pending_bucket: Option<u32>,
-    load_error: Option<String>,
+    svg_tree: Arc<usvg::Tree>,
+    initial_image: Arc<RenderImage>,
+    rendered: Option<Arc<RenderImage>>,
+    requested_density: Option<f32>,
+    raster_task: Option<Task<()>>,
     zoom_mode: ZoomMode,
     pan: Point<Pixels>,
     viewport_bounds: Rc<Cell<Bounds<Pixels>>>,
     drag_state: Option<(Point<Pixels>, Point<Pixels>)>,
     focus_handle: FocusHandle,
+    previous_focus: Option<WeakFocusHandle>,
 }
 
 impl EventEmitter<LightboxClose> for SvgLightbox {}
 
 impl SvgLightbox {
     pub fn new(
-        svg: SharedString,
-        initial_image: Option<Arc<RenderImage>>,
+        svg_tree: Arc<usvg::Tree>,
+        initial_image: Arc<RenderImage>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let previous_focus = window.focused(cx).map(|focus| focus.downgrade());
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
 
-        let options = crate::svg::usvg_options();
-        let (natural_size, svg_tree, load_error) = match usvg::Tree::from_str(&svg, &options) {
-            Ok(tree) => {
-                let size = tree.size();
-                (
-                    Some((size.width().max(1.0), size.height().max(1.0))),
-                    Some(Arc::new(tree)),
-                    None,
-                )
-            }
-            Err(err) => (
-                None,
-                None,
-                Some(crate::i18n::media::mermaid_svg_parse_failed(&err)),
-            ),
-        };
-
-        let mut lightbox = Self {
-            natural_size,
+        Self {
             svg_tree,
-            rendered: initial_image.map(|image| (0, image)),
-            pending_bucket: None,
-            load_error,
+            initial_image,
+            rendered: None,
+            requested_density: None,
+            raster_task: None,
             zoom_mode: ZoomMode::Fit,
             pan: Point::default(),
-            viewport_bounds: Rc::new(Cell::new(Bounds::default())),
+            viewport_bounds: Rc::new(Cell::new(Bounds {
+                origin: Point::default(),
+                size: window.viewport_size(),
+            })),
             drag_state: None,
             focus_handle,
-        };
-        lightbox.ensure_svg_rendered(window.scale_factor(), cx);
-        lightbox
+            previous_focus,
+        }
+    }
+
+    pub(crate) fn release(&mut self, window: &mut Window, cx: &mut App) {
+        self.raster_task = None;
+        if let Some(image) = self.rendered.take() {
+            window.drop_image(image).expect("remove lightbox image from atlas");
+        }
+        if let Some(focus) = self.previous_focus.as_ref().and_then(WeakFocusHandle::upgrade) {
+            focus.focus(window, cx);
+        }
     }
 
     fn fit_scale(&self) -> f32 {
-        let Some((nw, nh)) = self.natural_size else {
-            return 1.0;
-        };
+        let size = self.svg_tree.size();
         let bounds = self.viewport_bounds.get();
         let vw = f32::from(bounds.size.width);
         let vh = f32::from(bounds.size.height);
-        if vw <= 1.0 || vh <= 1.0 || nw <= 0.0 || nh <= 0.0 {
+        if vw <= 1.0 || vh <= 1.0 {
             return 1.0;
         }
         let avail_w = (vw - FIT_PADDING - CARD_PADDING * 2.0).max(64.0);
         let avail_h = (vh - FIT_PADDING - CARD_PADDING * 2.0).max(64.0);
-        (avail_w / nw).min(avail_h / nh).clamp(MIN_SCALE, 4.0)
+        (avail_w / size.width()).min(avail_h / size.height()).clamp(MIN_SCALE, 4.0)
     }
 
     fn effective_scale(&self) -> f32 {
@@ -114,15 +107,15 @@ impl SvgLightbox {
     }
 
     fn card_rect(&self, scale: f32) -> Option<Bounds<Pixels>> {
-        let (nw, nh) = self.natural_size?;
+        let size = self.svg_tree.size();
         let bounds = self.viewport_bounds.get();
         let vw = f32::from(bounds.size.width);
         let vh = f32::from(bounds.size.height);
         if vw <= 1.0 || vh <= 1.0 {
             return None;
         }
-        let card_w = nw * scale + CARD_PADDING * 2.0;
-        let card_h = nh * scale + CARD_PADDING * 2.0;
+        let card_w = size.width() * scale + CARD_PADDING * 2.0;
+        let card_h = size.height() * scale + CARD_PADDING * 2.0;
         let left = f32::from(bounds.origin.x) + (vw - card_w) * 0.5 + f32::from(self.pan.x);
         let top = f32::from(bounds.origin.y) + (vh - card_h) * 0.5 + f32::from(self.pan.y);
         Some(Bounds {
@@ -135,17 +128,15 @@ impl SvgLightbox {
     }
 
     fn clamp_pan(&self, pan: Point<Pixels>, scale: f32) -> Point<Pixels> {
-        let Some((nw, nh)) = self.natural_size else {
-            return Point::default();
-        };
+        let size = self.svg_tree.size();
         let bounds = self.viewport_bounds.get();
         let vw = f32::from(bounds.size.width);
         let vh = f32::from(bounds.size.height);
         if vw <= 1.0 || vh <= 1.0 {
             return pan;
         }
-        let rw = nw * scale + CARD_PADDING * 2.0;
-        let rh = nh * scale + CARD_PADDING * 2.0;
+        let rw = size.width() * scale + CARD_PADDING * 2.0;
+        let rh = size.height() * scale + CARD_PADDING * 2.0;
         let keep_x = (rw * 0.5).min(64.0);
         let keep_y = (rh * 0.5).min(64.0);
         let limit_x = ((vw + rw) * 0.5 - keep_x).max(0.0);
@@ -209,54 +200,34 @@ impl SvgLightbox {
         }
     }
 
-    fn ensure_svg_rendered(&mut self, display_scale: f32, cx: &mut Context<Self>) {
-        let Some(tree) = self.svg_tree.clone() else {
-            return;
-        };
-        let Some((nw, nh)) = self.natural_size else {
-            return;
-        };
-        let max_density = (MAX_SVG_RASTER_DIM / nw.max(nh)).max(0.25);
-        let target_density = (display_scale.clamp(0.25, max_density.min(8.0)) * 4.0).ceil() / 4.0;
-        let bucket = (target_density * 100.0).round() as u32;
-
-        if self.rendered.as_ref().is_some_and(|(b, _)| *b == bucket)
-            || self.pending_bucket == Some(bucket)
-        {
+    fn ensure_svg_rendered(&mut self, display_scale: f32, window: &Window, cx: &mut Context<Self>) {
+        let bucket = (display_scale.clamp(0.25, 8.0) * 4.0).ceil() / 4.0;
+        let density = crate::svg::bounded_raster_density(&self.svg_tree, bucket);
+        if self.raster_task.is_some() || self.requested_density == Some(density) {
             return;
         }
-        self.pending_bucket = Some(bucket);
-        cx.spawn(async move |view, cx| {
+        // Keep one raster job in flight. The completion redraw picks up the latest zoom.
+        self.requested_density = Some(density);
+        let tree = Arc::clone(&self.svg_tree);
+        self.raster_task = Some(cx.spawn_in(window, async move |view, cx| {
             let rendered = cx
                 .background_executor()
-                .spawn(async move { rasterize_svg_tree(&tree, target_density) })
+                .spawn(async move { crate::svg::rasterize_tree(&tree, density) })
                 .await;
-            let _ = view.update(cx, |view, cx| {
-                if view.pending_bucket == Some(bucket) {
-                    view.pending_bucket = None;
+            let _ = view.update_in(cx, |view, window, cx| {
+                view.raster_task = None;
+                if let Some(image) = rendered
+                    && let Some(previous) = view.rendered.replace(image)
+                {
+                    window.drop_image(previous).expect("remove replaced lightbox image from atlas");
                 }
-                match rendered {
-                    Ok(image) => {
-                        view.rendered = Some((bucket, image));
-                        cx.notify();
-                    }
-                    Err(err) => {
-                        if view.rendered.is_none() {
-                            view.load_error = Some(err);
-                            cx.notify();
-                        }
-                    }
-                }
+                cx.notify();
             });
-        })
-        .detach();
+        }));
     }
 
     fn handle_scroll(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) {
         cx.stop_propagation();
-        if self.natural_size.is_none() {
-            return;
-        }
         let steps = match event.delta {
             ScrollDelta::Pixels(delta) => f32::from(delta.y) / 40.0,
             ScrollDelta::Lines(lines) => lines.y,
@@ -359,7 +330,7 @@ impl Render for SvgLightbox {
         if clamped_pan != self.pan {
             self.pan = clamped_pan;
         }
-        self.ensure_svg_rendered(scale * window.scale_factor(), cx);
+        self.ensure_svg_rendered(scale * window.scale_factor(), window, cx);
 
         let bounds_cell = self.viewport_bounds.clone();
         let dragging = self.drag_state.is_some();
@@ -411,8 +382,10 @@ impl Render for SvgLightbox {
             }))
             .child(
                 canvas(
-                    move |bounds, _, _| {
-                        bounds_cell.set(bounds);
+                    move |bounds, window, _| {
+                        if bounds_cell.replace(bounds) != bounds {
+                            window.request_animation_frame();
+                        }
                     },
                     |_, _, _, _| {},
                 )
@@ -420,69 +393,46 @@ impl Render for SvgLightbox {
                 .size_full(),
             );
 
-        if let Some(error) = &self.load_error {
-            stage = stage.child(
-                div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .p_6()
-                    .child(
-                        div()
-                            .px_4()
-                            .py_3()
-                            .rounded(px(8.))
-                            .bg(crate::theme::color(palette.surface))
-                            .border_1()
-                            .border_color(crate::theme::color(palette.border))
-                            .text_sm()
-                            .text_color(crate::theme::color(palette.danger))
-                            .child(error.clone()),
-                    ),
-            );
-        } else if let Some((nw, nh)) = self.natural_size {
+        let card = {
+            let size = self.svg_tree.size();
             let bounds = self.viewport_bounds.get();
             let vw = f32::from(bounds.size.width);
             let vh = f32::from(bounds.size.height);
-            let drawn_w = nw * scale;
-            let drawn_h = nh * scale;
+            let drawn_w = size.width() * scale;
+            let drawn_h = size.height() * scale;
             let card_w = drawn_w + CARD_PADDING * 2.0;
             let card_h = drawn_h + CARD_PADDING * 2.0;
             let left = (vw - card_w) * 0.5 + f32::from(self.pan.x);
             let top = (vh - card_h) * 0.5 + f32::from(self.pan.y);
 
-            if let Some((_, rendered)) = &self.rendered {
-                stage = stage.child(
-                    div()
-                        .absolute()
-                        .left(px(left))
-                        .top(px(top))
-                        .w(px(card_w))
-                        .h(px(card_h))
-                        .p(px(CARD_PADDING))
-                        .rounded(px(10.))
-                        .bg(crate::theme::color(palette.surface))
-                        .border_1()
-                        .border_color(crate::theme::color(palette.border))
-                        .shadow(palette.modal_shadow())
-                        .cursor(if dragging {
-                            CursorStyle::ClosedHand
-                        } else {
-                            CursorStyle::OpenHand
-                        })
-                        .child(
-                            img(rendered.clone())
-                                .w(px(drawn_w))
-                                .h(px(drawn_h))
-                                .object_fit(ObjectFit::Fill),
-                        ),
-                );
-            }
-        }
+            let rendered = self.rendered.as_ref().unwrap_or(&self.initial_image);
+            div()
+                .absolute()
+                .left(px(left))
+                .top(px(top))
+                .w(px(card_w))
+                .h(px(card_h))
+                .p(px(CARD_PADDING))
+                .rounded(px(10.))
+                .bg(crate::theme::color(palette.surface))
+                .border_1()
+                .border_color(crate::theme::color(palette.border))
+                .shadow(palette.modal_shadow())
+                .cursor(if dragging {
+                    CursorStyle::ClosedHand
+                } else {
+                    CursorStyle::OpenHand
+                })
+                .child(
+                    img(rendered.clone())
+                        .w(px(drawn_w))
+                        .h(px(drawn_h))
+                        .object_fit(ObjectFit::Fill),
+                )
+        };
 
         // Top-right close button
-        stage = stage.child(
+        stage = stage.child(card).child(
             div()
                 .id("svg-lightbox-close-wrap")
                 .absolute()
@@ -510,8 +460,8 @@ impl Render for SvgLightbox {
                 ),
         );
 
-        if self.load_error.is_none() {
-            let hud = div()
+        let hud = {
+            div()
                 .id("svg-lightbox-hud")
                 .absolute()
                 .bottom_4()
@@ -609,31 +559,9 @@ impl Render for SvgLightbox {
                                 .build(window, cx)
                         })
                         .child(crate::i18n::media::IMG_ACTUAL_SIZE.get()),
-                );
+                )
+        };
 
-            stage = stage.child(hud);
-        }
-
-        stage.into_any_element()
+        stage.child(hud).into_any_element()
     }
-}
-
-fn rasterize_svg_tree(tree: &usvg::Tree, density: f32) -> Result<Arc<RenderImage>, String> {
-    let size = tree.size();
-    let pixel_width = (size.width() * density).ceil().max(1.0) as u32;
-    let pixel_height = (size.height() * density).ceil().max(1.0) as u32;
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(pixel_width, pixel_height)
-        .ok_or_else(|| crate::i18n::media::MERMAID_BITMAP_ALLOC.get().to_owned())?;
-    resvg::render(
-        tree,
-        resvg::tiny_skia::Transform::from_scale(density, density),
-        &mut pixmap.as_mut(),
-    );
-    let mut bytes = pixmap.take();
-    for pixel in bytes.chunks_exact_mut(4) {
-        pixel.swap(0, 2);
-    }
-    let image = image::RgbaImage::from_raw(pixel_width, pixel_height, bytes)
-        .ok_or_else(|| crate::i18n::media::MERMAID_BITMAP_INVALID.get().to_owned())?;
-    Ok(Arc::new(RenderImage::new([Frame::new(image)])))
 }

@@ -116,16 +116,17 @@ impl Workspace {
             cx.set_global(settings.translate.clone());
         }
         if previous.keybindings != settings.keybindings {
-            // Rebind the global panel shortcuts even when focus belongs to a child entity.
-            for (id, action) in [
-                ("toggle_ai", ToggleAi.name()),
-                ("toggle_terminal", ToggleTerminal.name()),
-                ("toggle_zen", ToggleZen.name()),
+            // Unbind in the same context in which the action was registered.
+            for (id, action, context) in [
+                ("toggle_ai", ToggleAi.name(), "FolioWorkspace"),
+                ("toggle_terminal", ToggleTerminal.name(), "FolioWorkspace"),
+                ("toggle_zen", ToggleZen.name(), "FolioWorkspace"),
+                ("ask_ai", AskAi.name(), "!GpuiXterm"),
             ] {
                 let old_key = previous.key_for(id);
-                if old_key != settings.key_for(id) {
+                if !old_key.is_empty() && old_key != settings.key_for(id) {
                     cx.bind_keys([KeyBinding::new(
-                        Box::leak(old_key.into_boxed_str()), Unbind(action.into()), Some("FolioWorkspace"),
+                        Box::leak(old_key.into_boxed_str()), Unbind(action.into()), Some(context),
                     )]);
                 }
             }
@@ -154,9 +155,7 @@ impl Workspace {
         }
         if previous.extra_text_extensions != self.settings.extra_text_extensions {
             crate::files::set_extra_text_extensions(&self.settings.extra_text_extensions);
-            if let Err(error) = self.refresh_files(window, cx) {
-                self.report(error, cx);
-            }
+            self.schedule_document_tree_refresh();
         }
         self.persist_settings(cx);
         cx.notify();

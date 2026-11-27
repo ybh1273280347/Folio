@@ -699,9 +699,9 @@ impl AiPane {
             AiPaneEvent::OpenFile(path) => cx.emit(AiPaneEvent::OpenFile(path.clone())),
             AiPaneEvent::BackToHub => cx.emit(AiPaneEvent::BackToHub),
             AiPaneEvent::ToggleMaximize => cx.emit(AiPaneEvent::ToggleMaximize),
-            AiPaneEvent::OpenMermaidLightbox { svg, image } => {
+            AiPaneEvent::OpenMermaidLightbox { tree, image } => {
                 cx.emit(AiPaneEvent::OpenMermaidLightbox {
-                    svg: svg.clone(),
+                    tree: Arc::clone(tree),
                     image: Arc::clone(image),
                 });
             }

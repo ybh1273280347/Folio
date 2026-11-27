@@ -413,7 +413,8 @@ impl Workspace {
             return;
         };
         let input = self.tags.input.read(cx).value().trim().to_owned();
-        let len = self.edit_candidates(paths, &input).len();
+        let counts = self.tag_edit_counts(paths);
+        let len = self.edit_candidates(&counts, paths.len(), &input).len();
         if len == 0 {
             self.tags.edit_index = 0;
             return;
@@ -424,30 +425,34 @@ impl Workspace {
         cx.notify();
     }
 
-    fn edit_candidates(&self, paths: &[String], input: &str) -> Vec<EditCandidate> {
-        let trimmed = input.trim();
-        let query = tags::name_key(trimmed);
-        let exact = self
-            .tags
-            .snapshot
-            .tags
-            .iter()
-            .any(|tag| tags::name_key(&tag.name) == query);
-        let total = paths.len();
-        let mut out = Vec::new();
-        if !query.is_empty() && !exact {
-            out.push(EditCandidate::CreateAndAdd(trimmed.to_owned()));
+    fn tag_edit_counts(&self, paths: &[String]) -> HashMap<&str, usize> {
+        let mut counts = HashMap::new();
+        // Visit the selected files' memberships once for both chips and candidates.
+        for ids in paths.iter().filter_map(|path| self.tags.snapshot.assigned.get(path)) {
+            for id in ids {
+                *counts.entry(id.as_str()).or_insert(0) += 1;
+            }
         }
-        let mut unassigned = Vec::new();
+        counts
+    }
+
+    fn edit_candidates(
+        &self,
+        counts: &HashMap<&str, usize>,
+        total: usize,
+        input: &str,
+    ) -> Vec<EditCandidate> {
+        let query = tags::name_key(input);
+        let mut out = Vec::new();
         let mut assigned = Vec::new();
+        let mut exact = false;
         for tag in &self.tags.snapshot.tags {
-            if !tags::name_key(&tag.name).contains(&query) {
+            let name = tags::name_key(&tag.name);
+            exact |= name == query;
+            if !name.contains(&query) {
                 continue;
             }
-            let count = paths
-                .iter()
-                .filter(|path| self.tags.snapshot.has(path, &tag.id))
-                .count();
+            let count = counts.get(tag.id.as_str()).copied().unwrap_or(0);
             let candidate = EditCandidate::Tag {
                 id: tag.id.clone(),
                 name: tag.name.clone(),
@@ -456,12 +461,14 @@ impl Workspace {
                 total,
             };
             if count < total {
-                unassigned.push(candidate);
+                out.push(candidate);
             } else {
                 assigned.push(candidate);
             }
         }
-        out.extend(unassigned);
+        if !query.is_empty() && !exact {
+            out.insert(0, EditCandidate::CreateAndAdd(input.to_owned()));
+        }
         out.extend(assigned);
         out
     }
@@ -469,14 +476,17 @@ impl Workspace {
     fn activate_edit_candidate(
         &mut self,
         candidate: &EditCandidate,
-        paths: &[String],
         clear_input: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Mode::Edit { paths, .. } = &self.tags.mode else {
+            return;
+        };
+        let paths = paths.clone();
         let ok = match candidate {
             EditCandidate::CreateAndAdd(name) => {
-                self.change_tags(Change::Create { name, paths }, cx)
+                self.change_tags(Change::Create { name, paths: &paths }, cx)
             }
             EditCandidate::Tag {
                 id,
@@ -486,7 +496,7 @@ impl Workspace {
             } => self.change_tags(
                 Change::Assign {
                     tag: id,
-                    paths,
+                    paths: &paths,
                     add: *count < *total,
                 },
                 cx,
@@ -619,8 +629,8 @@ impl Workspace {
                 }
             }
             Mode::Edit { paths, .. } => {
-                let paths = paths.clone();
-                let candidates = self.edit_candidates(&paths, &value);
+                let counts = self.tag_edit_counts(paths);
+                let candidates = self.edit_candidates(&counts, paths.len(), &value);
                 let index = if candidates.is_empty() {
                     return;
                 } else {
@@ -628,7 +638,6 @@ impl Workspace {
                 };
                 self.activate_edit_candidate(
                     &candidates[index],
-                    &paths,
                     !value.is_empty(),
                     window,
                     cx,
@@ -1044,16 +1053,14 @@ impl Workspace {
         cx: &Context<Self>,
     ) -> Div {
         let total = paths.len();
+        let counts = self.tag_edit_counts(paths);
         let assigned_tags: Vec<_> = self
             .tags
             .snapshot
             .tags
             .iter()
             .filter_map(|tag| {
-                let count = paths
-                    .iter()
-                    .filter(|path| self.tags.snapshot.has(path, &tag.id))
-                    .count();
+                let count = counts.get(tag.id.as_str()).copied().unwrap_or(0);
                 (count > 0).then_some((tag, count))
             })
             .collect();
@@ -1141,9 +1148,8 @@ impl Workspace {
                     )
             }));
 
-        let candidates = self.edit_candidates(paths, input);
+        let candidates = self.edit_candidates(&counts, total, input);
         let active_idx = (!candidates.is_empty()).then(|| self.tags.edit_index.min(candidates.len() - 1));
-        let paths_owned = paths.to_vec();
         let clear_on_pick = !input.is_empty();
 
         let list = div()
@@ -1165,7 +1171,6 @@ impl Workspace {
             })
             .children(candidates.into_iter().enumerate().map(|(ix, candidate)| {
                 let highlighted = active_idx == Some(ix);
-                let row_paths = paths_owned.clone();
                 let row = div()
                     .id(SharedString::from(format!("tag-edit-cand-{ix}")))
                     .flex()
@@ -1181,19 +1186,9 @@ impl Workspace {
                         row.hover(move |s| s.bg(gpui_kit::rgb(palette.hover)))
                     });
 
-                match candidate {
+                let row = match &candidate {
                     EditCandidate::CreateAndAdd(name) => {
-                        let create_name = name.clone();
-                        row.on_click(cx.listener(move |app, _, window, cx| {
-                            app.activate_edit_candidate(
-                                &EditCandidate::CreateAndAdd(create_name.clone()),
-                                &row_paths,
-                                true,
-                                window,
-                                cx,
-                            );
-                        }))
-                        .child(
+                        row.child(
                             crate::ui::icon(IconName::Plus)
                                 .size(px(13.))
                                 .text_color(gpui_kit::rgb(palette.accent))
@@ -1206,36 +1201,19 @@ impl Workspace {
                                 .text_ellipsis()
                                 .text_color(gpui_kit::rgb(palette.accent))
                                 .font_medium()
-                                .child(crate::i18n::tags::create_and_add_tag(&name)),
+                                .child(crate::i18n::tags::create_and_add_tag(name)),
                         )
                     }
                     EditCandidate::Tag {
-                        id,
                         name,
                         color,
                         count,
                         total,
+                        ..
                     } => {
-                        let (_, bg, fg) = COLORS.get(color as usize).copied().unwrap_or(COLORS[0]);
-                        let click_id = id.clone();
-                        let click_name = name.clone();
+                        let (_, bg, fg) = COLORS.get(*color as usize).copied().unwrap_or(COLORS[0]);
                         let fully_assigned = count == total;
-                        row.on_click(cx.listener(move |app, _, window, cx| {
-                            app.activate_edit_candidate(
-                                &EditCandidate::Tag {
-                                    id: click_id.clone(),
-                                    name: click_name.clone(),
-                                    color,
-                                    count,
-                                    total,
-                                },
-                                &row_paths,
-                                clear_on_pick,
-                                window,
-                                cx,
-                            );
-                        }))
-                        .child(
+                        row.child(
                             div()
                                 .px_2()
                                 .py(px(1.5))
@@ -1244,7 +1222,7 @@ impl Workspace {
                                 .text_color(rgb(fg))
                                 .max_w(px(260.))
                                 .text_ellipsis()
-                                .child(name),
+                                .child(name.clone()),
                         )
                         .child(div().flex_1().min_w_0())
                         .when(fully_assigned, |row| {
@@ -1254,7 +1232,7 @@ impl Workspace {
                                     .text_color(gpui_kit::rgb(palette.accent)),
                             )
                         })
-                        .when(total > 1 && count > 0 && !fully_assigned, |row| {
+                        .when(*total > 1 && *count > 0 && !fully_assigned, |row| {
                             row.child(
                                 div()
                                     .text_xs()
@@ -1263,7 +1241,10 @@ impl Workspace {
                             )
                         })
                     }
-                }
+                };
+                row.on_click(cx.listener(move |app, _, window, cx| {
+                    app.activate_edit_candidate(&candidate, clear_on_pick, window, cx);
+                }))
             }));
 
         panel

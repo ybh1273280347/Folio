@@ -296,8 +296,8 @@ impl Workspace {
                 app.right_panel.maximized = !app.right_panel.maximized;
                 cx.notify();
             }
-            AiPaneEvent::OpenMermaidLightbox { svg, image } => {
-                app.open_svg_lightbox(svg.clone(), image.clone(), window, cx);
+            AiPaneEvent::OpenMermaidLightbox { tree, image } => {
+                app.open_svg_lightbox(tree.clone(), image.clone(), window, cx);
             }
         })
         .detach();
@@ -338,7 +338,7 @@ impl Workspace {
                 if matches!(key, "escape" | "up" | "down") {
                     let _ = this.update(cx, |app, cx| {
                         if key == "escape" && app.svg_lightbox.is_some() {
-                            app.close_svg_lightbox(cx);
+                            app.close_svg_lightbox(window, cx);
                             cx.stop_propagation();
                             return;
                         }
@@ -1104,9 +1104,9 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(Self::compile))
             .on_action(cx.listener(Self::find_file))
-            .on_action(cx.listener(|app, _: &Dismiss, _, cx| {
+            .on_action(cx.listener(|app, _: &Dismiss, window, cx| {
                 app.show_preferences = false;
-                app.close_svg_lightbox(cx);
+                app.close_svg_lightbox(window, cx);
                 app.close_project_menu(cx);
                 app.documents.clear_pending_canvas_insert();
                 app.tree.dismiss_overlays();
@@ -1793,22 +1793,24 @@ impl Render for Workspace {
 impl Workspace {
     pub(super) fn open_svg_lightbox(
         &mut self,
-        svg: SharedString,
+        tree: Arc<usvg::Tree>,
         image: std::sync::Arc<RenderImage>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let lightbox = cx.new(|cx| crate::image::SvgLightbox::new(svg, Some(image), window, cx));
+        self.close_svg_lightbox(window, cx);
+        let lightbox = cx.new(|cx| crate::image::SvgLightbox::new(tree, image, window, cx));
         let subscription =
-            cx.subscribe(&lightbox, |app, _, _: &crate::image::LightboxClose, cx| {
-                app.close_svg_lightbox(cx);
+            cx.subscribe_in(&lightbox, window, |app, _, _: &crate::image::LightboxClose, window, cx| {
+                app.close_svg_lightbox(window, cx);
             });
         self.svg_lightbox = Some((lightbox, subscription));
         cx.notify();
     }
 
-    fn close_svg_lightbox(&mut self, cx: &mut Context<Self>) {
-        if self.svg_lightbox.take().is_some() {
+    fn close_svg_lightbox(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((lightbox, _)) = self.svg_lightbox.take() {
+            lightbox.update(cx, |view, cx| view.release(window, cx));
             cx.notify();
         }
     }

@@ -14,7 +14,6 @@ use gpui_kit::{
     prelude::FluentBuilder,
     *,
 };
-use image::Frame;
 use markdown_editor::BlockId;
 use merman::svg::SvgPipeline;
 use merman::{OperationControl, RenderOutput, RenderRequest, Renderer, SvgRequest};
@@ -33,8 +32,7 @@ struct Appearance {
 
 struct Diagram {
     svg: SharedString,
-    width: f32,
-    height: f32,
+    tree: Arc<usvg::Tree>,
     image: Arc<RenderImage>,
 }
 
@@ -73,7 +71,7 @@ impl BlockState {
 pub enum MermaidEvent {
     Ready,
     OpenLightbox {
-        svg: SharedString,
+        tree: Arc<usvg::Tree>,
         image: Arc<RenderImage>,
     },
 }
@@ -124,14 +122,13 @@ impl MermaidRenderer {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let appearance = appearance(window);
-        let source = code.code().to_string();
         let density = (window.scale_factor() * BASE_DENSITY).max(BASE_DENSITY);
         let stale = self
             .blocks
             .get(&id)
             .is_none_or(|state| !state.matches(revision, appearance));
         if stale {
-            self.refresh(id, revision, appearance, density, &source, cx);
+            self.refresh(id, revision, appearance, density, &code.code(), cx);
         }
 
         let state = self.blocks.get(&id).expect("Mermaid block state");
@@ -159,7 +156,7 @@ impl MermaidRenderer {
             return;
         };
         cx.emit(MermaidEvent::OpenLightbox {
-            svg: diagram.svg.clone(),
+            tree: Arc::clone(&diagram.tree),
             image: Arc::clone(&diagram.image),
         });
     }
@@ -245,8 +242,9 @@ impl MermaidRenderer {
         interactive: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let natural_w = (diagram.width * appearance.font_scale).max(1.0);
-        let natural_h = (diagram.height * appearance.font_scale).max(1.0);
+        let size = diagram.tree.size();
+        let natural_w = (size.width() * appearance.font_scale).max(1.0);
+        let natural_h = (size.height() * appearance.font_scale).max(1.0);
         let height = natural_h.min(MAX_PREVIEW_HEIGHT).max(MIN_PREVIEW_HEIGHT);
         let palette = appearance.palette;
         let image = Arc::clone(&diagram.image);
@@ -491,13 +489,12 @@ fn render_diagram(source: &str, dark: bool, density: f32) -> Result<Diagram, Str
         return Err(crate::i18n::media::MERMAID_NO_SVG.get().to_owned());
     };
     let svg: SharedString = output.svg().to_owned().into();
-    let (image, (width, height)) = rasterize(&svg, density)?;
-    Ok(Diagram {
-        svg,
-        width,
-        height,
-        image,
-    })
+    let tree = usvg::Tree::from_str(&svg, &crate::svg::usvg_options())
+        .map_err(|error| crate::i18n::media::mermaid_svg_parse_failed(&error))?;
+    let density = crate::svg::bounded_raster_density(&tree, density);
+    let image = crate::svg::rasterize_tree(&tree, density)
+        .ok_or_else(|| crate::i18n::media::MERMAID_BITMAP_ALLOC.get().to_owned())?;
+    Ok(Diagram { svg, tree: Arc::new(tree), image })
 }
 
 fn with_theme(source: &str, dark: bool) -> String {
@@ -514,30 +511,4 @@ fn with_theme(source: &str, dark: bool) -> String {
         }
     }
     format!("{directive}\n{trimmed}")
-}
-
-fn rasterize(svg: &str, density: f32) -> Result<(Arc<RenderImage>, (f32, f32)), String> {
-    let options = crate::svg::usvg_options();
-    let tree = usvg::Tree::from_str(svg, &options)
-        .map_err(|error| crate::i18n::media::mermaid_svg_parse_failed(&error))?;
-    let size = tree.size();
-    let pixel_width = (size.width() * density).ceil().max(1.0) as u32;
-    let pixel_height = (size.height() * density).ceil().max(1.0) as u32;
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(pixel_width, pixel_height)
-        .ok_or_else(|| crate::i18n::media::MERMAID_BITMAP_ALLOC.get().to_owned())?;
-    resvg::render(
-        &tree,
-        resvg::tiny_skia::Transform::from_scale(density, density),
-        &mut pixmap.as_mut(),
-    );
-    let mut bytes = pixmap.take();
-    for pixel in bytes.chunks_exact_mut(4) {
-        pixel.swap(0, 2);
-    }
-    let image = image::RgbaImage::from_raw(pixel_width, pixel_height, bytes)
-        .ok_or_else(|| crate::i18n::media::MERMAID_BITMAP_INVALID.get().to_owned())?;
-    Ok((
-        Arc::new(RenderImage::new([Frame::new(image)])),
-        (size.width(), size.height()),
-    ))
 }
