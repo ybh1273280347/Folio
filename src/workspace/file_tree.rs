@@ -1075,6 +1075,7 @@ impl Workspace {
         if let Err(error) = self.refresh_files(window, cx) {
             self.report(error, cx);
         }
+        self.refresh_active_backlinks(cx);
         if self.kb_enabled() {
             self.refresh_kb_snapshot(cx);
         }

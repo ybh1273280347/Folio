@@ -13,7 +13,6 @@ impl Workspace {
         &mut self,
         rel_path: &str,
         text: &str,
-        disk_synced: bool,
         cx: &mut Context<Self>,
     ) {
         if !Self::is_markdown_path(rel_path) {
@@ -22,13 +21,10 @@ impl Workspace {
         let Some(db_path) = self.canvas_metadata_db_path() else {
             return;
         };
-        let full = disk_synced.then(|| self.document_path(rel_path));
-        if let Err(error) =
-            md_links::sync_markdown_links(&db_path, rel_path, text, full.as_deref())
-        {
+        let full = self.document_path(rel_path);
+        if let Err(error) = md_links::sync_markdown_links(&db_path, rel_path, text, &full) {
             self.report(error, cx);
         }
-        self.refresh_active_markdown_backlinks();
     }
 
     pub(in crate::workspace) fn sync_project_markdown_links(&mut self, cx: &mut Context<Self>) {
@@ -49,7 +45,7 @@ impl Workspace {
         if let Err(error) = md_links::sync_project_markdown_links(&db_path, &root, &md_paths) {
             self.report(error, cx);
         }
-        self.refresh_active_markdown_backlinks();
+        self.refresh_active_markdown_backlinks(cx);
     }
 
     pub(in crate::workspace) fn remove_markdown_links_index(
@@ -65,15 +61,14 @@ impl Workspace {
         {
             self.report(error, cx);
         }
-        self.refresh_active_markdown_backlinks();
     }
 
-    pub(in crate::workspace) fn refresh_active_backlinks(&mut self) {
+    pub(in crate::workspace) fn refresh_active_backlinks(&mut self, cx: &mut Context<Self>) {
         self.refresh_active_canvas_backlinks();
-        self.refresh_active_markdown_backlinks();
+        self.refresh_active_markdown_backlinks(cx);
     }
 
-    pub(in crate::workspace) fn refresh_active_markdown_backlinks(&mut self) {
+    pub(in crate::workspace) fn refresh_active_markdown_backlinks(&mut self, cx: &mut Context<Self>) {
         if self.documents.active.is_empty() {
             self.documents.active_markdown_backlinks.clear();
             return;
@@ -82,20 +77,18 @@ impl Workspace {
             self.documents.active_markdown_backlinks.clear();
             return;
         };
-        let entries = md_links::backlinks_for(&db_path, &self.documents.active);
-        let mut live = Vec::with_capacity(entries.len());
-        let mut stale = BTreeSet::new();
-        for link in entries {
-            if self.document_path(&link.source_path).is_file() {
-                live.push(link);
-            } else {
-                stale.insert(link.source_path);
+        let mut source_exists = BTreeMap::new();
+        let links = match md_links::backlinks_for(&db_path, &self.documents.active) {
+            Ok(links) => links,
+            Err(error) => {
+                self.report(error, cx);
+                Vec::new()
             }
-        }
-        for path in stale {
-            let _ = md_links::remove_markdown_links(&db_path, &path);
-        }
-        self.documents.active_markdown_backlinks = live;
+        };
+        self.documents.active_markdown_backlinks = links.into_iter().filter(|link| {
+            *source_exists.entry(link.source_path.clone())
+                .or_insert_with(|| self.document_path(&link.source_path).is_file())
+        }).collect();
     }
 
     pub(in crate::workspace) fn open_markdown_backlink(
@@ -107,6 +100,7 @@ impl Workspace {
         let full = self.document_path(&backlink.source_path);
         if !full.is_file() {
             self.remove_markdown_links_index(&backlink.source_path, cx);
+            self.refresh_active_markdown_backlinks(cx);
             self.report(crate::i18n::workspace::err_file_not_found(&full), cx);
             return;
         }
@@ -127,13 +121,16 @@ impl Workspace {
             PaneKey::tab(&file.path)
         };
         if let Some(md) = self.documents.markdown_panes.get(&pane_key).cloned() {
-            let line = backlink.line;
-            let snippet = (!backlink.label.trim().is_empty()).then_some(backlink.label.clone());
             md.update(cx, |pane, cx| {
-                pane.jump_to_search_hit(Some(line), None, snippet.as_deref(), window, cx);
+                let label = backlink.label.trim();
+                if label.is_empty() {
+                    pane.jump_to_search_hit(Some(backlink.line), None, None, window, cx);
+                } else {
+                    // A cold document may still be displaying its first-paint preview.
+                    pane.jump_to_canvas_quote(label, 0, None, Some(backlink.line), window, cx);
+                }
             });
         }
-        self.refresh_active_backlinks();
         cx.notify();
     }
 
@@ -151,6 +148,16 @@ impl Workspace {
             return;
         }
         let Some(project) = self.projects.directory() else {
+            for (old, new) in moves {
+                self.remove_markdown_links_index(old, cx);
+                if Self::is_markdown_path(new) {
+                    match files::read_document_at(Path::new(new)) {
+                        Ok(disk) => self.sync_markdown_links_from_text(new, &disk.text, cx),
+                        Err(error) => self.report(error, cx),
+                    }
+                }
+            }
+            self.refresh_active_markdown_backlinks(cx);
             return;
         };
         let root = PathBuf::from(&project.folder);
@@ -178,13 +185,13 @@ impl Workspace {
                 candidates.insert(file.path.clone());
             }
         }
-        for path in self.documents.open.keys() {
-            if Self::is_markdown_path(path) {
-                candidates.insert(path.clone());
+        for (path, buffer) in self.documents.open_buffers() {
+            if Self::is_markdown_path(path) && buffer.is_dirty() {
+                candidates.insert(path.to_owned());
             }
         }
 
-        if let Err(error) = md_links::relocate_source_paths(&db_path, moves, is_folder) {
+        if let Err(error) = md_links::remove_relocated_sources(&db_path, moves, is_folder) {
             self.report(error, cx);
         }
 
@@ -193,58 +200,68 @@ impl Workspace {
         let mut conflict_files = Vec::new();
 
         for current_path in candidates {
-            let old_source = md_links::reverse_remap_rel_path(&current_path, moves, is_folder)
-                .unwrap_or_else(|| current_path.clone());
+            let moved_from = md_links::reverse_remap_rel_path(&current_path, moves, is_folder);
+            let old_source = moved_from.as_deref().unwrap_or(&current_path);
+            let full = self.document_path(&current_path);
 
             if let Some(buffer) = self.documents.open_buffer(&current_path) {
-                let current_text = buffer.text.clone();
                 if let Some((next_text, count)) = md_links::rewrite_markdown_links(
-                    &current_text,
-                    &old_source,
+                    &buffer.text,
+                    old_source,
                     &current_path,
                     moves,
                     is_folder,
                 ) {
-                    self.edit_document(&current_path, next_text.clone());
+                    self.edit_document(&current_path, next_text);
                     self.sync_markdown_panes(&current_path, window, cx);
-                    if let Err(error) =
-                        md_links::sync_markdown_links(&db_path, &current_path, &next_text, None)
-                    {
-                        self.report(error, cx);
-                    }
                     updated_files += 1;
                     updated_links += count;
+                }
+                // Moving changes the base of the saved links immediately. The rewritten
+                // draft becomes visible in backlinks only after a successful save.
+                if moved_from.is_some() {
+                    match files::read_document(&root, &current_path) {
+                        Ok(disk) => self.sync_markdown_links_from_text(&current_path, &disk.text, cx),
+                        Err(error) => self.report(error, cx),
+                    }
                 }
                 continue;
             }
 
-            let Ok(disk) = files::read_document(&root, &current_path) else {
-                continue;
+            // Auto-refactoring a closed document must preserve its bytes outside the links.
+            let text = match files::project_path(&root, &current_path)
+                .and_then(std::fs::read_to_string)
+            {
+                Ok(text) => text,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    self.report(format!("{}: {error}", full.display()), cx);
+                    continue;
+                }
             };
             let Some((next_text, count)) = md_links::rewrite_markdown_links(
-                &disk.text,
-                &old_source,
+                &text,
+                old_source,
                 &current_path,
                 moves,
                 is_folder,
             ) else {
+                if moved_from.is_some() {
+                    self.sync_markdown_links_from_text(&current_path, &text, cx);
+                }
                 continue;
             };
-            match files::save_document(&root, &current_path, &next_text, &disk.revision) {
+            let revision = files::sha256_hex(text.as_bytes());
+            match files::save_document(&root, &current_path, &next_text, &revision) {
                 Ok(Ok(saved)) => {
-                    let full = self.document_path(&current_path);
-                    if let Err(error) = md_links::sync_markdown_links(
-                        &db_path,
-                        &current_path,
-                        &saved.text,
-                        Some(&full),
-                    ) {
-                        self.report(error, cx);
-                    }
+                    self.sync_markdown_links_from_text(&current_path, &saved.text, cx);
                     updated_files += 1;
                     updated_links += count;
                 }
-                Ok(Err(_)) => conflict_files.push(current_path),
+                Ok(Err(disk)) => {
+                    self.sync_markdown_links_from_text(&current_path, &disk.text, cx);
+                    conflict_files.push(current_path);
+                }
                 Err(error) => self.report(error, cx),
             }
         }
@@ -270,7 +287,7 @@ impl Workspace {
                 cx,
             );
         }
-        self.refresh_active_markdown_backlinks();
+        self.refresh_active_markdown_backlinks(cx);
     }
 
     fn open_internal_link_file(

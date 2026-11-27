@@ -28,7 +28,7 @@ use gpui_kit::{
 };
 use markdown_editor::{
     BlockEditor, BlockEditorEvent, BlockEditorModel, BlockEditorState, BlockId, BlockKind,
-    BlockPosition, BlockSelection, CalloutStyle, ColumnAlign, EditorCommand, MarkChange, MarkKind,
+    BlockPosition, BlockSelection, CalloutStyle, CapturedRange, ColumnAlign, EditorCommand, MarkChange, MarkKind,
     TableEdit,
 };
 use crate::rag::SearchHit;
@@ -300,6 +300,8 @@ struct WikiLinkCandidate {
     icon: IconName,
 }
 
+type ProjectFiles = Box<dyn for<'a> Fn(&'a App) -> &'a [crate::model::ProjectFile]>;
+
 enum QuickInsertMenu {
     Slash {
         token_len: usize,
@@ -321,9 +323,6 @@ impl QuickInsertMenu {
         }
     }
 
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 fn wikilink_file_icon(rel_path: &str) -> IconName {
@@ -389,8 +388,9 @@ pub struct MarkdownPane {
     char_count: usize,
     path: PathBuf,
     project_root: Option<PathBuf>,
-    wiki_file_cache: RefCell<Option<(std::time::Instant, Vec<String>)>>,
-    wiki_heading_cache: RefCell<Option<(PathBuf, Vec<(u8, String)>)>>,
+    project_files: ProjectFiles,
+    wiki_menu_cache: RefCell<Option<(String, std::time::Instant, Vec<WikiLinkCandidate>)>>,
+    wiki_heading_cache: RefCell<Option<(PathBuf, std::time::SystemTime, u64, Vec<OutlineHeading>)>>,
     title_input: Entity<InputState>,
     headings: Vec<OutlineHeading>,
     outline_tree: Vec<outline::OutlineNode>,
@@ -490,6 +490,7 @@ impl MarkdownPane {
     /// Rename the document identity without replacing its editor or undo history.
     pub fn set_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.path = path;
+        self.wiki_menu_cache.get_mut().take();
         let doc_dir = self
             .path
             .parent()
@@ -497,6 +498,7 @@ impl MarkdownPane {
             .to_path_buf();
         let image_cache = crate::image::MarkdownImageCache::default();
         self.visual_editor.update(cx, |editor, cx| {
+            editor.invalidate_captures();
             editor.set_image_source(
                 move |uri| {
                     crate::image::resolve_markdown_image_source_cached(&doc_dir, uri, &image_cache)
@@ -677,6 +679,9 @@ impl MarkdownPane {
         let weak_pane = cx.weak_entity();
         visual_editor.update(cx, |editor, _| {
             editor.set_slash_key_handler(move |editor, key, window, cx| {
+                if !matches!(key, "up" | "down" | "enter" | "tab") {
+                    return false;
+                }
                 // Completion belongs to prose; code and IME composition keep
                 // their own Enter/Tab semantics instead of accepting an emoji.
                 if editor.is_readonly() || editor.is_composing()
@@ -685,30 +690,22 @@ impl MarkdownPane {
                 {
                     return false;
                 }
-                let Some(prefix) = editor.caret_prefix().map(str::to_owned) else {
+                let Some(prefix) = editor.caret_prefix() else {
                     return false;
                 };
                 let Some(pane) = weak_pane.upgrade() else {
                     return false;
                 };
-                let (source, dismissed, slash_index, menu) = {
+                let (slash_index, menu) = {
                     let p = pane.read(cx);
-                    (
-                        p.source,
-                        p.dismissed_slash_prefix.clone(),
-                        p.slash_index,
-                        p.quick_insert_menu(&prefix),
-                    )
+                    if p.source || p.dismissed_slash_prefix.as_deref() == Some(prefix) {
+                        return false;
+                    }
+                    (p.slash_index, p.quick_insert_menu(prefix, cx))
                 };
-                if source || dismissed.as_deref() == Some(prefix.as_str()) {
-                    return false;
-                }
                 let Some(menu) = menu else {
                     return false;
                 };
-                if menu.is_empty() {
-                    return false;
-                }
                 let count = menu.len();
                 match key {
                     "up" => {
@@ -742,11 +739,14 @@ impl MarkdownPane {
                                 });
                             }
                             QuickInsertMenu::WikiLink { token_len, items, .. } => {
+                                let Ok(range) = editor.capture_suffix(token_len) else {
+                                    return false;
+                                };
                                 let candidate = items[chosen].clone();
                                 window.defer(cx, move |window, cx| {
                                     if let Some(pane) = weak_for_defer.upgrade() {
                                         pane.update(cx, |pane, cx| {
-                                            pane.execute_wikilink_insert(&candidate, token_len, window, cx);
+                                            pane.execute_wikilink_insert(&candidate, range, window, cx);
                                         });
                                     }
                                 });
@@ -1043,7 +1043,8 @@ impl MarkdownPane {
             char_count,
             path,
             project_root: None,
-            wiki_file_cache: RefCell::new(None),
+            project_files: Box::new(|_| &[]),
+            wiki_menu_cache: RefCell::new(None),
             wiki_heading_cache: RefCell::new(None),
             title_input,
             headings: Vec::new(),
@@ -1194,6 +1195,7 @@ impl MarkdownPane {
         self.outline_tree = outline::build_tree(&headings);
         self.outline_parents = outline::parent_indices(&self.outline_tree);
         self.headings = headings;
+        self.wiki_menu_cache.get_mut().take();
     }
 
     fn parse_outline(&mut self) {
@@ -1785,8 +1787,9 @@ impl MarkdownPane {
         }
     }
 
-    pub fn with_project_root(mut self, root: Option<PathBuf>) -> Self {
+    pub fn with_project_files(mut self, root: Option<PathBuf>, files: ProjectFiles) -> Self {
         self.project_root = root;
+        self.project_files = files;
         self
     }
 
@@ -1803,39 +1806,7 @@ impl MarkdownPane {
             .map(|rel| rel.to_string_lossy().replace('\\', "/"))
     }
 
-    fn cached_project_files(&self) -> Vec<String> {
-        let Some(root) = self.project_root.as_ref() else {
-            return Vec::new();
-        };
-        const TTL: std::time::Duration = std::time::Duration::from_secs(2);
-        if let Some((ts, ref cached)) = *self.wiki_file_cache.borrow()
-            && ts.elapsed() < TTL
-        {
-            return cached.clone();
-        }
-        let files: Vec<String> = crate::files::list_files(root)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|f| f.path)
-            .collect();
-        *self.wiki_file_cache.borrow_mut() = Some((std::time::Instant::now(), files.clone()));
-        files
-    }
-
-    fn cached_file_headings(&self, full_path: &std::path::Path) -> Vec<(u8, String)> {
-        if let Some((ref cached_path, ref headings)) = *self.wiki_heading_cache.borrow()
-            && cached_path == full_path
-        {
-            return headings.clone();
-        }
-        let headings = std::fs::read_to_string(full_path)
-            .map(|text| crate::markdown::links::extract_markdown_headings(&text))
-            .unwrap_or_default();
-        *self.wiki_heading_cache.borrow_mut() = Some((full_path.to_path_buf(), headings.clone()));
-        headings
-    }
-
-    fn wikilink_candidates(&self, query: &str) -> Vec<WikiLinkCandidate> {
+    fn wikilink_candidates(&self, query: &str, cx: &App) -> Vec<WikiLinkCandidate> {
         let current_rel = self.current_rel_path().unwrap_or_default();
         if let Some((file_part, heading_part)) = query.split_once('#') {
             let file_q = file_part.trim();
@@ -1845,9 +1816,9 @@ impl MarkdownPane {
                     .headings
                     .iter()
                     .filter(|h| {
-                        heading_q.is_empty()
+                        !h.title.trim().is_empty() && (heading_q.is_empty()
                             || h.display_title.to_lowercase().contains(&heading_q)
-                            || h.title.to_lowercase().contains(&heading_q)
+                            || h.title.to_lowercase().contains(&heading_q))
                     })
                     .take(20)
                     .map(|h| WikiLinkCandidate {
@@ -1867,13 +1838,13 @@ impl MarkdownPane {
             let Some(root) = self.project_root.as_ref() else {
                 return Vec::new();
             };
-            let files = self.cached_project_files();
             let file_q_lower = file_q.to_lowercase();
-            let best_md = files
-                .into_iter()
+            let best_md = (self.project_files)(cx)
+                .iter()
+                .map(|file| &file.path)
                 .filter(|p| p.to_ascii_lowercase().ends_with(".md"))
                 .filter_map(|rel| {
-                    let stem = std::path::Path::new(&rel)
+                    let stem = std::path::Path::new(rel)
                         .file_stem()
                         .map(|s| s.to_string_lossy().to_lowercase())
                         .unwrap_or_default();
@@ -1896,21 +1867,38 @@ impl MarkdownPane {
             let Some((_, target_rel)) = best_md else {
                 return Vec::new();
             };
-            let full = root.join(target_rel.replace('/', "\\"));
-            let stem = std::path::Path::new(&target_rel)
+            let full = root.join(target_rel);
+            let stem = std::path::Path::new(target_rel)
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| target_rel.clone());
-            return self
-                .cached_file_headings(&full)
-                .into_iter()
-                .filter(|(_, title)| heading_q.is_empty() || title.to_lowercase().contains(&heading_q))
+            let Ok(meta) = std::fs::metadata(&full) else {
+                return Vec::new();
+            };
+            let Ok(modified) = meta.modified() else {
+                return Vec::new();
+            };
+            let mut cache = self.wiki_heading_cache.borrow_mut();
+            if cache.as_ref().is_none_or(|(path, time, size, _)| {
+                *path != full || *time != modified || *size != meta.len()
+            }) {
+                let Ok(bytes) = std::fs::read(&full) else {
+                    return Vec::new();
+                };
+                // Use the same titles that the destination editor can navigate to.
+                let headings = Self::outline_headings(&String::from_utf8_lossy(&bytes));
+                *cache = Some((full, modified, meta.len(), headings));
+            }
+            return cache.as_ref().unwrap().3.iter()
+                .filter(|h| !h.title.trim().is_empty() && (heading_q.is_empty()
+                    || h.display_title.to_lowercase().contains(&heading_q)
+                    || h.title.to_lowercase().contains(&heading_q)))
                 .take(20)
-                .map(|(depth, title)| WikiLinkCandidate {
-                    title: title.clone(),
-                    subtitle: format!("{stem} · H{depth}"),
+                .map(|h| WikiLinkCandidate {
+                    title: h.display_title.clone(),
+                    subtitle: format!("{stem} · H{}", h.level),
                     target_rel: target_rel.clone(),
-                    anchor: Some(title),
+                    anchor: Some(h.title.clone()),
                     icon: IconName::Heading,
                 })
                 .collect();
@@ -1920,9 +1908,9 @@ impl MarkdownPane {
             return Vec::new();
         }
         let q = query.trim().to_lowercase();
-        let mut scored: Vec<(u8, u8, String, WikiLinkCandidate)> = self
-            .cached_project_files()
-            .into_iter()
+        let mut scored: Vec<_> = (self.project_files)(cx)
+            .iter()
+            .map(|file| file.path.as_str())
             .filter(|rel| {
                 #[cfg(windows)]
                 {
@@ -1930,20 +1918,20 @@ impl MarkdownPane {
                 }
                 #[cfg(not(windows))]
                 {
-                    rel != &current_rel
+                    *rel != current_rel
                 }
             })
             .filter_map(|rel| {
                 let is_md = rel.to_ascii_lowercase().ends_with(".md");
-                let file_name = std::path::Path::new(&rel)
+                let path = std::path::Path::new(rel);
+                let file_name = path
                     .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| rel.clone());
-                let stem = std::path::Path::new(&rel)
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(rel);
+                let stem = path
                     .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| file_name.clone());
-                let title = if is_md { stem.clone() } else { file_name.clone() };
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(file_name);
                 let stem_lower = stem.to_lowercase();
                 let name_lower = file_name.to_lowercase();
                 let rel_lower = rel.to_lowercase();
@@ -1961,33 +1949,7 @@ impl MarkdownPane {
                 } else {
                     return None;
                 };
-                let kind_rank = if is_md { 0u8 } else { 1 };
-                let parent = std::path::Path::new(&rel)
-                    .parent()
-                    .map(|p| p.to_string_lossy().replace('\\', "/"))
-                    .unwrap_or_default();
-                let subtitle = if parent.is_empty() {
-                    std::path::Path::new(&rel)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| format!(".{e}"))
-                        .unwrap_or_default()
-                } else {
-                    parent
-                };
-                let icon = wikilink_file_icon(&rel);
-                Some((
-                    match_rank,
-                    kind_rank,
-                    rel_lower,
-                    WikiLinkCandidate {
-                        title,
-                        subtitle,
-                        target_rel: rel,
-                        anchor: None,
-                        icon,
-                    },
-                ))
+                Some((match_rank, !is_md, rel_lower, rel, if is_md { stem } else { file_name }))
             })
             .collect();
 
@@ -1996,17 +1958,52 @@ impl MarkdownPane {
                 .then_with(|| a.1.cmp(&b.1))
                 .then_with(|| a.2.cmp(&b.2))
         });
-        scored.into_iter().take(20).map(|(_, _, _, c)| c).collect()
+        scored.into_iter().take(20).map(|(_, _, _, rel, title)| {
+                let path = std::path::Path::new(rel);
+                let parent = path
+                    .parent()
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                let subtitle = if parent.is_empty() {
+                    path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| format!(".{e}"))
+                        .unwrap_or_default()
+                } else {
+                    parent
+                };
+                WikiLinkCandidate {
+                    title: title.to_owned(),
+                    subtitle,
+                    target_rel: rel.to_owned(),
+                    anchor: None,
+                    icon: wikilink_file_icon(rel),
+                }
+            })
+            .collect()
     }
 
-    fn quick_insert_menu(&self, prefix: &str) -> Option<QuickInsertMenu> {
+    fn quick_insert_menu(&self, prefix: &str, cx: &App) -> Option<QuickInsertMenu> {
         if let Some((token_len, query)) = crate::markdown::links::extract_wikilink_query(prefix) {
-            let items = self.wikilink_candidates(&query);
+            // Rendering and keyboard navigation reuse the same ranking for a query.
+            // Expiration lets an open menu pick up changes to other files.
+            let mut cache = self.wiki_menu_cache.borrow_mut();
+            if cache.as_ref().is_none_or(|(cached_query, time, _)| {
+                *cached_query != query || time.elapsed() >= std::time::Duration::from_secs(2)
+            }) {
+                *cache = Some((
+                    query.clone(),
+                    std::time::Instant::now(),
+                    self.wikilink_candidates(&query, cx),
+                ));
+            }
+            let items = &cache.as_ref().unwrap().2;
             if !items.is_empty() {
                 return Some(QuickInsertMenu::WikiLink {
                     token_len,
                     query,
-                    items,
+                    items: items.clone(),
                 });
             }
             return None;
@@ -2038,31 +2035,35 @@ impl MarkdownPane {
         if self.dismissed_slash_prefix.as_deref() == Some(prefix) {
             return None;
         }
-        self.quick_insert_menu(prefix)
+        self.quick_insert_menu(prefix, cx)
     }
 
     fn execute_wikilink_insert(
         &mut self,
         candidate: &WikiLinkCandidate,
-        token_len: usize,
+        mut range: CapturedRange,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.source {
+            return;
+        }
         let current_rel = self.current_rel_path().unwrap_or_default();
         let is_same_file = {
             #[cfg(windows)]
             {
-                !current_rel.is_empty() && current_rel.eq_ignore_ascii_case(&candidate.target_rel)
+                current_rel.eq_ignore_ascii_case(&candidate.target_rel)
             }
             #[cfg(not(windows))]
             {
-                !current_rel.is_empty() && current_rel == candidate.target_rel
+                current_rel == candidate.target_rel
             }
         };
         let url = if is_same_file
-            && let Some(anchor) = candidate.anchor.as_deref()
+            && let Some(fragment) = candidate.anchor.as_deref()
+                .and_then(crate::markdown::links::format_heading_fragment)
         {
-            format!("#{anchor}")
+            fragment
         } else {
             crate::markdown::links::format_relative_link_url(
                 &current_rel,
@@ -2071,10 +2072,9 @@ impl MarkdownPane {
             )
         };
         self.visual_editor.update(cx, |editor, cx| {
-            if let Ok(mut range) = editor.capture_suffix(token_len) {
-                let _ = editor.replace_captured_with_link(&mut range, &candidate.title, &url, cx);
+            if editor.replace_captured_with_link(&mut range, &candidate.title, &url, cx).is_ok() {
+                editor.focus(window, cx);
             }
-            editor.focus(window, cx);
         });
         cx.notify();
     }
@@ -3827,6 +3827,7 @@ impl MarkdownPane {
                 query,
                 items,
             } => {
+                let range = self.visual_editor.read(cx).capture_suffix(token_len).ok()?;
                 let header = if query.is_empty() {
                     Some(crate::i18n::markdown::WIKILINK_HEADER_EMPTY.get().to_owned())
                 } else {
@@ -3838,6 +3839,7 @@ impl MarkdownPane {
                     .map(|(ix, item)| {
                         let selected = ix == active_ix;
                         let candidate = item.clone();
+                        let range = range.clone();
                         div()
                             .id(("wikilink-item", ix))
                             .flex()
@@ -3919,7 +3921,7 @@ impl MarkdownPane {
                             })
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |pane, _, window, cx| {
-                                pane.execute_wikilink_insert(&candidate, token_len, window, cx);
+                                pane.execute_wikilink_insert(&candidate, range.clone(), window, cx);
                             }))
                             .into_any_element()
                     })

@@ -315,7 +315,7 @@ impl Workspace {
         self.refresh_tags(cx);
         self.projects.save()?;
         self.remember_session()?;
-        self.sync_project_markdown_links(cx);
+        self.refresh_active_backlinks(cx);
         self.reset_rag_sync_on_project_switch(cx);
         cx.notify();
         Ok(())
@@ -407,6 +407,7 @@ impl Workspace {
         self.projects.save()?;
         self.remember_session()?;
         self.sync_project_markdown_links(cx);
+        self.refresh_active_canvas_backlinks();
         self.reset_rag_sync_on_project_switch(cx);
         cx.notify();
         Ok(())

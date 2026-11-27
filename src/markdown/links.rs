@@ -71,7 +71,7 @@ struct LocatedLink {
     dest_start: usize,
     dest_end: usize,
     angle_bracketed: bool,
-    raw_dest: String,
+    url: String,
     label: String,
     line: usize,
     kind: MarkdownLinkKind,
@@ -86,9 +86,10 @@ fn markdown_parse_options() -> markdown::ParseOptions {
 
 /// Extracts all project-internal Markdown links, images, and link definitions from `text`.
 pub fn extract_markdown_links(source_path: &str, text: &str) -> Vec<ExtractedMarkdownLink> {
+    let source_path = normalize_slash(source_path);
     let mut out = Vec::new();
     for located in collect_located_links(text) {
-        let Some(parsed) = parse_local_target(source_path, &located.raw_dest) else {
+        let Some(parsed) = parse_local_target(&source_path, &located.url) else {
             continue;
         };
         out.push(ExtractedMarkdownLink {
@@ -125,7 +126,7 @@ pub fn rewrite_markdown_links(
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
 
     for item in located {
-        let Some(parsed) = parse_local_target(&old_source, &item.raw_dest) else {
+        let Some(parsed) = parse_local_target(&old_source, &item.url) else {
             continue;
         };
         let remapped_target = remap_rel_path_compat(&parsed.target_path, moves, is_folder);
@@ -134,6 +135,12 @@ pub fn rewrite_markdown_links(
             continue;
         }
         let next_target = remapped_target.as_deref().unwrap_or(&parsed.target_path);
+        // A co-moved relative target can still resolve correctly with its original spelling.
+        if parse_local_target(&new_source, &item.url)
+            .is_some_and(|current| current.target_path == next_target)
+        {
+            continue;
+        }
         let next_path = match parsed.style {
             PathStyle::RootRelative => format!("/{next_target}"),
             PathStyle::DotRelative => {
@@ -146,39 +153,34 @@ pub fn rewrite_markdown_links(
             }
             PathStyle::Relative => relative_path(parent_dir(&new_source), next_target),
         };
-        let formatted_path = if item.angle_bracketed {
-            next_path
-        } else {
-            encode_bare_destination(&next_path)
-        };
+        let formatted_path = encode_destination(&next_path, item.angle_bracketed, false);
         let replacement = match &parsed.anchor {
-            Some(anchor) => format!("{formatted_path}#{anchor}"),
+            Some(anchor) => format!(
+                "{formatted_path}#{}",
+                encode_destination(anchor, item.angle_bracketed, true)
+            ),
             None => formatted_path,
         };
-        if replacement != item.raw_dest {
-            edits.push((item.dest_start, item.dest_end, replacement));
-        }
+        edits.push((item.dest_start, item.dest_end, replacement));
     }
 
     if edits.is_empty() {
         return None;
     }
 
-    // Apply edits from back to front so earlier byte offsets remain valid.
-    edits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-    let mut updated = text.to_owned();
-    let mut replaced = 0usize;
-    let mut last_start = usize::MAX;
+    // AST destinations are disjoint, including images nested in link labels.
+    // Copy the gaps once so large refactors do not repeatedly shift the rest of the file.
+    edits.sort_unstable_by_key(|edit| edit.0);
+    let replaced = edits.len();
+    let mut updated = String::with_capacity(text.len());
+    let mut cursor = 0;
     for (start, end, replacement) in edits {
-        if end > last_start || end > updated.len() || start > end {
-            continue;
-        }
-        updated.replace_range(start..end, &replacement);
-        last_start = start;
-        replaced += 1;
+        updated.push_str(&text[cursor..start]);
+        updated.push_str(&replacement);
+        cursor = end;
     }
-
-    (replaced > 0).then_some((updated, replaced))
+    updated.push_str(&text[cursor..]);
+    Some((updated, replaced))
 }
 
 /// Inverse-maps a current path back to its pre-move path if it was part of `moves`.
@@ -278,8 +280,10 @@ struct ParsedLocalTarget {
     style: PathStyle,
 }
 
-fn parse_local_target(source_path: &str, raw_dest: &str) -> Option<ParsedLocalTarget> {
-    let raw = raw_dest.trim();
+/// Parses the semantic URL from the Markdown AST. The original destination span
+/// is used only for editing, since its escapes and character references are syntax.
+fn parse_local_target(source_path: &str, url: &str) -> Option<ParsedLocalTarget> {
+    let raw = url.trim();
     if raw.is_empty() || raw.starts_with('#') || raw.starts_with("//") {
         return None;
     }
@@ -293,15 +297,16 @@ fn parse_local_target(source_path: &str, raw_dest: &str) -> Option<ParsedLocalTa
         Some((path, frag)) => (path, Some(frag.to_owned())),
         None => (raw, None),
     };
-    let unescaped = unescape_commonmark_destination(raw_path);
-    let decoded = files::percent_decode(&unescaped);
+    let decoded = files::percent_decode(raw_path);
     if decoded.is_empty() {
         return None;
     }
     let normalized = decoded.replace('\\', "/");
     // Skip Windows drive-letter absolute paths like `C:/...`.
     let bytes = normalized.as_bytes();
-    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+    if normalized.starts_with("//")
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+    {
         return None;
     }
 
@@ -310,17 +315,14 @@ fn parse_local_target(source_path: &str, raw_dest: &str) -> Option<ParsedLocalTa
     } else if normalized.starts_with("./") {
         (
             PathStyle::DotRelative,
-            normalize_lexical(parent_dir(&normalize_slash(source_path)), &normalized)?,
+            normalize_lexical(parent_dir(source_path), &normalized)?,
         )
     } else {
         (
             PathStyle::Relative,
-            normalize_lexical(parent_dir(&normalize_slash(source_path)), &normalized)?,
+            normalize_lexical(parent_dir(source_path), &normalized)?,
         )
     };
-    if resolved.is_empty() {
-        return None;
-    }
     Some(ParsedLocalTarget {
         target_path: resolved,
         anchor,
@@ -338,40 +340,17 @@ pub fn format_relative_link_url(
     let source_norm = normalize_slash(source_rel);
     let target_norm = normalize_slash(target_rel);
     let rel = relative_path(parent_dir(&source_norm), &target_norm);
-    let encoded = encode_bare_destination(&rel);
-    match anchor.map(str::trim).filter(|a| !a.is_empty()) {
-        Some(a) => format!("{encoded}#{a}"),
+    let encoded = encode_destination(&rel, false, false);
+    match format_heading_fragment(anchor.unwrap_or_default()) {
+        Some(fragment) => format!("{encoded}{fragment}"),
         None => encoded,
     }
 }
 
-/// Extracts `(depth, title)` headings from Markdown text while skipping code blocks and math.
-pub fn extract_markdown_headings(text: &str) -> Vec<(u8, String)> {
-    let Ok(root) = markdown::to_mdast(text, &markdown_parse_options()) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    collect_headings(&root, &mut out);
-    out
-}
-
-fn collect_headings(node: &Node, out: &mut Vec<(u8, String)>) {
-    match node {
-        Node::Code(_) | Node::InlineCode(_) | Node::Math(_) | Node::InlineMath(_) => return,
-        Node::Heading(h) => {
-            let title = extract_plain_text(node);
-            if !title.is_empty() {
-                out.push((h.depth, title));
-            }
-            return;
-        }
-        _ => {}
-    }
-    if let Some(children) = node.children() {
-        for child in children {
-            collect_headings(child, out);
-        }
-    }
+/// A completion starts from the literal heading title, including any percent signs.
+pub fn format_heading_fragment(title: &str) -> Option<String> {
+    let title = title.trim();
+    (!title.is_empty()).then(|| format!("#{}", encode_destination(title, false, false)))
 }
 
 /// Detects an active `[[query` trigger at the end of `prefix`, returning `(token_bytes, query)`.
@@ -420,38 +399,31 @@ fn relative_path(from_dir: &str, target_path: &str) -> String {
     for part in &target_parts[common..] {
         result.push(*part);
     }
-    result.join("/")
+    if result.is_empty() {
+        "./".to_owned()
+    } else {
+        result.join("/")
+    }
 }
 
-fn encode_bare_destination(path: &str) -> String {
+fn encode_destination(path: &str, angle_bracketed: bool, preserve_percent_encoding: bool) -> String {
     let mut out = String::with_capacity(path.len());
     for ch in path.chars() {
         match ch {
-            ' ' => out.push_str("%20"),
-            '(' => out.push_str("%28"),
-            ')' => out.push_str("%29"),
+            '%' if !preserve_percent_encoding => out.push_str("%25"),
+            ' ' if !angle_bracketed => out.push_str("%20"),
+            '(' if !angle_bracketed => out.push_str("%28"),
+            ')' if !angle_bracketed => out.push_str("%29"),
+            '\t' => out.push_str("%09"),
+            '\r' => out.push_str("%0D"),
+            '\n' => out.push_str("%0A"),
             '#' => out.push_str("%23"),
+            '&' => out.push_str("%26"),
             '<' => out.push_str("%3C"),
             '>' => out.push_str("%3E"),
+            '\\' => out.push_str("%5C"),
             _ => out.push(ch),
         }
-    }
-    out
-}
-
-fn unescape_commonmark_destination(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\\'
-            && let Some(&next) = chars.peek()
-            && next.is_ascii_punctuation()
-        {
-            out.push(next);
-            chars.next();
-            continue;
-        }
-        out.push(ch);
     }
     out
 }
@@ -461,23 +433,24 @@ fn collect_located_links(source: &str) -> Vec<LocatedLink> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    walk_ast(&root, source, &mut out);
+    walk_ast(&root, source, 0, &mut out);
     out
 }
 
-fn walk_ast(node: &Node, source: &str, out: &mut Vec<LocatedLink>) {
+fn walk_ast(node: &Node, source: &str, quote_depth: usize, out: &mut Vec<LocatedLink>) {
+    let quote_depth = quote_depth + usize::from(matches!(node, Node::Blockquote(_)));
     match node {
         Node::Code(_) | Node::InlineCode(_) | Node::Math(_) | Node::InlineMath(_) => return,
         Node::Link(link) => {
             if let Some(pos) = &link.position
-                && let Some(span) = locate_inline_link_dest(source, pos.start.offset, pos.end.offset, &link.children)
+                && let Some(span) = locate_inline_link_dest(source, pos.start.offset, pos.end.offset, &link.children, quote_depth)
             {
                 let label = extract_plain_text(node);
                 out.push(LocatedLink {
                     dest_start: span.start,
                     dest_end: span.end,
                     angle_bracketed: span.angle_bracketed,
-                    raw_dest: source[span.start..span.end].to_owned(),
+                    url: link.url.clone(),
                     label,
                     line: pos.start.line,
                     kind: MarkdownLinkKind::Link,
@@ -485,19 +458,19 @@ fn walk_ast(node: &Node, source: &str, out: &mut Vec<LocatedLink>) {
             }
             // Still walk children so `[![alt](img.png)](doc.md)` locates the inner image too.
             for child in &link.children {
-                walk_ast(child, source, out);
+                walk_ast(child, source, quote_depth, out);
             }
             return;
         }
         Node::Image(image) => {
             if let Some(pos) = &image.position
-                && let Some(span) = locate_inline_image_dest(source, pos.start.offset, pos.end.offset)
+                && let Some(span) = locate_inline_image_dest(source, pos.start.offset, pos.end.offset, quote_depth)
             {
                 out.push(LocatedLink {
                     dest_start: span.start,
                     dest_end: span.end,
                     angle_bracketed: span.angle_bracketed,
-                    raw_dest: source[span.start..span.end].to_owned(),
+                    url: image.url.clone(),
                     label: image.alt.clone(),
                     line: pos.start.line,
                     kind: MarkdownLinkKind::Image,
@@ -507,14 +480,14 @@ fn walk_ast(node: &Node, source: &str, out: &mut Vec<LocatedLink>) {
         }
         Node::Definition(def) => {
             if let Some(pos) = &def.position
-                && let Some(span) = locate_definition_dest(source, pos.start.offset, pos.end.offset)
+                && let Some(span) = locate_definition_dest(source, pos.start.offset, pos.end.offset, quote_depth)
             {
                 let label = def.label.clone().unwrap_or_else(|| def.identifier.clone());
                 out.push(LocatedLink {
                     dest_start: span.start,
                     dest_end: span.end,
                     angle_bracketed: span.angle_bracketed,
-                    raw_dest: source[span.start..span.end].to_owned(),
+                    url: def.url.clone(),
                     label,
                     line: pos.start.line,
                     kind: MarkdownLinkKind::Definition,
@@ -527,7 +500,7 @@ fn walk_ast(node: &Node, source: &str, out: &mut Vec<LocatedLink>) {
 
     if let Some(children) = node.children() {
         for child in children {
-            walk_ast(child, source, out);
+            walk_ast(child, source, quote_depth, out);
         }
     }
 }
@@ -564,6 +537,7 @@ fn locate_inline_link_dest(
     start: usize,
     end: usize,
     children: &[Node],
+    quote_depth: usize,
 ) -> Option<DestSpan> {
     let bytes = source.as_bytes();
     if start >= end || end > bytes.len() || bytes[start] != b'[' {
@@ -589,10 +563,10 @@ fn locate_inline_link_dest(
     if i + 1 >= end || bytes[i] != b']' || bytes[i + 1] != b'(' {
         return None;
     }
-    parse_dest_span(source, i + 2, end, true)
+    parse_dest_span(source, i + 2, end, true, quote_depth)
 }
 
-fn locate_inline_image_dest(source: &str, start: usize, end: usize) -> Option<DestSpan> {
+fn locate_inline_image_dest(source: &str, start: usize, end: usize, quote_depth: usize) -> Option<DestSpan> {
     let bytes = source.as_bytes();
     if start + 2 >= end || end > bytes.len() || bytes[start] != b'!' || bytes[start + 1] != b'[' {
         return None;
@@ -619,10 +593,10 @@ fn locate_inline_image_dest(source: &str, start: usize, end: usize) -> Option<De
     if i + 1 >= end || bytes[i] != b']' || bytes[i + 1] != b'(' {
         return None;
     }
-    parse_dest_span(source, i + 2, end, true)
+    parse_dest_span(source, i + 2, end, true, quote_depth)
 }
 
-fn locate_definition_dest(source: &str, start: usize, end: usize) -> Option<DestSpan> {
+fn locate_definition_dest(source: &str, start: usize, end: usize, quote_depth: usize) -> Option<DestSpan> {
     let bytes = source.as_bytes();
     if start >= end || end > bytes.len() {
         return None;
@@ -648,12 +622,26 @@ fn locate_definition_dest(source: &str, start: usize, end: usize) -> Option<Dest
     if i + 1 >= end || bytes[i] != b']' || bytes[i + 1] != b':' {
         return None;
     }
-    parse_dest_span(source, i + 2, end, false)
+    parse_dest_span(source, i + 2, end, false, quote_depth)
 }
 
-fn parse_dest_span(source: &str, mut i: usize, end: usize, inside_parens: bool) -> Option<DestSpan> {
+fn parse_dest_span(
+    source: &str,
+    mut i: usize,
+    end: usize,
+    inside_parens: bool,
+    quote_depth: usize,
+) -> Option<DestSpan> {
     let bytes = source.as_bytes();
-    while i < end && matches!(bytes[i], b' ' | b'\t' | b'\r' | b'\n') {
+    let mut quote_prefix = 0;
+    while i < end {
+        match bytes[i] {
+            b'\r' | b'\n' => quote_prefix = quote_depth,
+            b' ' | b'\t' => {}
+            // Continuation lines retain their container prefix in the original source.
+            b'>' if quote_prefix > 0 => quote_prefix -= 1,
+            _ => break,
+        }
         i += 1;
     }
     if i >= end {
@@ -724,6 +712,9 @@ pub fn metadata_db_path(project_root: Option<&Path>) -> std::io::Result<PathBuf>
     crate::canvas::index::metadata_db_path(project_root)
 }
 
+const LINK_INDEX_VERSION: i64 = 1;
+const TARGET_COLLATION: &str = if cfg!(windows) { "NOCASE" } else { "BINARY" };
+
 fn open_links_db(db_path: &Path, create: bool) -> Result<Option<Connection>, String> {
     if !db_path.exists() && !create {
         return Ok(None);
@@ -738,7 +729,7 @@ fn open_links_db(db_path: &Path, create: bool) -> Result<Option<Connection>, Str
     let conn = Connection::open_with_flags(db_path, flags).map_err(|e| e.to_string())?;
     conn.busy_timeout(Duration::from_millis(250))
         .map_err(|e| e.to_string())?;
-    conn.execute_batch(
+    conn.execute_batch(&format!(
         "CREATE TABLE IF NOT EXISTS markdown_links (
             source_path TEXT NOT NULL,
             target_path TEXT NOT NULL,
@@ -749,14 +740,15 @@ fn open_links_db(db_path: &Path, create: bool) -> Result<Option<Connection>, Str
             trash_id    TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_md_links_source ON markdown_links(source_path, trash_id);
-        CREATE INDEX IF NOT EXISTS idx_md_links_target ON markdown_links(target_path COLLATE NOCASE, trash_id);
+        CREATE INDEX IF NOT EXISTS idx_md_links_target ON markdown_links(target_path COLLATE {TARGET_COLLATION}, trash_id);
         CREATE INDEX IF NOT EXISTS idx_md_links_trash ON markdown_links(trash_id);
         CREATE TABLE IF NOT EXISTS markdown_link_files (
             source_path TEXT PRIMARY KEY,
             mtime_ns    INTEGER NOT NULL,
             file_size   INTEGER NOT NULL
-        );",
-    )
+        );
+        CREATE TABLE IF NOT EXISTS markdown_link_index_version (version INTEGER PRIMARY KEY);",
+    ))
     .map_err(|e| e.to_string())?;
     Ok(Some(conn))
 }
@@ -772,19 +764,16 @@ fn file_stamp(full_path: &Path) -> Option<(i64, i64)> {
     Some((mtime_ns, size))
 }
 
-/// Syncs links for a single Markdown file from `text` and optional disk stamp.
+/// Syncs links for a single saved Markdown file.
 pub fn sync_markdown_links(
     db_path: &Path,
     source_path: &str,
     text: &str,
-    disk_path: Option<&Path>,
+    disk_path: &Path,
 ) -> Result<(), String> {
     let normalized = normalize_slash(source_path);
     let links = extract_markdown_links(&normalized, text);
-    let stamp = disk_path.and_then(file_stamp);
-    if links.is_empty() && stamp.is_none() && !db_path.exists() {
-        return Ok(());
-    }
+    let stamp = file_stamp(disk_path);
     let Some(mut conn) = open_links_db(db_path, !links.is_empty() || stamp.is_some())? else {
         return Ok(());
     };
@@ -833,6 +822,9 @@ fn write_source_links(
             params![source_path, mtime_ns, file_size],
         )
         .map_err(|e| e.to_string())?;
+    } else {
+        tx.execute("DELETE FROM markdown_link_files WHERE source_path = ?1", [source_path])
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -849,6 +841,12 @@ pub fn sync_project_markdown_links(
     let Some(mut conn) = open_links_db(db_path, !md_rel_paths.is_empty())? else {
         return Ok(());
     };
+    // Stamps from older extraction rules cannot validate the current derived rows.
+    let version_matches = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM markdown_link_index_version WHERE version = ?1)",
+        [LINK_INDEX_VERSION],
+        |row| row.get::<_, bool>(0),
+    ).map_err(|e| e.to_string())?;
     let cached: BTreeMap<String, (i64, i64)> = {
         let mut stmt = conn
             .prepare("SELECT source_path, mtime_ns, file_size FROM markdown_link_files")
@@ -861,33 +859,51 @@ pub fn sync_project_markdown_links(
                 ))
             })
             .map_err(|e| e.to_string())?;
-        rows.filter_map(Result::ok).collect()
+        rows.collect::<rusqlite::Result<_>>().map_err(|e| e.to_string())?
     };
 
     let current_set: BTreeSet<String> = md_rel_paths.iter().map(|p| normalize_slash(p)).collect();
-    let stale: Vec<String> = cached
-        .keys()
-        .filter(|path| !current_set.contains(*path))
-        .cloned()
-        .collect();
-
-    let mut to_update: Vec<(String, Vec<ExtractedMarkdownLink>, (i64, i64))> = Vec::new();
-    for rel in &current_set {
-        let full = project_root.join(rel.replace('/', "\\"));
-        let Some(stamp) = file_stamp(&full) else {
-            continue;
-        };
-        if cached.get(rel) == Some(&stamp) {
-            continue;
-        }
-        if let Ok(text) = fs::read_to_string(&full) {
-            let links = extract_markdown_links(rel, &text);
-            to_update.push((rel.clone(), links, stamp));
+    let mut stale: BTreeSet<_> = cached.keys()
+        .filter(|path| !current_set.contains(*path)).cloned().collect();
+    if !version_matches {
+        // Early releases could write unstamped draft rows. Remove missing sources too.
+        let mut stmt = conn.prepare("SELECT DISTINCT source_path FROM markdown_links WHERE trash_id = ''")
+            .map_err(|e| e.to_string())?;
+        let sources = stmt.query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        for source in sources {
+            let source = source.map_err(|e| e.to_string())?;
+            if !current_set.contains(&source) {
+                stale.insert(source);
+            }
         }
     }
 
-    if stale.is_empty() && to_update.is_empty() {
-        return Ok(());
+    let mut to_update = Vec::new();
+    let mut read_error = None;
+    for rel in &current_set {
+        let full = project_root.join(rel);
+        let Some(stamp) = file_stamp(&full) else {
+            continue;
+        };
+        if version_matches && cached.get(rel) == Some(&stamp) {
+            continue;
+        }
+        match fs::read(&full) {
+            Ok(bytes) => to_update.push((
+                rel,
+                extract_markdown_links(rel, &String::from_utf8_lossy(&bytes)),
+                stamp,
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                read_error.get_or_insert_with(|| format!("{}: {error}", full.display()));
+            }
+        }
+    }
+
+    if stale.is_empty() && to_update.is_empty() && version_matches {
+        return read_error.map_or(Ok(()), Err);
     }
 
     let tx = conn
@@ -905,7 +921,14 @@ pub fn sync_project_markdown_links(
     for (rel, links, stamp) in &to_update {
         write_source_links(&tx, rel, links, Some(*stamp))?;
     }
-    tx.commit().map_err(|e| e.to_string())
+    if !version_matches && read_error.is_none() {
+        tx.execute("DELETE FROM markdown_link_index_version", [])
+            .map_err(|e| e.to_string())?;
+        tx.execute("INSERT INTO markdown_link_index_version (version) VALUES (?1)", [LINK_INDEX_VERSION])
+            .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    read_error.map_or(Ok(()), Err)
 }
 
 pub fn remove_markdown_links(db_path: &Path, source_path: &str) -> Result<(), String> {
@@ -956,42 +979,21 @@ pub fn restore_markdown_links(
     target_rel_path: &str,
     target_file: &Path,
 ) -> Result<(), String> {
-    let normalized = normalize_slash(target_rel_path);
+    // Relative targets follow the restored file's actual directory and payload.
+    let source = normalize_slash(target_rel_path);
     let stamp = file_stamp(target_file);
-    if let Some(mut conn) = open_links_db(db_path, false)? {
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|e| e.to_string())?;
-        tx.execute(
-            "DELETE FROM markdown_links WHERE source_path = ?1 AND trash_id = ''",
-            [&normalized],
-        )
+    let bytes = fs::read(target_file).map_err(|e| e.to_string())?;
+    let links = extract_markdown_links(&source, &String::from_utf8_lossy(&bytes));
+    let Some(mut conn) = open_links_db(db_path, true)? else {
+        unreachable!("opening an index with create enabled returns a connection");
+    };
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
-        let restored = tx
-            .execute(
-                "UPDATE markdown_links SET trash_id = '', source_path = ?1 WHERE trash_id = ?2",
-                params![normalized, trash_id],
-            )
-            .map_err(|e| e.to_string())?;
-        if restored > 0 {
-            if let Some((mtime_ns, file_size)) = stamp {
-                tx.execute(
-                    "INSERT INTO markdown_link_files (source_path, mtime_ns, file_size)
-                     VALUES (?1, ?2, ?3)
-                     ON CONFLICT(source_path) DO UPDATE SET mtime_ns = excluded.mtime_ns, file_size = excluded.file_size",
-                    params![normalized, mtime_ns, file_size],
-                )
-                .map_err(|e| e.to_string())?;
-            }
-            tx.commit().map_err(|e| e.to_string())?;
-            return Ok(());
-        }
-        tx.commit().map_err(|e| e.to_string())?;
-    }
-    if let Ok(raw) = fs::read_to_string(target_file) {
-        sync_markdown_links(db_path, &normalized, &raw, Some(target_file))?;
-    }
-    Ok(())
+    tx.execute("DELETE FROM markdown_links WHERE trash_id = ?1", [trash_id])
+        .map_err(|e| e.to_string())?;
+    write_source_links(&tx, &source, &links, stamp)?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 pub fn purge_trashed_markdown_links(db_path: &Path, trash_id: &str) -> Result<(), String> {
@@ -1015,26 +1017,37 @@ pub fn sources_referencing_moves(
     let Some(conn) = open_links_db(db_path, false)? else {
         return Ok(Vec::new());
     };
-    let mut stmt = conn
-        .prepare("SELECT DISTINCT source_path, target_path FROM markdown_links WHERE trash_id = ''")
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(|e| e.to_string())?;
+    let mut exact = conn.prepare(&format!(
+        "SELECT DISTINCT source_path FROM markdown_links
+         WHERE target_path = ?1 COLLATE {TARGET_COLLATION} AND trash_id = ''",
+    )).map_err(|e| e.to_string())?;
+    let mut descendants = conn.prepare(&format!(
+        "SELECT DISTINCT source_path FROM markdown_links
+         WHERE target_path COLLATE {TARGET_COLLATION} >= ?1
+           AND target_path COLLATE {TARGET_COLLATION} < ?2 AND trash_id = ''",
+    )).map_err(|e| e.to_string())?;
     let mut matched = BTreeSet::new();
-    for row in rows.filter_map(Result::ok) {
-        let (source, target) = row;
-        if remap_rel_path_compat(&target, moves, is_folder).is_some() {
-            matched.insert(source);
+    for (old, _) in moves {
+        let old = normalize_slash(old);
+        let rows = exact.query_map([&old], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            matched.insert(row.map_err(|e| e.to_string())?);
+        }
+        if is_folder {
+            // '/' and '0' are adjacent, so the indexed range contains only this folder's children.
+            let rows = descendants.query_map([format!("{old}/"), format!("{old}0")], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                matched.insert(row.map_err(|e| e.to_string())?);
+            }
         }
     }
     Ok(matched.into_iter().collect())
 }
 
-/// Updates `source_path` keys in `markdown_links` and `markdown_link_files` when Markdown files move.
-pub fn relocate_source_paths(
+/// Drops old source keys before the workspace re-indexes moved files at their new locations.
+pub fn remove_relocated_sources(
     db_path: &Path,
     moves: &[(String, String)],
     is_folder: bool,
@@ -1049,82 +1062,39 @@ pub fn relocate_source_paths(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
 
-    let link_sources = {
-        let mut stmt = tx
-            .prepare("SELECT DISTINCT source_path FROM markdown_links WHERE trash_id = ''")
-            .map_err(|e| e.to_string())?;
-        let mapped = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| e.to_string())?;
-        mapped
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|e| e.to_string())?
-    };
-    for path in link_sources {
-        if let Some(next) = remap_rel_path_compat(&path, moves, is_folder) {
-            tx.execute(
-                "UPDATE markdown_links SET source_path = ?1 WHERE source_path = ?2 AND trash_id = ''",
-                params![next, path],
-            )
-            .map_err(|e| e.to_string())?;
-        }
-    }
-
-    let stamped_sources = {
-        let mut stmt = tx
-            .prepare("SELECT source_path, mtime_ns, file_size FROM markdown_link_files")
-            .map_err(|e| e.to_string())?;
-        let mapped = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?;
-        mapped
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|e| e.to_string())?
-    };
-    for (path, mtime_ns, file_size) in stamped_sources {
-        if let Some(next) = remap_rel_path_compat(&path, moves, is_folder) {
-            tx.execute("DELETE FROM markdown_link_files WHERE source_path = ?1", [&path])
-                .map_err(|e| e.to_string())?;
-            tx.execute(
-                "INSERT INTO markdown_link_files (source_path, mtime_ns, file_size)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(source_path) DO UPDATE SET mtime_ns = excluded.mtime_ns, file_size = excluded.file_size",
-                params![next, mtime_ns, file_size],
-            )
-            .map_err(|e| e.to_string())?;
-        }
+    for (old, _) in moves {
+        let old = normalize_slash(old);
+        let lower = is_folder.then(|| format!("{old}/"));
+        let upper = is_folder.then(|| format!("{old}0"));
+        tx.execute(
+            "DELETE FROM markdown_links WHERE trash_id = ''
+             AND (source_path = ?1 OR (source_path >= ?2 AND source_path < ?3))",
+            params![old, lower, upper],
+        ).map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM markdown_link_files
+             WHERE source_path = ?1 OR (source_path >= ?2 AND source_path < ?3)",
+            params![old, lower, upper],
+        ).map_err(|e| e.to_string())?;
     }
 
     tx.commit().map_err(|e| e.to_string())
 }
 
 /// Queries all active Markdown backlinks pointing to `target_path` (excluding self-links).
-pub fn backlinks_for(db_path: &Path, target_path: &str) -> Vec<MarkdownBacklink> {
-    let Ok(Some(conn)) = open_links_db(db_path, false) else {
-        return Vec::new();
+pub fn backlinks_for(db_path: &Path, target_path: &str) -> Result<Vec<MarkdownBacklink>, String> {
+    let Some(conn) = open_links_db(db_path, false)? else {
+        return Ok(Vec::new());
     };
     let normalized = normalize_slash(target_path);
-    let query = if cfg!(windows) {
+    let query = format!(
         "SELECT source_path, target_path, anchor, label, line, link_kind
          FROM markdown_links
-         WHERE target_path = ?1 COLLATE NOCASE AND trash_id = ''
+         WHERE target_path = ?1 COLLATE {TARGET_COLLATION} AND trash_id = ''
          ORDER BY source_path, line"
-    } else {
-        "SELECT source_path, target_path, anchor, label, line, link_kind
-         FROM markdown_links
-         WHERE target_path = ?1 AND trash_id = ''
-         ORDER BY source_path, line"
-    };
-    let Ok(mut stmt) = conn.prepare(query) else {
-        return Vec::new();
-    };
-    let Ok(rows) = stmt.query_map([&normalized], |row| {
+    );
+    let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([&normalized], |row| {
         let anchor_raw: String = row.get(2)?;
         let kind_raw: String = row.get(5)?;
         Ok(MarkdownBacklink {
@@ -1135,12 +1105,10 @@ pub fn backlinks_for(db_path: &Path, target_path: &str) -> Vec<MarkdownBacklink>
             line: row.get::<_, i64>(4)?.max(1) as usize,
             kind: MarkdownLinkKind::from_str(&kind_raw),
         })
-    }) else {
-        return Vec::new();
-    };
-    rows.filter_map(Result::ok)
-        .filter(|link| !path_eq(&link.source_path, &normalized))
-        .collect()
+    }).map_err(|e| e.to_string())?;
+    let mut links = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+    links.retain(|link| !path_eq(&link.source_path, &normalized));
+    Ok(links)
 }
 
 #[cfg(test)]
@@ -1219,16 +1187,20 @@ External: [web](https://example.com/a.md), [mail](mailto:a@b.com), [local](#Over
     fn rewrites_outbound_links_when_source_moves_across_directories() {
         let doc = concat!(
             "Sibling [B](b.md), dot [C](./c.md), up ![Logo](../assets/logo.png), root [R](/README.md).\n",
+            "[Folder](deep), [Project root](..).\n",
         );
         let moves = vec![("notes/a.md".to_owned(), "notes/deep/a.md".to_owned())];
         let (updated, count) =
             rewrite_markdown_links(doc, "notes/a.md", "notes/deep/a.md", &moves, false)
                 .expect("should rewrite outbound relative paths");
 
-        assert_eq!(count, 3);
+        assert_eq!(count, 5);
         assert_eq!(
             updated,
-            "Sibling [B](../b.md), dot [C](../c.md), up ![Logo](../../assets/logo.png), root [R](/README.md).\n"
+            concat!(
+                "Sibling [B](../b.md), dot [C](../c.md), up ![Logo](../../assets/logo.png), root [R](/README.md).\n",
+                "[Folder](./), [Project root](../..).\n"
+            )
         );
     }
 
@@ -1278,6 +1250,19 @@ External: [web](https://example.com/a.md), [mail](mailto:a@b.com), [local](#Over
     }
 
     #[test]
+    fn rewrites_quoted_link_destinations_without_changing_container_prefix() {
+        let doc = "> > [A](\r\n> > <a&amp;b.md#100%25>)\r\n";
+        let moves = [("a&b.md".to_owned(), "100%20#完成.md".to_owned())];
+        let (updated, count) = rewrite_markdown_links(doc, "index.md", "index.md", &moves, false)
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(updated, "> > [A](\r\n> > <100%2520%23完成.md#100%25>)\r\n");
+        let links = extract_markdown_links("index.md", &updated);
+        assert_eq!(links[0].target_path, "100%20#完成.md");
+        assert_eq!(links[0].anchor.as_deref(), Some("100%25"));
+    }
+
+    #[test]
     fn sqlite_index_sync_backlinks_relocate_and_trash_roundtrip() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -1289,14 +1274,17 @@ External: [web](https://example.com/a.md), [mail](mailto:a@b.com), [local](#Over
         fs::write(&a_path, "# A\nSee [B](b.md#结论) and [Self](a.md).\n").unwrap();
         fs::write(&b_path, "# B\n").unwrap();
 
+        // Simulate a legacy index that stamped an unsaved draft as the current file.
+        sync_markdown_links(&db, "notes/a.md", "[Draft](draft.md)", &a_path).unwrap();
         sync_project_markdown_links(
             &db,
             root,
             &["notes/a.md".to_owned(), "notes/b.md".to_owned()],
         )
         .unwrap();
+        assert!(backlinks_for(&db, "notes/draft.md").unwrap().is_empty());
 
-        let backlinks = backlinks_for(&db, "notes/b.md");
+        let backlinks = backlinks_for(&db, "notes/b.md").unwrap();
         assert_eq!(backlinks.len(), 1);
         assert_eq!(backlinks[0].source_path, "notes/a.md");
         assert_eq!(backlinks[0].anchor.as_deref(), Some("结论"));
@@ -1304,7 +1292,7 @@ External: [web](https://example.com/a.md), [mail](mailto:a@b.com), [local](#Over
         assert_eq!(backlinks[0].line, 2);
 
         // Self-links are excluded from backlinks.
-        assert!(backlinks_for(&db, "notes/a.md").is_empty());
+        assert!(backlinks_for(&db, "notes/a.md").unwrap().is_empty());
 
         // Finding sources referencing a moved target.
         let affected = sources_referencing_moves(
@@ -1317,32 +1305,35 @@ External: [web](https://example.com/a.md), [mail](mailto:a@b.com), [local](#Over
 
         // Trash hides links; restore brings them back.
         trash_markdown_links(&db, "notes/a.md", "trash-1").unwrap();
-        assert!(backlinks_for(&db, "notes/b.md").is_empty());
+        assert!(backlinks_for(&db, "notes/b.md").unwrap().is_empty());
 
-        let restored = root.join("notes/a-restored.md");
+        fs::create_dir_all(root.join("docs")).unwrap();
+        let restored = root.join("docs/a-restored.md");
         fs::copy(&a_path, &restored).unwrap();
-        restore_markdown_links(&db, "trash-1", "notes/a-restored.md", &restored).unwrap();
-        let after_restore = backlinks_for(&db, "notes/b.md");
+        restore_markdown_links(&db, "trash-1", "docs/a-restored.md", &restored).unwrap();
+        assert!(backlinks_for(&db, "notes/b.md").unwrap().is_empty());
+        let after_restore = backlinks_for(&db, "docs/b.md").unwrap();
         assert_eq!(after_restore.len(), 1);
-        assert_eq!(after_restore[0].source_path, "notes/a-restored.md");
+        assert_eq!(after_restore[0].source_path, "docs/a-restored.md");
 
-        // Relocate source path directly.
-        relocate_source_paths(
+        // Renaming the source to a non-Markdown file removes its outgoing links.
+        remove_relocated_sources(
             &db,
-            &[("notes/a-restored.md".to_owned(), "docs/a.md".to_owned())],
+            &[("docs/a-restored.md".to_owned(), "docs/a.txt".to_owned())],
             false,
         )
         .unwrap();
-        assert_eq!(backlinks_for(&db, "notes/b.md")[0].source_path, "docs/a.md");
+        assert!(backlinks_for(&db, "docs/b.md").unwrap().is_empty());
 
         // Trash + purge permanently removes records.
-        trash_markdown_links(&db, "docs/a.md", "trash-2").unwrap();
+        sync_markdown_links(&db, "notes/a.md", "[B](b.md)", &a_path).unwrap();
+        trash_markdown_links(&db, "notes/a.md", "trash-2").unwrap();
         purge_trashed_markdown_links(&db, "trash-2").unwrap();
-        assert!(backlinks_for(&db, "notes/b.md").is_empty());
+        assert!(backlinks_for(&db, "notes/b.md").unwrap().is_empty());
     }
 
     #[test]
-    fn wikilink_query_relative_url_and_heading_extraction() {
+    fn wikilink_query_and_url_formatting() {
         assert_eq!(
             extract_wikilink_query("参考[[设计文档#架构"),
             Some(("[[设计文档#架构".len(), "设计文档#架构".to_owned()))
@@ -1352,15 +1343,14 @@ External: [web](https://example.com/a.md), [mail](mailto:a@b.com), [local](#Over
             format_relative_link_url("notes/sub/a.md", "docs/my guide.md", Some("快速开始")),
             "../../docs/my%20guide.md#快速开始"
         );
-        let headings = extract_markdown_headings("# 一级\n```md\n# 忽略\n```\n## 二级 *强调*\n");
         assert_eq!(
-            headings,
-            vec![(1, "一级".to_owned()), (2, "二级 强调".to_owned())]
+            format_heading_fragment("完成 100%20"),
+            Some("#完成%20100%2520".to_owned())
         );
     }
 
     #[test]
-    fn editor_replace_captured_with_link_roundtrip_and_undo() {
+    fn completion_roundtrips_a_literal_file_name_and_heading_in_one_undo() {
         let mut editor = markdown_editor::BlockEditorModel::from_markdown(
             "参考 [[引导",
             gpui_kit::base::text::MarkdownExtensions::default(),
@@ -1368,16 +1358,11 @@ External: [web](https://example.com/a.md), [mail](mailto:a@b.com), [local](#Over
         .unwrap();
         editor.select_end().unwrap();
         let mut capture = editor.capture_suffix("[[引导".len()).unwrap();
-        editor
-            .replace_captured_with_link(&mut capture, "引导", "../docs/guide.md")
-            .unwrap();
-        assert_eq!(editor.source(), "参考 [引导](../docs/guide.md)");
-        editor
-            .insert_text(" 后续", markdown_editor::EditOrigin::Typing)
-            .unwrap();
-        assert_eq!(editor.source(), "参考 [引导](../docs/guide.md) 后续");
-        assert!(editor.undo());
-        assert_eq!(editor.source(), "参考 [引导](../docs/guide.md)");
+        let url = format_relative_link_url("notes/a.md", "docs/100%20#完成.md", Some("完成 50%"));
+        editor.replace_captured_with_link(&mut capture, "引导", &url).unwrap();
+        let links = extract_markdown_links("notes/a.md", &editor.source());
+        assert_eq!(links[0].target_path, "docs/100%20#完成.md");
+        assert_eq!(files::percent_decode(links[0].anchor.as_deref().unwrap()), "完成 50%");
         assert!(editor.undo());
         assert_eq!(editor.caret_prefix(), Some("参考 [[引导"));
     }
