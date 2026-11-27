@@ -440,7 +440,7 @@ fn collapse_whitespace(input: &str) -> String {
 fn outline_font_family() -> &'static str {
     #[cfg(target_os = "windows")]
     {
-        "Noto Sans SC"
+        "OPPO Sans 4.0"
     }
     #[cfg(target_os = "macos")]
     {
@@ -710,7 +710,7 @@ fn render_nodes(
             is_collapsed && active_heading.is_some_and(|active_ix| node.contains_index(active_ix));
         let is_active = is_direct_active || is_collapsed_ancestor_active;
 
-        let font_size = if depth == 0 { px(12.) } else { px(11.5) };
+        let font_size = if depth == 0 { px(11.5) } else { px(11.) };
         let line_height = if depth == 0 { px(19.5) } else { px(18.5) };
         let row_py = if depth == 0 { px(5.) } else { px(4.) };
         let rest_color = if is_active {
