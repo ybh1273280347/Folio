@@ -391,6 +391,10 @@ pub struct MarkdownPane {
     text: String,
     /// Whitespace-free characters of `text`, kept current for the corner badge.
     char_count: usize,
+    frontmatter: Option<crate::markdown::frontmatter::FrontMatter>,
+    frontmatter_collapsed: bool,
+    frontmatter_editing: bool,
+    frontmatter_editor: Entity<EditorState>,
     path: PathBuf,
     project_root: Option<PathBuf>,
     project_files: ProjectFiles,
@@ -482,6 +486,7 @@ pub struct MarkdownPane {
     zoom_hud: crate::ui::ZoomHud,
     translate: crate::translate::TranslatePopover,
     _source_subscription: Subscription,
+    _frontmatter_subscription: Subscription,
     _visual_subscription: Subscription,
     _math_subscription: Subscription,
     _mermaid_subscription: Subscription,
@@ -772,6 +777,14 @@ impl MarkdownPane {
                 .searchable(true)
                 .context_menu(false)
         });
+        let frontmatter_editor = cx.new(|cx| {
+            EditorState::new(window, cx)
+                .language("yaml")
+                .line_number(false)
+                .soft_wrap(true)
+                .searchable(false)
+                .context_menu(false)
+        });
         let source_heading_highlight = source_editor.update(cx, |editor, cx| {
             editor.create_range_decorations_collection(Vec::new(), cx)
         });
@@ -902,6 +915,10 @@ impl MarkdownPane {
                     pane.loading = None;
                     pane.mermaid.update(cx, |renderer, _| renderer.retain_blocks([]));
                     pane.text = state.read(cx).value().to_string();
+                    pane.frontmatter = crate::markdown::frontmatter::split(&pane.text).0;
+                    if pane.frontmatter.is_none() {
+                        pane.frontmatter_editing = false;
+                    }
                     pane.char_count = crate::model::nonspace_char_count(&pane.text);
                     pane.visual_needs_sync = true;
                     pane.parse_outline();
@@ -912,12 +929,40 @@ impl MarkdownPane {
                 }
             },
         );
+        let frontmatter_subscription = cx.subscribe_in(
+            &frontmatter_editor,
+            window,
+            |pane: &mut Self, state, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) && pane.frontmatter_editing {
+                    if let Some(fm) = &pane.frontmatter {
+                        let next_yaml = state.read(cx).value().to_string();
+                        if next_yaml != fm.yaml_body {
+                            let updated = fm.with_yaml_body(&next_yaml);
+                            let body = crate::markdown::frontmatter::body_of(&pane.text).to_owned();
+                            pane.text = updated.join_body(&body);
+                            pane.frontmatter = Some(updated);
+                            pane.char_count = crate::model::nonspace_char_count(&pane.text);
+                            pane.source_needs_sync = true;
+                            pane.parse_outline();
+                            cx.emit(MarkdownEvent::Change(pane.text.clone()));
+                            cx.notify();
+                        }
+                    }
+                } else if matches!(event, InputEvent::Focus) {
+                    cx.emit(MarkdownEvent::Focus);
+                }
+            },
+        );
         let visual_subscription = cx.subscribe_in(
             &visual_editor,
             window,
             |pane, editor, event: &BlockEditorEvent, window, cx| match event {
                 BlockEditorEvent::Changed { .. } => {
-                    pane.text = editor.read(cx).source();
+                    let body = editor.read(cx).source();
+                    pane.text = pane
+                        .frontmatter
+                        .as_ref()
+                        .map_or(body.clone(), |fm| fm.join_body(&body));
                     pane.char_count = crate::model::nonspace_char_count(&pane.text);
                     pane.source_needs_sync = true;
                     pane.retain_mermaid_blocks(cx);
@@ -1052,11 +1097,16 @@ impl MarkdownPane {
         });
         let annotations = annotations::load_annotations(&path);
         let char_count = crate::model::nonspace_char_count(&text);
+        let frontmatter = crate::markdown::frontmatter::split(&text).0;
         let mut pane = Self {
             export: Rc::new(RefCell::new(None)),
             export_width: px(0.),
             text,
             char_count,
+            frontmatter,
+            frontmatter_collapsed: false,
+            frontmatter_editing: false,
+            frontmatter_editor,
             path,
             project_root: None,
             project_files: Box::new(|_| &[]),
@@ -1141,6 +1191,7 @@ impl MarkdownPane {
             zoom_hud: crate::ui::ZoomHud::default(),
             translate: crate::translate::TranslatePopover::default(),
             _source_subscription: source_subscription,
+            _frontmatter_subscription: frontmatter_subscription,
             _visual_subscription: visual_subscription,
             _math_subscription: math_subscription,
             _mermaid_subscription: mermaid_subscription,
@@ -1152,21 +1203,26 @@ impl MarkdownPane {
     fn load_visual(&mut self, cx: &mut Context<Self>) {
         self.loading = None;
         self.visual_needs_sync = false;
-        // Bound first-paint work in bytes, even for OCR paragraphs with no blank lines.
-        // The full parse still sees the original document, preserving fences and references.
-        let long = self.text.len() > PREVIEW_BYTES;
+        let (frontmatter, body) = crate::markdown::frontmatter::split(&self.text);
+        let body_offset = frontmatter.as_ref().map_or(0, |fm| fm.raw_block.len());
+        let long = body.len() > PREVIEW_BYTES;
         let preview_end = if long {
-            let end = self.text.floor_char_boundary(PREVIEW_BYTES);
-            self.text[..end].rfind('\n').unwrap_or(end)
+            let end = body.floor_char_boundary(PREVIEW_BYTES);
+            body[..end].rfind('\n').unwrap_or(end)
         } else {
-            self.text.len()
+            body.len()
         };
+        let preview_slice = &self.text[body_offset..body_offset + preview_end];
         self.visual_editor.update(cx, |editor, cx| {
             editor.set_readonly(long, cx);
             editor
-                .set_source(&self.text[..preview_end], cx)
+                .set_source(preview_slice, cx)
                 .expect("Markdown preview parses with the configured GPUI extensions");
         });
+        self.frontmatter = frontmatter;
+        if self.frontmatter.is_none() {
+            self.frontmatter_editing = false;
+        }
         self.retain_mermaid_blocks(cx);
         if !long {
             self.parse_outline();
@@ -1174,12 +1230,13 @@ impl MarkdownPane {
             return;
         }
         self.set_outline_headings(Vec::new());
-        let text = self.text.clone();
+        let body_owned = self.text[body_offset..].to_owned();
+        let full_text = self.text.clone();
         let extensions = self.extensions.clone();
         let prepared = cx.background_executor().spawn(async move {
-            let model = BlockEditorModel::from_markdown(&text, extensions)
+            let model = BlockEditorModel::from_markdown(&body_owned, extensions)
                 .expect("full Markdown parses with the configured GPUI extensions");
-            (model, Self::outline_headings(&text))
+            (model, Self::outline_headings(&full_text))
         });
         self.loading = Some(cx.spawn(async move |this, cx| {
             let (model, headings) = prepared.await;
@@ -1245,10 +1302,13 @@ impl MarkdownPane {
     }
 
     fn outline_headings(text: &str) -> Vec<OutlineHeading> {
+        let (fm, body) = crate::markdown::frontmatter::split(text);
+        let byte_offset = fm.as_ref().map_or(0, |fm| fm.raw_block.len());
+        let line_offset = fm.as_ref().map_or(0, |fm| fm.line_count);
         let arena = Arena::new();
-        let root = parse_document(&arena, text, &Options::default());
+        let root = parse_document(&arena, body, &Options::default());
         let lines: Vec<_> = std::iter::once(0)
-            .chain(text.match_indices('\n').map(|(offset, _)| offset + 1))
+            .chain(body.match_indices('\n').map(|(offset, _)| offset + 1))
             .collect();
         root.descendants()
             .filter_map(|node| {
@@ -1257,15 +1317,17 @@ impl MarkdownPane {
                     return None;
                 };
                 let position = data.sourcepos;
-                let start = lines
-                    .get(position.start.line.saturating_sub(1))
-                    .copied()
-                    .unwrap_or(0)
+                let start = byte_offset
+                    + lines
+                        .get(position.start.line.saturating_sub(1))
+                        .copied()
+                        .unwrap_or(0)
                     + position.start.column.saturating_sub(1);
-                let end = (lines
-                    .get(position.end.line.saturating_sub(1))
-                    .copied()
-                    .unwrap_or(0)
+                let end = (byte_offset
+                    + lines
+                        .get(position.end.line.saturating_sub(1))
+                        .copied()
+                        .unwrap_or(0)
                     + position.end.column)
                     .min(text.len());
                 let title: String = node
@@ -1280,7 +1342,7 @@ impl MarkdownPane {
                 let display_title = outline::clean_outline_title(&title);
                 Some(OutlineHeading {
                     range: start..end,
-                    line: position.start.line.saturating_sub(1),
+                    line: line_offset + position.start.line.saturating_sub(1),
                     level: heading.level,
                     title,
                     display_title,
@@ -2236,8 +2298,41 @@ impl MarkdownPane {
         self.source_needs_sync = true;
         self.pending_source_jump = None;
         self.load_visual(cx);
+        if self.frontmatter_editing {
+            if let Some(fm) = &self.frontmatter {
+                let yaml = fm.yaml_body.clone();
+                self.frontmatter_editor.update(cx, |editor, cx| {
+                    if editor.value().as_ref() != yaml.as_str() {
+                        editor.set_value(yaml, window, cx);
+                    }
+                });
+            } else {
+                self.frontmatter_editing = false;
+            }
+        }
         if self.source {
             self.load_source(window, cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn toggle_frontmatter_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.frontmatter_editing {
+            let Some(fm) = &self.frontmatter else {
+                return;
+            };
+            self.frontmatter_collapsed = false;
+            self.frontmatter_editing = true;
+            let yaml = fm.yaml_body.clone();
+            let editor = self.frontmatter_editor.clone();
+            editor.update(cx, |editor, cx| {
+                editor.set_value(yaml, window, cx);
+                editor.focus(window, cx);
+            });
+            cx.emit(MarkdownEvent::Focus);
+        } else {
+            self.frontmatter_editing = false;
+            self.defer_focus_visual(window, cx);
         }
         cx.notify();
     }
@@ -2297,7 +2392,7 @@ impl MarkdownPane {
     }
 
     pub(super) fn show_empty_templates(&self) -> bool {
-        !self.source && self.loading.is_none() && self.text.trim().is_empty()
+        !self.source && self.loading.is_none() && self.frontmatter.is_none() && self.text.trim().is_empty()
     }
 
     pub(super) fn apply_empty_template(
@@ -2495,6 +2590,7 @@ impl MarkdownPane {
     pub fn toggle_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.source = !self.source;
         if self.source {
+            self.frontmatter_editing = false;
             self.hovered_link = None;
             if self.source_needs_sync {
                 self.load_source(window, cx);

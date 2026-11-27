@@ -1,6 +1,7 @@
 //! Folio's Markdown content extensions, editor pane, and PDF publication.
 
 pub(crate) mod extensions;
+pub(crate) mod frontmatter;
 pub(crate) mod links;
 mod pane;
 pub(crate) mod pdf;

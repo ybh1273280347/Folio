@@ -317,6 +317,7 @@ impl Render for MarkdownPane {
                             .pt_6()
                             .pb(trailing_space)
                             .child(document_title)
+                            .children(self.render_frontmatter_card(cx))
                             .children(template_pills)
                             .child(BlockEditor::new(&self.visual_editor).when(self.backdrop_visible, |editor| {
                                 editor.with_content_background_opacity(0.35)
@@ -1410,5 +1411,286 @@ impl Render for MarkdownPane {
                     ),
                 ))
             })
+    }
+}
+
+impl MarkdownPane {
+    fn render_frontmatter_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let fm = self.frontmatter.as_ref()?;
+        let palette = crate::theme::palette();
+        let collapsed = self.frontmatter_collapsed;
+        let editing = self.frontmatter_editing;
+        let card_bg = if self.backdrop_visible {
+            gpui_kit::rgb(palette.surface).opacity(0.68)
+        } else if palette.is_dark() {
+            gpui_kit::rgb(palette.hover).opacity(0.55)
+        } else {
+            gpui_kit::rgb(0xf8f8f6).opacity(1.0)
+        };
+        let border_color = gpui_kit::rgb(palette.border);
+        let muted = gpui_kit::rgb(palette.muted);
+        let text_color = gpui_kit::rgb(palette.text);
+        let pill_bg = if palette.is_dark() {
+            gpui_kit::rgb(palette.selection)
+        } else {
+            gpui_kit::rgb(0xeeeeec)
+        };
+
+        let header = div()
+            .id("md-frontmatter-header")
+            .h(px(32.))
+            .px_2p5()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .cursor_pointer()
+            .on_click(cx.listener(|pane, _, _, cx| {
+                pane.frontmatter_collapsed = !pane.frontmatter_collapsed;
+                if pane.frontmatter_collapsed {
+                    pane.frontmatter_editing = false;
+                }
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .min_w_0()
+                    .child(
+                        crate::ui::icon(if collapsed {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .size(px(14.))
+                        .text_color(muted),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_medium()
+                            .text_color(muted)
+                            .child(crate::i18n::markdown::FRONTMATTER_TITLE.get()),
+                    )
+                    .when(!fm.entries.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .text_xs()
+                                .text_color(muted.opacity(0.75))
+                                .child(format!(
+                                    "· {}",
+                                    crate::i18n::markdown::frontmatter_count(fm.entries.len())
+                                )),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .id("md-frontmatter-edit-toggle")
+                    .px_2()
+                    .h(px(22.))
+                    .rounded(px(5.))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(if editing {
+                        gpui_kit::rgb(palette.accent)
+                    } else {
+                        muted
+                    })
+                    .hover(move |s| s.bg(pill_bg).text_color(text_color))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|pane, _, window, cx| {
+                        cx.stop_propagation();
+                        pane.toggle_frontmatter_edit(window, cx);
+                    }))
+                    .child(
+                        crate::ui::icon(if editing {
+                            IconName::Check
+                        } else {
+                            IconName::CodeXml
+                        })
+                        .size(px(12.)),
+                    )
+                    .child(if editing {
+                        crate::i18n::markdown::FRONTMATTER_DONE.get()
+                    } else {
+                        crate::i18n::markdown::FRONTMATTER_EDIT_YAML.get()
+                    }),
+            );
+
+        let mut card = div()
+            .id("md-frontmatter-card")
+            .w_full()
+            .mb_4()
+            .rounded(px(8.))
+            .bg(card_bg)
+            .border_1()
+            .border_color(border_color)
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(header);
+
+        if !collapsed {
+            if editing {
+                let line_count = fm.yaml_body.lines().count().max(3);
+                let editor_height = ((line_count as f32) * 21.0 + 20.0).clamp(88.0, 260.0);
+                card = card.child(
+                    div()
+                        .w_full()
+                        .border_t_1()
+                        .border_color(border_color)
+                        .p_2()
+                        .bg(gpui_kit::rgb(palette.surface).opacity(if self.backdrop_visible {
+                            0.72
+                        } else {
+                            1.0
+                        }))
+                        .child(
+                            div().w_full().h(px(editor_height)).child(
+                                Editor::new(&self.frontmatter_editor)
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .size_full()
+                                    .text_size(px(13.))
+                                    .font_family(if self.settings.editor_font.is_empty() {
+                                        SharedString::from("Consolas")
+                                    } else {
+                                        self.settings.editor_font.clone().into()
+                                    }),
+                            ),
+                        ),
+                );
+            } else {
+                use crate::markdown::frontmatter::FrontMatterValue;
+                let mut body = div()
+                    .w_full()
+                    .border_t_1()
+                    .border_color(border_color)
+                    .px_3()
+                    .py_2()
+                    .flex()
+                    .flex_col()
+                    .gap_1p5();
+
+                if fm.entries.is_empty() {
+                    body = body.child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(crate::i18n::markdown::FRONTMATTER_EMPTY.get()),
+                    );
+                } else {
+                    let mono_font: SharedString = if self.settings.editor_font.is_empty() {
+                        SharedString::from("Consolas")
+                    } else {
+                        self.settings.editor_font.clone().into()
+                    };
+                    for entry in &fm.entries {
+                        let value_el: AnyElement = match &entry.value {
+                            FrontMatterValue::Text(text) => div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(13.))
+                                .line_height(relative(1.5))
+                                .text_color(text_color)
+                                .child(text.clone())
+                                .into_any_element(),
+                            FrontMatterValue::Bool(val) => {
+                                let (badge_bg, badge_fg) = if *val {
+                                    if palette.is_dark() {
+                                        (gpui_kit::rgb(0x14532d), gpui_kit::rgb(0x86efac))
+                                    } else {
+                                        (gpui_kit::rgb(0xdcfce7), gpui_kit::rgb(0x166534))
+                                    }
+                                } else {
+                                    (pill_bg, muted)
+                                };
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded(px(5.))
+                                            .bg(badge_bg)
+                                            .text_xs()
+                                            .font_medium()
+                                            .text_color(badge_fg)
+                                            .child(if *val { "true" } else { "false" }),
+                                    )
+                                    .into_any_element()
+                            }
+                            FrontMatterValue::List(items) => div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_1()
+                                .children(items.iter().map(|item| {
+                                    div()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_full()
+                                        .bg(pill_bg)
+                                        .text_xs()
+                                        .text_color(text_color)
+                                        .child(item.clone())
+                                }))
+                                .into_any_element(),
+                            FrontMatterValue::Raw(raw) => div()
+                                .flex_1()
+                                .min_w_0()
+                                .px_2()
+                                .py_1()
+                                .rounded(px(5.))
+                                .bg(pill_bg.opacity(0.65))
+                                .font_family(mono_font.clone())
+                                .text_xs()
+                                .line_height(relative(1.45))
+                                .text_color(text_color)
+                                .child(raw.clone())
+                                .into_any_element(),
+                        };
+
+                        body = body.child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .items_start()
+                                .gap_3()
+                                .py_0p5()
+                                .child(
+                                    div()
+                                        .w(px(148.))
+                                        .flex_shrink_0()
+                                        .pt(px(2.))
+                                        .text_xs()
+                                        .font_medium()
+                                        .text_color(muted)
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(entry.key.clone()),
+                                )
+                                .child(value_el),
+                        );
+                    }
+                }
+                card = card.child(body);
+            }
+        }
+
+        Some(card.into_any_element())
     }
 }
