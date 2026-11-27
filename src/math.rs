@@ -489,8 +489,6 @@ impl MarkdownPlugin for MathPlugin {
         let scale = f32::from(context.font_size()) * inline_scale / 10.;
         let plugin = self.clone();
         let fitted_content = content.clone();
-        // Mark highlights are painted at the editor line level using the max
-        // vertical extent across text and inline math; record bounds in prepaint.
         Some(
             inline_formula_element(self, &content, scale, None)
                 .expect("natural inline element")
@@ -554,71 +552,13 @@ fn inline_formula_element(
         return None;
     }
     let formula = plugin.editable(content, element).into_any_element();
-    let mut inline = InlineElement::new(InlineBoundsRecorder(formula)).with_baseline(px(baseline));
+    let mut inline = InlineElement::new(formula).with_baseline(px(baseline));
     if let Some(size) = explicit_size.filter(|_| max_width.is_some()) {
         inline = inline.with_size(size);
     }
     Some(inline)
 }
 
-struct InlineBoundsRecorder(AnyElement);
-
-impl IntoElement for InlineBoundsRecorder {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
-impl Element for InlineBoundsRecorder {
-    type RequestLayoutState = ();
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, ()) {
-        (self.0.request_layout(window, cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        markdown_editor::record_inline_atom_bounds(bounds);
-        self.0.prepaint(window, cx);
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
-        _: &mut (),
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        self.0.paint(window, cx);
-    }
-}
 pub fn formula_id(node: &MarkdownNode) -> Option<u64> {
     node.data::<MathContent>().map(|content| content.id)
 }
