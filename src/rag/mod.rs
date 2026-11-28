@@ -225,6 +225,7 @@ pub struct ReindexReport {
     pub removed_files: usize,
     pub embedded_chunks: usize,
     pub pending_vectors: usize,
+    /// Whether this sync prepared a backend for pending vectors. Live health is reported by status.
     pub embed_server_ready: bool,
     pub accurate_upgraded_pdfs: usize,
     pub accurate_failed_pdfs: Vec<String>,

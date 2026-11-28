@@ -314,19 +314,18 @@ pub fn sync_project(
     }
 
     let mut embedded_chunks = 0usize;
-    let embed_server_ready = opts.embed_client.is_some_and(EmbeddingClient::ensure_ready);
-    if embed_server_ready && let Some(client) = opts.embed_client {
+    let mut embed_server_ready = false;
+    if let Some(client) = opts.embed_client {
+        check_cancelled(cancelled)?;
+        // Finish the incremental sync without starting a model if the index has no vector work.
+        let mut pending = store
+            .pending_vector_chunks(0, EMBED_SYNC_PAGE)
+            .map_err(|e| RagError::new("store_error", e))?;
+        embed_server_ready = !pending.is_empty() && client.ensure_ready();
         // Each successful batch advances this sync's cursor. A fresh sync starts at the
         // beginning and can retry any chunks left pending after an interruption.
-        let mut last_embedded_chunk_id = 0;
-        loop {
+        while let Some(last_chunk) = pending.last().filter(|_| embed_server_ready) {
             check_cancelled(cancelled)?;
-            let pending = store
-                .pending_vector_chunks(last_embedded_chunk_id, EMBED_SYNC_PAGE)
-                .map_err(|e| RagError::new("store_error", e))?;
-            let Some(last_chunk) = pending.last() else {
-                break;
-            };
             let texts: Vec<&str> = pending.iter().map(|c| c.chunk_text.as_str()).collect();
             let vectors = client
                 .embed_documents(&texts)
@@ -340,8 +339,10 @@ pub fn sync_project(
             store
                 .insert_chunk_vectors(&pairs)
                 .map_err(|e| RagError::new("store_error", e))?;
-            last_embedded_chunk_id = last_chunk.chunk_id;
             embedded_chunks += pairs.len();
+            pending = store
+                .pending_vector_chunks(last_chunk.chunk_id, EMBED_SYNC_PAGE)
+                .map_err(|e| RagError::new("store_error", e))?;
         }
     }
 
