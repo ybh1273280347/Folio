@@ -81,6 +81,7 @@ const MUTED: u32 = 0x787774;
 pub(super) const RAIL_WIDTH: f32 = 44.0;
 const CANVAS_GUTTER: f32 = 6.0;
 const CANVAS_RADIUS: f32 = 10.0;
+const NETWORK_REAP_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Clone)]
 struct SidebarResizeDrag;
@@ -250,6 +251,7 @@ pub struct Workspace {
     right_panel_drag: Option<(f32, f32)>,
     log_drag: Option<(f32, f32)>,
     resize_save_task: Task<()>,
+    last_network_reap: Instant,
     notice: Option<String>,
     notice_until: Option<Instant>,
     focus: FocusHandle,
@@ -385,6 +387,7 @@ impl Workspace {
             right_panel_drag: None,
             log_drag: None,
             resize_save_task: Task::ready(()),
+            last_network_reap: Instant::now(),
             notice: None,
             notice_until: None,
             focus: cx.focus_handle(),
@@ -600,6 +603,15 @@ impl Workspace {
     }
 
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.last_network_reap.elapsed() >= NETWORK_REAP_INTERVAL {
+            self.last_network_reap = Instant::now();
+            cx.background_spawn(async {
+                #[cfg(windows)]
+                crate::http::reap_idle_sessions();
+                crate::rag::client::reap_idle_servers();
+            })
+            .detach();
+        }
         self.poll_trash(cx);
         self.poll_rag(cx);
         if self

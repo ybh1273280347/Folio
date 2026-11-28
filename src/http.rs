@@ -1,5 +1,26 @@
 //! Minimal HTTP/HTTPS client backed by WinHTTP on Windows and `curl` elsewhere.
 
+#[cfg(windows)]
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    ffi::c_void,
+    sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
+};
+#[cfg(windows)]
+use windows::{
+    Win32::Networking::WinHttp::{
+        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_ACCESS_TYPE_NAMED_PROXY,
+        WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_DISABLE_COOKIES, WINHTTP_FLAG_SECURE,
+        WINHTTP_OPEN_REQUEST_FLAGS, WINHTTP_OPTION_DISABLE_FEATURE,
+        WINHTTP_OPTION_DISABLE_GLOBAL_POOLING, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
+        WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
+        WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption,
+        WinHttpSetTimeouts,
+    },
+    core::{HSTRING, PCWSTR},
+};
+
 #[derive(Debug)]
 pub struct HttpResponse {
     pub status: u16,
@@ -47,71 +68,125 @@ pub fn env_proxy() -> Option<String> {
 }
 
 #[cfg(windows)]
-pub fn send(opts: RequestOptions<'_>) -> Result<HttpResponse, String> {
-    use std::ffi::c_void;
-    use windows::{
-        Win32::Networking::WinHttp::{
-            WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
-            WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest,
-            WinHttpSetTimeouts, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-            WINHTTP_ACCESS_TYPE_NAMED_PROXY, WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_FLAG_SECURE,
-            WINHTTP_OPEN_REQUEST_FLAGS, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
-        },
-        core::{HSTRING, PCWSTR},
-    };
+struct Handle(*mut c_void);
 
-    struct Handle(*mut c_void);
-    impl Drop for Handle {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                unsafe {
-                    let _ = WinHttpCloseHandle(self.0);
-                }
+#[cfg(windows)]
+impl Drop for Handle {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = WinHttpCloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+#[derive(Eq, Hash, PartialEq)]
+enum ProxyPolicy {
+    Direct,
+    System,
+    Named(String),
+}
+
+#[cfg(windows)]
+struct SessionHandle {
+    handle: Handle,
+}
+
+#[cfg(windows)]
+// SAFETY: WinHTTP handles can move across threads. The session mutex serializes
+// WinHttpConnect on the same handle, and each request retains its session until it closes.
+unsafe impl Send for SessionHandle {}
+
+#[cfg(windows)]
+struct CachedSession {
+    handle: Arc<Mutex<SessionHandle>>,
+    idle_since: Option<Instant>,
+}
+
+#[cfg(windows)]
+static SESSIONS: OnceLock<Mutex<HashMap<ProxyPolicy, CachedSession>>> = OnceLock::new();
+
+#[cfg(windows)]
+fn acquire_session(opts: &RequestOptions<'_>) -> Result<Arc<Mutex<SessionHandle>>, String> {
+    let proxy = if let Some(named) = opts.use_env_proxy.then(env_proxy).flatten() {
+        ProxyPolicy::Named(named)
+    } else if opts.use_system_proxy {
+        ProxyPolicy::System
+    } else {
+        ProxyPolicy::Direct
+    };
+    let mut sessions = SESSIONS
+        .get_or_init(Mutex::default)
+        .lock()
+        .expect("HTTP pool lock");
+    let entry = match sessions.entry(proxy) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => {
+            let (access_type, named) = match entry.key() {
+                ProxyPolicy::Direct => (WINHTTP_ACCESS_TYPE_NO_PROXY, None),
+                ProxyPolicy::System => (WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, None),
+                ProxyPolicy::Named(proxy) => (
+                    WINHTTP_ACCESS_TYPE_NAMED_PROXY,
+                    Some(HSTRING::from(proxy)),
+                ),
+            };
+            let ua = HSTRING::from("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Folio/1.0");
+            let proxy = named.as_ref().map_or(PCWSTR::null(), |name| PCWSTR(name.as_ptr()));
+            let raw = unsafe { WinHttpOpen(&ua, access_type, proxy, PCWSTR::null(), 0) };
+            if raw.is_null() {
+                return Err(crate::i18n::media::http_init_session(opts.label));
             }
-        }
-    }
-
-    let ua = HSTRING::from("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Folio/1.0");
-    let proxy = if opts.use_env_proxy { env_proxy() } else { None };
-    let proxy_h = proxy.as_deref().map(HSTRING::from);
-    let session = unsafe {
-        if let Some(ref p) = proxy_h {
-            WinHttpOpen(&ua, WINHTTP_ACCESS_TYPE_NAMED_PROXY, p, PCWSTR::null(), 0)
-        } else if opts.use_system_proxy {
-            WinHttpOpen(
-                &ua,
-                WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-                PCWSTR::null(),
-                PCWSTR::null(),
-                0,
-            )
-        } else {
-            WinHttpOpen(
-                &ua,
-                WINHTTP_ACCESS_TYPE_NO_PROXY,
-                PCWSTR::null(),
-                PCWSTR::null(),
-                0,
-            )
+            let handle = Handle(raw);
+            // Keep idle connections owned by this session so reaping it also closes its pool.
+            unsafe {
+                WinHttpSetOption(
+                    Some(handle.0),
+                    WINHTTP_OPTION_DISABLE_GLOBAL_POOLING,
+                    Some(&1u32.to_ne_bytes()),
+                )
+            }
+            .map_err(|error| {
+                format!("{} ({error})", crate::i18n::media::http_init_session(opts.label))
+            })?;
+            entry.insert(CachedSession {
+                handle: Arc::new(Mutex::new(SessionHandle { handle })),
+                idle_since: None,
+            })
         }
     };
-    if session.is_null() {
-        return Err(crate::i18n::media::http_init_session(opts.label));
-    }
-    let session = Handle(session);
+    entry.idle_since = None;
+    Ok(entry.handle.clone())
+}
 
-    unsafe {
-        let _ = WinHttpSetTimeouts(
-            session.0,
-            opts.connect_timeout_ms,
-            opts.connect_timeout_ms,
-            opts.receive_timeout_ms,
-            opts.receive_timeout_ms,
-        );
-    }
+#[cfg(windows)]
+pub(crate) fn reap_idle_sessions() {
+    let Some(sessions) = SESSIONS.get() else {
+        return;
+    };
+    let now = Instant::now();
+    // The pool is the only source of new leases. Count its own reference while holding
+    // the pool lock, then close expired handles after unlocking for new requests.
+    let expired: Vec<_> = sessions
+        .lock()
+        .expect("HTTP pool lock")
+        .extract_if(|_, session| {
+            if Arc::strong_count(&session.handle) > 1 {
+                return false;
+            }
+            now.duration_since(*session.idle_since.get_or_insert(now)) >= Duration::from_secs(30)
+        })
+        .collect();
+    drop(expired);
+}
 
+#[cfg(windows)]
+pub fn send(opts: RequestOptions<'_>) -> Result<HttpResponse, String> {
+    let session = acquire_session(&opts)?;
     let host_h = HSTRING::from(opts.host);
-    let connect = unsafe { WinHttpConnect(session.0, &host_h, opts.port, 0) };
+    let connect = {
+        let session = session.lock().expect("HTTP session lock");
+        unsafe { WinHttpConnect(session.handle.0, &host_h, opts.port, 0) }
+    };
     if connect.is_null() {
         return Err(crate::i18n::media::http_connect(opts.label));
     }
@@ -139,6 +214,27 @@ pub fn send(opts: RequestOptions<'_>) -> Result<HttpResponse, String> {
         return Err(crate::i18n::media::http_open_req(opts.label));
     }
     let request = Handle(request);
+
+    // Timeouts and mutable request options belong to the request, including when
+    // health probes and long requests share the same WinHTTP session.
+    unsafe {
+        WinHttpSetTimeouts(
+            request.0,
+            opts.connect_timeout_ms,
+            opts.connect_timeout_ms,
+            opts.receive_timeout_ms,
+            opts.receive_timeout_ms,
+        )
+        .and_then(|_| {
+            // These API calls were stateless across requests when each had its own session.
+            WinHttpSetOption(
+                Some(request.0),
+                WINHTTP_OPTION_DISABLE_FEATURE,
+                Some(&WINHTTP_DISABLE_COOKIES.to_ne_bytes()),
+            )
+        })
+    }
+    .map_err(|error| format!("{} ({error})", crate::i18n::media::http_open_req(opts.label)))?;
 
     let joined_headers = opts
         .headers
@@ -171,7 +267,7 @@ pub fn send(opts: RequestOptions<'_>) -> Result<HttpResponse, String> {
 
     let mut status: u32 = 0;
     let mut status_len: u32 = std::mem::size_of::<u32>() as u32;
-    let _ = unsafe {
+    unsafe {
         WinHttpQueryHeaders(
             request.0,
             WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
@@ -180,7 +276,8 @@ pub fn send(opts: RequestOptions<'_>) -> Result<HttpResponse, String> {
             &mut status_len,
             std::ptr::null_mut(),
         )
-    };
+    }
+    .map_err(|error| format!("{} ({error})", crate::i18n::media::http_read_err(opts.label)))?;
 
     let mut out = Vec::new();
     let mut buf = [0u8; 8192];
@@ -201,10 +298,10 @@ pub fn send(opts: RequestOptions<'_>) -> Result<HttpResponse, String> {
         if read == 0 {
             break;
         }
-        out.extend_from_slice(&buf[..read as usize]);
-        if out.len() > opts.max_response_bytes {
+        if read as usize > opts.max_response_bytes - out.len() {
             return Err(crate::i18n::media::http_too_large(opts.label));
         }
+        out.extend_from_slice(&buf[..read as usize]);
     }
 
     Ok(HttpResponse {

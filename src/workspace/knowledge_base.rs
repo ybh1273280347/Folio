@@ -6,7 +6,7 @@ use super::{
 };
 use crate::rag::{
     DirtyDocument, RagError,
-    client::{EmbeddingClient, reap_idle_servers},
+    client::EmbeddingClient,
     collect_eligible_paths,
     ocr::{self, OcrProgressEvent},
     pipeline::{KbSearchCache, SyncOptions, sync_project},
@@ -26,7 +26,6 @@ use std::{
 };
 
 const SYNC_DEBOUNCE: Duration = Duration::from_millis(2500);
-const REAP_INTERVAL: Duration = Duration::from_secs(15);
 
 enum OcrRunnerEvent {
     Progress(OcrProgressEvent),
@@ -56,26 +55,13 @@ struct OcrRunnerHandle {
 }
 
 /// Project switches discard pending work and keep late job results off the active sidebar.
+#[derive(Default)]
 pub(super) struct RagSyncState {
     pending_deadline: Option<Instant>,
     in_flight: Option<(u64, String, Arc<AtomicBool>)>,
     next_sync_id: u64,
     kb_search_cache: KbSearchCache,
     ocr_runner: Option<OcrRunnerHandle>,
-    last_reap: Instant,
-}
-
-impl Default for RagSyncState {
-    fn default() -> Self {
-        Self {
-            pending_deadline: None,
-            in_flight: None,
-            next_sync_id: 0,
-            kb_search_cache: KbSearchCache::default(),
-            ocr_runner: None,
-            last_reap: Instant::now(),
-        }
-    }
 }
 
 impl Workspace {
@@ -851,10 +837,6 @@ impl Workspace {
     }
 
     pub(in crate::workspace) fn poll_rag(&mut self, cx: &mut Context<Self>) {
-        if self.rag_sync.last_reap.elapsed() >= REAP_INTERVAL {
-            self.rag_sync.last_reap = Instant::now();
-            cx.background_spawn(async { reap_idle_servers() }).detach();
-        }
         self.poll_ocr_runner(cx);
         if let Some(deadline) = self.rag_sync.pending_deadline
             && Instant::now() >= deadline
