@@ -4,7 +4,7 @@
 use super::super::Workspace;
 use crate::{
     ai::{WorkspaceToolAction, WorkspaceToolRequest},
-    graph::model::{GraphEdgeKind, GraphNodeKind, GraphSnapshot, canonical_key, normalize_rel_path},
+    graph::model::{GraphEdgeKind, GraphNodeKind, GraphSnapshot, normalize_rel_path},
 };
 use gpui_kit::{AppContext, Context};
 use serde::Deserialize;
@@ -42,9 +42,16 @@ impl Failure {
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 enum GraphToolOp {
-    Neighbors(NeighborsParams),
-    Overview(OverviewParams),
-    Path(PathParams),
+    Neighbors {
+        params: NeighborsParams,
+    },
+    Overview {
+        #[serde(default)]
+        params: OverviewParams,
+    },
+    Path {
+        params: PathParams,
+    },
 }
 
 #[derive(Deserialize)]
@@ -56,7 +63,7 @@ struct NeighborsParams {
     include_attachments: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct OverviewParams {
     #[serde(default)]
     include_attachments: bool,
@@ -502,9 +509,9 @@ impl Workspace {
             )
             .map_err(|e| Failure::new("graph_index_failed", e))?;
             match op {
-                GraphToolOp::Neighbors(params) => execute_neighbors(&snapshot, params),
-                GraphToolOp::Overview(params) => execute_overview(&snapshot, params),
-                GraphToolOp::Path(params) => execute_path(&snapshot, params),
+                GraphToolOp::Neighbors { params } => execute_neighbors(&snapshot, params),
+                GraphToolOp::Overview { params } => execute_overview(&snapshot, params),
+                GraphToolOp::Path { params } => execute_path(&snapshot, params),
             }
         });
 
@@ -538,5 +545,34 @@ impl Workspace {
             ));
         }
         Ok(root)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserializes_bridge_wrapped_params() {
+        let n: GraphToolOp = serde_json::from_value(json!({
+            "operation": "neighbors",
+            "params": { "path": "concepts/双链与知识图谱.md", "depth": 2 }
+        }))
+        .unwrap();
+        assert!(matches!(n, GraphToolOp::Neighbors { params } if params.path == "concepts/双链与知识图谱.md" && params.depth == 2));
+
+        let o: GraphToolOp = serde_json::from_value(json!({
+            "operation": "overview",
+            "params": { "include_attachments": false, "limit": 100 }
+        }))
+        .unwrap();
+        assert!(matches!(o, GraphToolOp::Overview { params } if params.limit == 100));
+
+        let p: GraphToolOp = serde_json::from_value(json!({
+            "operation": "path",
+            "params": { "from_path": "papers/a.md", "to_path": "concepts/b.md" }
+        }))
+        .unwrap();
+        assert!(matches!(p, GraphToolOp::Path { params } if params.from_path == "papers/a.md" && params.to_path == "concepts/b.md"));
     }
 }
