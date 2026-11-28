@@ -179,6 +179,7 @@ impl Workspace {
 
     pub(super) fn use_tag_snapshot(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
         self.tags.snapshot = snapshot;
+        self.mark_graph_dirty(cx);
         if self.projects.directory().is_none() {
             // Tagged loose files remain discoverable after closing their tabs.
             let paths: Vec<_> = self

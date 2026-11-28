@@ -900,6 +900,9 @@ impl Workspace {
         }
         self.documents.active = file.path.clone();
         self.sync_graph_active_document(&file.path, cx);
+        if self.projects.directory().is_none() {
+            self.mark_graph_dirty(cx);
+        }
         self.refresh_active_backlinks(cx);
         if focus_editor {
             if let Some(pane) = self.documents.markdown_panes.get(&tab) {
@@ -1376,6 +1379,7 @@ impl Workspace {
                 // A split-only document shows the conflict in its own pane.
                 if self.documents.tabs.iter().any(|tab| tab == path) {
                     self.documents.active = path.to_owned();
+                    self.sync_graph_active_document(path, cx);
                     self.refresh_active_backlinks(cx);
                 }
                 cx.notify();
@@ -1608,6 +1612,7 @@ impl Workspace {
         self.documents.clear_reading_focus_for(&path);
         self.documents.tabs.push(path.clone());
         self.documents.active = path.clone();
+        self.sync_graph_active_document(&path, cx);
         self.refresh_active_backlinks(cx);
         if focus_editor {
             self.focus_document_tab(&path, window, cx);
@@ -1678,6 +1683,9 @@ impl Workspace {
             if !self.trash.is_open() && !self.graph_open && !self.documents.active.is_empty() {
                 self.focus_document_tab(&active, window, cx);
             }
+        }
+        if role == PaneRole::Tab && self.projects.directory().is_none() {
+            self.mark_graph_dirty(cx);
         }
         if self.trash.is_open() || self.graph_open || !self.promote_first_reading_pane_if_tabs_empty(true, window, cx) {
             self.refresh_active_backlinks(cx);
@@ -1751,6 +1759,9 @@ impl Workspace {
                     .filter(|path| Self::is_canvas_path(path) || Self::is_markdown_path(path))
                     .cloned(),
             );
+            if current != previous {
+                self.mark_graph_dirty(cx);
+            }
         }
         let mut refresh_markdown_backlinks = false;
         let mut indexed_open_documents = BTreeMap::new();
@@ -1779,6 +1790,10 @@ impl Workspace {
                     } else {
                         self.remove_canvas_index(&key, cx);
                     }
+                }
+                Err(error) if !is_markdown && error.kind() == io::ErrorKind::InvalidData => {
+                    self.remove_canvas_index(&key, cx);
+                    self.report(error, cx);
                 }
                 Err(error) => self.report(error, cx),
             }
@@ -2091,7 +2106,10 @@ impl Workspace {
         for path in self.documents.tabs.iter_mut().chain(self.documents.reading_panes.iter_mut()) {
             if path == key { *path = renamed.clone(); }
         }
-        if self.documents.active == key { self.documents.active = renamed.clone(); }
+        if self.documents.active == key {
+            self.documents.active = renamed.clone();
+            self.sync_graph_active_document(&renamed, cx);
+        }
         if self.documents.focused_markdown.as_deref() == Some(key) { self.documents.focused_markdown = Some(renamed.clone()); }
         if self.documents.focused_reading_editor.as_deref() == Some(key) { self.documents.focused_reading_editor = Some(renamed.clone()); }
         if let Some(width) = self.documents.reading_pane_initial_widths.remove(key) {

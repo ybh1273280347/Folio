@@ -12,8 +12,6 @@ use crate::{
     canvas::interaction::Camera,
     i18n::graph as i18n_graph,
     markdown::links::format_root_link_url,
-    model::ProjectFile,
-    tags::Snapshot as TagSnapshot,
     theme::{Palette, palette as active_palette},
     ui::{FolioContextMenuExt, FolioMenuItem, TAG_COLORS},
 };
@@ -32,7 +30,6 @@ use gpui_kit::{
 use std::{
     cell::Cell,
     collections::HashSet,
-    path::Path,
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -130,7 +127,7 @@ struct EdgeScreenCurve {
 
 pub struct GraphPane {
     local_mode: bool,
-    snapshot: GraphSnapshot,
+    snapshot: Rc<GraphSnapshot>,
     filter: GraphFilter,
     visible: VisibleGraph,
     sim: GraphSimulation,
@@ -191,7 +188,7 @@ impl GraphPane {
         )
         .detach();
 
-        let snapshot = GraphSnapshot::default();
+        let snapshot = Rc::new(GraphSnapshot::default());
         let filter = GraphFilter::default();
         let visible = snapshot.compute_visible(&filter);
         let sim = GraphSimulation::new(&snapshot, &visible, filter.color_mode);
@@ -269,6 +266,8 @@ impl GraphPane {
                 self.hovered_node = None;
                 self.hovered_edge = None;
                 self.linking_from = None;
+                self.drag_mode = DragMode::None;
+                self.last_click = None;
                 self.visible = self.snapshot.compute_visible(&self.filter);
                 self.apply_layout_for_mode(false, cx);
             }
@@ -278,17 +277,13 @@ impl GraphPane {
         }
     }
 
-    pub fn load_data(
+    pub fn set_snapshot(
         &mut self,
-        db_path: Option<&Path>,
-        project_files: &[ProjectFile],
-        tag_snapshot: &TagSnapshot,
-        loose_open_paths: &[String],
+        snapshot: Rc<GraphSnapshot>,
         reset_fit: bool,
         cx: &mut Context<Self>,
-    ) -> Result<(), String> {
-        let next = GraphSnapshot::build(db_path, project_files, tag_snapshot, loose_open_paths)?;
-        let prev = std::mem::replace(&mut self.snapshot, next);
+    ) {
+        let prev = std::mem::replace(&mut self.snapshot, snapshot);
         let selected_id = self
             .selected_node
             .and_then(|idx| prev.nodes.get(idx).map(|n| n.id.clone()));
@@ -313,10 +308,8 @@ impl GraphPane {
                 .as_deref()
                 .and_then(|id| self.snapshot.node_index(id))
             {
-                self.sim = GraphSimulation::new(&self.snapshot, &self.visible, self.filter.color_mode);
+                // The radial layout writes every visible position and settles immediately.
                 self.sim.apply_radial_ego_layout(&self.snapshot, &self.visible, center_idx);
-            } else {
-                self.sim.sync_snapshot(&prev, &self.snapshot, &self.visible, self.filter.color_mode);
             }
         } else {
             self.sim.sync_snapshot(
@@ -331,16 +324,18 @@ impl GraphPane {
         self.hovered_node = hovered_id.and_then(|id| self.snapshot.node_index(&id));
         self.hovered_edge = None;
         self.linking_from = None;
+        // An in-progress gesture holds indices from the previous snapshot.
+        self.drag_mode = DragMode::None;
+        self.last_click = None;
         if reset_fit || prev.nodes.is_empty() {
             self.needs_initial_fit = true;
         }
         self.ensure_animating(cx);
         cx.notify();
-        Ok(())
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
-        self.snapshot = GraphSnapshot::default();
+        self.snapshot = Rc::new(GraphSnapshot::default());
         self.visible = VisibleGraph::default();
         self.filter.focus_center = None;
         self.sim = GraphSimulation::new(&self.snapshot, &self.visible, self.filter.color_mode);
@@ -348,6 +343,9 @@ impl GraphPane {
         self.hovered_edge = None;
         self.selected_node = None;
         self.linking_from = None;
+        self.drag_mode = DragMode::None;
+        self.last_click = None;
+        self.camera_lerp = None;
         self.needs_initial_fit = true;
         cx.notify();
     }
@@ -598,13 +596,6 @@ impl GraphPane {
         best.map(|(ni, _)| ni)
     }
 
-    fn edge_is_bidirectional(&self, src: usize, dst: usize) -> bool {
-        self.visible.visible_edges.iter().any(|&ei| {
-            let e = &self.snapshot.edges[ei];
-            e.source == dst && e.target == src
-        })
-    }
-
     fn hit_test_edge(&self, screen: Point<Pixels>) -> Option<usize> {
         let viewport = self.viewport_bounds.get();
         if f32::from(viewport.size.width) <= 4.0 {
@@ -627,7 +618,7 @@ impl GraphPane {
             let Some(&p1_w) = self.sim.positions.get(edge.target) else {
                 continue;
             };
-            let bidirectional = self.edge_is_bidirectional(edge.source, edge.target);
+            let bidirectional = self.visible.directed_pairs.contains(&(edge.target, edge.source));
             let Some(curve) = compute_edge_screen_curve(p0_w, p1_w, bidirectional, &self.camera, viewport) else {
                 continue;
             };
@@ -1075,12 +1066,7 @@ impl Render for GraphPane {
             badge_text: Option<String>,
         }
 
-        let mut edge_pairs: HashSet<(usize, usize)> = HashSet::with_capacity(self.visible.visible_edges.len());
-        for &ei in &self.visible.visible_edges {
-            let e = &self.snapshot.edges[ei];
-            edge_pairs.insert((e.source, e.target));
-        }
-
+        let active_node = self.snapshot.node_index(&self.active_doc_path);
         let render_nodes: Vec<RenderNode> = self
             .visible
             .visible_nodes
@@ -1097,8 +1083,7 @@ impl Render for GraphPane {
                     kind: node.kind,
                     color: self.node_color(node, palette),
                     degree: self.visible.visible_in_degree[ni] + self.visible.visible_out_degree[ni],
-                    is_active_doc: !self.active_doc_path.is_empty()
-                        && canonical_key(&self.active_doc_path) == node.id,
+                    is_active_doc: active_node == Some(ni),
                     is_matched: self.visible.matched_nodes.contains(&ni),
                 })
             })
@@ -1112,10 +1097,14 @@ impl Render for GraphPane {
                 let e = self.snapshot.edges.get(ei)?;
                 let &p0 = self.sim.positions.get(e.source)?;
                 let &p1 = self.sim.positions.get(e.target)?;
-                let badge_text = if e.kind == GraphEdgeKind::CanvasAnchor {
-                    Some(i18n_graph::EDGE_CANVAS_ANCHOR.get().to_owned())
+                let badge_text = if self.hovered_edge == Some(ei) {
+                    if e.kind == GraphEdgeKind::CanvasAnchor {
+                        Some(i18n_graph::EDGE_CANVAS_ANCHOR.get().to_owned())
+                    } else {
+                        e.first_line.map(i18n_graph::edge_line_badge)
+                    }
                 } else {
-                    e.first_line.map(i18n_graph::edge_line_badge)
+                    None
                 };
                 Some(RenderEdge {
                     edge_idx: ei,
@@ -1124,7 +1113,7 @@ impl Render for GraphPane {
                     p0,
                     p1,
                     kind: e.kind,
-                    bidirectional: edge_pairs.contains(&(e.target, e.source)),
+                    bidirectional: self.visible.directed_pairs.contains(&(e.target, e.source)),
                     badge_text,
                 })
             })
@@ -1755,18 +1744,23 @@ impl Render for GraphPane {
                     });
 
                 menu = menu.min_w(px(196.));
+                let snapshot = ctx_pane.read(cx).snapshot.clone();
+                // Menu callbacks outlive this render and their indices belong to this snapshot.
+                let indexed_action = |index, action: fn(&mut Self, usize, &mut Window, &mut Context<Self>)| {
+                    let entity = ctx_pane.clone();
+                    let snapshot = snapshot.clone();
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        entity.update(cx, |pane, cx| {
+                            if Rc::ptr_eq(&snapshot, &pane.snapshot) {
+                                action(pane, index, window, cx);
+                            }
+                        });
+                    }
+                };
                 if let Some(ni) = hit_node {
-                    let (is_unresolved, is_markdown, can_split) = {
-                        let pane = ctx_pane.read(cx);
-                        let node = &pane.snapshot.nodes[ni];
-                        (
-                            node.kind == GraphNodeKind::Unresolved,
-                            node.kind == GraphNodeKind::Markdown,
-                            node.kind != GraphNodeKind::Unresolved
-                                && crate::workspace::Workspace::supports_split_pane(&node.rel_path),
-                        )
-                    };
-                    let p_open = ctx_pane.clone();
+                    let node = &snapshot.nodes[ni];
+                    let is_unresolved = node.kind == GraphNodeKind::Unresolved;
+                    let can_split = !is_unresolved && crate::workspace::Workspace::supports_split_pane(&node.rel_path);
                     menu = menu.item(
                         FolioMenuItem::new(if is_unresolved {
                             i18n_graph::BTN_CREATE_NOTE.get()
@@ -1774,88 +1768,63 @@ impl Render for GraphPane {
                             i18n_graph::BTN_OPEN.get()
                         })
                         .icon(if is_unresolved { IconName::Plus } else { IconName::FileText })
-                        .on_click(move |_, _, cx| {
-                            p_open.update(cx, |pane, cx| pane.open_node(ni, false, cx));
-                        }),
+                        .on_click(indexed_action(ni, |pane, ni, _, cx| pane.open_node(ni, false, cx))),
                     );
                     if can_split {
-                        let p_split = ctx_pane.clone();
                         menu = menu.item(
                             FolioMenuItem::new(i18n_graph::BTN_OPEN_SPLIT.get())
                                 .icon(IconName::Columns2)
-                                .on_click(move |_, _, cx| {
-                                    p_split.update(cx, |pane, cx| pane.open_node(ni, true, cx));
-                                }),
+                                .on_click(indexed_action(ni, |pane, ni, _, cx| pane.open_node(ni, true, cx))),
                         );
                     }
                     if !is_local_mode {
-                        let p_f1 = ctx_pane.clone();
-                        let p_f2 = ctx_pane.clone();
                         menu = menu
                             .separator()
                             .item(
                                 FolioMenuItem::new(i18n_graph::MENU_FOCUS_1HOP.get())
                                     .icon(IconName::ChartNetwork)
-                                    .on_click(move |_, _, cx| {
-                                        p_f1.update(cx, |pane, cx| pane.focus_local_neighborhood(ni, 1, cx));
-                                    }),
+                                    .on_click(indexed_action(ni, |pane, ni, _, cx| pane.focus_local_neighborhood(ni, 1, cx))),
                             )
                             .item(
                                 FolioMenuItem::new(i18n_graph::MENU_FOCUS_2HOP.get())
                                     .icon(IconName::ChartNetwork)
-                                    .on_click(move |_, _, cx| {
-                                        p_f2.update(cx, |pane, cx| pane.focus_local_neighborhood(ni, 2, cx));
-                                    }),
+                                    .on_click(indexed_action(ni, |pane, ni, _, cx| pane.focus_local_neighborhood(ni, 2, cx))),
                             );
                     }
-                    if is_markdown {
-                        let p_link = ctx_pane.clone();
+                    if node.kind == GraphNodeKind::Markdown {
                         menu = menu.separator().item(
                             FolioMenuItem::new(i18n_graph::MENU_CONNECT_TO.get())
                                 .icon(IconName::Plus)
-                                .on_click(move |_, window, cx| {
-                                    let cur = window.mouse_position();
-                                    p_link.update(cx, |pane, cx| {
-                                        pane.linking_from = Some(ni);
-                                        pane.linking_cursor = cur;
-                                        cx.notify();
-                                    });
-                                }),
+                                .on_click(indexed_action(ni, |pane, ni, window, cx| {
+                                    pane.linking_from = Some(ni);
+                                    pane.linking_cursor = window.mouse_position();
+                                    cx.notify();
+                                })),
                         );
                     } else {
                         menu = menu.separator();
                     }
-                    let p_copy = ctx_pane.clone();
                     menu = menu.item(
                         FolioMenuItem::new(i18n_graph::MENU_COPY_LINK.get())
                             .icon(IconName::Link)
-                            .on_click(move |_, _, cx| {
-                                p_copy.update(cx, |pane, cx| pane.emit_copy_link(ni, cx));
-                            }),
+                            .on_click(indexed_action(ni, |pane, ni, _, cx| pane.emit_copy_link(ni, cx))),
                     );
                     if !is_unresolved {
-                        let p_reveal = ctx_pane.clone();
-                        let rel_path = ctx_pane.read(cx).snapshot.nodes[ni].rel_path.clone();
                         menu = menu.item(
                             FolioMenuItem::new(i18n_graph::MENU_REVEAL_IN_TREE.get())
                                 .icon(IconName::FolderOpen)
-                                .on_click(move |_, _, cx| {
-                                    p_reveal.update(cx, |_, cx| {
-                                        cx.emit(GraphPaneEvent::RevealInTree {
-                                            rel_path: rel_path.clone(),
-                                        });
+                                .on_click(indexed_action(ni, |pane, ni, _, cx| {
+                                    cx.emit(GraphPaneEvent::RevealInTree {
+                                        rel_path: pane.snapshot.nodes[ni].rel_path.clone(),
                                     });
-                                }),
+                                })),
                         );
                     }
                 } else if let Some(ei) = hit_edge {
-                    let p_edge = ctx_pane.clone();
                     menu = menu.item(
                         FolioMenuItem::new(i18n_graph::MENU_EDGE_JUMP.get())
                             .icon(IconName::ExternalLink)
-                            .on_click(move |_, _, cx| {
-                                p_edge.update(cx, |pane, cx| pane.open_edge_source(ei, false, cx));
-                            }),
+                            .on_click(indexed_action(ei, |pane, ei, _, cx| pane.open_edge_source(ei, false, cx))),
                     );
                 } else {
                     let p_fit = ctx_pane.clone();

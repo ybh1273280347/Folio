@@ -159,6 +159,9 @@ fn execute_neighbors(snapshot: &GraphSnapshot, params: NeighborsParams) -> Resul
             format!("未在图谱索引中找到文件：{norm}"),
         ));
     };
+    if !node_allowed(snapshot.nodes[center_idx].kind, params.include_attachments) {
+        return Err(Failure::new("node_not_found", format!("当前筛选不包含该节点：{norm}")));
+    }
 
     let (in_deg, out_deg) = filtered_degrees(snapshot, params.include_attachments);
     let mut inbound = Vec::new();
@@ -385,6 +388,11 @@ fn execute_path(snapshot: &GraphSnapshot, params: PathParams) -> Result<Value, F
             format!("未在图谱索引中找到终点文件：{to_norm}"),
         ));
     };
+    if !node_allowed(snapshot.nodes[start].kind, params.include_attachments)
+        || !node_allowed(snapshot.nodes[goal].kind, params.include_attachments)
+    {
+        return Err(Failure::new("node_not_found", "当前筛选不包含起点或终点。"));
+    }
 
     let (in_deg, out_deg) = filtered_degrees(snapshot, params.include_attachments);
     if start == goal {
@@ -494,8 +502,10 @@ impl Workspace {
             }
         };
 
-        // Ensure on-disk `.canvas` anchors are indexed before reading SQLite.
-        self.sync_project_canvas_links(cx);
+        if let Err(error) = self.ensure_project_canvas_links() {
+            self.ai.read(cx).respond_workspace_tool(request, Failure::new("graph_index_failed", error).result());
+            return;
+        }
         let db_path = self.canvas_metadata_db_path();
         let project_files = self.tree.files().to_vec();
         let tag_snapshot = self.tags.snapshot.clone();
@@ -551,6 +561,18 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attachment_filter_applies_to_a_zero_hop_path() {
+        let snapshot = GraphSnapshot::build(None, &[], &Default::default(), &["image.png".into()]).unwrap();
+        let result = execute_path(&snapshot, PathParams {
+            from_path: "image.png".into(),
+            to_path: "image.png".into(),
+            directed: false,
+            include_attachments: false,
+        });
+        assert!(matches!(result, Err(Failure { code: "node_not_found", .. })));
+    }
 
     #[test]
     fn deserializes_bridge_wrapped_params() {

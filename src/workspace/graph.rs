@@ -2,7 +2,8 @@
 //! and in-graph append-only link creation.
 
 use super::*;
-use crate::graph::GraphPaneEvent;
+use crate::graph::{GraphPaneEvent, model::GraphSnapshot};
+use std::rc::Rc;
 
 impl Workspace {
     pub(super) fn open_graph(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -61,56 +62,72 @@ impl Workspace {
         self.graph_dirty = true;
         self.local_graph_dirty = true;
         let local_visible = self.right_panel.open && self.right_panel.view == RightPanelView::Graph;
-        if self.graph_open || local_visible {
-            self.refresh_graph_data(false, cx);
+        if self.graph_refresh_pending || !(self.graph_open || local_visible) {
+            return;
         }
+        // A save or watcher batch can update several links and tags in the same turn.
+        self.graph_refresh_pending = true;
+        let workspace = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = workspace.update(cx, |app, cx| {
+                app.graph_refresh_pending = false;
+                app.refresh_graph_data(false, cx);
+            });
+        });
     }
 
     pub(super) fn refresh_graph_data(&mut self, reset_fit: bool, cx: &mut Context<Self>) {
-        self.sync_project_canvas_links(cx);
+        let global = self.graph_open && self.graph_dirty;
+        let local = self.right_panel.open
+            && self.right_panel.view == RightPanelView::Graph
+            && self.local_graph_dirty;
+        if !(global || local) {
+            return;
+        }
+        if let Err(error) = self.ensure_project_canvas_links() {
+            self.report(error, cx);
+            return;
+        }
         let db_path = self.canvas_metadata_db_path();
-        let project_files = self.tree.files().to_vec();
-        let tag_snapshot = self.tags.snapshot.clone();
         let loose_paths = if self.projects.directory().is_none() {
-            self.documents.tabs().to_vec()
+            self.documents.tabs()
         } else {
-            Vec::new()
+            &[]
         };
-        let local_visible = self.right_panel.open && self.right_panel.view == RightPanelView::Graph;
-
-        if self.graph_open || (reset_fit && !local_visible) {
-            let result = self.graph.update(cx, |pane, cx| {
-                pane.load_data(
-                    db_path.as_deref(),
-                    &project_files,
-                    &tag_snapshot,
-                    &loose_paths,
-                    reset_fit,
-                    cx,
-                )
-            });
-            match result {
-                Ok(()) => self.graph_dirty = false,
-                Err(error) => self.report(error, cx),
+        let snapshot = match GraphSnapshot::build(
+            db_path.as_deref(), self.tree.files(), &self.tags.snapshot, loose_paths,
+        ) {
+            Ok(snapshot) => Rc::new(snapshot),
+            Err(error) => {
+                self.report(error, cx);
+                return;
             }
-        }
+        };
 
-        if local_visible {
-            let result = self.local_graph.update(cx, |pane, cx| {
-                pane.load_data(
-                    db_path.as_deref(),
-                    &project_files,
-                    &tag_snapshot,
-                    &loose_paths,
-                    reset_fit,
-                    cx,
-                )
-            });
-            match result {
-                Ok(()) => self.local_graph_dirty = false,
-                Err(error) => self.report(error, cx),
-            }
+        if global {
+            self.graph.update(cx, |pane, cx| pane.set_snapshot(snapshot.clone(), reset_fit, cx));
+            self.graph_dirty = false;
         }
+        if local {
+            self.local_graph.update(cx, |pane, cx| pane.set_snapshot(snapshot, reset_fit, cx));
+            self.local_graph_dirty = false;
+        }
+    }
+
+    pub(super) fn reset_graph_after_project_switch(&mut self, cx: &mut Context<Self>) {
+        self.graph_open = false;
+        self.project_canvas_links_indexed = false;
+        self.graph.update(cx, |pane, cx| pane.clear(cx));
+        self.local_graph.update(cx, |pane, cx| pane.clear(cx));
+        let active = self.documents.active().to_owned();
+        self.sync_graph_active_document(&active, cx);
+        self.mark_graph_dirty(cx);
+    }
+
+    fn reindex_graph(&mut self, cx: &mut Context<Self>) {
+        self.project_canvas_links_indexed = false;
+        self.sync_project_markdown_links(cx);
+        self.mark_graph_dirty(cx);
     }
 
     pub(super) fn handle_graph_event(
@@ -124,7 +141,7 @@ impl Workspace {
                 let full = self.document_path(rel_path);
                 if !full.is_file() {
                     self.report(crate::i18n::workspace::err_file_not_found(&full), cx);
-                    self.refresh_graph_data(false, cx);
+                    self.mark_graph_dirty(cx);
                     return;
                 }
                 let file = ProjectFile {
@@ -195,6 +212,7 @@ impl Workspace {
                 }
                 self.expand_ancestors(&target_rel);
                 self.sync_project_markdown_links(cx);
+                self.mark_graph_dirty(cx);
                 let file = ProjectFile {
                     kind: Self::file_kind(&full),
                     path: target_rel,
@@ -221,8 +239,7 @@ impl Workspace {
                 self.reveal_file_in_tree(rel_path, cx);
             }
             GraphPaneEvent::RefreshRequested => {
-                self.sync_project_markdown_links(cx);
-                self.refresh_graph_data(false, cx);
+                self.reindex_graph(cx);
             }
         }
     }
@@ -260,7 +277,6 @@ impl Workspace {
             if !was_dirty {
                 match self.save_file(source_rel, false, cx) {
                     Ok(true) => {
-                        self.refresh_graph_data(false, cx);
                         self.report(
                             crate::i18n::graph::appended_link_notice(&source_name, target_title, true),
                             cx,
@@ -298,7 +314,6 @@ impl Workspace {
         match files::save_document(&root, source_rel, &next_text, &disk.revision) {
             Ok(Ok(saved)) => {
                 self.sync_markdown_links_from_text(source_rel, &saved.text, cx);
-                self.refresh_graph_data(false, cx);
                 self.report(
                     crate::i18n::graph::appended_link_notice(&source_name, target_title, true),
                     cx,
@@ -450,8 +465,7 @@ impl Workspace {
                             .icon(crate::ui::icon(IconName::RefreshCw).size(px(14.)))
                             .tooltip(crate::i18n::graph::TOOLTIP_REFRESH.get())
                             .on_click(cx.listener(|app, _, _, cx| {
-                                app.sync_project_markdown_links(cx);
-                                app.refresh_graph_data(false, cx);
+                                app.reindex_graph(cx);
                             })),
                     )
                     .child(

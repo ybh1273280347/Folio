@@ -115,6 +115,8 @@ pub struct VisibleGraph {
     pub matched_nodes: HashSet<usize>,
     pub ordered_matches: Vec<usize>,
     pub neighbors: Vec<Vec<usize>>,
+    // Drawing and hit testing must curve the same edges after filtering.
+    pub directed_pairs: HashSet<(usize, usize)>,
 }
 
 pub(crate) fn normalize_rel_path(raw: &str) -> String {
@@ -220,7 +222,8 @@ fn ensure_node(
         return idx;
     }
     let idx = nodes.len();
-    let tags = collect_tags_for_path(&norm, tag_snapshot, tag_map);
+    // Standalone tag assignments use the original native absolute path.
+    let tags = collect_tags_for_path(rel_path, tag_snapshot, tag_map);
     nodes.push(GraphNode {
         id: key.clone(),
         label: node_label_for(&norm, kind),
@@ -274,6 +277,8 @@ impl GraphSnapshot {
             }
         }
 
+        // Only listed files can originate edges. Targets added from the index can be missing.
+        let source_count = nodes.len();
         let mut raw_edges: BTreeMap<(usize, usize, u8), GraphEdge> = BTreeMap::new();
         let mut push_edge = |source: usize,
                               target: usize,
@@ -318,15 +323,17 @@ impl GraphSnapshot {
         if let Some(db) = db_path
             && db.exists()
         {
-            let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            let mut conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .map_err(|e| e.to_string())?;
             conn.busy_timeout(Duration::from_millis(250))
                 .map_err(|e| e.to_string())?;
 
-            if table_exists(&conn, "markdown_links")? {
-                let mut stmt = conn
+            // Both link tables must come from the same SQLite read snapshot.
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            if table_exists(&tx, "markdown_links")? {
+                let mut stmt = tx
                     .prepare(
-                        "SELECT source_path, target_path, anchor, label, line, link_kind
+                        "SELECT source_path, target_path, label, line, link_kind
                          FROM markdown_links
                          WHERE trash_id = ''",
                     )
@@ -337,15 +344,14 @@ impl GraphSnapshot {
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
                             row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, i64>(4)?,
-                            row.get::<_, String>(5)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, String>(4)?,
                         ))
                     })
                     .map_err(|e| e.to_string())?;
 
                 for row in rows {
-                    let (src_raw, dst_raw, _anchor_raw, label, line, kind_raw) =
+                    let (src_raw, dst_raw, label, line, kind_raw) =
                         row.map_err(|e| e.to_string())?;
                     let src_norm = normalize_rel_path(&src_raw);
                     let dst_norm = normalize_rel_path(&dst_raw);
@@ -359,8 +365,7 @@ impl GraphSnapshot {
                         MarkdownLinkKind::Definition => GraphEdgeKind::MarkdownDef,
                     };
                     let src_key = canonical_key(&src_norm);
-                    // Only create source if it's already tracked or in loose mode.
-                    let Some(&src_idx) = id_lookup.get(&src_key) else {
+                    let Some(&src_idx) = id_lookup.get(&src_key).filter(|&&i| i < source_count) else {
                         continue;
                     };
                     let target_kind = if dst_norm.to_ascii_lowercase().ends_with(".md")
@@ -390,10 +395,10 @@ impl GraphSnapshot {
                 }
             }
 
-            if table_exists(&conn, "canvas_links")? {
-                let mut stmt = conn
+            if table_exists(&tx, "canvas_links")? {
+                let mut stmt = tx
                     .prepare(
-                        "SELECT canvas_path, node_id, target_path, anchor_kind, label
+                        "SELECT canvas_path, node_id, target_path, label
                          FROM canvas_links
                          WHERE trash_id = ''",
                     )
@@ -405,13 +410,12 @@ impl GraphSnapshot {
                             row.get::<_, String>(1)?,
                             row.get::<_, String>(2)?,
                             row.get::<_, String>(3)?,
-                            row.get::<_, String>(4)?,
                         ))
                     })
                     .map_err(|e| e.to_string())?;
 
                 for row in rows {
-                    let (canvas_raw, node_id, dst_raw, _anchor_kind, label) =
+                    let (canvas_raw, node_id, dst_raw, label) =
                         row.map_err(|e| e.to_string())?;
                     let src_norm = normalize_rel_path(&canvas_raw);
                     let dst_norm = normalize_rel_path(&dst_raw);
@@ -419,7 +423,7 @@ impl GraphSnapshot {
                         continue;
                     }
                     let src_key = canonical_key(&src_norm);
-                    let Some(&src_idx) = id_lookup.get(&src_key) else {
+                    let Some(&src_idx) = id_lookup.get(&src_key).filter(|&&i| i < source_count) else {
                         continue;
                     };
                     let dst_idx = ensure_node(
@@ -440,6 +444,7 @@ impl GraphSnapshot {
                     );
                 }
             }
+            tx.commit().map_err(|e| e.to_string())?;
         }
 
         let edges: Vec<GraphEdge> = raw_edges.into_values().collect();
@@ -589,6 +594,13 @@ impl GraphSnapshot {
             });
         }
 
+        let directed_pairs = visible_edges
+            .iter()
+            .map(|&ei| {
+                let edge = &self.edges[ei];
+                (edge.source, edge.target)
+            })
+            .collect();
         VisibleGraph {
             node_visible,
             visible_nodes,
@@ -598,6 +610,7 @@ impl GraphSnapshot {
             matched_nodes,
             ordered_matches,
             neighbors,
+            directed_pairs,
         }
     }
 }
@@ -701,5 +714,26 @@ mod tests {
         assert!(focus_2.visible_nodes.len() >= 3);
         let orphan_idx = snap.node_index("notes/orphan.md").unwrap();
         assert!(!focus_2.node_visible[orphan_idx]);
+    }
+
+    #[test]
+    fn skips_old_outgoing_links_from_a_missing_note() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let db = root.join("metadata.sqlite3");
+        let live = root.join("live.md");
+        let removed = root.join("removed.md");
+        std::fs::write(&live, "[Removed](removed.md)").unwrap();
+        std::fs::write(&removed, "[Old target](old-target.md)").unwrap();
+        sync_markdown_links(&db, "live.md", "[Removed](removed.md)", &live).unwrap();
+        sync_markdown_links(&db, "removed.md", "[Old target](old-target.md)", &removed).unwrap();
+        std::fs::remove_file(removed).unwrap();
+
+        let files = [ProjectFile { kind: FileKind::Text, path: "live.md".into() }];
+        let snapshot = GraphSnapshot::build(Some(&db), &files, &TagSnapshot::default(), &[]).unwrap();
+        let missing = &snapshot.nodes[snapshot.node_index("removed.md").unwrap()];
+        assert_eq!(missing.kind, GraphNodeKind::Unresolved);
+        assert_eq!((missing.in_degree, missing.out_degree), (1, 0));
+        assert!(snapshot.node_index("old-target.md").is_none());
     }
 }

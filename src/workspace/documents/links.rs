@@ -47,7 +47,6 @@ impl Workspace {
             self.report(error, cx);
         }
         self.refresh_active_markdown_backlinks(cx);
-        self.mark_graph_dirty(cx);
     }
 
     pub(in crate::workspace) fn remove_markdown_links_index(
@@ -63,6 +62,7 @@ impl Workspace {
         {
             self.report(error, cx);
         }
+        self.mark_graph_dirty(cx);
     }
 
     pub(in crate::workspace) fn refresh_active_backlinks(&mut self, cx: &mut Context<Self>) {
@@ -151,7 +151,7 @@ impl Workspace {
         let full = self.document_path(source_rel);
         if !full.is_file() {
             self.report(crate::i18n::workspace::err_file_not_found(&full), cx);
-            self.refresh_graph_data(false, cx);
+            self.mark_graph_dirty(cx);
             return;
         }
         let file = ProjectFile {
@@ -203,6 +203,7 @@ impl Workspace {
         if moves.is_empty() {
             return;
         }
+        self.mark_graph_dirty(cx);
         let Some(project) = self.projects.directory() else {
             for (old, new) in moves {
                 self.remove_markdown_links_index(old, cx);

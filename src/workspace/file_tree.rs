@@ -727,6 +727,7 @@ impl Workspace {
         let root = PathBuf::from(&self.projects.directory().unwrap().folder);
         let file = files::create_markdown_in(&root, None)?;
         self.tree.files = files::list_files(&root)?;
+        self.mark_graph_dirty(cx);
         self.expand_ancestors(&file.path);
         self.open_reading_pane_with_width(&file, initial_width, window, cx);
         Ok(())
@@ -789,6 +790,7 @@ impl Workspace {
         };
         self.tree.files = files::list_files(&root)?;
         self.expand_ancestors(&file.path);
+        self.mark_graph_dirty(cx);
         self.open_file(&file, window, cx)
     }
 
@@ -910,6 +912,7 @@ impl Workspace {
                 files::create_file(&root, &name)?;
                 self.tree.files = files::list_files(&root)?;
                 self.tree.folders = files::list_folders(&root).unwrap_or_default();
+                self.mark_graph_dirty(cx);
                 let normalized = name.trim().replace('\\', "/");
                 let file = self.tree.files
                     .iter()

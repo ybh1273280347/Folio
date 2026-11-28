@@ -29,39 +29,38 @@ impl Workspace {
             Err(_) => canvas_index::remove_canvas_links(&db_path, rel_path),
         };
         if let Err(error) = result {
+            self.project_canvas_links_indexed = false;
             self.report(error, cx);
         }
         self.refresh_active_canvas_backlinks();
         self.mark_graph_dirty(cx);
     }
 
-    pub(in crate::workspace) fn sync_project_canvas_links(&mut self, cx: &mut Context<Self>) {
+    /// Backfills canvases once per project visit. Saves and the file watcher maintain the index afterward.
+    pub(in crate::workspace) fn ensure_project_canvas_links(&mut self) -> Result<(), String> {
+        if self.project_canvas_links_indexed {
+            return Ok(());
+        }
         let Some(project) = self.projects.directory() else {
-            return;
+            return Ok(());
         };
-        let Some(db_path) = self.canvas_metadata_db_path() else {
-            return;
-        };
-        let root = PathBuf::from(&project.folder);
-        let canvas_paths: Vec<String> = self
-            .tree
-            .files()
-            .iter()
-            .filter(|f| Self::is_canvas_path(&f.path))
-            .map(|f| f.path.clone())
-            .collect();
-        for rel_path in canvas_paths {
-            let full = root.join(&rel_path);
-            let Ok(text) = std::fs::read_to_string(&full) else {
-                continue;
-            };
-            if let Ok(doc) = CanvasDocument::from_json_str(&text)
-                && let Err(error) = canvas_index::sync_canvas_links(&db_path, &rel_path, &doc)
-            {
-                self.report(error, cx);
+        let root = Path::new(&project.folder);
+        let db_path = canvas_index::metadata_db_path(Some(root)).map_err(|error| error.to_string())?;
+        for file in self.tree.files().iter().filter(|f| Self::is_canvas_path(&f.path)) {
+            match files::read_document(root, &file.path) {
+                Ok(disk) => match CanvasDocument::from_json_str(&disk.text) {
+                    Ok(doc) => canvas_index::sync_canvas_links(&db_path, &file.path, &doc)?,
+                    Err(_) => canvas_index::remove_canvas_links(&db_path, &file.path)?,
+                },
+                Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::InvalidData) => {
+                    canvas_index::remove_canvas_links(&db_path, &file.path)?;
+                }
+                Err(error) => return Err(format!("{}: {error}", root.join(&file.path).display())),
             }
         }
+        self.project_canvas_links_indexed = true;
         self.refresh_active_canvas_backlinks();
+        Ok(())
     }
 
     pub(in crate::workspace) fn remove_canvas_index(&mut self, rel_path: &str, cx: &mut Context<Self>) {
@@ -71,9 +70,11 @@ impl Workspace {
         if let Some(db_path) = self.canvas_metadata_db_path()
             && let Err(error) = canvas_index::remove_canvas_links(&db_path, rel_path)
         {
+            self.project_canvas_links_indexed = false;
             self.report(error, cx);
         }
         self.refresh_active_canvas_backlinks();
+        self.mark_graph_dirty(cx);
     }
 
     pub(in crate::workspace) fn refresh_active_canvas_backlinks(&mut self) {
