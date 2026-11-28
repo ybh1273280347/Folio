@@ -191,3 +191,43 @@ pub(crate) fn header(
         .child(actions)
         .into_any_element()
 }
+
+pub(crate) fn frontmatter_header(
+    state: &Entity<BlockEditorState>,
+    block: BlockId,
+    cx: &mut App,
+) -> AnyElement {
+    let source_editor = state.clone();
+    let theme = cx.theme();
+    div()
+        .id(("frontmatter-tools", block.as_u64() as usize))
+        .w_full()
+        .px_2p5()
+        .py_1()
+        .flex()
+        .items_center()
+        .justify_between()
+        .border_b_1()
+        .border_color(theme.border.opacity(0.45))
+        .block_mouse_except_scroll()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child("YAML"),
+        )
+        .child(
+            Button::new(("frontmatter-done", block.as_u64() as usize))
+                .ghost()
+                .compact()
+                .w(px(24.))
+                .h(px(24.))
+                .icon(Icon::new(IconName::Check).w(px(13.)).h(px(13.)))
+                .tooltip("完成编辑 (Esc)")
+                .on_click(move |_, _, cx| {
+                    source_editor.update(cx, |state, cx| state.exit_code_preview_source(cx));
+                }),
+        )
+        .into_any_element()
+}

@@ -61,6 +61,54 @@ pub(crate) fn node(
     .accessibility_label("Mermaid")
 }
 
+pub(crate) fn render_frontmatter_surface(
+    state: Entity<BlockEditorState>,
+    block: BlockId,
+    revision: u64,
+    code: CodeBlock,
+    renderer: Renderer,
+    bounds: Option<BoundsMap>,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui::Div {
+    let chart = (renderer)(block, revision, &code, false, window, cx);
+    let click_state = state.clone();
+    div()
+        .w_full()
+        .child(
+            div()
+                .id(("editor-code-preview", block.as_u64() as usize))
+                .relative()
+                .w_full()
+                .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                    cx.stop_propagation();
+                    click_state.update(cx, |state, cx| {
+                        state.focus(window, cx);
+                        if event.click_count >= 2 && !state.is_readonly() {
+                            state.enter_code_preview_source(block, cx);
+                        } else {
+                            state.select_code_preview(block, event.modifiers.shift, cx);
+                        }
+                    });
+                })
+                .child(chart)
+                .child(
+                    canvas(
+                        move |area, _, _| {
+                            if let Some(bounds) = &bounds {
+                                bounds.lock().expect("code preview bounds").insert(block, area);
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+                ),
+        )
+}
+
 pub(crate) fn register_renderer(extensions: &mut MarkdownExtensions) {
     *extensions = std::mem::take(extensions).block_renderer(NAME, |node, window, cx| {
         let data = node.data::<Data>().expect("editor code preview data");
@@ -130,6 +178,7 @@ fn render(data: &Data, window: &mut Window, cx: &mut App) -> AnyElement {
     };
 
     let state = data.state.clone();
+    let double_click_edits = !data.toolbar;
     div()
         .id(("editor-code-preview", block.as_u64() as usize))
         .relative()
@@ -138,7 +187,11 @@ fn render(data: &Data, window: &mut Window, cx: &mut App) -> AnyElement {
             cx.stop_propagation();
             state.update(cx, |state, cx| {
                 state.focus(window, cx);
-                state.select_code_preview(block, event.modifiers.shift, cx);
+                if double_click_edits && event.click_count >= 2 && !state.is_readonly() {
+                    state.enter_code_preview_source(block, cx);
+                } else {
+                    state.select_code_preview(block, event.modifiers.shift, cx);
+                }
             });
         })
         .child(toolbar)

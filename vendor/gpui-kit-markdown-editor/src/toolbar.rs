@@ -58,6 +58,7 @@ const STYLES: &[(&str, BlockKind)] = &[
 pub(crate) fn style_label(kind: Option<BlockKind>) -> &'static str {
     match kind {
         Some(BlockKind::CodeBlock) => "Code block",
+        Some(BlockKind::FrontMatter) => "Front Matter",
         Some(BlockKind::Heading { level: 5 }) => "Heading 5",
         Some(BlockKind::Heading { level: 6 }) => "Heading 6",
         Some(kind) => STYLES
