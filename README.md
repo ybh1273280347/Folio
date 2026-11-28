@@ -2,7 +2,7 @@
 
 基于 [GPUI](https://www.gpui.rs/) 与 Rust 编写的 Windows 原生 LaTeX / Markdown 个人工作台。
 
-写文档和论文时，希望有一款轻量、启动快、内存占用低的本地编辑工具，于是用 GPUI 做了这套原生工作台。界面、编辑器、公式排版、PDF 预览与导出均在进程内完成。Markdown 文档之间支持 `[[` 快捷插链与反向引用，文件移动或重命名时引用路径自动重构；知识画布把 Markdown 选区、PDF 批注与本地文件串成可双向跳转的关系图。AI 助手采用原生 GPUI 面板，模型与工具宿主运行在独立 Node 进程。HTML 预览和离线 Draw.io 按需使用系统 WebView2。
+写文档和论文时，希望有一款轻量、启动快、内存占用低的本地编辑工具，于是用 GPUI 做了这套原生工作台。界面、编辑器、公式排版、PDF 预览与导出均在进程内完成。Markdown 文档之间支持 `[[` 快捷插链与反向引用，文件移动或重命名时引用路径自动重构；知识画布把 Markdown 选区、PDF 批注与本地文件串成可双向跳转的关系图，知识图谱再把笔记、画布与待建双链汇总成可搜索、可筛选的关系网络。AI 助手采用原生 GPUI 面板，模型与工具宿主运行在独立 Node 进程。HTML 预览和离线 Draw.io 按需使用系统 WebView2。
 
 [构建与运行](#构建与运行) · [Markdown 写作提示](FOLIO_MARKDOWN.md) · [架构与开发指南](ARCHITECTURE.md)
 
@@ -114,6 +114,7 @@
 - **联网与抓取**：`exa_search`（web/academic、时间与域名过滤）和 `baidu_qianfan_search`（中文来源）是显式工具选择；Exa 通过 PowerShell 7/.NET 读取 Windows 系统代理并用 Undici dispatcher 发起请求，未配置代理时直接报错、不回退直连。`web_fetch` 用 Scrapling 抽取 Markdown，`mode: dynamic` 显式启动临时 Chromium；PDF 支持按 1 开始的页码选取，扫描/混合 PDF 返回待 OCR 页码，交给独立的 `paddleocr` MCP 服务（PaddleOCR-VL-1.6）处理，不是内嵌模型或隐藏下载。
 - **工作区工具**：AI 可查看 / 按标签查找当前项目或默认空间内的文件，为文件增删标签、给新标签指定颜色，以及全局重命名标签 / 改色（`folio_tags_list` / `folio_files_query` / `folio_file_tags_update` / `folio_tags_manage`）；`run_python` 将多行 Python 源码直接经 stdin 交给 `python -X utf8 -u` 执行（不经过 shell，避免转义问题，返回合并输出与退出码）。标签改动不经审批，直接在会话时间线生成带「撤销」按钮的回执；仅项目与默认空间可用，独立文件空间不开放。
 - **知识库工具**：AI 可用 `folio_kb_search` 做关键词、向量或混合检索（可指定意图、标签、目录、扩展名和结果数），用 `folio_kb_status` 查询索引与服务状态，用 `folio_kb_reindex` 做增量/全量重建或指定 PDF 精确解析，并用 `folio_pdf_read` 按页读取 PDF Markdown、优先复用精确解析缓存。搜索包含未保存草稿。
+- **图谱工具**：`folio_graph_neighbors` 查单篇文档的入链、出链、悬空目标与可选二跳邻域（带 Markdown 行号或画布节点 ID），`folio_graph_overview` 汇总节点 / 连线统计、枢纽、孤立笔记与悬空清单，`folio_graph_path` 查找两篇文档间的最短引用路径。三者均为只读、无需审批，由内置 `folio-graph` 技能指导。
 - **文档批注**：可直接让 AI 为当前项目的 Markdown 或有文字层的 PDF 写批注（`folio_annotations_list` / `folio_annotation_create`）。AI 选取少量有价值位置添加高亮与评论，PDF 页码从 1 起、重复原文可用 occurrence 定位，已有不同评论不会被覆盖；首版不支持扫描页 / OCR、公式与图片区域、跨块锚点及原生 PDF / Word 批注导出。批注写入文档旁的 `.folio/annotations.json`（与手动批注共用），Markdown 高亮写回正文；正文保存成功而 sidecar 失败时明确提示。工作流由内置的 `folio-annotations` 技能指导。
 - **上下文与权限**：会话顶部显示上下文窗口用量；思考级别可调（关闭 / 最低 / 低 / 中 / 高 / 极高 / 最高，模型不支持时提示“当前模型不支持调节”）。命令与脚本执行前弹出审批卡片（“允许” / “运行命令”，支持“此会话始终允许”与“拒绝”），顶栏盾牌图标切换“需确认” ↔ “完全访问”；扩展的 confirm / select / input / editor 提示也以卡片呈现。工具时间线的详略由“设置 → 视图 → 工具执行视图”（极简 / 标准 / 详细）控制。
 - **文档选页预览**：可读取 Word / PowerPoint / PDF 的指定页，页码从 1 开始；先用 `scripts/install-document-renderers.ps1` 把渲染脚本装入本机 Magpie 的 `pdf`/`docx`/`pptx` 技能，Office 格式依赖本机 Microsoft Office，结果以 PNG 供模型查看。
@@ -134,7 +135,18 @@
 - **导出**：工具栏可导出为同目录的 PDF / SVG / PNG 伴生文件；有选中节点时只导出选中节点及其连线，否则导出整张画布。
 - **AI 协作**：可让 AI 读取、创建、批量修改画布并自动布局；批量修改在一次撤销步骤内完成并校验版本，由内置 `folio-canvas` 技能指导，无需审批。
 
-### 12\. 个性化设置
+### 12\. 知识图谱
+
+项目内的 Markdown 链接与知识画布锚点会自动汇总成一张关系图：笔记、画布、待建双链与附件都是节点，引用关系是带方向的连线。图谱只读取现有链接索引与文件树，不额外写文件。
+
+- **两个入口**：左侧栏顶部的网络图标打开全局「知识图谱」标签页，打开其他文件时自动让位；文档标签栏右侧的网络图标或右侧功能中心打开右侧栏「局部图谱」，随当前 Markdown / 画布自动跟随，可在 1 跳 / 2 跳同心布局间切换、刷新、最大化，或点右上角在全局图谱中展开。
+- **节点与连线**：节点区分笔记、知识画布、附件（图片 / PDF 等）与「悬空」目标；连线来自 Markdown 链接、图片引用、引用式链接定义和画布锚点，同一条引用出现多次会合并计数，悬停连线显示首次引用行号或画布节点 ID。默认隐藏附件节点与图片引用。
+- **浏览与操作**：力导向布局自动排布；滚轮以光标为中心缩放，空格或中键拖动平移，全局图谱中可拖动节点调整位置；双击或 `Ctrl+单击` 打开节点（`Alt` 分栏），单击连线跳到首次引用位置（`Alt` 分栏）；悬停节点会聚光其邻居并淡化其余节点。
+- **搜索与筛选**：左上角搜索框匹配节点名与标签，命中项在图中高亮，下拉结果点击即居中；右上角可切换显示画布 / 悬空 / 附件、只看孤立节点，配色可在按目录 / 按标签 / 按类型间切换，并可重新整理布局、刷新索引、自适应全图与缩放。
+- **聚焦与右键**：节点右键可打开 / 分栏、聚焦 1~2 跳邻域（顶部出现「局部 · 名称」标签，可切换跳数或退出）、复制 Markdown 链接、在文件树中定位；悬空节点可直接「创建笔记」；连线右键可跳到引用位置；空白处右键提供自适应、重新整理与刷新（局部图谱为自适应、刷新与退出聚焦）。
+- **文末补链**：对 Markdown 节点选「连接到…」后点目标节点，会在源文档末尾追加一条 `- [标题](根相对链接)`；源文档没有未保存改动时立即写盘并刷新图谱，否则先写入草稿、保存后生效；磁盘文件刚被外部修改时提示刷新重试。
+
+### 13\. 个性化设置
 
 设置分为“外观（字体 / 主题 / 视图）”“快捷键”“终端”“API 服务”，改动即时应用并落盘：
 
@@ -224,17 +236,17 @@ pwsh -NoProfile -File .\scripts\package.ps1
 
 ```powershell
 cargo test                       # Rust：tests/fold_callouts.rs、tests/appearance.rs、tests/annotations.rs、tests/char_count.rs、tests/frontmatter.rs
-npm test --prefix resources/pi-host   # AI 宿主 JSONL 协议、标签 / 批注 / 编译 / draw.io / RAG 工具（受控 OpenAI 兼容服务）
+npm test --prefix resources/pi-host   # AI 宿主 JSONL 协议、标签 / 批注 / 编译 / draw.io / RAG / 图谱工具（受控 OpenAI 兼容服务）
 ```
 
-Rust 集成测试覆盖折叠标注的 Markdown 往返与输入规则、主题/自定义配色持久化、块级代码随正文缩放、字符计数规则与缓冲更新、Front Matter 的字节级往返与首块位置约束，以及批注的 Markdown / PDF 定位、歧义拒绝与越界路径防护；RAG 解析、索引、去重与指纹过滤另有 `cargo test --bin folio-gpui-prototype rag::` 等二进制单元测试。AI 宿主测试覆盖多会话并行、实时快照、项目隔离、标题与删除保护、联网工具选项与取消，以及标签 / 批注 / RAG 工具的请求—应答往返与会话隔离，不使用固定等待。宿主流式协议性能可用 `node scripts/pi-host-stream-benchmark.mjs` 测量。打包脚本本身不运行测试。
+Rust 集成测试覆盖折叠标注的 Markdown 往返与输入规则、主题/自定义配色持久化、块级代码随正文缩放、字符计数规则与缓冲更新、Front Matter 的字节级往返与首块位置约束，图谱模型、筛选与力导向布局，以及批注的 Markdown / PDF 定位、歧义拒绝与越界路径防护；RAG 解析、索引、去重与指纹过滤另有 `cargo test --bin folio-gpui-prototype rag::` 等二进制单元测试。AI 宿主测试覆盖多会话并行、实时快照、项目隔离、标题与删除保护、联网工具选项与取消，以及标签 / 批注 / RAG / 图谱工具的请求—应答往返与会话隔离，不使用固定等待。宿主流式协议性能可用 `node scripts/pi-host-stream-benchmark.mjs` 测量。打包脚本本身不运行测试。
 
 ---
 
 ## 📌 说明
 
 - **自用分享**：按个人写作与排版习惯搭建，主要满足日常 LaTeX 编译与 Markdown 记笔记需求。
-- **数据存储**：配置保存在 `%APPDATA%\folio-gpui`（可用 `FOLIO_USER_DATA` 覆盖），含 `preferences.json`、`projects.json`、`workspace-sessions.json`、`ai-tabs.json`、`ai-session-metadata.json`、废纸篓与 WebView2 缓存；AI 对话原文由 Pi JSONL 管理，项目文件树永久忽略 `.pi/`；PDF 批注在目标目录下的 `.folio/annotations.json`；标签库为项目下的 `.folio/metadata.sqlite3`（默认空间在 `~/.Folio/.folio/`，独立文件在应用数据目录 `loose-metadata.sqlite3`），Markdown 链接与画布反链索引（`markdown_links` / `canvas_links`）也在该库；项目知识库索引在 `.folio/rag.sqlite3`，OCR 产物在 `.folio/pdf-cache/<sha256>/`，派生清单在 `.folio/derived-pdfs.json` 与 `.folio/derived-markdowns.json`；粘贴图片保存在文档目录 `images/<文档名>/`；文档源文件与编译 PDF 均留在项目本地目录，不改动用户文件结构。
+- **数据存储**：配置保存在 `%APPDATA%\folio-gpui`（可用 `FOLIO_USER_DATA` 覆盖），含 `preferences.json`、`projects.json`、`workspace-sessions.json`、`ai-tabs.json`、`ai-session-metadata.json`、废纸篓与 WebView2 缓存；AI 对话原文由 Pi JSONL 管理，项目文件树永久忽略 `.pi/`；PDF 批注在目标目录下的 `.folio/annotations.json`；标签库为项目下的 `.folio/metadata.sqlite3`（默认空间在 `~/.Folio/.folio/`，独立文件在应用数据目录 `loose-metadata.sqlite3`），Markdown 链接与画布反链索引（`markdown_links` / `canvas_links`）也在该库，知识图谱直接读取这两张表与文件树，不额外保存图谱数据；项目知识库索引在 `.folio/rag.sqlite3`，OCR 产物在 `.folio/pdf-cache/<sha256>/`，派生清单在 `.folio/derived-pdfs.json` 与 `.folio/derived-markdowns.json`；粘贴图片保存在文档目录 `images/<文档名>/`；文档源文件与编译 PDF 均留在项目本地目录，不改动用户文件结构。
 - **隐私**：划词翻译会把选中文本发送给 Google（或其百度回退）服务；AI 助手会把输入、附件与选区发送到所配置的网关及启用的联网搜索服务，Exa/千帆凭证只经私有环境变量传给宿主。知识库的扫描 PDF 精确解析会在显式触发后把文档内容发送到配置的 PaddleOCR 服务；本地向量模型路径由用户配置，按需启动。启用前请确认这符合你对相关内容的处理要求。
 - **参考文档**：Markdown 写作提示见 [FOLIO_MARKDOWN.md](FOLIO_MARKDOWN.md)，数学公式支持范围见 [LATEX_SUPPORT_BOUNDARIES.md](LATEX_SUPPORT_BOUNDARIES.md) 与 [LATEX_EXTENSION_GUIDE.md](LATEX_EXTENSION_GUIDE.md)。开发从 [ARCHITECTURE.md](ARCHITECTURE.md) 开始，前端布局与动效经验见 [FrontExperience.md](FrontExperience.md)，仓库协作约定见 [AGENTS.md](AGENTS.md)。
 
