@@ -12,7 +12,8 @@ use std::{
 #[cfg(windows)]
 use windows::{
     Win32::Networking::WinHttp::{
-        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_ACCESS_TYPE_NAMED_PROXY,
+        ERROR_WINHTTP_INVALID_OPTION, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+        WINHTTP_ACCESS_TYPE_NAMED_PROXY,
         WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_DISABLE_COOKIES, WINHTTP_FLAG_SECURE,
         WINHTTP_OPEN_REQUEST_FLAGS, WINHTTP_OPTION_DISABLE_FEATURE,
         WINHTTP_OPTION_DISABLE_GLOBAL_POOLING, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
@@ -20,7 +21,7 @@ use windows::{
         WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption,
         WinHttpSetTimeouts, WinHttpWriteData,
     },
-    core::{HSTRING, PCWSTR},
+    core::{HRESULT, HSTRING, PCWSTR},
 };
 
 #[derive(Debug)]
@@ -140,17 +141,21 @@ fn acquire_session(opts: &RequestOptions<'_>) -> Result<Arc<Mutex<SessionHandle>
                 return Err(crate::i18n::media::http_init_session(opts.label));
             }
             let handle = Handle(raw);
-            // Keep idle connections owned by this session so reaping it also closes its pool.
-            unsafe {
+            // Keep idle connections owned by this session where WinHTTP supports
+            // disabling the legacy cross-session pool.
+            if let Err(error) = unsafe {
                 WinHttpSetOption(
                     Some(handle.0),
                     WINHTTP_OPTION_DISABLE_GLOBAL_POOLING,
                     Some(&1u32.to_ne_bytes()),
                 )
+            } && error.code() != HRESULT::from_win32(ERROR_WINHTTP_INVALID_OPTION)
+            {
+                return Err(format!(
+                    "{} ({error})",
+                    crate::i18n::media::http_init_session(opts.label)
+                ));
             }
-            .map_err(|error| {
-                format!("{} ({error})", crate::i18n::media::http_init_session(opts.label))
-            })?;
             entry.insert(CachedSession {
                 handle: Arc::new(Mutex::new(SessionHandle { handle })),
                 idle_since: None,
