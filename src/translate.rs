@@ -746,7 +746,7 @@ fn post_form_https(
         method: "POST",
         path,
         headers: &[("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")],
-        body: form_body.as_bytes(),
+        body: &[form_body.as_bytes()],
         connect_timeout_ms,
         receive_timeout_ms: 8_000,
         use_system_proxy: true,

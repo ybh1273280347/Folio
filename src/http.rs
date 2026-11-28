@@ -1,5 +1,7 @@
 //! Minimal HTTP/HTTPS client backed by WinHTTP on Windows and `curl` elsewhere.
 
+use std::io::{self, Read};
+
 #[cfg(windows)]
 use std::{
     collections::{HashMap, hash_map::Entry},
@@ -16,7 +18,7 @@ use windows::{
         WINHTTP_OPTION_DISABLE_GLOBAL_POOLING, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
         WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
         WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption,
-        WinHttpSetTimeouts,
+        WinHttpSetTimeouts, WinHttpWriteData,
     },
     core::{HSTRING, PCWSTR},
 };
@@ -34,7 +36,8 @@ pub struct RequestOptions<'a> {
     pub method: &'a str,
     pub path: &'a str,
     pub headers: &'a [(&'a str, &'a str)],
-    pub body: &'a [u8],
+    /// Borrowed wire segments sent as a single body with a known Content-Length.
+    pub body: &'a [&'a [u8]],
     pub connect_timeout_ms: i32,
     pub receive_timeout_ms: i32,
     pub use_system_proxy: bool,
@@ -181,6 +184,61 @@ pub(crate) fn reap_idle_sessions() {
 
 #[cfg(windows)]
 pub fn send(opts: RequestOptions<'_>) -> Result<HttpResponse, String> {
+    let (status, mut response) = open(opts)?;
+    let mut body = Vec::new();
+    response
+        .read_to_end(&mut body)
+        .map_err(|error| error.to_string())?;
+    Ok(HttpResponse { status, body })
+}
+
+#[cfg(windows)]
+struct ResponseBody<'a> {
+    // Field drop order closes child handles before the parent handles they rely on.
+    request: Handle,
+    _connection: Handle,
+    _session: Arc<Mutex<SessionHandle>>,
+    label: &'a str,
+    remaining: usize,
+}
+
+#[cfg(windows)]
+impl Read for ResponseBody<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        // Probe at most one byte past the budget so an exactly sized response
+        // succeeds at EOF and a longer response fails before reaching the caller.
+        let size = buffer
+            .len()
+            .min(self.remaining.saturating_add(1))
+            .min(u32::MAX as usize);
+        let mut read = 0u32;
+        unsafe {
+            WinHttpReadData(
+                self.request.0,
+                buffer.as_mut_ptr().cast::<c_void>(),
+                size as u32,
+                &mut read,
+            )
+        }
+        .map_err(|_| io::Error::other(crate::i18n::media::http_read_err(self.label)))?;
+        let read = read as usize;
+        self.remaining = self.remaining.checked_sub(read).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                crate::i18n::media::http_too_large(self.label),
+            )
+        })?;
+        Ok(read)
+    }
+}
+
+/// Opens a response after sending the request. The reader owns the request and its
+/// session lease, and enforces the response budget as bytes are read on Windows.
+#[cfg(windows)]
+pub fn open(opts: RequestOptions<'_>) -> Result<(u16, impl Read + '_), String> {
     let session = acquire_session(&opts)?;
     let host_h = HSTRING::from(opts.host);
     let connect = {
@@ -243,22 +301,46 @@ pub fn send(opts: RequestOptions<'_>) -> Result<HttpResponse, String> {
         .collect::<Vec<_>>()
         .join("\r\n");
     let headers_h = (!joined_headers.is_empty()).then(|| HSTRING::from(joined_headers));
-    let body_ptr = (!opts.body.is_empty()).then_some(opts.body.as_ptr() as *const c_void);
-    let body_len = u32::try_from(opts.body.len())
+    let body_len = u32::try_from(opts.body.iter().map(|part| part.len()).sum::<usize>())
         .map_err(|_| format!("{}: request body exceeds 4 GiB", opts.label))?;
+    let inline = match opts.body {
+        [part] => *part,
+        _ => &[],
+    };
+    let body_ptr = (!inline.is_empty()).then_some(inline.as_ptr().cast::<c_void>());
 
     let sent = unsafe {
         WinHttpSendRequest(
             request.0,
             headers_h.as_deref(),
             body_ptr,
-            body_len,
+            inline.len() as u32,
             body_len,
             0,
         )
     };
     if sent.is_err() {
         return Err(crate::i18n::media::http_send_req(opts.label));
+    }
+    if opts.body.len() > 1 {
+        // Send the multipart envelope and PDF as borrowed segments to avoid a
+        // second full-document allocation. Keep WinHTTP writes bounded as well.
+        for part in opts.body {
+            for chunk in part.chunks(64 * 1024) {
+                let mut written = 0u32;
+                let result = unsafe {
+                    WinHttpWriteData(
+                        request.0,
+                        Some(chunk.as_ptr().cast::<c_void>()),
+                        chunk.len() as u32,
+                        &mut written,
+                    )
+                };
+                if result.is_err() || written as usize != chunk.len() {
+                    return Err(crate::i18n::media::http_send_req(opts.label));
+                }
+            }
+        }
     }
 
     if unsafe { WinHttpReceiveResponse(request.0, std::ptr::null_mut()) }.is_err() {
@@ -279,35 +361,16 @@ pub fn send(opts: RequestOptions<'_>) -> Result<HttpResponse, String> {
     }
     .map_err(|error| format!("{} ({error})", crate::i18n::media::http_read_err(opts.label)))?;
 
-    let mut out = Vec::new();
-    let mut buf = [0u8; 8192];
-    loop {
-        let mut read = 0u32;
-        if unsafe {
-            WinHttpReadData(
-                request.0,
-                buf.as_mut_ptr().cast::<c_void>(),
-                buf.len() as u32,
-                &mut read,
-            )
-        }
-        .is_err()
-        {
-            return Err(crate::i18n::media::http_read_err(opts.label));
-        }
-        if read == 0 {
-            break;
-        }
-        if read as usize > opts.max_response_bytes - out.len() {
-            return Err(crate::i18n::media::http_too_large(opts.label));
-        }
-        out.extend_from_slice(&buf[..read as usize]);
-    }
-
-    Ok(HttpResponse {
-        status: status as u16,
-        body: out,
-    })
+    Ok((
+        status as u16,
+        ResponseBody {
+            request,
+            _connection: connect,
+            _session: session,
+            label: opts.label,
+            remaining: opts.max_response_bytes,
+        },
+    ))
 }
 
 #[cfg(not(windows))]
@@ -337,7 +400,9 @@ pub fn send(opts: RequestOptions<'_>) -> Result<HttpResponse, String> {
         .map_err(|e| crate::i18n::media::curl_invoke_failed(opts.label, &e))?;
     if !opts.body.is_empty() {
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(opts.body).map_err(|e| e.to_string())?;
+            for part in opts.body {
+                stdin.write_all(part).map_err(|e| e.to_string())?;
+            }
         }
     }
     let output = child
@@ -353,9 +418,17 @@ pub fn send(opts: RequestOptions<'_>) -> Result<HttpResponse, String> {
         .ok()
         .and_then(|s| s.trim().parse::<u16>().ok())
         .unwrap_or(0);
-    let body = output.stdout[..split].to_vec();
-    if body.len() > opts.max_response_bytes {
+    if split > opts.max_response_bytes {
         return Err(crate::i18n::media::http_too_large(opts.label));
     }
+    let mut body = output.stdout;
+    body.truncate(split);
     Ok(HttpResponse { status, body })
+}
+
+#[cfg(not(windows))]
+pub fn open(opts: RequestOptions<'_>) -> Result<(u16, impl Read + '_), String> {
+    // The curl fallback writes the status trailer after the buffered body.
+    let response = send(opts)?;
+    Ok((response.status, io::Cursor::new(response.body)))
 }

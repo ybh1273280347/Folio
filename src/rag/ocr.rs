@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     fs,
+    io::{BufReader, Read},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -464,8 +465,8 @@ pub fn process_single_pdf_with_progress(
     }
 }
 
-fn pdf_total_pages(bytes: &[u8]) -> Option<usize> {
-    gpui_pdf::parse(Arc::new(bytes.to_vec()))
+fn pdf_total_pages(bytes: Arc<Vec<u8>>) -> Option<usize> {
+    gpui_pdf::parse(bytes)
         .ok()
         .map(|doc| doc.pages().len())
 }
@@ -501,6 +502,8 @@ fn process_single_pdf(
             format!("PDF 已更改，请同步知识库后重试 ({rel_path})"),
         ));
     }
+    // Share the same verified bytes with the PDF parser and multipart sender.
+    let bytes = Arc::new(bytes);
 
     let mut base_pages: Option<Vec<PdfPageMarkdown>> = None;
     let mut target_pages: Option<Vec<usize>> = None;
@@ -537,7 +540,7 @@ fn process_single_pdf(
     let expected_pages = target_pages
         .as_ref()
         .map(|p| p.len())
-        .or_else(|| pdf_total_pages(&bytes));
+        .or_else(|| pdf_total_pages(bytes.clone()));
     on_progress(OcrProgressEvent::Started {
         rel_path: rel_path.to_owned(),
         total_pages: expected_pages,
@@ -555,12 +558,11 @@ fn process_single_pdf(
     })
     .to_string();
     let boundary = format!("----FolioPaddleOcr{}", &hash[..12.min(hash.len())]);
-    let body = build_multipart_body(
+    let (prefix, suffix) = multipart_envelope(
         &boundary,
         &optional_payload,
         page_ranges_arg.as_deref(),
         &file_name,
-        &bytes,
     );
     let content_type = format!("multipart/form-data; boundary={boundary}");
     let auth = format!("bearer {token}");
@@ -575,7 +577,7 @@ fn process_single_pdf(
             ("Authorization", &auth),
             ("Content-Type", &content_type),
         ],
-        body: &body,
+        body: &[prefix.as_bytes(), bytes.as_slice(), suffix.as_bytes()],
         connect_timeout_ms: 10_000,
         receive_timeout_ms: 180_000,
         use_system_proxy: true,
@@ -584,6 +586,7 @@ fn process_single_pdf(
         label: "PaddleOCR",
     })
     .map_err(|e| RagError::new("ocr_network", e))?;
+    drop(bytes);
 
     if !(200..300).contains(&resp.status) {
         let preview = String::from_utf8_lossy(&resp.body);
@@ -612,18 +615,18 @@ fn process_single_pdf(
         .map_err(|e| RagError::new("store_error", e))?;
 
     let jsonl_url = poll_job_until_done(&auth, &job_id, rel_path, expected_pages, cancelled, on_progress)?;
-    let jsonl_text = download_jsonl(&jsonl_url)?;
+    let page_texts = download_ocr_pages(&jsonl_url)?;
     if cancelled.load(Ordering::Relaxed) {
         return Err(RagError::cancelled());
     }
     let out_dir = cache_dir(root, hash);
-    match (base_pages.as_deref(), target_pages.as_deref()) {
+    match (base_pages, target_pages.as_deref()) {
         (Some(existing), Some(targets)) => {
-            merge_paddleocr_jsonl_into_cache(&jsonl_text, existing, targets, &out_dir)
+            merge_ocr_pages_into_cache(page_texts, existing, targets, &out_dir)
                 .map_err(|e| RagError::new("ocr_parse", e))?;
         }
         _ => {
-            parse_paddleocr_jsonl_to_cache_checked(&jsonl_text, expected_pages, &out_dir)
+            write_ocr_pages_to_cache(page_texts, expected_pages, &out_dir)
                 .map_err(|e| RagError::new("ocr_parse", e))?;
         }
     }
@@ -651,44 +654,31 @@ fn process_single_pdf(
     Ok(())
 }
 
-pub fn build_multipart_body(
+fn multipart_envelope(
     boundary: &str,
     optional_payload_json: &str,
     page_ranges: Option<&str>,
     file_name: &str,
-    file_bytes: &[u8],
-) -> Vec<u8> {
+) -> (String, String) {
+    use std::fmt::Write as _;
     let safe_name = file_name.replace('"', "_");
-    let mut out = Vec::with_capacity(file_bytes.len() + 512);
-    out.extend_from_slice(
-        format!(
-            "--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{PADDLEOCR_MODEL}\r\n"
-        )
-        .as_bytes(),
-    );
-    out.extend_from_slice(
-        format!(
-            "--{boundary}\r\nContent-Disposition: form-data; name=\"optionalPayload\"\r\n\r\n{optional_payload_json}\r\n"
-        )
-        .as_bytes(),
+    let mut prefix = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{PADDLEOCR_MODEL}\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"optionalPayload\"\r\n\r\n{optional_payload_json}\r\n"
     );
     if let Some(ranges) = page_ranges.filter(|r| !r.is_empty()) {
-        out.extend_from_slice(
-            format!(
-                "--{boundary}\r\nContent-Disposition: form-data; name=\"pageRanges\"\r\n\r\n{ranges}\r\n"
-            )
-            .as_bytes(),
-        );
-    }
-    out.extend_from_slice(
-        format!(
-            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{safe_name}\"\r\nContent-Type: application/pdf\r\n\r\n"
+        write!(
+            prefix,
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"pageRanges\"\r\n\r\n{ranges}\r\n"
         )
-        .as_bytes(),
-    );
-    out.extend_from_slice(file_bytes);
-    out.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-    out
+        .expect("writing to a String");
+    }
+    write!(
+        prefix,
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{safe_name}\"\r\nContent-Type: application/pdf\r\n\r\n"
+    )
+    .expect("writing to a String");
+    (prefix, format!("\r\n--{boundary}--\r\n"))
 }
 
 fn poll_job_until_done(
@@ -761,14 +751,14 @@ fn poll_job_until_done(
     Err(RagError::new("ocr_timeout", "OCR 解析轮询超时。"))
 }
 
-fn download_jsonl(url: &str) -> Result<String, RagError> {
+fn download_ocr_pages(url: &str) -> Result<Vec<String>, RagError> {
     let ep = Endpoint::parse(url).map_err(|e| RagError::new("ocr_url", e))?;
     let parsed = url::Url::parse(url).map_err(|e| RagError::new("ocr_url", e.to_string()))?;
     let path_and_query = match parsed.query() {
         Some(q) => format!("{}?{q}", parsed.path()),
         None => parsed.path().to_owned(),
     };
-    let resp = http::send(RequestOptions {
+    let (status, body) = http::open(RequestOptions {
         https: ep.https,
         host: &ep.host,
         port: ep.port,
@@ -785,55 +775,71 @@ fn download_jsonl(url: &str) -> Result<String, RagError> {
     })
     .map_err(|e| RagError::new("ocr_download", e))?;
 
-    if !(200..300).contains(&resp.status) {
+    if !(200..300).contains(&status) {
         return Err(RagError::new(
             "ocr_download",
-            format!("下载 OCR 结果失败 (HTTP {})", resp.status),
+            format!("下载 OCR 结果失败 (HTTP {status})"),
         ));
     }
-    String::from_utf8(resp.body)
-        .map_err(|e| RagError::new("ocr_parse", format!("OCR 结果编码异常: {e}")))
-}
-
-#[cfg(test)]
-pub fn parse_paddleocr_jsonl_to_cache(jsonl_text: &str, out_dir: &Path) -> Result<(), String> {
-    parse_paddleocr_jsonl_to_cache_checked(jsonl_text, None, out_dir)
-}
-
-fn extract_jsonl_page_markdowns(jsonl_text: &str) -> Result<Vec<String>, String> {
-    let mut page_texts = Vec::new();
-    for raw_line in jsonl_text.lines() {
-        let trimmed = raw_line.trim();
-        if trimmed.is_empty() {
-            continue;
+    extract_jsonl_page_markdowns(body).map_err(|error| {
+        if error.is_io() {
+            RagError::new("ocr_download", error.to_string())
+        } else {
+            RagError::new("ocr_parse", format!("解析 OCR JSONL 失败: {error}"))
         }
-        let val: Value =
-            serde_json::from_str(trimmed).map_err(|e| format!("解析 OCR JSONL 失败: {e}"))?;
-        let Some(pages) = val
-            .pointer("/result/layoutParsingResults")
-            .and_then(Value::as_array)
+    })
+}
+
+#[derive(Deserialize)]
+struct OcrRecord {
+    result: Option<OcrLayoutResult>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OcrLayoutResult {
+    layout_parsing_results: Option<Vec<OcrLayoutPage>>,
+}
+
+#[derive(Deserialize)]
+struct OcrLayoutPage {
+    markdown: Option<OcrMarkdown>,
+}
+
+#[derive(Deserialize)]
+struct OcrMarkdown {
+    text: Option<String>,
+}
+
+fn extract_jsonl_page_markdowns(body: impl Read) -> serde_json::Result<Vec<String>> {
+    // Deserialize only the fields that enter the page cache. The decoder skips
+    // other response fields in place and never allocates a complete JSONL record.
+    let records = serde_json::Deserializer::from_reader(BufReader::new(body)).into_iter::<OcrRecord>();
+    let mut page_texts = Vec::new();
+    for record in records {
+        let Some(pages) = record?
+            .result
+            .and_then(|result| result.layout_parsing_results)
         else {
             continue;
         };
 
         for page in pages {
-            let md_text = page
-                .pointer("/markdown/text")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim();
-            page_texts.push(md_text.to_owned());
+            let text = page
+                .markdown
+                .and_then(|markdown| markdown.text)
+                .unwrap_or_default();
+            page_texts.push(text.trim().to_owned());
         }
     }
     Ok(page_texts)
 }
 
-pub fn parse_paddleocr_jsonl_to_cache_checked(
-    jsonl_text: &str,
+fn write_ocr_pages_to_cache(
+    raw_pages: Vec<String>,
     expected_total_pages: Option<usize>,
     out_dir: &Path,
 ) -> Result<(), String> {
-    let raw_pages = extract_jsonl_page_markdowns(jsonl_text)?;
     let page_idx = raw_pages.len();
 
     if let Some(expected) = expected_total_pages
@@ -855,7 +861,7 @@ pub fn parse_paddleocr_jsonl_to_cache_checked(
         })
         .collect();
 
-    if join_pages_markdown(&page_texts).trim().is_empty() {
+    if page_texts.iter().all(|page| page.markdown.is_empty()) {
         return Err("OCR 结果中未提取到有效文本".to_owned());
     }
 
@@ -863,13 +869,12 @@ pub fn parse_paddleocr_jsonl_to_cache_checked(
     write_pages_cache(out_dir, &page_texts, Some(&anchors))
 }
 
-pub fn merge_paddleocr_jsonl_into_cache(
-    jsonl_text: &str,
-    existing_pages: &[PdfPageMarkdown],
+fn merge_ocr_pages_into_cache(
+    ocr_pages: Vec<String>,
+    mut merged: Vec<PdfPageMarkdown>,
     target_pages: &[usize],
     out_dir: &Path,
 ) -> Result<(), String> {
-    let ocr_pages = extract_jsonl_page_markdowns(jsonl_text)?;
     // OCR rows are positional. Extra rows are as ambiguous as missing rows.
     if ocr_pages.len() != target_pages.len() {
         return Err(format!(
@@ -879,8 +884,7 @@ pub fn merge_paddleocr_jsonl_into_cache(
         ));
     }
 
-    let mut merged = existing_pages.to_vec();
-    for (&page_num, md_text) in target_pages.iter().zip(ocr_pages.into_iter()) {
+    for (&page_num, md_text) in target_pages.iter().zip(ocr_pages) {
         if let Some(slot) = merged.iter_mut().find(|p| p.page == page_num) {
             slot.markdown = md_text;
             slot.source = Some("ocr".to_owned());
@@ -896,7 +900,10 @@ pub fn merge_paddleocr_jsonl_into_cache(
     }
     merged.sort_by_key(|p| p.page);
 
-    if join_pages_markdown(&merged).trim().is_empty() {
+    if merged
+        .iter()
+        .all(|page| page.needs_ocr || page.markdown.trim().is_empty())
+    {
         return Err("OCR 结果中未提取到有效文本".to_owned());
     }
 
@@ -980,7 +987,7 @@ pub fn read_pdf_markdown(
         && let Ok(full_md) = fs::read_to_string(&full_md_path)
         && !full_md.trim().is_empty()
     {
-        let total_pages = pdf_total_pages(&bytes).unwrap_or(1).max(1);
+        let total_pages = pdf_total_pages(Arc::new(bytes)).unwrap_or(1).max(1);
         return Ok(PdfReadResult {
             path: norm_rel,
             source: "paddleocr_cache",
@@ -1149,7 +1156,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let hash = "deadbeef12345678";
         let out_dir = cache_dir(dir.path(), hash);
-        parse_paddleocr_jsonl_to_cache(&jsonl, &out_dir).unwrap();
+        let pages = extract_jsonl_page_markdowns(jsonl.as_bytes()).unwrap();
+        write_ocr_pages_to_cache(pages.clone(), None, &out_dir).unwrap();
 
         let extracted = load_cached_pdf(dir.path(), "papers/opt.pdf", hash).unwrap();
         assert_eq!(extracted.parse_tier, "accurate");
@@ -1158,7 +1166,7 @@ mod tests {
         assert_eq!(extracted.chunks[1].page_num, Some(2));
 
         assert!(
-            parse_paddleocr_jsonl_to_cache_checked(&jsonl, Some(3), &cache_dir(dir.path(), "incomplete"))
+            write_ocr_pages_to_cache(pages.clone(), Some(3), &cache_dir(dir.path(), "incomplete"))
                 .is_err()
         );
 
@@ -1167,7 +1175,7 @@ mod tests {
         let dummy_pdf = b"%PDF-1.4\n% page1 page2";
         fs::write(pdf_dir.join("opt.pdf"), dummy_pdf).unwrap();
         let real_hash = sha256_hex(dummy_pdf);
-        parse_paddleocr_jsonl_to_cache_checked(&jsonl, Some(2), &cache_dir(dir.path(), &real_hash)).unwrap();
+        write_ocr_pages_to_cache(pages, Some(2), &cache_dir(dir.path(), &real_hash)).unwrap();
 
         let exported_rel = export_pdf_markdown_to_sibling(dir.path(), "papers/opt.pdf", &real_hash).unwrap();
         assert_eq!(exported_rel, "papers/opt_folio-parse.md");
@@ -1184,13 +1192,19 @@ mod tests {
 
     #[test]
     fn multipart_body_contains_model_payload_and_pdf_bytes() {
-        let body = build_multipart_body("B123", r#"{"useDocUnwarping":false}"#, Some("2,4-6"), "scan.pdf", b"%PDF-1.4");
+        let (prefix, suffix) = multipart_envelope(
+            "B123",
+            r#"{"useDocUnwarping":false}"#,
+            Some("2,4-6"),
+            "scan.pdf",
+        );
+        let body = [prefix.as_bytes(), b"%PDF-1.4", suffix.as_bytes()].concat();
         let text = String::from_utf8_lossy(&body);
         assert!(text.contains("name=\"model\"\r\n\r\nPaddleOCR-VL-1.6"));
         assert!(text.contains("name=\"optionalPayload\"\r\n\r\n{\"useDocUnwarping\":false}"));
         assert!(text.contains("name=\"pageRanges\"\r\n\r\n2,4-6"));
         assert!(text.contains("filename=\"scan.pdf\""));
-        assert!(text.contains("%PDF-1.4"));
+        assert!(text.ends_with("\r\n\r\n%PDF-1.4\r\n--B123--\r\n"));
     }
 
     #[test]
@@ -1262,14 +1276,13 @@ mod tests {
                 }]
             }
         });
-        assert!(
-            merge_paddleocr_jsonl_into_cache(&format!("{p2}\n{p2}"), &partial, &[2], &out_dir)
-                .is_err()
-        );
+        let duplicate = extract_jsonl_page_markdowns(format!("{p2}\n{p2}").as_bytes()).unwrap();
+        assert!(merge_ocr_pages_into_cache(duplicate, partial.clone(), &[2], &out_dir).is_err());
         assert!(
             read_pdf_markdown(root, "papers/notes.pdf", Some(2), Some(2)).unwrap().needs_ocr
         );
-        merge_paddleocr_jsonl_into_cache(&p2.to_string(), &partial, &[2], &out_dir).unwrap();
+        let pages = extract_jsonl_page_markdowns(p2.to_string().as_bytes()).unwrap();
+        merge_ocr_pages_into_cache(pages, partial, &[2], &out_dir).unwrap();
         let read_hybrid = read_pdf_markdown(root, "papers/notes.pdf", Some(1), Some(2)).unwrap();
         assert_eq!(read_hybrid.parse_tier, "hybrid");
         assert!(!read_hybrid.needs_ocr);
