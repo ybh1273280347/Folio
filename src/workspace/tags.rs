@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 pub(super) struct TagPanel {
     pub snapshot: Snapshot,
-    pub filter: Option<String>,
+    pub filter: Vec<String>,
     input: Entity<InputState>,
     rename_input: Entity<InputState>,
     open: bool,
@@ -68,7 +68,7 @@ impl TagPanel {
         .detach();
         Self {
             snapshot: Snapshot::default(),
-            filter: None,
+            filter: Vec::new(),
             input,
             rename_input,
             open: false,
@@ -95,7 +95,7 @@ impl TagPanel {
     pub(super) fn reset(&mut self) {
         self.scan = None;
         self.snapshot = Snapshot::default();
-        self.filter = None;
+        self.filter.clear();
         self.open = false;
         self.mode = Mode::Browse;
         self.creating = false;
@@ -198,10 +198,10 @@ impl Workspace {
                 }
             }
         }
-        if let Some(filter) = &self.tags.filter {
-            if !self.tags.snapshot.tags.iter().any(|tag| &tag.id == filter) {
-                self.tags.filter = None;
-            }
+        if !self.tags.filter.is_empty() {
+            self.tags
+                .filter
+                .retain(|filter| self.tags.snapshot.tags.iter().any(|tag| &tag.id == filter));
             self.prune_tag_selection(cx);
         }
         if let Some(renaming) = &self.tags.renaming
@@ -357,14 +357,24 @@ impl Workspace {
     }
 
     pub(super) fn tag_matches(&self, path: &str) -> bool {
-        self.tags
-            .filter
-            .as_deref()
-            .is_none_or(|tag| self.tags.snapshot.has(path, tag))
+        self.tags.snapshot.has_all(path, &self.tags.filter)
     }
 
-    fn select_tag(&mut self, filter: Option<String>, cx: &mut Context<Self>) {
-        self.tags.filter = filter;
+    fn toggle_tag_filter(&mut self, tag: String, cx: &mut Context<Self>) {
+        if let Some(pos) = self.tags.filter.iter().position(|id| id == &tag) {
+            self.tags.filter.remove(pos);
+        } else {
+            self.tags.filter.push(tag);
+        }
+        self.apply_tree_filter(cx);
+        cx.notify();
+    }
+
+    fn clear_tag_filter(&mut self, cx: &mut Context<Self>) {
+        if self.tags.filter.is_empty() {
+            return;
+        }
+        self.tags.filter.clear();
         self.apply_tree_filter(cx);
         cx.notify();
     }
@@ -797,15 +807,19 @@ impl Workspace {
     }
 
     pub(super) fn render_tag_filter(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let filter = self.tags.filter.as_ref()?;
-        let tag = self
+        if self.tags.filter.is_empty() {
+            return None;
+        }
+        let selected_tags: Vec<_> = self
             .tags
-            .snapshot
-            .tags
+            .filter
             .iter()
-            .find(|tag| &tag.id == filter)?;
+            .filter_map(|id| self.tags.snapshot.tags.iter().find(|tag| &tag.id == id))
+            .collect();
+        if selected_tags.is_empty() {
+            return None;
+        }
         let palette = crate::theme::palette();
-        let (_, bg, fg) = COLORS.get(tag.color as usize).copied().unwrap_or(COLORS[0]);
         Some(
             div()
                 .flex()
@@ -816,7 +830,7 @@ impl Workspace {
                 .mb_1()
                 .pl_2()
                 .pr_1()
-                .py(px(2.))
+                .py(px(3.))
                 .rounded(px(6.))
                 .border_1()
                 .border_color(palette.card_border())
@@ -825,29 +839,54 @@ impl Workspace {
                 .child(
                     div()
                         .flex()
+                        .flex_wrap()
                         .items_center()
-                        .gap_1p5()
+                        .gap_1()
+                        .flex_1()
                         .min_w_0()
                         .child(
                             div()
                                 .flex_shrink_0()
                                 .text_color(gpui_kit::rgb(palette.muted))
                                 .child(crate::i18n::tags::TAGS_TITLE.get()),
-                        )
-                        .child(
+                         )
+                        .children(selected_tags.into_iter().map(|tag| {
+                            let id = tag.id.clone();
+                            let (_, bg, fg) =
+                                COLORS.get(tag.color as usize).copied().unwrap_or(COLORS[0]);
                             div()
-                                .px_1p5()
+                                .id(SharedString::from(format!("active-tag-filter-{}", tag.id)))
+                                .flex()
+                                .items_center()
+                                .gap_0p5()
+                                .max_w(px(140.))
+                                .pl_1p5()
+                                .pr_1()
                                 .py(px(1.))
                                 .rounded_full()
                                 .bg(rgb(bg))
                                 .text_color(rgb(fg))
-                                .text_ellipsis()
-                                .child(tag.name.clone()),
-                        ),
+                                .cursor_pointer()
+                                .hover(|s| s.opacity(0.85))
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.toggle_tag_filter(id.clone(), cx);
+                                }))
+                                .child(div().min_w_0().text_ellipsis().child(tag.name.clone()))
+                                .child(
+                                    crate::ui::icon(IconName::Close)
+                                        .size(px(10.))
+                                        .flex_shrink_0(),
+                                )
+                        })),
                 )
                 .child(
-                    tag_control("clear-tag-filter", IconName::Close, crate::i18n::tags::CLEAR_TAG_FILTER.get())
-                        .on_click(cx.listener(|app, _, _, cx| app.select_tag(None, cx))),
+                    tag_control(
+                        "clear-tag-filter",
+                        IconName::Close,
+                        crate::i18n::tags::CLEAR_TAG_FILTER.get(),
+                    )
+                    .flex_shrink_0()
+                    .on_click(cx.listener(|app, _, _, cx| app.clear_tag_filter(cx))),
                 )
                 .into_any_element(),
         )
@@ -915,7 +954,7 @@ impl Workspace {
                     .child(tag.name.clone())
                     .on_click(cx.listener(move |app, _, _, cx| {
                         cx.stop_propagation();
-                        app.select_tag(Some(id.clone()), cx);
+                        app.toggle_tag_filter(id.clone(), cx);
                     })),
             );
         }
@@ -1593,7 +1632,7 @@ impl Workspace {
         }
 
         let (_, bg, fg) = COLORS.get(tag.color as usize).copied().unwrap_or(COLORS[0]);
-        let active_filter = self.tags.filter.as_ref() == Some(&id);
+        let active_filter = self.tags.filter.contains(&id);
         let showing_colors = self.tags.coloring.as_deref() == Some(&id);
         let row_group: SharedString = format!("tag-row-grp-{id}").into();
         let title = SharedString::from(name.clone());
@@ -1660,12 +1699,7 @@ impl Workspace {
                     .cursor_pointer()
                     .tooltip(move |window, cx| Tooltip::new(title.clone()).build(window, cx))
                     .on_click(cx.listener(move |app, _, _, cx| {
-                        let filter = if app.tags.filter.as_ref() == Some(&select) {
-                            None
-                        } else {
-                            Some(select.clone())
-                        };
-                        app.select_tag(filter, cx);
+                        app.toggle_tag_filter(select.clone(), cx);
                     }))
                     .child(
                         div()
@@ -1680,6 +1714,14 @@ impl Workspace {
                             .child(name),
                     )
                     .child(div().flex_1().min_w_0())
+                    .when(active_filter, |row| {
+                        row.child(
+                            crate::ui::icon(IconName::Check)
+                                .size(px(12.))
+                                .flex_shrink_0()
+                                .text_color(gpui_kit::rgb(palette.accent)),
+                        )
+                    })
                     .child(
                         div()
                             .flex_shrink_0()

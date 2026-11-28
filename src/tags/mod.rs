@@ -35,6 +35,10 @@ impl Snapshot {
             .get(path)
             .is_some_and(|ids| ids.iter().any(|id| id == tag))
     }
+
+    pub fn has_all(&self, path: &str, tags: &[String]) -> bool {
+        tags.iter().all(|tag| self.has(path, tag))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -926,5 +930,23 @@ mod tests {
         store.restore_file(&file, "课后题 (1).md")?;
         assert!(store.snapshot()?.assigned.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn has_all_requires_intersection_of_selected_tags() {
+        let mut snapshot = Snapshot::default();
+        snapshot.assigned.insert(
+            "a.md".into(),
+            vec!["t1".into(), "t2".into(), "t3".into()],
+        );
+        snapshot
+            .assigned
+            .insert("b.md".into(), vec!["t1".into()]);
+
+        assert!(snapshot.has_all("a.md", &[]));
+        assert!(snapshot.has_all("b.md", &[]));
+        assert!(snapshot.has_all("a.md", &["t1".into(), "t3".into()]));
+        assert!(!snapshot.has_all("b.md", &["t1".into(), "t3".into()]));
+        assert!(!snapshot.has_all("missing.md", &["t1".into()]));
     }
 }

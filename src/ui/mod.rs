@@ -1003,12 +1003,12 @@ pub const MAIN_TEX_COLOR: u32 = 0x5c7f9f;
 
 /// Tag surfaces and their matching text colors in picker order.
 pub const TAG_COLORS: [(crate::i18n::BiText, u32, u32); 6] = [
-    (crate::i18n::tags::TAG_COLOR_GRAY, 0xefeeeb, 0x56524b),
-    (crate::i18n::tags::TAG_COLOR_BLUE, 0xe3edf8, 0x2d5377),
-    (crate::i18n::tags::TAG_COLOR_GREEN, 0xe2f0e8, 0x2e5c46),
-    (crate::i18n::tags::TAG_COLOR_ORANGE, 0xf5ead8, 0x704915),
-    (crate::i18n::tags::TAG_COLOR_RED, 0xf5e4e4, 0x803f45),
-    (crate::i18n::tags::TAG_COLOR_PURPLE, 0xebe5f5, 0x624785),
+    (crate::i18n::tags::TAG_COLOR_GRAY, 0xe2e8f0, 0x334155),
+    (crate::i18n::tags::TAG_COLOR_BLUE, 0xbae6fd, 0x075985),
+    (crate::i18n::tags::TAG_COLOR_GREEN, 0xbbf7d0, 0x166534),
+    (crate::i18n::tags::TAG_COLOR_ORANGE, 0xfed7aa, 0x9a3412),
+    (crate::i18n::tags::TAG_COLOR_RED, 0xfecdd3, 0x9f1239),
+    (crate::i18n::tags::TAG_COLOR_PURPLE, 0xe9d5ff, 0x6b21a8),
 ];
 
 fn file_type_icon(filename: &str) -> Option<(&'static str, u32)> {

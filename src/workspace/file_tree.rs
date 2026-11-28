@@ -97,7 +97,7 @@ impl FileTree {
         }).detach();
         let search_input = cx.new(|cx| InputState::new(window, cx));
         cx.subscribe(&search_input, |app, _, _: &InputEvent, cx| {
-            if app.tags.filter.is_some() {
+            if !app.tags.filter.is_empty() {
                 app.prune_tag_selection(cx);
             }
             cx.notify();
@@ -313,15 +313,11 @@ impl Workspace {
         } else {
             String::new()
         };
-        let filtered = self.tags.filter.is_some() || !query.is_empty();
+        let filtered = !self.tags.filter.is_empty() || !query.is_empty();
         let available: BTreeSet<_> = self.tree.files.iter().map(|file| file.path.as_str()).collect();
         self.tree.selected_files.retain(|path| {
             available.contains(path.as_str())
-                && self
-                    .tags
-                    .filter
-                    .as_deref()
-                    .is_none_or(|tag| self.tags.snapshot.has(path, tag))
+                && self.tags.snapshot.has_all(path, &self.tags.filter)
                 && path.to_lowercase().contains(&query)
                 && (filtered
                     || !self.tree.collapsed_folders.iter().any(|folder| {
@@ -1690,7 +1686,7 @@ impl Workspace {
         let mut entries = BTreeMap::new();
         if self.projects.directory().is_none() {
             let mut paths: BTreeSet<_> = self.documents.tabs().iter().collect();
-            if self.tags.filter.is_some() {
+            if !self.tags.filter.is_empty() {
                 paths.extend(self.tags.snapshot.assigned.keys());
             }
             for path in paths {
@@ -1701,7 +1697,7 @@ impl Workspace {
         } else {
             for folder in self.tree.folders
                 .iter()
-                .filter(|folder| self.tags.filter.is_none() && folder.to_lowercase().contains(&query))
+                .filter(|folder| self.tags.filter.is_empty() && folder.to_lowercase().contains(&query))
             {
                 let parts: Vec<_> = folder.split('/').collect();
                 for depth in 1..=parts.len() {
@@ -1719,7 +1715,7 @@ impl Workspace {
                 entries.insert(file.path.clone(), false);
             }
         }
-        let no_tag_results = self.tags.filter.is_some() && entries.is_empty();
+        let no_tag_results = !self.tags.filter.is_empty() && entries.is_empty();
         let files_by_path: HashMap<_, _> = self
             .tree
             .files
@@ -1763,7 +1759,7 @@ impl Workspace {
             key
         });
         self.tree.tree_row_bounds.lock().expect("tree bounds").clear();
-        let active_collapsed = if self.tags.filter.is_some() {
+        let active_collapsed = if !self.tags.filter.is_empty() {
             &self.tree.tag_collapsed_folders
         } else {
             &self.tree.collapsed_folders
@@ -1981,7 +1977,7 @@ impl Workspace {
                             app.trash.dismiss();
                             app.tree.focused_folder = Some(toggled.clone());
                             app.tree.focused_file = None;
-                            let tag_filtered = app.tags.filter.is_some();
+                            let tag_filtered = !app.tags.filter.is_empty();
                             let collapsed = if tag_filtered {
                                 &mut app.tree.tag_collapsed_folders
                             } else {

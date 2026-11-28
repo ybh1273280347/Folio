@@ -1066,8 +1066,8 @@ pub(crate) fn render_preview(
                         None
                     };
                     let (item_bg, item_fg) = if let Some((bg, fg)) = tag_palette {
-                        let bg_col = gpui_kit::rgb(bg).opacity(if dark { 0.25 } else { 0.72 });
-                        let fg_col = gpui_kit::rgb(fg);
+                        let bg_col = gpui_kit::rgb(bg).opacity(if dark { 0.22 } else { 0.72 });
+                        let fg_col = gpui_kit::rgb(if dark { bg } else { fg });
                         (bg_col, fg_col)
                     } else {
                         (subtle_tint, text_color.opacity(0.9))
