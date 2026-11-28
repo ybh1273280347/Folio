@@ -77,6 +77,8 @@ pub(crate) enum BlockKindData {
     },
     FrontMatter {
         opening: SharedString,
+        // Source separator before the closing fence, including a single blank YAML line.
+        yaml_ending: SharedString,
         closing: SharedString,
     },
     HorizontalRule,

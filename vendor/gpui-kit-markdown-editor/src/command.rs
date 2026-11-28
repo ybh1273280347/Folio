@@ -1854,8 +1854,9 @@ impl BlockEditorModel {
             let only_block = tx.doc.children(parent).len() == 1;
             let fm = DetachedBlock::leaf(
                 BlockKindData::FrontMatter {
-                    opening: "---".into(),
-                    closing: "---".into(),
+                    opening: "---\n".into(),
+                    yaml_ending: "".into(),
+                    closing: "---\n\n".into(),
                 },
                 BlockContent::Plain(String::new()),
             );
@@ -2110,6 +2111,12 @@ impl BlockEditorModel {
         if new_index == index {
             return Ok(false);
         }
+        // Moving either side across the first slot would turn metadata into prose on reload.
+        if (index == 0 || new_index == 0)
+            && matches!(self.doc.kind(self.doc.children(root)[0]), Some(BlockKindData::FrontMatter { .. }))
+        {
+            return Ok(false);
+        }
         let selection = BlockSelection::Blocks {
             anchor: block,
             head: block,
@@ -2146,6 +2153,12 @@ impl BlockEditorModel {
             }
             index - 1
         };
+        if parent == self.doc.root
+            && (index == 0 || new_index == 0)
+            && matches!(self.doc.kind(self.doc.children(parent)[0]), Some(BlockKindData::FrontMatter { .. }))
+        {
+            return Ok(false);
+        }
         let selection = self.selection.clone();
         self.transact(EditOrigin::Command("move_blocks"), |tx| {
             tx.move_block(target, parent, new_index)?;

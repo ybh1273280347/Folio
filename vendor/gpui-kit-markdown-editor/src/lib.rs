@@ -90,6 +90,7 @@ pub use editor::BlockEditorModel;
 pub use element::BlockEditor;
 pub use gpui_kit::base::text::editor_host::ColumnAlign;
 pub use input_rule::InputRule;
+pub use import::{FrontMatterSource, split_frontmatter};
 pub use math::normalize_math;
 /// Shows or hides the optional toolbar. Unbound by default; bind it in the
 /// `"BlockEditor"` key context, e.g. `KeyBinding::new("cmd-shift-t", ToggleToolbar, Some("BlockEditor"))`.

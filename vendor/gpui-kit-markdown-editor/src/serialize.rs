@@ -27,6 +27,20 @@ pub(crate) fn serialize(doc: &EditorDocument) -> String {
 }
 
 pub(crate) fn join_blocks(doc: &EditorDocument, ids: &[BlockId]) -> String {
+    if let Some((&first, rest)) = ids.split_first()
+        && let Some(BlockKindData::FrontMatter { closing, .. }) = doc.kind(first)
+    {
+        let mut source = block(doc, first);
+        if !rest.is_empty() {
+            // The front matter already owns its original separator. Only add one
+            // when editing introduces a body after an EOF closing fence.
+            if !closing.ends_with('\n') {
+                source.push_str(if closing.contains('\n') { "\n" } else { "\n\n" });
+            }
+            source.push_str(&join_blocks(doc, rest));
+        }
+        return source;
+    }
     render_children(doc, ids)
         .into_iter()
         .map(|(_, text)| text)
@@ -155,12 +169,13 @@ fn block(doc: &EditorDocument, id: BlockId) -> String {
             let fence = delimiter.to_string().repeat(longest.max(2) + 1);
             format!("{fence}{info}\n{code}\n{fence}")
         }
-        (BlockKindData::FrontMatter { opening, closing }, BlockContent::Plain(yaml)) => {
-            if yaml.is_empty() {
-                format!("{opening}\n{closing}")
+        (BlockKindData::FrontMatter { opening, yaml_ending, closing }, BlockContent::Plain(yaml)) => {
+            let ending = if yaml_ending.is_empty() && !yaml.is_empty() {
+                if opening.ends_with("\r\n") { "\r\n" } else { "\n" }
             } else {
-                format!("{opening}\n{yaml}\n{closing}")
-            }
+                yaml_ending.as_ref()
+            };
+            format!("{opening}{yaml}{ending}{closing}")
         }
         (BlockKindData::HtmlTable(source), _) => super::html_table_model::write(doc, id, source),
         (BlockKindData::Table { aligns }, _) => {

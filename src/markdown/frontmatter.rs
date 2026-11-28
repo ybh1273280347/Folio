@@ -1,10 +1,16 @@
 //! Lossless YAML Front Matter extraction, display parsing, and reassembly.
 
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use gpui_kit::SharedString;
+use markdown_editor::split_frontmatter;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FrontMatterValue {
     Text(String),
     Bool(bool),
-    List(Vec<String>),
+    List(Arc<[String]>),
     Raw(String),
 }
 
@@ -14,183 +20,30 @@ pub(crate) struct FrontMatterEntry {
     pub value: FrontMatterValue,
 }
 
-/// A parsed YAML Front Matter block at the very start of a Markdown document.
-///
-/// `raw_block` preserves the exact original bytes (BOM, opening `---`, comments,
-/// indentation, closing `---`/`...`, and trailing separator newlines) so editing
-/// the Markdown body never mutates the user's Front Matter.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct FrontMatter {
-    pub raw_block: String,
-    pub yaml_body: String,
-    pub opening: String,
-    pub closing_and_sep: String,
-    pub line_count: usize,
-    pub entries: Vec<FrontMatterEntry>,
-}
-
-impl FrontMatter {
-    /// Reassemble the full Markdown source from this Front Matter and a body string.
-    pub fn join_body(&self, body: &str) -> String {
-        let mut out = String::with_capacity(self.raw_block.len() + body.len());
-        out.push_str(&self.raw_block);
-        out.push_str(body);
-        out
-    }
-
-    /// Replace only the inner YAML text while keeping the original fences and separator.
-    pub fn with_yaml_body(&self, next_yaml: &str) -> Self {
-        let newline = if self.opening.ends_with("\r\n") {
-            "\r\n"
-        } else {
-            "\n"
-        };
-        let normalized_yaml = if next_yaml.is_empty() || next_yaml.ends_with('\n') {
-            next_yaml.to_owned()
-        } else {
-            format!("{next_yaml}{newline}")
-        };
-        let raw_block = format!("{}{normalized_yaml}{}", self.opening, self.closing_and_sep);
-        let line_count = raw_block.bytes().filter(|&b| b == b'\n').count();
-        let trimmed_yaml = normalized_yaml
-            .strip_suffix("\r\n")
-            .or_else(|| normalized_yaml.strip_suffix('\n'))
-            .unwrap_or(&normalized_yaml)
-            .to_owned();
-        let entries = parse_entries(&trimmed_yaml);
-        Self {
-            raw_block,
-            yaml_body: trimmed_yaml,
-            opening: self.opening.clone(),
-            closing_and_sep: self.closing_and_sep.clone(),
-            line_count,
-            entries,
-        }
-    }
-}
-
-/// Split optional leading YAML Front Matter from a Markdown document.
-///
-/// Returns `(Some(frontmatter), body)` when the document begins with a valid
-/// `---` ... `---` (or `...`) YAML metadata block; otherwise `(None, source)`.
-pub(crate) fn split(source: &str) -> (Option<FrontMatter>, &str) {
-    let bom_len = if source.starts_with('\u{feff}') {
-        '\u{feff}'.len_utf8()
-    } else {
-        0
-    };
-    let rest = &source[bom_len..];
-    let Some(first_nl) = rest.find('\n') else {
-        return (None, source);
-    };
-    let first_line_with_nl = &rest[..=first_nl];
-    let first_line = first_line_with_nl
-        .strip_suffix("\r\n")
-        .or_else(|| first_line_with_nl.strip_suffix('\n'))
-        .unwrap_or(first_line_with_nl);
-    if first_line.trim_end_matches([' ', '\t']) != "---" {
-        return (None, source);
-    }
-
-    let opening_end = bom_len + first_nl + 1;
-    let mut cursor = opening_end;
-    let mut closing_start = None;
-    let mut closing_end = None;
-
-    while cursor < source.len() {
-        let line_end = source[cursor..]
-            .find('\n')
-            .map_or(source.len(), |idx| cursor + idx + 1);
-        let line = &source[cursor..line_end];
-        let trimmed = line
-            .strip_suffix("\r\n")
-            .or_else(|| line.strip_suffix('\n'))
-            .unwrap_or(line)
-            .trim_end_matches([' ', '\t']);
-        if trimmed == "---" || trimmed == "..." {
-            closing_start = Some(cursor);
-            closing_end = Some(line_end);
-            break;
-        }
-        cursor = line_end;
-    }
-
-    let (Some(close_start), Some(mut block_end)) = (closing_start, closing_end) else {
-        return (None, source);
-    };
-
-    let yaml_with_nl = &source[opening_end..close_start];
-    let yaml_body = yaml_with_nl
-        .strip_suffix("\r\n")
-        .or_else(|| yaml_with_nl.strip_suffix('\n'))
-        .unwrap_or(yaml_with_nl);
-
-    // Guard against mistaking two horizontal rules around normal prose for YAML.
-    let has_non_comment_content = yaml_body.lines().any(|line| {
-        let t = line.trim();
-        !t.is_empty() && !t.starts_with('#')
-    });
-    if has_non_comment_content && !yaml_body.lines().any(|line| line_has_mapping_key(line)) {
-        return (None, source);
-    }
-
-    // Include trailing blank lines right after the closing fence in `raw_block`
-    // so the visual body starts cleanly at the first real Markdown block and
-    // round-trips without gaining or losing blank lines.
-    while block_end < source.len() {
-        let next_end = source[block_end..]
-            .find('\n')
-            .map_or(source.len(), |idx| block_end + idx + 1);
-        let next_line = &source[block_end..next_end];
-        if next_line.trim().is_empty() {
-            block_end = next_end;
-        } else {
-            break;
-        }
-    }
-
-    let raw_block = source[..block_end].to_owned();
-    let opening = source[..opening_end].to_owned();
-    let closing_and_sep = source[close_start..block_end].to_owned();
-    let line_count = raw_block.bytes().filter(|&b| b == b'\n').count();
-    let entries = parse_entries(yaml_body);
-
-    (
-        Some(FrontMatter {
-            raw_block,
-            yaml_body: yaml_body.to_owned(),
-            opening,
-            closing_and_sep,
-            line_count,
-            entries,
-        }),
-        &source[block_end..],
-    )
-}
-
-fn line_has_mapping_key(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('-') {
-        return false;
-    }
-    split_key_value(trimmed).is_some()
-}
-
 fn split_key_value(line: &str) -> Option<(&str, &str)> {
+    if line.starts_with([' ', '\t', '#', '-']) {
+        return None;
+    }
     let bytes = line.as_bytes();
     let mut in_single = false;
     let mut in_double = false;
+    let mut escaped = false;
     for (idx, &b) in bytes.iter().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
         match b {
-            b'\'' if !in_double => in_single = !in_single,
-            b'"' if !in_single => in_double = !in_double,
+            b'\\' if in_double => escaped = true,
+            b'\'' if in_single && bytes.get(idx + 1) == Some(&b'\'') => escaped = true,
+            b'\'' if in_single || idx == 0 => in_single = !in_single,
+            b'"' if in_double || idx == 0 => in_double = !in_double,
             b':' if !in_single && !in_double => {
                 let next = bytes.get(idx + 1).copied();
                 if next.is_none() || matches!(next, Some(b' ' | b'\t')) {
-                    let key = line[..idx].trim();
-                    if !key.is_empty() {
-                        let val = line[idx + 1..].trim();
-                        return Some((unquote(key), val));
+                    let key = &line[..idx];
+                    if !key.trim().is_empty() {
+                        return Some((key, &line[idx + 1..]));
                     }
                 }
             }
@@ -211,6 +64,44 @@ fn unquote(raw: &str) -> &str {
     }
 }
 
+fn scalar_text(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.starts_with('"') && let Ok(value) = serde_json::from_str::<String>(raw) {
+        return value;
+    }
+    if raw.starts_with('\'') && raw.ends_with('\'') {
+        return unquote(raw).replace("''", "'");
+    }
+    unquote(raw).to_owned()
+}
+
+/// Split a trailing comment, keeping its preceding whitespace for source edits.
+fn split_yaml_comment(raw: &str) -> (&str, &str) {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut previous = b' ';
+    for (index, byte) in raw.bytes().enumerate() {
+        if escaped {
+            escaped = false;
+        } else if let Some(delimiter) = quote {
+            if byte == delimiter {
+                quote = None;
+            } else if delimiter == b'"' && byte == b'\\' {
+                escaped = true;
+            }
+        } else if byte == b'#' && previous.is_ascii_whitespace() {
+            let start = raw[..index].trim_end_matches([' ', '\t']).len();
+            return (raw[..start].trim(), &raw[start..]);
+        } else if matches!(byte, b'\'' | b'"')
+            && (previous.is_ascii_whitespace() || matches!(previous, b'[' | b','))
+        {
+            quote = Some(byte);
+        }
+        previous = byte;
+    }
+    (raw.trim(), "")
+}
+
 fn parse_flow_list(raw: &str) -> Option<Vec<String>> {
     let trimmed = raw.trim();
     if !(trimmed.starts_with('[') && trimmed.ends_with(']')) {
@@ -224,25 +115,48 @@ fn parse_flow_list(raw: &str) -> Option<Vec<String>> {
     let mut start = 0;
     let mut in_single = false;
     let mut in_double = false;
+    let mut escaped = false;
     for (idx, ch) in inner.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
         match ch {
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
+            '\\' if in_double => escaped = true,
+            '\'' if in_single && inner[idx + 1..].starts_with('\'') => escaped = true,
+            '\'' if !in_double && (in_single || inner[start..idx].trim().is_empty()) => {
+                in_single = !in_single;
+            }
+            '"' if !in_single && (in_double || inner[start..idx].trim().is_empty()) => {
+                in_double = !in_double;
+            }
+            '[' | ']' | '{' | '}' if !in_single && !in_double => return None,
             ',' if !in_single && !in_double => {
-                let part = unquote(&inner[start..idx]).trim();
-                if !part.is_empty() {
-                    items.push(part.to_owned());
+                if !is_simple_list_item(inner[start..idx].trim()) {
+                    return None;
+                }
+                let part = scalar_text(&inner[start..idx]);
+                if !part.trim().is_empty() {
+                    items.push(part);
                 }
                 start = idx + 1;
             }
             _ => {}
         }
     }
-    let tail = unquote(&inner[start..]).trim();
-    if !tail.is_empty() {
-        items.push(tail.to_owned());
+    if in_single || in_double || !is_simple_list_item(inner[start..].trim()) {
+        return None;
+    }
+    let tail = scalar_text(&inner[start..]);
+    if !tail.trim().is_empty() {
+        items.push(tail);
     }
     Some(items)
+}
+
+fn is_simple_list_item(item: &str) -> bool {
+    !item.starts_with(['[', '{', '*', '&', '!', '|', '>'])
+        && split_key_value(item).is_none()
 }
 
 /// Lightweight display parser for top-level YAML Front Matter fields.
@@ -267,7 +181,8 @@ pub(crate) fn parse_entries(yaml: &str) -> Vec<FrontMatterEntry> {
             i += 1;
             continue;
         };
-        let key = key.to_owned();
+        let key = scalar_text(key);
+        let (val, _) = split_yaml_comment(val);
         i += 1;
 
         // Block scalar (`|`, `>`, `|-`, `>-`, `|+`, `>+`)
@@ -311,7 +226,7 @@ pub(crate) fn parse_entries(yaml: &str) -> Vec<FrontMatterEntry> {
             let mut sub_lines = Vec::new();
             while i < lines.len() {
                 let next = lines[i];
-                if next.trim().is_empty() {
+                if next.trim().is_empty() || next.trim_start().starts_with('#') {
                     sub_lines.push(next);
                     i += 1;
                     continue;
@@ -334,21 +249,23 @@ pub(crate) fn parse_entries(yaml: &str) -> Vec<FrontMatterEntry> {
                     key,
                     value: FrontMatterValue::Text(String::new()),
                 });
-            } else if non_empty
-                .iter()
-                .all(|l| l.starts_with("- ") || *l == "-")
+            } else if non_empty.iter().all(|line| {
+                *line == "-"
+                    || line.strip_prefix("- ").is_some_and(|item| {
+                        is_simple_list_item(split_yaml_comment(item).0)
+                    })
+            })
             {
-                let items = non_empty
+                let items: Vec<_> = non_empty
                     .into_iter()
                     .filter_map(|l| {
-                        let item = l.strip_prefix("- ").unwrap_or("").trim();
-                        let item = unquote(item).trim();
-                        (!item.is_empty()).then(|| item.to_owned())
+                        let item = scalar_text(split_yaml_comment(l.strip_prefix("- ").unwrap_or("")).0);
+                        (!item.trim().is_empty()).then_some(item)
                     })
                     .collect();
                 entries.push(FrontMatterEntry {
                     key,
-                    value: FrontMatterValue::List(items),
+                    value: FrontMatterValue::List(items.into()),
                 });
             } else {
                 let min_indent = sub_lines
@@ -382,7 +299,14 @@ pub(crate) fn parse_entries(yaml: &str) -> Vec<FrontMatterEntry> {
         if let Some(items) = parse_flow_list(val) {
             entries.push(FrontMatterEntry {
                 key,
-                value: FrontMatterValue::List(items),
+                value: FrontMatterValue::List(items.into()),
+            });
+            continue;
+        }
+        if val.starts_with(['[', '{', '*', '&', '!']) {
+            entries.push(FrontMatterEntry {
+                key,
+                value: FrontMatterValue::Raw(val.to_owned()),
             });
             continue;
         }
@@ -403,7 +327,7 @@ pub(crate) fn parse_entries(yaml: &str) -> Vec<FrontMatterEntry> {
         }
 
         // Plain or quoted scalar (collect any indented continuation lines)
-        let mut text = unquote(val).to_owned();
+        let mut text = scalar_text(val);
         while i < lines.len() {
             let next = lines[i];
             if next.starts_with([' ', '\t']) && !next.trim().is_empty() && !next.trim_start().starts_with('#') {
@@ -427,27 +351,27 @@ pub(crate) fn parse_entries(yaml: &str) -> Vec<FrontMatterEntry> {
 /// preserving comments, ordering, and all other lines untouched.
 pub(crate) fn toggle_bool_in_yaml(yaml: &str, target_key: &str, next: bool) -> String {
     let replacement = if next { "true" } else { "false" };
-    let mut out = Vec::new();
-    let mut updated = false;
-    for line in yaml.lines() {
-        if !updated && !line.starts_with([' ', '\t']) {
-            if let Some((key, val)) = split_key_value(line)
-                && key == target_key
-                && (val.eq_ignore_ascii_case("true") || val.eq_ignore_ascii_case("false"))
-                && let Some(colon) = line.find(':')
-            {
-                out.push(format!("{}: {replacement}", &line[..colon]));
-                updated = true;
-                continue;
+    let mut offset = 0;
+    for line in yaml.split_inclusive('\n') {
+        if let Some((key, raw)) = split_key_value(line.trim_end_matches(['\r', '\n']))
+            && scalar_text(key) == target_key
+        {
+            let (value, _) = split_yaml_comment(raw);
+            if value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false") {
+                let start = offset + key.len() + 1 + raw.len() - raw.trim_start().len();
+                let mut updated = yaml.to_owned();
+                updated.replace_range(start..start + value.len(), replacement);
+                return updated;
             }
+            break;
         }
-        out.push(line.to_owned());
+        offset += line.len();
     }
-    out.join("\n")
+    yaml.to_owned()
 }
 
 pub(crate) type TagColorLookup =
-    std::sync::Arc<dyn Fn(&str, &gpui_kit::App) -> Option<(u32, u32)> + Send + Sync>;
+    Arc<dyn Fn(&str, &gpui_kit::App) -> Option<(u32, u32)> + Send + Sync>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FieldType {
@@ -460,17 +384,19 @@ fn find_key_line_span(lines: &[&str], target_key: &str) -> Option<(usize, usize,
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
-        if !line.starts_with([' ', '\t'])
-            && let Some((key, val)) = split_key_value(line)
-            && key == target_key
+        if let Some((key, raw)) = split_key_value(line)
+            && scalar_text(key) == target_key
         {
+            let (val, _) = split_yaml_comment(raw);
             let start = i;
             let mut end = i + 1;
             let mut is_block_list = false;
             if val.is_empty() || matches!(val, "|" | ">" | "|-" | ">-" | "|+" | ">+") {
                 while end < lines.len() {
                     let next = lines[end];
-                    if next.trim().is_empty() {
+                    if next.trim().is_empty()
+                        || (val.is_empty() && next.trim_start().starts_with('#'))
+                    {
                         end += 1;
                         continue;
                     }
@@ -485,7 +411,10 @@ fn find_key_line_span(lines: &[&str], target_key: &str) -> Option<(usize, usize,
                         break;
                     }
                 }
-                while end > start + 1 && lines[end - 1].trim().is_empty() {
+                while end > start + 1
+                    && (lines[end - 1].trim().is_empty()
+                        || (val.is_empty() && lines[end - 1].trim_start().starts_with('#')))
+                {
                     end -= 1;
                 }
             } else {
@@ -508,6 +437,49 @@ fn find_key_line_span(lines: &[&str], target_key: &str) -> Option<(usize, usize,
     None
 }
 
+fn yaml_line_ending(yaml: &str) -> &'static str {
+    if yaml
+        .split_inclusive('\n')
+        .next()
+        .is_some_and(|line| line.ends_with("\r\n"))
+    {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+/// Splice only the edited field. Existing CRLF, blank lines and indentation
+/// outside the selected line range remain byte-for-byte intact.
+fn replace_yaml_lines(yaml: &str, start: usize, end: usize, replacement: &str) -> String {
+    let mut lines = yaml.split_inclusive('\n');
+    let from: usize = lines.by_ref().take(start).map(str::len).sum();
+    let to = from + lines.take(end - start).map(str::len).sum::<usize>();
+    let removed = &yaml[from..to];
+    let mut result = yaml.to_owned();
+    if replacement.is_empty() {
+        // Deleting the last field should not leave an extra empty line before the fence.
+        let from = if to == yaml.len() && !removed.ends_with('\n') {
+            let previous = &yaml[..from];
+            previous
+                .strip_suffix("\r\n")
+                .or_else(|| previous.strip_suffix('\n'))
+                .unwrap_or(previous)
+                .len()
+        } else {
+            from
+        };
+        result.replace_range(from..to, "");
+    } else {
+        let removed = removed
+            .strip_suffix("\r\n")
+            .or_else(|| removed.strip_suffix('\n'))
+            .unwrap_or(removed);
+        result.replace_range(from..from + removed.len(), replacement);
+    }
+    result
+}
+
 fn format_yaml_scalar(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -521,10 +493,10 @@ fn format_yaml_scalar(value: &str) -> String {
     }
     let needs_quote = trimmed.starts_with(['-', '?', ':', '#', '&', '*', '!', '|', '>', '\'', '"', '%', '@', '`', '[', '{'])
         || trimmed.contains(": ")
-        || trimmed.contains(" #");
+        || trimmed.contains(" #")
+        || trimmed.chars().any(char::is_control);
     if needs_quote {
-        let escaped = trimmed.replace('\\', "\\\\").replace('"', "\\\"");
-        format!("\"{escaped}\"")
+        serde_json::to_string(trimmed).expect("string can be JSON-quoted")
     } else {
         trimmed.to_owned()
     }
@@ -535,18 +507,15 @@ pub(crate) fn set_text_value_in_yaml(yaml: &str, target_key: &str, new_val: &str
     let Some((start, end, _)) = find_key_line_span(&lines, target_key) else {
         return yaml.to_owned();
     };
-    let key_prefix = lines[start].find(':').map_or(target_key, |idx| &lines[start][..idx]);
+    let (key_prefix, raw) = split_key_value(lines[start]).expect("field span begins at its key");
+    let (_, comment) = split_yaml_comment(raw);
     let formatted = format_yaml_scalar(new_val);
     let replacement = if formatted.is_empty() {
-        format!("{key_prefix}:")
+        format!("{key_prefix}:{comment}")
     } else {
-        format!("{key_prefix}: {formatted}")
+        format!("{key_prefix}: {formatted}{comment}")
     };
-    let mut out: Vec<String> = Vec::with_capacity(lines.len());
-    out.extend(lines[..start].iter().map(|s| (*s).to_owned()));
-    out.push(replacement);
-    out.extend(lines[end..].iter().map(|s| (*s).to_owned()));
-    out.join("\n")
+    replace_yaml_lines(yaml, start, end, &replacement)
 }
 
 pub(crate) fn rename_key_in_yaml(yaml: &str, old_key: &str, new_key: &str) -> String {
@@ -558,12 +527,13 @@ pub(crate) fn rename_key_in_yaml(yaml: &str, old_key: &str, new_key: &str) -> St
     let Some((start, _, _)) = find_key_line_span(&lines, old_key) else {
         return yaml.to_owned();
     };
-    let rest = lines[start]
-        .find(':')
-        .map_or("", |idx| &lines[start][idx..]);
-    let mut out: Vec<String> = lines.iter().map(|s| (*s).to_owned()).collect();
-    out[start] = format!("{new_key}{rest}");
-    out.join("\n")
+    if find_key_line_span(&lines, new_key).is_some() {
+        return yaml.to_owned();
+    }
+    let (key_prefix, raw) = split_key_value(lines[start]).expect("field span begins at its key");
+    let spacing = &key_prefix[key_prefix.trim_end().len()..];
+    let new_key = format_yaml_tag_item(new_key);
+    replace_yaml_lines(yaml, start, start + 1, &format!("{new_key}{spacing}:{raw}"))
 }
 
 pub(crate) fn remove_key_in_yaml(yaml: &str, target_key: &str) -> String {
@@ -571,10 +541,7 @@ pub(crate) fn remove_key_in_yaml(yaml: &str, target_key: &str) -> String {
     let Some((start, end, _)) = find_key_line_span(&lines, target_key) else {
         return yaml.to_owned();
     };
-    let mut out: Vec<String> = Vec::with_capacity(lines.len());
-    out.extend(lines[..start].iter().map(|s| (*s).to_owned()));
-    out.extend(lines[end..].iter().map(|s| (*s).to_owned()));
-    out.join("\n")
+    replace_yaml_lines(yaml, start, end, "")
 }
 
 pub(crate) fn set_list_in_yaml(yaml: &str, target_key: &str, items: &[String]) -> String {
@@ -582,22 +549,34 @@ pub(crate) fn set_list_in_yaml(yaml: &str, target_key: &str, items: &[String]) -
     let Some((start, end, block_style)) = find_key_line_span(&lines, target_key) else {
         return yaml.to_owned();
     };
-    let key_prefix = lines[start].find(':').map_or(target_key, |idx| &lines[start][..idx]);
-    let mut out: Vec<String> = Vec::with_capacity(lines.len() + items.len());
-    out.extend(lines[..start].iter().map(|s| (*s).to_owned()));
+    let (key_prefix, raw) = split_key_value(lines[start]).expect("field span begins at its key");
+    let (_, comment) = split_yaml_comment(raw);
+    let newline = yaml_line_ending(yaml);
+    let mut out = Vec::with_capacity(items.len() + 1);
     if items.is_empty() {
-        out.push(format!("{key_prefix}: []"));
+        out.push(format!("{key_prefix}: []{comment}"));
     } else if block_style {
-        out.push(format!("{key_prefix}:"));
+        out.push(format!("{key_prefix}:{comment}"));
         for item in items {
             out.push(format!("  - {}", format_yaml_tag_item(item)));
         }
     } else {
         let formatted: Vec<String> = items.iter().map(|s| format_yaml_tag_item(s)).collect();
-        out.push(format!("{key_prefix}: [{}]", formatted.join(", ")));
+        out.push(format!("{key_prefix}: [{}]{comment}", formatted.join(", ")));
     }
-    out.extend(lines[end..].iter().map(|s| (*s).to_owned()));
-    out.join("\n")
+    if block_style {
+        // Keep standalone comments and any comments attached to replaced items.
+        for line in &lines[start + 1..end] {
+            let (value, comment) = split_yaml_comment(line);
+            if value.is_empty() {
+                out.push((*line).to_owned());
+            } else if !comment.is_empty() {
+                let indent = line.len() - line.trim_start().len();
+                out.push(format!("{}{}", &line[..indent], comment.trim_start()));
+            }
+        }
+    }
+    replace_yaml_lines(yaml, start, end, &out.join(newline))
 }
 
 pub(crate) fn convert_field_type_in_yaml(
@@ -620,7 +599,7 @@ pub(crate) fn convert_field_type_in_yaml(
         }
         FieldType::List => {
             let items = match current {
-                Some(FrontMatterValue::List(items)) => items,
+                Some(FrontMatterValue::List(items)) => items.to_vec(),
                 Some(FrontMatterValue::Text(t)) if !t.trim().is_empty() => t
                     .split(',')
                     .map(|s| s.trim().to_owned())
@@ -643,7 +622,8 @@ pub(crate) fn convert_field_type_in_yaml(
             let Some((start, end, _)) = find_key_line_span(&lines, target_key) else {
                 return yaml.to_owned();
             };
-            let key_prefix = lines[start].find(':').map_or(target_key, |idx| &lines[start][..idx]);
+            let (key_prefix, raw) = split_key_value(lines[start]).expect("field span begins at its key");
+            let (_, comment) = split_yaml_comment(raw);
             let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
             let replacement = if text.is_empty() {
                 format!("{key_prefix}:")
@@ -655,29 +635,28 @@ pub(crate) fn convert_field_type_in_yaml(
             } else {
                 format!("{key_prefix}: {}", format_yaml_scalar(&text))
             };
-            let mut out: Vec<String> = Vec::with_capacity(lines.len());
-            out.extend(lines[..start].iter().map(|s| (*s).to_owned()));
-            out.push(replacement);
-            out.extend(lines[end..].iter().map(|s| (*s).to_owned()));
-            out.join("\n")
+            replace_yaml_lines(yaml, start, end, &format!("{replacement}{comment}"))
         }
     }
 }
 
 pub(crate) fn append_key_in_yaml(yaml: &str, key: &str, as_list: bool) -> String {
     let key = key.trim();
-    if key.is_empty() {
+    if key.is_empty() || find_key_line_span(&yaml.lines().collect::<Vec<_>>(), key).is_some() {
         return yaml.to_owned();
     }
+    let key = format_yaml_tag_item(key);
     let line = if as_list {
         format!("{key}: []")
     } else {
         format!("{key}: ")
     };
-    if yaml.trim().is_empty() {
+    if yaml.is_empty() {
         line
+    } else if yaml.ends_with('\n') {
+        format!("{yaml}{line}")
     } else {
-        format!("{}\n{line}", yaml.trim_end_matches('\n'))
+        format!("{yaml}{}{line}", yaml_line_ending(yaml))
     }
 }
 
@@ -693,7 +672,8 @@ struct FrontMatterInlineState {
     editing: Option<InlineTarget>,
     type_menu_key: Option<String>,
     input: gpui_kit::Entity<gpui_kit::component::input::InputState>,
-    yaml_snapshot: String,
+    yaml_snapshot: SharedString,
+    parsed_yaml: Option<(SharedString, Arc<[FrontMatterEntry]>)>,
     block: markdown_editor::BlockId,
     editor: gpui_kit::WeakEntity<markdown_editor::BlockEditorState>,
     _sub: gpui_kit::Subscription,
@@ -728,7 +708,8 @@ impl FrontMatterInlineState {
             editing: None,
             type_menu_key: None,
             input,
-            yaml_snapshot: String::new(),
+            yaml_snapshot: SharedString::default(),
+            parsed_yaml: None,
             block,
             editor,
             _sub: sub,
@@ -772,8 +753,8 @@ impl FrontMatterInlineState {
         match target {
             InlineTarget::Key(old_key) => {
                 let next_yaml = rename_key_in_yaml(&yaml, &old_key, &raw);
-                if next_yaml != yaml {
-                    self.yaml_snapshot = next_yaml.clone();
+                if next_yaml.as_str() != yaml.as_ref() {
+                    self.yaml_snapshot = next_yaml.clone().into();
                     let block = self.block;
                     let _ = self.editor.update(cx, |ed, cx| {
                         ed.replace_plain_block_text(block, next_yaml, cx);
@@ -782,8 +763,8 @@ impl FrontMatterInlineState {
             }
             InlineTarget::TextValue(key) => {
                 let next_yaml = set_text_value_in_yaml(&yaml, &key, &raw);
-                if next_yaml != yaml {
-                    self.yaml_snapshot = next_yaml.clone();
+                if next_yaml.as_str() != yaml.as_ref() {
+                    self.yaml_snapshot = next_yaml.clone().into();
                     let block = self.block;
                     let _ = self.editor.update(cx, |ed, cx| {
                         ed.replace_plain_block_text(block, next_yaml, cx);
@@ -797,7 +778,7 @@ impl FrontMatterInlineState {
                         .into_iter()
                         .find(|e| e.key == key)
                         .and_then(|e| match e.value {
-                            FrontMatterValue::List(v) => Some(v),
+                            FrontMatterValue::List(v) => Some(v.to_vec()),
                             _ => None,
                         })
                         .unwrap_or_default();
@@ -807,7 +788,7 @@ impl FrontMatterInlineState {
                         }
                     }
                     let next_yaml = set_list_in_yaml(&yaml, &key, &items);
-                    self.yaml_snapshot = next_yaml.clone();
+                    self.yaml_snapshot = next_yaml.clone().into();
                     let block = self.block;
                     let _ = self.editor.update(cx, |ed, cx| {
                         ed.replace_plain_block_text(block, next_yaml, cx);
@@ -831,7 +812,7 @@ impl FrontMatterInlineState {
                     let as_list = key.eq_ignore_ascii_case("tags")
                         || key.eq_ignore_ascii_case("aliases");
                     let next_yaml = append_key_in_yaml(&yaml, &key, as_list);
-                    self.yaml_snapshot = next_yaml.clone();
+                    self.yaml_snapshot = next_yaml.clone().into();
                     let block = self.block;
                     let _ = self.editor.update(cx, |ed, cx| {
                         ed.replace_plain_block_text(block, next_yaml, cx);
@@ -868,7 +849,7 @@ impl FrontMatterInlineState {
 /// the file-tree color palette, and every field supports independent inline editing.
 pub(crate) fn render_preview(
     block: markdown_editor::BlockId,
-    yaml: &str,
+    yaml: SharedString,
     editor: gpui_kit::WeakEntity<markdown_editor::BlockEditorState>,
     editor_font: &str,
     tag_colors: Option<TagColorLookup>,
@@ -878,7 +859,7 @@ pub(crate) fn render_preview(
     use gpui_kit::component::input::Input;
     use gpui_kit::{
         AnyElement, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement,
-        SharedString, StatefulInteractiveElement, Styled, div, px, relative,
+        StatefulInteractiveElement, Styled, div, px, relative,
     };
     use gpui_kit::assets::IconName;
 
@@ -887,10 +868,15 @@ pub(crate) fn render_preview(
         cx,
         |window, cx| FrontMatterInlineState::new(block, editor.clone(), window, cx),
     );
-    inline_state.update(cx, |state, _| {
-        state.yaml_snapshot = yaml.to_owned();
-        state.block = block;
-        state.editor = editor.clone();
+    let entries = inline_state.update(cx, |state, _| {
+        state.yaml_snapshot = yaml.clone();
+        // Layout and hover changes reuse the same parsed property values.
+        if let Some((source, entries)) = &state.parsed_yaml && *source == yaml {
+            return entries.clone();
+        }
+        let entries: Arc<[FrontMatterEntry]> = parse_entries(&yaml).into();
+        state.parsed_yaml = Some((yaml.clone(), entries.clone()));
+        entries
     });
 
     let editing_target = inline_state.read(cx).editing.clone();
@@ -917,7 +903,6 @@ pub(crate) fn render_preview(
     let icon_px = (body_px * 0.80).max(11.0);
     let check_px = (body_px * 0.88).max(13.0);
 
-    let entries = parse_entries(yaml);
     let max_key_chars = entries
         .iter()
         .map(|e| e.key.chars().count())
@@ -935,7 +920,6 @@ pub(crate) fn render_preview(
         .flex_col()
         .gap(px(2.));
 
-    let yaml_owned = yaml.to_owned();
     let esc_state = inline_state.clone();
     rows = rows.on_key_down(move |ev: &KeyDownEvent, _, cx| {
         if ev.keystroke.key == "escape" {
@@ -947,7 +931,7 @@ pub(crate) fn render_preview(
         }
     });
 
-    for (ix, entry) in entries.into_iter().enumerate() {
+    for (ix, entry) in entries.iter().enumerate() {
         let key_name = entry.key.clone();
         let is_tags_field = key_name.eq_ignore_ascii_case("tags");
         let key_icon = match &entry.value {
@@ -962,7 +946,7 @@ pub(crate) fn render_preview(
         let is_adding_item = editing_target == Some(InlineTarget::AddListItem(key_name.clone()));
         let show_type_menu = type_menu_key.as_deref() == Some(key_name.as_str());
 
-        let value_el: AnyElement = match entry.value {
+        let value_el: AnyElement = match &entry.value {
             FrontMatterValue::Text(text) => {
                 if is_editing_text {
                     div()
@@ -1006,13 +990,14 @@ pub(crate) fn render_preview(
                                 );
                             });
                         })
-                        .child(text)
+                        .child(text.clone())
                         .into_any_element()
                 }
             }
             FrontMatterValue::Bool(val) => {
+                let val = *val;
                 let toggle_editor = editor.clone();
-                let toggle_yaml = yaml_owned.clone();
+                let toggle_yaml = yaml.clone();
                 let toggle_key = key_name.clone();
                 let next_val = !val;
                 div()
@@ -1074,14 +1059,9 @@ pub(crate) fn render_preview(
                     };
 
                     let remove_editor = editor.clone();
-                    let remove_yaml = yaml_owned.clone();
+                    let remove_yaml = yaml.clone();
                     let remove_key = key_name.clone();
-                    let remaining: Vec<String> = items
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| *i != item_ix)
-                        .map(|(_, v)| v.clone())
-                        .collect();
+                    let remove_items = items.clone();
                     let pill_group = SharedString::from(format!("fm-pill-{ix}-{item_ix}"));
 
                     list_row = list_row.child(
@@ -1105,12 +1085,10 @@ pub(crate) fn render_preview(
                             .child(item.clone())
                             .child(
                                 div()
-                                    .id((
-                                        "fm-pill-rm",
-                                        (block.as_u64() as usize)
-                                            .wrapping_mul(131)
-                                            .wrapping_add(ix * 37 + item_ix),
-                                    ))
+                                    .id(SharedString::from(format!(
+                                        "fm-pill-rm-{}-{ix}-{item_ix}",
+                                        block.as_u64(),
+                                    )))
                                     .absolute()
                                     .right(px(2.))
                                     .top(px((pill_px * 1.75 - pill_px * 1.2) * 0.5))
@@ -1129,6 +1107,9 @@ pub(crate) fn render_preview(
                                     })
                                     .on_click(move |_, _, cx| {
                                         cx.stop_propagation();
+                                        // Copy the list only for the selected removal.
+                                        let mut remaining = remove_items.to_vec();
+                                        remaining.remove(item_ix);
                                         let next_yaml =
                                             set_list_in_yaml(&remove_yaml, &remove_key, &remaining);
                                         let _ = remove_editor.update(cx, |ed, cx| {
@@ -1205,7 +1186,7 @@ pub(crate) fn render_preview(
                 .text_size(px(pill_px))
                 .line_height(relative(1.45))
                 .text_color(text_color.opacity(0.9))
-                .child(raw)
+                .child(raw.clone())
                 .into_any_element(),
         };
 
@@ -1350,7 +1331,7 @@ pub(crate) fn render_preview(
             let make_convert = |target: FieldType| -> Box<dyn Fn(&mut gpui_kit::App)> {
                 let ed = editor.clone();
                 let st = inline_state.clone();
-                let y = yaml_owned.clone();
+                let y = yaml.clone();
                 let k = key_name.clone();
                 Box::new(move |cx| {
                     st.update(cx, |s, cx| {
@@ -1365,7 +1346,7 @@ pub(crate) fn render_preview(
             };
             let del_ed = editor.clone();
             let del_st = inline_state.clone();
-            let del_y = yaml_owned.clone();
+            let del_y = yaml.clone();
             let del_k = key_name.clone();
             let on_delete: Box<dyn Fn(&mut gpui_kit::App)> = Box::new(move |cx| {
                 del_st.update(cx, |s, cx| {
@@ -1491,33 +1472,30 @@ pub(crate) fn render_preview(
 /// Returns `None` if the document has no Front Matter or no `tags` key.
 /// Returns `Some(vec)` (possibly empty for `tags: []`) when a `tags` key is present.
 pub(crate) fn extract_tags(source: &str) -> Option<Vec<String>> {
-    let fm = split(source).0?;
-    let entry = fm
-        .entries
-        .into_iter()
-        .find(|entry| entry.key.eq_ignore_ascii_case("tags"))?;
-    let raw_items = match entry.value {
-        FrontMatterValue::List(items) => items,
-        FrontMatterValue::Text(text) => {
-            if text.trim().is_empty() {
-                Vec::new()
-            } else {
-                text.split(',')
-                    .map(|part| part.trim().to_owned())
-                    .filter(|part| !part.is_empty())
-                    .collect()
-            }
-        }
+    let header = split_frontmatter(source)?;
+    let entries = parse_entries(header.yaml);
+    let mut matching = entries.iter().filter(|entry| entry.key.eq_ignore_ascii_case("tags"));
+    let value = &matching.next()?.value;
+    if matching.next().is_some() {
+        return None;
+    }
+    tags_from_value(value)
+}
+
+fn tags_from_value(value: &FrontMatterValue) -> Option<Vec<String>> {
+    let raw_items: Vec<&str> = match value {
+        FrontMatterValue::List(items) => items.iter().map(String::as_str).collect(),
+        FrontMatterValue::Text(text) => text.split(',').collect(),
         FrontMatterValue::Bool(_) | FrontMatterValue::Raw(_) => return None,
     };
-    let mut seen = std::collections::BTreeSet::new();
+    let mut seen = BTreeSet::new();
     let mut result = Vec::new();
     for item in raw_items {
         let trimmed = item.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let key = trimmed.to_lowercase();
+        let key = crate::tags::name_key(trimmed);
         if seen.insert(key) {
             result.push(trimmed.to_owned());
         }
@@ -1529,114 +1507,74 @@ fn format_yaml_tag_item(tag: &str) -> String {
     let needs_quote = tag.is_empty()
         || tag.starts_with([' ', '\t', '-', '?', ':', '#', '&', '*', '!', '|', '>', '\'', '"', '%', '@', '`', '[', '{'])
         || tag.ends_with([' ', '\t'])
-        || tag.contains([',', '[', ']', '{', '}', '#'])
+        || tag.contains([',', '[', ']', '{', '}', '#', '\'', '"'])
+        || tag.chars().any(char::is_control)
         || tag.contains(": ")
         || matches!(tag.to_ascii_lowercase().as_str(), "true" | "false" | "null" | "~");
     if needs_quote {
-        let escaped = tag.replace('\\', "\\\\").replace('"', "\\\"");
-        format!("\"{escaped}\"")
+        serde_json::to_string(tag).expect("string can be JSON-quoted")
     } else {
         tag.to_owned()
     }
 }
 
-/// Update the `tags` field inside an existing YAML Front Matter block (conservative mode).
-///
-/// Returns `None` if:
-/// - the document has no Front Matter (never injects `---` into plain notes), or
-/// - the normalized tag set already matches `desired_tags` (prevents sync loops).
-pub(crate) fn update_tags_in_markdown(source: &str, desired_tags: &[String]) -> Option<String> {
-    let (fm, body) = split(source);
-    let fm = fm?;
-
-    let mut desired_clean = Vec::new();
-    let mut desired_keys = std::collections::BTreeSet::new();
-    for tag in desired_tags {
-        let trimmed = tag.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let key = trimmed.to_lowercase();
-        if desired_keys.insert(key) {
-            desired_clean.push(trimmed.to_owned());
-        }
+/// Apply a tag operation to an existing YAML header, keeping other draft tags.
+pub(crate) fn update_tags_in_markdown(
+    source: &str,
+    before: &[String],
+    after: &[String],
+) -> Option<String> {
+    let header = split_frontmatter(source)?;
+    let entries = parse_entries(header.yaml);
+    let mut matching = entries.iter().filter(|entry| entry.key.eq_ignore_ascii_case("tags"));
+    let existing = matching.next();
+    // Replacing an ambiguous or unsupported YAML value can discard user data.
+    if matching.next().is_some() {
+        return None;
     }
-
-    let existing_keys: std::collections::BTreeSet<String> = extract_tags(source)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|t| t.trim().to_lowercase())
-        .collect();
+    let mut desired = match existing {
+        Some(entry) => tags_from_value(&entry.value)?,
+        None => Vec::new(),
+    };
+    let existing_keys: BTreeSet<_> =
+        desired.iter().map(|name| crate::tags::name_key(name)).collect();
+    let before_keys: BTreeSet<_> =
+        before.iter().map(|name| crate::tags::name_key(name)).collect();
+    let after_keys: BTreeSet<_> =
+        after.iter().map(|name| crate::tags::name_key(name)).collect();
+    // Drafts and on-disk edits can contain tags the database has not seen.
+    desired.retain(|tag| {
+        let key = crate::tags::name_key(tag);
+        !before_keys.contains(&key) || after_keys.contains(&key)
+    });
+    let mut desired_keys: BTreeSet<_> =
+        desired.iter().map(|name| crate::tags::name_key(name)).collect();
+    desired.extend(
+        after
+            .iter()
+            .filter(|name| {
+                let key = crate::tags::name_key(name);
+                (existing.is_none() || !before_keys.contains(&key)) && desired_keys.insert(key)
+            })
+            .cloned(),
+    );
     if existing_keys == desired_keys {
         return None;
     }
-
-    let lines: Vec<&str> = fm.yaml_body.lines().collect();
-    let mut out: Vec<String> = Vec::with_capacity(lines.len() + desired_clean.len() + 1);
-    let mut i = 0;
-    let mut replaced = false;
-
-    while i < lines.len() {
-        let line = lines[i];
-        if !replaced
-            && !line.starts_with([' ', '\t'])
-            && let Some((key, val)) = split_key_value(line)
-            && key.eq_ignore_ascii_case("tags")
-        {
-            replaced = true;
-            let key_prefix = line.find(':').map_or("tags", |idx| &line[..idx]);
-            let mut block_style = false;
-            i += 1;
-            if val.is_empty() {
-                while i < lines.len() {
-                    let next = lines[i];
-                    if next.trim().is_empty() {
-                        i += 1;
-                        continue;
-                    }
-                    let starts_indented = next.starts_with([' ', '\t']);
-                    let starts_dash = next.starts_with("- ") || next.trim() == "-";
-                    if starts_indented || starts_dash {
-                        block_style = true;
-                        i += 1;
-                    } else {
-                        break;
-                    }
-                }
-            }
-            if desired_clean.is_empty() {
-                out.push(format!("{key_prefix}: []"));
-            } else if block_style {
-                out.push(format!("{key_prefix}:"));
-                for tag in &desired_clean {
-                    out.push(format!("  - {}", format_yaml_tag_item(tag)));
-                }
-            } else {
-                let items: Vec<String> = desired_clean
-                    .iter()
-                    .map(|tag| format_yaml_tag_item(tag))
-                    .collect();
-                out.push(format!("{key_prefix}: [{}]", items.join(", ")));
-            }
-            continue;
+    let newline = yaml_line_ending(header.opening);
+    let yaml = if let Some(entry) = existing {
+        set_list_in_yaml(header.yaml, &entry.key, &desired)
+    } else {
+        let items: Vec<_> = desired.iter().map(|tag| format_yaml_tag_item(tag)).collect();
+        let line = format!("tags: [{}]", items.join(", "));
+        if header.yaml.is_empty() {
+            line
+        } else {
+            format!("{}{newline}{line}", header.yaml)
         }
-        out.push(line.to_owned());
-        i += 1;
-    }
-
-    if !replaced {
-        if desired_clean.is_empty() {
-            return None;
-        }
-        let items: Vec<String> = desired_clean
-            .iter()
-            .map(|tag| format_yaml_tag_item(tag))
-            .collect();
-        out.push(format!("tags: [{}]", items.join(", ")));
-    }
-
-    let updated = fm.with_yaml_body(&out.join("\n"));
-    Some(updated.join_body(body))
+    };
+    let ending = if header.yaml_ending.is_empty() { newline } else { header.yaml_ending };
+    Some(format!("{}{yaml}{ending}{}{}", header.opening, header.closing, header.body))
 }
 
 #[cfg(test)]
@@ -1644,46 +1582,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn splits_skill_frontmatter_and_roundtrips_losslessly() {
+    fn splits_skill_frontmatter_and_parses_properties() {
         let src = "---\nname: folio-intro\ndescription: 面向普通用户介绍 Folio 是什么。\ndisable-model-invocation: false\n---\n\n# 介绍 Folio\n\n正文\n";
-        let (fm, body) = split(src);
-        let fm = fm.expect("frontmatter detected");
-        assert_eq!(body, "# 介绍 Folio\n\n正文\n");
-        assert_eq!(fm.line_count, 6);
-        assert_eq!(fm.entries.len(), 3);
+        let header = split_frontmatter(src).expect("frontmatter detected");
+        let entries = parse_entries(header.yaml);
+        assert_eq!(header.body, "# 介绍 Folio\n\n正文\n");
+        assert_eq!(entries.len(), 3);
         assert_eq!(
-            fm.entries[0],
+            entries[0],
             FrontMatterEntry {
                 key: "name".into(),
                 value: FrontMatterValue::Text("folio-intro".into()),
             }
         );
         assert_eq!(
-            fm.entries[2],
+            entries[2],
             FrontMatterEntry {
                 key: "disable-model-invocation".into(),
                 value: FrontMatterValue::Bool(false),
             }
         );
-        assert_eq!(fm.join_body(body), src);
     }
 
     #[test]
     fn parses_block_and_flow_lists_and_block_scalars() {
         let src = "---\ntags: [rust, \"gpui\", markdown]\nauthors:\n  - Alice\n  - Bob\nsummary: >-\n  First line\n  second line\n---\nBody";
-        let (fm, body) = split(src);
-        let fm = fm.expect("frontmatter detected");
-        assert_eq!(body, "Body");
+        let header = split_frontmatter(src).expect("frontmatter detected");
+        let entries = parse_entries(header.yaml);
+        assert_eq!(header.body, "Body");
         assert_eq!(
-            fm.entries[0].value,
-            FrontMatterValue::List(vec!["rust".into(), "gpui".into(), "markdown".into()])
+            entries[0].value,
+            FrontMatterValue::List(vec!["rust".into(), "gpui".into(), "markdown".into()].into())
         );
         assert_eq!(
-            fm.entries[1].value,
-            FrontMatterValue::List(vec!["Alice".into(), "Bob".into()])
+            entries[1].value,
+            FrontMatterValue::List(vec!["Alice".into(), "Bob".into()].into())
         );
         assert_eq!(
-            fm.entries[2].value,
+            entries[2].value,
             FrontMatterValue::Text("First line second line".into())
         );
     }
@@ -1691,19 +1627,16 @@ mod tests {
     #[test]
     fn ignores_horizontal_rules_without_yaml_mappings() {
         let src = "---\n\nHello world\n\n---\n\n# Heading\n";
-        let (fm, body) = split(src);
-        assert!(fm.is_none());
-        assert_eq!(body, src);
+        assert!(split_frontmatter(src).is_none());
     }
 
     #[test]
-    fn editing_yaml_body_preserves_fences_and_separator() {
-        let src = "---\nname: old\n---\n\n# Body\n";
-        let (fm, body) = split(src);
-        let updated = fm.unwrap().with_yaml_body("name: new\ndraft: true");
-        assert_eq!(updated.join_body(body), "---\nname: new\ndraft: true\n---\n\n# Body\n");
-        assert_eq!(updated.entries.len(), 2);
-        assert_eq!(updated.entries[1].value, FrontMatterValue::Bool(true));
+    fn toggle_quoted_key_preserves_crlf_and_comment() {
+        let yaml = "\"出版: 正式\":  false  # 保留\r\ntitle: 明天\r\n";
+        assert_eq!(
+            toggle_bool_in_yaml(yaml, "出版: 正式", true),
+            "\"出版: 正式\":  true  # 保留\r\ntitle: 明天\r\n"
+        );
     }
 
     #[test]
@@ -1711,16 +1644,16 @@ mod tests {
         // Plain note without frontmatter is never mutated in conservative mode.
         let plain = "# Just a note\n\nBody\n";
         assert_eq!(extract_tags(plain), None);
-        assert_eq!(update_tags_in_markdown(plain, &["Rust".into()]), None);
+        assert_eq!(update_tags_in_markdown(plain, &[], &["Rust".into()]), None);
 
         // Flow-style tags update in place and no-op when set matches.
         let flow = "---\nname: demo\ntags: [Rust, GPUI]\n---\n\n# Body\n";
         assert_eq!(extract_tags(flow), Some(vec!["Rust".into(), "GPUI".into()]));
         assert_eq!(
-            update_tags_in_markdown(flow, &["gpui".into(), "rust".into()]),
+            update_tags_in_markdown(flow, &["Rust".into(), "GPUI".into()], &["gpui".into(), "rust".into()]),
             None
         );
-        let updated = update_tags_in_markdown(flow, &["Rust".into(), "Markdown".into()]).unwrap();
+        let updated = update_tags_in_markdown(flow, &["Rust".into(), "GPUI".into()], &["Rust".into(), "Markdown".into()]).unwrap();
         assert_eq!(
             updated,
             "---\nname: demo\ntags: [Rust, Markdown]\n---\n\n# Body\n"
@@ -1728,7 +1661,7 @@ mod tests {
 
         // Block-style tags preserve block style.
         let block = "---\nname: demo\ntags:\n  - Alice\n---\n\nBody";
-        let updated = update_tags_in_markdown(block, &["Alice".into(), "Bob".into()]).unwrap();
+        let updated = update_tags_in_markdown(block, &["Alice".into()], &["Alice".into(), "Bob".into()]).unwrap();
         assert_eq!(
             updated,
             "---\nname: demo\ntags:\n  - Alice\n  - Bob\n---\n\nBody"
@@ -1736,8 +1669,30 @@ mod tests {
 
         // Existing frontmatter without tags key appends tags when non-empty.
         let no_tags = "---\nname: demo\n---\n\nBody";
-        let updated = update_tags_in_markdown(no_tags, &["Note".into()]).unwrap();
+        let updated = update_tags_in_markdown(no_tags, &[], &["Note".into()]).unwrap();
         assert_eq!(updated, "---\nname: demo\ntags: [Note]\n---\n\nBody");
+    }
+
+    #[test]
+    fn yaml_tag_writeback_keeps_draft_tags_and_original_bytes() {
+        let source = "\u{feff}--- \r\nname: demo\r\n\"tags\": # 分类\r\n  # 草稿\r\n  - draft\r\n  - Old # 备注\r\n\r\n... \r\n\r\n正文";
+        let after = ["Rust's".into(), "quoted \"tag\", with comma".into()];
+        let updated = update_tags_in_markdown(source, &["Old".into()], &after).unwrap();
+        assert_eq!(
+            updated,
+            "\u{feff}--- \r\nname: demo\r\n\"tags\": # 分类\r\n  - draft\r\n  - \"Rust's\"\r\n  - \"quoted \\\"tag\\\", with comma\"\r\n  # 草稿\r\n  # 备注\r\n\r\n... \r\n\r\n正文"
+        );
+        assert_eq!(
+            extract_tags(&updated),
+            Some(vec!["draft".into(), after[0].clone(), after[1].clone()])
+        );
+    }
+
+    #[test]
+    fn yaml_tag_sync_skips_structured_values() {
+        let source = "---\ntags: {primary: Rust}\n---\n";
+        assert_eq!(extract_tags(source), None);
+        assert_eq!(update_tags_in_markdown(source, &[], &["new".into()]), None);
     }
 
     #[test]

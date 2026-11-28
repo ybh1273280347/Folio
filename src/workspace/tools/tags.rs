@@ -86,20 +86,11 @@ impl Workspace {
                     .ok_or_else(|| {
                         Failure::new("stale_preview", crate::i18n::tags::ERR_AGENT_STALE_TAG_CHANGES.get())
                     })?;
-                let prev_assigned = self.tags.snapshot.assigned.clone();
+                let affected = pending.edit.yaml_tag_paths();
                 let (snapshot, result) = store.agent_commit(self.tree.files(), pending.edit)?;
-                let mut affected_md: Vec<String> = prev_assigned
-                    .keys()
-                    .chain(snapshot.assigned.keys())
-                    .filter(|path| Self::is_markdown_path(path))
-                    .cloned()
-                    .collect();
-                affected_md.sort();
-                affected_md.dedup();
+                let previous = std::mem::take(&mut self.tags.snapshot);
                 self.use_tag_snapshot(snapshot, cx);
-                if !affected_md.is_empty() {
-                    self.sync_markdown_frontmatter_tags(&affected_md, cx);
-                }
+                self.sync_markdown_frontmatter_tags(&affected, &previous, cx);
                 return Ok(Some(result));
             }
             Request::Discard(_) => unreachable!("discard can run without an active project"),

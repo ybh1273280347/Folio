@@ -329,6 +329,22 @@ impl TagConfirmation {
 }
 
 impl Proposal {
+    /// Only membership and name changes affect the files' YAML tags.
+    pub fn yaml_tag_paths(&self) -> Vec<String> {
+        match &self.plan {
+            Plan::Files { files, .. } => files
+                .iter()
+                .filter(|file| file.changed())
+                .map(|file| file.path.clone())
+                .collect(),
+            Plan::Definition {
+                change: DefinitionChange::Color(_),
+                ..
+            } => Vec::new(),
+            Plan::Definition { members, .. } => members.clone(),
+        }
+    }
+
     /// Global deletion also removes associations outside the live tree, so it
     /// uses the same explicit confirmation as the sidebar instead of an undo receipt.
     pub(crate) fn delete_prompt(&self) -> Option<Value> {

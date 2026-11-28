@@ -531,18 +531,18 @@ fn register_code_surfaces(
             if let Some(renderer) = frontmatter_renderer.clone() {
                 let preview_editor = editor.clone();
                 let bounds = preview_bounds.clone();
-                let (revision, yaml) = {
+                let (revision, yaml): (_, SharedString) = {
                     let st = editor.read(cx);
                     (
                         st.model.doc.block_revision(id),
-                        st.model.doc.plain(id).unwrap_or_default().to_owned(),
+                        st.model.doc.plain(id).unwrap_or_default().into(),
                     )
                 };
                 *extensions = std::mem::take(extensions).block_surface(
                     format!("editor-frontmatter-preview-{}", id.as_u64()),
                     move |window, cx| {
                         let code = gpui_kit::base::text::editor_host::CodeBlock::new(
-                            yaml.clone().into(),
+                            yaml.clone(),
                             Some("yaml".into()),
                             None::<gpui_kit::base::text::editor_host::Span>,
                         )

@@ -695,7 +695,7 @@ impl MarkdownPane {
                         .clone();
                     crate::markdown::frontmatter::render_preview(
                         id,
-                        &yaml,
+                        yaml,
                         editor_weak.clone(),
                         &editor_font,
                         lookup,
@@ -1270,9 +1270,9 @@ impl MarkdownPane {
     }
 
     fn outline_headings(text: &str) -> Vec<OutlineHeading> {
-        let (fm, body) = crate::markdown::frontmatter::split(text);
-        let byte_offset = fm.as_ref().map_or(0, |fm| fm.raw_block.len());
-        let line_offset = fm.as_ref().map_or(0, |fm| fm.line_count);
+        let body = markdown_editor::split_frontmatter(text).map_or(text, |header| header.body);
+        let byte_offset = text.len() - body.len();
+        let line_offset = text[..byte_offset].bytes().filter(|&b| b == b'\n').count();
         let arena = Arena::new();
         let root = parse_document(&arena, body, &Options::default());
         let lines: Vec<_> = std::iter::once(0)

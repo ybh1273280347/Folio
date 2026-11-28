@@ -24,6 +24,7 @@ pub struct Tag {
 
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
+    /// Ordered by normalized name for lookups from the Markdown property view.
     pub tags: Vec<Tag>,
     pub assigned: BTreeMap<String, Vec<String>>,
     pub missing: Vec<(String, String)>,
@@ -208,9 +209,7 @@ impl Store {
         let mut desired: Vec<(String, String)> = Vec::new();
         let mut desired_keys = BTreeSet::new();
         for raw in tag_names {
-            let Ok(clean) = label(raw) else {
-                continue;
-            };
+            let clean = label(raw)?;
             let key = name_key(clean);
             if desired_keys.insert(key.clone()) {
                 desired.push((clean.to_owned(), key));

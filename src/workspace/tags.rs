@@ -252,10 +252,9 @@ impl Workspace {
             .and_then(|store| store.change(change))
         {
             Ok(snapshot) => {
+                let previous = std::mem::take(&mut self.tags.snapshot);
                 self.use_tag_snapshot(snapshot, cx);
-                if !affected_md.is_empty() {
-                    self.sync_markdown_frontmatter_tags(&affected_md, cx);
-                }
+                self.sync_markdown_frontmatter_tags(&affected_md, &previous, cx);
                 true
             }
             Err(error) => {
@@ -278,10 +277,7 @@ impl Workspace {
         let Some(tag_names) = crate::markdown::frontmatter::extract_tags(text) else {
             return;
         };
-        let Ok(store) = self.tag_store() else {
-            return;
-        };
-        match store.sync_file_tags(path, &tag_names) {
+        match self.tag_store().map_err(Into::into).and_then(|store| store.sync_file_tags(path, &tag_names)) {
             Ok(Some(snapshot)) => self.use_tag_snapshot(snapshot, cx),
             Ok(None) => {}
             Err(error) => self.report(crate::i18n::tags::err_save_tags(&error), cx),
@@ -293,66 +289,79 @@ impl Workspace {
     pub(super) fn sync_markdown_frontmatter_tags(
         &mut self,
         paths: &[String],
+        previous: &Snapshot,
         cx: &mut Context<Self>,
     ) {
-        let tag_names_by_id: HashMap<&str, &str> = self
-            .tags
-            .snapshot
-            .tags
-            .iter()
-            .map(|tag| (tag.id.as_str(), tag.name.as_str()))
-            .collect();
-        let updates: Vec<(String, Vec<String>)> = paths
+        let paths: Vec<_> = paths
             .iter()
             .filter(|path| Self::is_markdown_path(path))
-            .map(|path| {
-                let names = self
-                    .tags
-                    .snapshot
-                    .assigned
-                    .get(path)
-                    .map(|ids| {
-                        ids.iter()
-                            .filter_map(|id| tag_names_by_id.get(id.as_str()).map(|s| (*s).to_owned()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                (path.clone(), names)
-            })
             .collect();
+        if paths.is_empty() {
+            return;
+        }
+        let names_for = |snapshot: &Snapshot| {
+            let names_by_id: HashMap<_, _> = snapshot.tags.iter()
+                .map(|tag| (&tag.id, &tag.name))
+                .collect();
+            paths.iter().map(|path| {
+                snapshot
+                    .assigned
+                    .get(*path)
+                    .into_iter()
+                    .flatten()
+                    .map(|id| names_by_id[id].to_string())
+                    .collect::<Vec<_>>()
+            }).collect::<Vec<_>>()
+        };
+        let before = names_for(previous);
+        let after = names_for(&self.tags.snapshot);
 
         let root = self
             .projects
             .directory()
             .map(|project| PathBuf::from(&project.folder));
-        for (path, desired_tags) in updates {
-            if let Some(current_text) = self.documents.open_buffer(&path).map(|b| b.text.clone()) {
-                if let Some(next_text) =
-                    crate::markdown::frontmatter::update_tags_in_markdown(&current_text, &desired_tags)
-                {
-                    self.edit_document(&path, next_text);
+        for (path, (before, after)) in paths.into_iter().zip(before.into_iter().zip(after)) {
+            if before == after {
+                continue;
+            }
+            let update = |text: &str| crate::markdown::frontmatter::update_tags_in_markdown(text, &before, &after);
+            if let Some(buffer) = self.documents.open_buffer(path) {
+                if let Some(next_text) = update(&buffer.text) {
+                    self.edit_document(path, next_text);
                     cx.notify();
                 }
                 continue;
             }
             let disk = if let Some(root) = &root {
-                files::read_document(root, &path)
+                files::read_document(root, path)
             } else {
-                files::read_document_at(Path::new(&path))
+                files::read_document_at(Path::new(path))
             };
-            let Ok(disk) = disk else {
+            let disk = match disk {
+                Ok(disk) => disk,
+                Err(error) => {
+                    self.report(crate::i18n::tags::err_save_tags(&format_args!("{path}: {error}")), cx);
+                    continue;
+                }
+            };
+            let Some(next_text) = update(&disk.text) else {
                 continue;
             };
-            let Some(next_text) =
-                crate::markdown::frontmatter::update_tags_in_markdown(&disk.text, &desired_tags)
-            else {
-                continue;
-            };
-            let _ = if let Some(root) = &root {
-                files::save_document(root, &path, &next_text, &disk.revision)
+            let saved = if let Some(root) = &root {
+                files::save_document(root, path, &next_text, &disk.revision)
             } else {
-                files::save_document_at(Path::new(&path), &next_text, &disk.revision)
+                files::save_document_at(Path::new(path), &next_text, &disk.revision)
             };
+            match saved {
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) => {
+                    let error = crate::i18n::tags::ERR_ANN_DISK_CHANGED.get();
+                    self.report(crate::i18n::tags::err_save_tags(&format_args!("{path}: {error}")), cx);
+                }
+                Err(error) => {
+                    self.report(crate::i18n::tags::err_save_tags(&format_args!("{path}: {error}")), cx);
+                }
+            }
         }
     }
 

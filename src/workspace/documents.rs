@@ -1216,16 +1216,14 @@ impl Workspace {
                 }))
                 .with_tag_colors(std::sync::Arc::new(move |tag_name, cx| {
                     let app = tag_workspace.upgrade()?;
-                    let key = tag_name.trim().to_lowercase();
-                    let tag = app
-                        .read(cx)
-                        .tags
-                        .snapshot
-                        .tags
-                        .iter()
-                        .find(|t| t.name.trim().to_lowercase() == key)?;
+                    let key = crate::tags::name_key(tag_name);
+                    let tags = &app.read(cx).tags.snapshot.tags;
+                    // Store snapshots order tags by the same normalized name key.
+                    let index = tags
+                        .binary_search_by(|tag| crate::tags::name_key(&tag.name).cmp(&key))
+                        .ok()?;
                     let (_, bg, fg) = crate::ui::TAG_COLORS
-                        .get(tag.color as usize)
+                        .get(tags[index].color as usize)
                         .copied()
                         .unwrap_or(crate::ui::TAG_COLORS[0]);
                     Some((bg, fg))
@@ -1726,10 +1724,15 @@ impl Workspace {
                 ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("canvas")
             }))
             .map(|path| {
-                let key = root.as_ref().map_or(path.as_path(), |root| {
-                    path.strip_prefix(root).expect("watch paths are scoped to the current project")
-                });
-                key.to_string_lossy().replace('\\', "/")
+                if let Some(root) = &root {
+                    path.strip_prefix(root)
+                        .expect("watch paths are scoped to the current project")
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                } else {
+                    // Standalone buffers and tag bindings use the native absolute key.
+                    path.to_string_lossy().into_owned()
+                }
             })
             .collect();
         if refresh_tree && root.is_some() {

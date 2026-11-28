@@ -18,8 +18,23 @@ use gpui_kit::base::text::{
     editor_host::{BlockNode, InlineNode, LinkMark, Paragraph, TextMark},
 };
 
-fn split_leading_frontmatter(source: &str) -> Option<(SharedString, String, SharedString, &str)> {
+/// Borrow the leading YAML block and its source boundaries without parsing its values.
+pub struct FrontMatterSource<'a> {
+    /// Opening fence and line ending, including any BOM.
+    pub opening: &'a str,
+    pub yaml: &'a str,
+    /// Line ending between the editable YAML and the closing fence.
+    pub yaml_ending: &'a str,
+    /// Closing fence and blank lines before the body.
+    pub closing: &'a str,
+    pub body: &'a str,
+}
+
+pub fn split_frontmatter(source: &str) -> Option<FrontMatterSource<'_>> {
     let rest = source.strip_prefix('\u{feff}').unwrap_or(source);
+    if !rest.starts_with("---") {
+        return None;
+    }
     let first_nl = rest.find('\n')?;
     let first_line_with_nl = &rest[..=first_nl];
     let first_line = first_line_with_nl
@@ -35,7 +50,6 @@ fn split_leading_frontmatter(source: &str) -> Option<(SharedString, String, Shar
     let mut cursor = opening_end;
     let mut closing_start = None;
     let mut closing_end = None;
-    let mut closing_fence = None;
 
     while cursor < rest.len() {
         let line_end = rest[cursor..]
@@ -50,13 +64,12 @@ fn split_leading_frontmatter(source: &str) -> Option<(SharedString, String, Shar
         if trimmed == "---" || trimmed == "..." {
             closing_start = Some(cursor);
             closing_end = Some(line_end);
-            closing_fence = Some(trimmed);
             break;
         }
         cursor = line_end;
     }
 
-    let (close_start, mut block_end, closing) = (closing_start?, closing_end?, closing_fence?);
+    let (close_start, mut block_end) = (closing_start?, closing_end?);
     let yaml_with_nl = &rest[opening_end..close_start];
     let yaml_body = yaml_with_nl
         .strip_suffix("\r\n")
@@ -107,20 +120,22 @@ fn split_leading_frontmatter(source: &str) -> Option<(SharedString, String, Shar
         }
     }
 
-    Some((
-        SharedString::from(opening.to_owned()),
-        yaml_body.to_owned(),
-        SharedString::from(closing.to_owned()),
-        &rest[block_end..],
-    ))
+    let bom_len = source.len() - rest.len();
+    Some(FrontMatterSource {
+        opening: &source[..bom_len + opening_end],
+        yaml: yaml_body,
+        yaml_ending: &yaml_with_nl[yaml_body.len()..],
+        closing: &rest[close_start..block_end],
+        body: &rest[block_end..],
+    })
 }
 
 pub(crate) fn parse_document(
     source: &str,
     extensions: Arc<MarkdownExtensions>,
 ) -> Result<EditorDocument, SharedString> {
-    let frontmatter = split_leading_frontmatter(source);
-    let body_source = frontmatter.as_ref().map_or(source, |(_, _, _, rest)| *rest);
+    let frontmatter = split_frontmatter(source);
+    let body_source = frontmatter.as_ref().map_or(source, |header| header.body);
     let normalized = super::math::normalize_math(body_source);
     let source = normalized.as_str();
     let parsed = parse_markdown(source, extensions.clone())?;
@@ -129,13 +144,17 @@ pub(crate) fn parse_document(
     // Drop the placeholder paragraph of the empty document.
     doc.detach(root, 0);
     let mut attach_ix = 0;
-    if let Some((opening, yaml_body, closing, _)) = frontmatter {
+    if let Some(header) = frontmatter {
         doc.attach(
             root,
             attach_ix,
             DetachedBlock::leaf(
-                BlockKindData::FrontMatter { opening, closing },
-                BlockContent::Plain(yaml_body),
+                BlockKindData::FrontMatter {
+                    opening: header.opening.into(),
+                    yaml_ending: header.yaml_ending.into(),
+                    closing: header.closing.into(),
+                },
+                BlockContent::Plain(header.yaml.to_owned()),
             ),
         );
         attach_ix += 1;

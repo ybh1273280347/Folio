@@ -3384,15 +3384,16 @@ impl BlockEditorState {
         if blocks.is_empty() {
             return None;
         }
-        Some(
-            blocks
-                .iter()
-                .find(|(_, _, b)| at.y < b.center().y)
-                .map_or_else(
-                    || blocks.last().map_or(len, |(ix, _, _)| ix + 1),
-                    |(ix, _, _)| *ix,
-                ),
-        )
+        let gap = blocks
+            .iter()
+            .find(|(_, _, b)| at.y < b.center().y)
+            .map_or_else(
+                || blocks.last().map_or(len, |(ix, _, _)| ix + 1),
+                |(ix, _, _)| *ix,
+            );
+        let doc = &self.model.doc;
+        let has_header = matches!(doc.kind(doc.children(doc.root)[0]), Some(BlockKindData::FrontMatter { .. }));
+        Some(gap.max(usize::from(has_header)))
     }
 
     /// D22: mouse-down on a handle arms a drag (the click itself is handled
@@ -3406,7 +3407,10 @@ impl BlockEditorState {
 
     /// Arm reordering from a host-provided handle for a top-level document block.
     pub fn arm_top_block_drag(&mut self, block: BlockId, at: Point<Pixels>) {
-        self.block_drag = (!self.readonly && self.model.doc.parent(block) == Some(self.model.doc.root))
+        let doc = &self.model.doc;
+        self.block_drag = (!self.readonly
+            && doc.parent(block) == Some(doc.root)
+            && !matches!(doc.kind(block), Some(BlockKindData::FrontMatter { .. })))
             .then_some(BlockDrag {
                 block,
                 start: at,
