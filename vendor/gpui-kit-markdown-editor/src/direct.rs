@@ -203,6 +203,15 @@ impl NodeCache {
                     .with_leaf_key(id.as_u64());
                 BlockNode::CodeBlock(code)
             }
+            BlockKindData::FrontMatter { .. } => {
+                let yaml = match &entry.content {
+                    BlockContent::Plain(yaml) => yaml.clone(),
+                    _ => String::new(),
+                };
+                let code = CodeBlock::new(yaml.into(), Some("yaml".into()), None::<Span>)
+                    .with_leaf_key(id.as_u64());
+                BlockNode::CodeBlock(code)
+            }
             BlockKindData::Table { aligns } => BlockNode::Table(Table::new(
                 doc.children(id)
                     .iter()

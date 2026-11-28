@@ -99,12 +99,14 @@ pub const DELETE_BLOCK: BiText = BiText::new("删除该块", "Delete block");
 pub const SAVE_ANNOTATION: BiText = BiText::new("保存批注", "Save annotation");
 pub const LOADING_MORE_CONTENT: BiText = BiText::new("正在加载后续内容…", "Loading remaining content…");
 
-// YAML Front Matter
-pub const FRONTMATTER_EDIT_YAML: BiText = BiText::new("编辑 YAML", "Edit YAML");
-pub const FRONTMATTER_DONE: BiText = BiText::new("完成编辑", "Done");
-pub const FRONTMATTER_COLLAPSE: BiText = BiText::new("收起属性", "Collapse properties");
-pub const FRONTMATTER_EXPAND: BiText = BiText::new("展开属性", "Expand properties");
-pub const FRONTMATTER_EMPTY: BiText = BiText::new("无属性字段", "No properties");
+// Front Matter inline editing
+pub const FM_TYPE_TEXT: BiText = BiText::new("文本", "Text");
+pub const FM_TYPE_LIST: BiText = BiText::new("列表", "List");
+pub const FM_TYPE_BOOL: BiText = BiText::new("复选框", "Checkbox");
+pub const FM_DELETE_ROW: BiText = BiText::new("删除该行", "Delete property");
+pub const FM_ADD_PROPERTY: BiText = BiText::new("添加属性", "Add property");
+pub const FM_ADD_ITEM_PLACEHOLDER: BiText = BiText::new("添加…", "Add…");
+pub const FM_KEY_PLACEHOLDER: BiText = BiText::new("属性名", "Property name");
 
 pub fn link_tooltip_click(is_mac: bool, is_anchor: bool) -> String {
     match (locale(), is_mac, is_anchor) {

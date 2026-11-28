@@ -1840,6 +1840,62 @@ impl BlockEditorModel {
         })
     }
 
+    /// The `---` input rule at the very start of the document: the caret's
+    /// paragraph becomes a `FrontMatter` block (plus a trailing paragraph if
+    /// it was the only block), holding the caret at offset 0.
+    pub(crate) fn paragraph_to_frontmatter(&mut self) -> Result<BlockId, CommandError> {
+        let leaf = self.caret_resolved()?.pos.block;
+        let mut created = None;
+        self.transact(EditOrigin::Command("frontmatter"), |tx| {
+            let (parent, index) = tx
+                .doc
+                .index_in_parent(leaf)
+                .ok_or(StepError::UnknownBlock(leaf))?;
+            let only_block = tx.doc.children(parent).len() == 1;
+            let fm = DetachedBlock::leaf(
+                BlockKindData::FrontMatter {
+                    opening: "---".into(),
+                    closing: "---".into(),
+                },
+                BlockContent::Plain(String::new()),
+            );
+            let fm_id = fm.id;
+            created = Some(fm_id);
+            tx.remove_block(leaf)?;
+            let mut inserted = vec![fm];
+            if only_block {
+                inserted.push(DetachedBlock::paragraph(InlineText::new()));
+            }
+            tx.insert(parent, index, inserted)?;
+            Ok(caret(BlockPosition::new(fm_id, 0)))
+        })?;
+        Ok(created.expect("frontmatter block created"))
+    }
+
+    pub(crate) fn replace_plain_block(
+        &mut self,
+        block: BlockId,
+        next: &str,
+    ) -> Result<bool, CommandError> {
+        let len = self
+            .doc
+            .leaf_len(block)
+            .ok_or(PositionError::UnknownBlock(block))?;
+        self.transact(EditOrigin::Command("frontmatter_edit"), |tx| {
+            tx.replace_plain(block, 0..len, next)?;
+            Ok(None)
+        })
+    }
+
+    pub(crate) fn remove_block_cleanly(&mut self, block: BlockId) -> Result<bool, CommandError> {
+        self.transact(EditOrigin::Command("remove_frontmatter"), |tx| {
+            let _ = tx.remove_block(block)?;
+            tx.normalize()?;
+            let first = tx.doc.first_leaf_in(tx.doc.root);
+            Ok(caret(first))
+        })
+    }
+
     /// The `---` input rule: the caret's (empty) paragraph becomes a
     /// horizontal rule followed by an empty paragraph holding the caret.
     pub(crate) fn paragraph_to_rule(&mut self) -> Result<bool, CommandError> {

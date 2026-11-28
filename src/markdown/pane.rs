@@ -391,13 +391,10 @@ pub struct MarkdownPane {
     text: String,
     /// Whitespace-free characters of `text`, kept current for the corner badge.
     char_count: usize,
-    frontmatter: Option<crate::markdown::frontmatter::FrontMatter>,
-    frontmatter_collapsed: bool,
-    frontmatter_editing: bool,
-    frontmatter_editor: Entity<EditorState>,
     path: PathBuf,
     project_root: Option<PathBuf>,
     project_files: ProjectFiles,
+    tag_color_lookup: Arc<std::sync::RwLock<Option<crate::markdown::frontmatter::TagColorLookup>>>,
     wiki_menu_cache: RefCell<Option<(String, std::time::Instant, Vec<WikiLinkCandidate>)>>,
     wiki_heading_cache: RefCell<Option<(PathBuf, std::time::SystemTime, u64, Vec<OutlineHeading>)>>,
     title_input: Entity<InputState>,
@@ -486,7 +483,6 @@ pub struct MarkdownPane {
     zoom_hud: crate::ui::ZoomHud,
     translate: crate::translate::TranslatePopover,
     _source_subscription: Subscription,
-    _frontmatter_subscription: Subscription,
     _visual_subscription: Subscription,
     _math_subscription: Subscription,
     _mermaid_subscription: Subscription,
@@ -657,6 +653,9 @@ impl MarkdownPane {
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
         let initial_image_cache = crate::image::MarkdownImageCache::default();
+        let tag_color_lookup: Arc<
+            std::sync::RwLock<Option<crate::markdown::frontmatter::TagColorLookup>>,
+        > = Arc::new(std::sync::RwLock::new(None));
         let visual_editor = cx.new(|cx| {
             let mut editor = BlockEditorState::new(window, cx)
                 .with_content_folding()
@@ -684,6 +683,28 @@ impl MarkdownPane {
                 renderer.update(cx, |renderer, cx| renderer.element(id, revision, code, interactive, window, cx))
                     .expect("Mermaid renderer lives with its Markdown pane")
             }, cx);
+            let editor_weak = cx.weak_entity();
+            let editor_font = settings.editor_font.clone();
+            let tag_colors = tag_color_lookup.clone();
+            editor.set_frontmatter_preview(
+                move |id, _revision, code, _interactive, window, cx| {
+                    let yaml = code.code();
+                    let lookup = tag_colors
+                        .read()
+                        .expect("tag color lookup lock")
+                        .clone();
+                    crate::markdown::frontmatter::render_preview(
+                        id,
+                        &yaml,
+                        editor_weak.clone(),
+                        &editor_font,
+                        lookup,
+                        window,
+                        cx,
+                    )
+                },
+                cx,
+            );
             editor
         });
         let weak_pane = cx.weak_entity();
@@ -775,14 +796,6 @@ impl MarkdownPane {
                 .soft_wrap(true)
                 .background_wrap_for_large_values(PREVIEW_BYTES)
                 .searchable(true)
-                .context_menu(false)
-        });
-        let frontmatter_editor = cx.new(|cx| {
-            EditorState::new(window, cx)
-                .language("yaml")
-                .line_number(false)
-                .soft_wrap(true)
-                .searchable(false)
                 .context_menu(false)
         });
         let source_heading_highlight = source_editor.update(cx, |editor, cx| {
@@ -915,10 +928,6 @@ impl MarkdownPane {
                     pane.loading = None;
                     pane.mermaid.update(cx, |renderer, _| renderer.retain_blocks([]));
                     pane.text = state.read(cx).value().to_string();
-                    pane.frontmatter = crate::markdown::frontmatter::split(&pane.text).0;
-                    if pane.frontmatter.is_none() {
-                        pane.frontmatter_editing = false;
-                    }
                     pane.char_count = crate::model::nonspace_char_count(&pane.text);
                     pane.visual_needs_sync = true;
                     pane.parse_outline();
@@ -929,40 +938,12 @@ impl MarkdownPane {
                 }
             },
         );
-        let frontmatter_subscription = cx.subscribe_in(
-            &frontmatter_editor,
-            window,
-            |pane: &mut Self, state, event: &InputEvent, _, cx| {
-                if matches!(event, InputEvent::Change) && pane.frontmatter_editing {
-                    if let Some(fm) = &pane.frontmatter {
-                        let next_yaml = state.read(cx).value().to_string();
-                        if next_yaml != fm.yaml_body {
-                            let updated = fm.with_yaml_body(&next_yaml);
-                            let body = crate::markdown::frontmatter::body_of(&pane.text).to_owned();
-                            pane.text = updated.join_body(&body);
-                            pane.frontmatter = Some(updated);
-                            pane.char_count = crate::model::nonspace_char_count(&pane.text);
-                            pane.source_needs_sync = true;
-                            pane.parse_outline();
-                            cx.emit(MarkdownEvent::Change(pane.text.clone()));
-                            cx.notify();
-                        }
-                    }
-                } else if matches!(event, InputEvent::Focus) {
-                    cx.emit(MarkdownEvent::Focus);
-                }
-            },
-        );
         let visual_subscription = cx.subscribe_in(
             &visual_editor,
             window,
             |pane, editor, event: &BlockEditorEvent, window, cx| match event {
                 BlockEditorEvent::Changed { .. } => {
-                    let body = editor.read(cx).source();
-                    pane.text = pane
-                        .frontmatter
-                        .as_ref()
-                        .map_or(body.clone(), |fm| fm.join_body(&body));
+                    pane.text = editor.read(cx).source();
                     pane.char_count = crate::model::nonspace_char_count(&pane.text);
                     pane.source_needs_sync = true;
                     pane.retain_mermaid_blocks(cx);
@@ -1097,19 +1078,15 @@ impl MarkdownPane {
         });
         let annotations = annotations::load_annotations(&path);
         let char_count = crate::model::nonspace_char_count(&text);
-        let frontmatter = crate::markdown::frontmatter::split(&text).0;
         let mut pane = Self {
             export: Rc::new(RefCell::new(None)),
             export_width: px(0.),
             text,
             char_count,
-            frontmatter,
-            frontmatter_collapsed: false,
-            frontmatter_editing: false,
-            frontmatter_editor,
             path,
             project_root: None,
             project_files: Box::new(|_| &[]),
+            tag_color_lookup,
             wiki_menu_cache: RefCell::new(None),
             wiki_heading_cache: RefCell::new(None),
             title_input,
@@ -1191,7 +1168,6 @@ impl MarkdownPane {
             zoom_hud: crate::ui::ZoomHud::default(),
             translate: crate::translate::TranslatePopover::default(),
             _source_subscription: source_subscription,
-            _frontmatter_subscription: frontmatter_subscription,
             _visual_subscription: visual_subscription,
             _math_subscription: math_subscription,
             _mermaid_subscription: mermaid_subscription,
@@ -1203,26 +1179,19 @@ impl MarkdownPane {
     fn load_visual(&mut self, cx: &mut Context<Self>) {
         self.loading = None;
         self.visual_needs_sync = false;
-        let (frontmatter, body) = crate::markdown::frontmatter::split(&self.text);
-        let body_offset = frontmatter.as_ref().map_or(0, |fm| fm.raw_block.len());
-        let long = body.len() > PREVIEW_BYTES;
+        let long = self.text.len() > PREVIEW_BYTES;
         let preview_end = if long {
-            let end = body.floor_char_boundary(PREVIEW_BYTES);
-            body[..end].rfind('\n').unwrap_or(end)
+            let end = self.text.floor_char_boundary(PREVIEW_BYTES);
+            self.text[..end].rfind('\n').unwrap_or(end)
         } else {
-            body.len()
+            self.text.len()
         };
-        let preview_slice = &self.text[body_offset..body_offset + preview_end];
         self.visual_editor.update(cx, |editor, cx| {
             editor.set_readonly(long, cx);
             editor
-                .set_source(preview_slice, cx)
+                .set_source(&self.text[..preview_end], cx)
                 .expect("Markdown preview parses with the configured GPUI extensions");
         });
-        self.frontmatter = frontmatter;
-        if self.frontmatter.is_none() {
-            self.frontmatter_editing = false;
-        }
         self.retain_mermaid_blocks(cx);
         if !long {
             self.parse_outline();
@@ -1230,13 +1199,12 @@ impl MarkdownPane {
             return;
         }
         self.set_outline_headings(Vec::new());
-        let body_owned = self.text[body_offset..].to_owned();
-        let full_text = self.text.clone();
+        let text = self.text.clone();
         let extensions = self.extensions.clone();
         let prepared = cx.background_executor().spawn(async move {
-            let model = BlockEditorModel::from_markdown(&body_owned, extensions)
+            let model = BlockEditorModel::from_markdown(&text, extensions)
                 .expect("full Markdown parses with the configured GPUI extensions");
-            (model, Self::outline_headings(&full_text))
+            (model, Self::outline_headings(&text))
         });
         self.loading = Some(cx.spawn(async move |this, cx| {
             let (model, headings) = prepared.await;
@@ -1882,6 +1850,17 @@ impl MarkdownPane {
         self
     }
 
+    pub fn with_tag_colors(
+        self,
+        lookup: crate::markdown::frontmatter::TagColorLookup,
+    ) -> Self {
+        *self
+            .tag_color_lookup
+            .write()
+            .expect("tag color lookup lock") = Some(lookup);
+        self
+    }
+
     fn current_rel_path(&self) -> Option<String> {
         let root = self.project_root.as_ref()?;
         if let Ok(rel) = self.path.strip_prefix(root) {
@@ -2298,41 +2277,8 @@ impl MarkdownPane {
         self.source_needs_sync = true;
         self.pending_source_jump = None;
         self.load_visual(cx);
-        if self.frontmatter_editing {
-            if let Some(fm) = &self.frontmatter {
-                let yaml = fm.yaml_body.clone();
-                self.frontmatter_editor.update(cx, |editor, cx| {
-                    if editor.value().as_ref() != yaml.as_str() {
-                        editor.set_value(yaml, window, cx);
-                    }
-                });
-            } else {
-                self.frontmatter_editing = false;
-            }
-        }
         if self.source {
             self.load_source(window, cx);
-        }
-        cx.notify();
-    }
-
-    pub(super) fn toggle_frontmatter_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.frontmatter_editing {
-            let Some(fm) = &self.frontmatter else {
-                return;
-            };
-            self.frontmatter_collapsed = false;
-            self.frontmatter_editing = true;
-            let yaml = fm.yaml_body.clone();
-            let editor = self.frontmatter_editor.clone();
-            editor.update(cx, |editor, cx| {
-                editor.set_value(yaml, window, cx);
-                editor.focus(window, cx);
-            });
-            cx.emit(MarkdownEvent::Focus);
-        } else {
-            self.frontmatter_editing = false;
-            self.defer_focus_visual(window, cx);
         }
         cx.notify();
     }
@@ -2392,7 +2338,7 @@ impl MarkdownPane {
     }
 
     pub(super) fn show_empty_templates(&self) -> bool {
-        !self.source && self.loading.is_none() && self.frontmatter.is_none() && self.text.trim().is_empty()
+        !self.source && self.loading.is_none() && self.text.trim().is_empty()
     }
 
     pub(super) fn apply_empty_template(
@@ -2590,7 +2536,6 @@ impl MarkdownPane {
     pub fn toggle_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.source = !self.source;
         if self.source {
-            self.frontmatter_editing = false;
             self.hovered_link = None;
             if self.source_needs_sync {
                 self.load_source(window, cx);

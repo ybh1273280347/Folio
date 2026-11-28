@@ -18,20 +18,132 @@ use gpui_kit::base::text::{
     editor_host::{BlockNode, InlineNode, LinkMark, Paragraph, TextMark},
 };
 
+fn split_leading_frontmatter(source: &str) -> Option<(SharedString, String, SharedString, &str)> {
+    let rest = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let first_nl = rest.find('\n')?;
+    let first_line_with_nl = &rest[..=first_nl];
+    let first_line = first_line_with_nl
+        .strip_suffix("\r\n")
+        .or_else(|| first_line_with_nl.strip_suffix('\n'))
+        .unwrap_or(first_line_with_nl);
+    let opening = first_line.trim_end_matches([' ', '\t']);
+    if opening != "---" {
+        return None;
+    }
+
+    let opening_end = first_nl + 1;
+    let mut cursor = opening_end;
+    let mut closing_start = None;
+    let mut closing_end = None;
+    let mut closing_fence = None;
+
+    while cursor < rest.len() {
+        let line_end = rest[cursor..]
+            .find('\n')
+            .map_or(rest.len(), |idx| cursor + idx + 1);
+        let line = &rest[cursor..line_end];
+        let trimmed = line
+            .strip_suffix("\r\n")
+            .or_else(|| line.strip_suffix('\n'))
+            .unwrap_or(line)
+            .trim_end_matches([' ', '\t']);
+        if trimmed == "---" || trimmed == "..." {
+            closing_start = Some(cursor);
+            closing_end = Some(line_end);
+            closing_fence = Some(trimmed);
+            break;
+        }
+        cursor = line_end;
+    }
+
+    let (close_start, mut block_end, closing) = (closing_start?, closing_end?, closing_fence?);
+    let yaml_with_nl = &rest[opening_end..close_start];
+    let yaml_body = yaml_with_nl
+        .strip_suffix("\r\n")
+        .or_else(|| yaml_with_nl.strip_suffix('\n'))
+        .unwrap_or(yaml_with_nl);
+
+    // Guard against treating two horizontal rules around normal prose as YAML.
+    let has_non_comment_content = yaml_body.lines().any(|line| {
+        let t = line.trim();
+        !t.is_empty() && !t.starts_with('#')
+    });
+    let has_mapping_key = yaml_body.lines().any(|line| {
+        let t = line.trim_start();
+        if t.is_empty() || t.starts_with('#') || t.starts_with('-') {
+            return false;
+        }
+        let bytes = t.as_bytes();
+        let (mut in_s, mut in_d) = (false, false);
+        for (i, &b) in bytes.iter().enumerate() {
+            match b {
+                b'\'' if !in_d => in_s = !in_s,
+                b'"' if !in_s => in_d = !in_d,
+                b':' if !in_s && !in_d => {
+                    let next = bytes.get(i + 1).copied();
+                    if (next.is_none() || matches!(next, Some(b' ' | b'\t')))
+                        && !t[..i].trim().is_empty()
+                    {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    });
+    if has_non_comment_content && !has_mapping_key {
+        return None;
+    }
+
+    while block_end < rest.len() {
+        let next_end = rest[block_end..]
+            .find('\n')
+            .map_or(rest.len(), |idx| block_end + idx + 1);
+        if rest[block_end..next_end].trim().is_empty() {
+            block_end = next_end;
+        } else {
+            break;
+        }
+    }
+
+    Some((
+        SharedString::from(opening.to_owned()),
+        yaml_body.to_owned(),
+        SharedString::from(closing.to_owned()),
+        &rest[block_end..],
+    ))
+}
+
 pub(crate) fn parse_document(
     source: &str,
     extensions: Arc<MarkdownExtensions>,
 ) -> Result<EditorDocument, SharedString> {
-    let normalized = super::math::normalize_math(source);
+    let frontmatter = split_leading_frontmatter(source);
+    let body_source = frontmatter.as_ref().map_or(source, |(_, _, _, rest)| *rest);
+    let normalized = super::math::normalize_math(body_source);
     let source = normalized.as_str();
     let parsed = parse_markdown(source, extensions.clone())?;
     let mut doc = EditorDocument::empty(extensions.clone());
     let root = doc.root;
     // Drop the placeholder paragraph of the empty document.
     doc.detach(root, 0);
+    let mut attach_ix = 0;
+    if let Some((opening, yaml_body, closing, _)) = frontmatter {
+        doc.attach(
+            root,
+            attach_ix,
+            DetachedBlock::leaf(
+                BlockKindData::FrontMatter { opening, closing },
+                BlockContent::Plain(yaml_body),
+            ),
+        );
+        attach_ix += 1;
+    }
     let blocks = import_markdown_blocks(source, extensions.clone())?;
-    for (ix, block) in blocks.into_iter().enumerate() {
-        doc.attach(root, ix, block);
+    for block in blocks {
+        doc.attach(root, attach_ix, block);
+        attach_ix += 1;
     }
     // Same structural rules as after every transaction (empty list items
     // get a paragraph, an empty document gets one leaf). The steps of this

@@ -155,6 +155,13 @@ fn block(doc: &EditorDocument, id: BlockId) -> String {
             let fence = delimiter.to_string().repeat(longest.max(2) + 1);
             format!("{fence}{info}\n{code}\n{fence}")
         }
+        (BlockKindData::FrontMatter { opening, closing }, BlockContent::Plain(yaml)) => {
+            if yaml.is_empty() {
+                format!("{opening}\n{closing}")
+            } else {
+                format!("{opening}\n{yaml}\n{closing}")
+            }
+        }
         (BlockKindData::HtmlTable(source), _) => super::html_table_model::write(doc, id, source),
         (BlockKindData::Table { aligns }, _) => {
             let mut lines = Vec::new();

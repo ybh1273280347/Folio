@@ -428,6 +428,7 @@ pub struct BlockEditorState {
     pub(crate) projection: ProjectionCache,
     heading_blocks: RefCell<Option<(u64, Vec<BlockId>)>>,
     pub(crate) code_preview: Option<Registration>,
+    pub(crate) frontmatter_preview: Option<super::code_preview::Renderer>,
     pub(crate) code_preview_source: Option<BlockId>,
     /// Last complete frame, written by the element after prepaint.
     pub(crate) frame: Rc<RefCell<FrameLayout>>,
@@ -532,6 +533,7 @@ impl BlockEditorState {
             block_code_style: gpui::StyleRefinement::default(),
             callout_styles: Default::default(),
             code_preview: None,
+            frontmatter_preview: None,
             code_preview_source: None,
             projection: ProjectionCache::default(),
             heading_blocks: RefCell::default(),
@@ -715,6 +717,59 @@ impl BlockEditorState {
         cx.notify();
     }
 
+    pub fn set_frontmatter_preview(
+        &mut self,
+        renderer: impl Fn(
+                BlockId,
+                u64,
+                &CodeBlock,
+                bool,
+                &mut Window,
+                &mut App,
+            ) -> AnyElement
+            + Send
+            + Sync
+            + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.frontmatter_preview = Some(Arc::new(renderer));
+        self.reset_code_preview_selection();
+        cx.notify();
+    }
+
+    pub(crate) fn frontmatter_preview_registration(&self) -> Option<super::code_preview::Renderer> {
+        self.frontmatter_preview.clone()
+    }
+
+    pub fn replace_plain_block_text(
+        &mut self,
+        block: BlockId,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.readonly {
+            return;
+        }
+        if text.trim().is_empty()
+            && matches!(
+                self.model.doc.kind(block),
+                Some(super::kind::BlockKindData::FrontMatter { .. })
+            )
+        {
+            self.edit(
+                EditOrigin::Command("remove_frontmatter"),
+                |m| m.remove_block_cleanly(block).map(|_| ()),
+                cx,
+            );
+            return;
+        }
+        self.edit(
+            EditOrigin::Command("frontmatter_edit"),
+            |m| m.replace_plain_block(block, &text).map(|_| ()),
+            cx,
+        );
+    }
+
     pub(crate) fn code_preview_registration(&self) -> Option<Registration> {
         self.code_preview.clone()
     }
@@ -724,6 +779,12 @@ impl BlockEditorState {
     }
 
     fn code_preview_matches(&self, block: BlockId) -> bool {
+        if matches!(
+            self.model.doc.kind(block),
+            Some(super::kind::BlockKindData::FrontMatter { .. })
+        ) {
+            return self.frontmatter_preview.is_some();
+        }
         let Some(Registration { language, .. }) = &self.code_preview else {
             return false;
         };
@@ -812,10 +873,33 @@ impl BlockEditorState {
         self.selection_changed(cx);
     }
 
+    fn remove_if_empty_frontmatter(&mut self, block: BlockId, cx: &mut Context<Self>) -> bool {
+        let is_empty_fm = matches!(
+            self.model.doc.kind(block),
+            Some(super::kind::BlockKindData::FrontMatter { .. })
+        ) && self
+            .model
+            .doc
+            .plain(block)
+            .is_some_and(|text| text.trim().is_empty());
+        if !is_empty_fm {
+            return false;
+        }
+        self.edit(
+            EditOrigin::Command("remove_frontmatter"),
+            |m| m.remove_block_cleanly(block).map(|_| ()),
+            cx,
+        );
+        true
+    }
+
     pub(crate) fn exit_code_preview_source(&mut self, cx: &mut Context<Self>) {
         let Some(block) = self.code_preview_source.take() else {
             return;
         };
+        if self.remove_if_empty_frontmatter(block, cx) {
+            return;
+        }
         if self.model.doc.get(block).is_some() {
             let _ = self.model.set_selection(BlockSelection::Blocks {
                 anchor: block,
@@ -2251,6 +2335,7 @@ impl BlockEditorState {
     }
 
     fn selection_changed(&mut self, cx: &mut Context<Self>) {
+        let prev_source = self.code_preview_source;
         self.image_resize = None;
         self.navigation_jump.set(None);
         self.sanitize_code_preview_source();
@@ -2266,6 +2351,12 @@ impl BlockEditorState {
             }
         } else {
             self.code_preview_source = None;
+        }
+        if let Some(prev) = prev_source
+            && self.code_preview_source != Some(prev)
+            && self.remove_if_empty_frontmatter(prev, cx)
+        {
+            return;
         }
         self.reveal_selection_folds();
         self.reveal.set(true);
@@ -3521,6 +3612,12 @@ impl BlockEditorState {
 
     pub(crate) fn on_backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
         self.end_composition();
+        if let Some(caret) = self.model.caret()
+            && caret.offset == 0
+            && self.remove_if_empty_frontmatter(caret.block, cx)
+        {
+            return;
+        }
         if self.reveal_delete_neighbour(false) { cx.notify(); return; }
         self.edit(EditOrigin::Backspace, |m| m.delete(false), cx);
     }
@@ -3623,7 +3720,53 @@ impl BlockEditorState {
             self.model.break_coalescing();
             return;
         }
-        // "---" then Enter in an otherwise empty paragraph: a rule.
+        // Typing "---" + Enter on a line inside a FrontMatter block closes it
+        // and moves the caret into the body paragraph below.
+        if !self.readonly
+            && let Some(caret) = self.model.caret()
+            && matches!(
+                self.model.doc.kind(caret.block),
+                Some(super::kind::BlockKindData::FrontMatter { .. })
+            )
+            && let Some(text) = self.model.doc.plain(caret.block)
+            && caret.offset == text.len()
+        {
+            let line_start = text.rfind('\n').map_or(0, |idx| idx + 1);
+            let last_line = text[line_start..].trim();
+            if last_line == "---" || last_line == "..." {
+                let block = caret.block;
+                let trimmed = if line_start > 0 {
+                    text[..line_start - 1].to_owned()
+                } else {
+                    String::new()
+                };
+                if trimmed.trim().is_empty() {
+                    self.code_preview_source = None;
+                    self.edit(
+                        EditOrigin::InputRule("frontmatter_close"),
+                        |m| m.remove_block_cleanly(block).map(|_| ()),
+                        cx,
+                    );
+                } else {
+                    self.code_preview_source = None;
+                    self.edit(
+                        EditOrigin::InputRule("frontmatter_close"),
+                        |m| {
+                            m.replace_plain_block(block, &trimmed)?;
+                            let _ = m.set_selection(BlockSelection::caret(BlockPosition::new(
+                                block,
+                                trimmed.len(),
+                            )));
+                            m.exit_block_edge(true).map(|_| ())
+                        },
+                        cx,
+                    );
+                }
+                return;
+            }
+        }
+        // "---" then Enter in an otherwise empty paragraph: Front Matter at the
+        // very start of the document, horizontal rule everywhere else.
         if !self.readonly
             && self.rule_on(RuleKind::HorizontalRule)
             && let Some(caret) = self.model.caret()
@@ -3631,6 +3774,12 @@ impl BlockEditorState {
             && self.model.doc.inline(caret.block).map(|i| i.text()) == Some("---")
         {
             let block = caret.block;
+            let at_doc_start = self
+                .model
+                .doc
+                .children(self.model.doc.root)
+                .first()
+                == Some(&block);
             self.model.break_coalescing();
             self.model.history.begin_transaction();
             let _ = self.model.set_selection(BlockSelection::Text {
@@ -3638,10 +3787,20 @@ impl BlockEditorState {
                 head: BlockPosition::new(block, 3),
             });
             let _ = self.model.delete(false);
-            let _ = self.model.paragraph_to_rule();
+            let created_fm = if at_doc_start {
+                self.model.paragraph_to_frontmatter().ok()
+            } else {
+                let _ = self.model.paragraph_to_rule();
+                None
+            };
             self.model.history.commit_transaction();
             self.model.break_coalescing();
-            self.after_edit(EditOrigin::InputRule("horizontal_rule"), cx);
+            if let Some(fm_id) = created_fm {
+                self.code_preview_source = Some(fm_id);
+                self.after_edit(EditOrigin::InputRule("frontmatter"), cx);
+            } else {
+                self.after_edit(EditOrigin::InputRule("horizontal_rule"), cx);
+            }
             return;
         }
         self.edit(EditOrigin::Command("split_block"), |m| m.split_block(), cx);

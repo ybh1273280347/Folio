@@ -118,6 +118,29 @@ fn with_live_surfaces(
         };
     }
     if let BlockNode::CodeBlock(code) = node {
+        let is_frontmatter = matches!(
+            doc.kind(id),
+            Some(super::kind::BlockKindData::FrontMatter { .. })
+        );
+        if is_frontmatter {
+            if force_preview {
+                return noop_surface();
+            }
+            if state.code_preview_source() != Some(id)
+                && state.frontmatter_preview_registration().is_some()
+            {
+                return BlockNode::Surface {
+                    name: format!("editor-frontmatter-preview-{}", id.as_u64()).into(),
+                    children: vec![noop_surface()],
+                    span: None,
+                };
+            }
+            return BlockNode::Surface {
+                name: format!("editor-frontmatter-source-{}", id.as_u64()).into(),
+                children: vec![node.clone()],
+                span: None,
+            };
+        }
         let preview = state
             .code_preview_registration()
             .filter(|registration| {
@@ -484,28 +507,75 @@ fn register_code_surfaces(
     extensions: &mut MarkdownExtensions,
     editor: &Entity<BlockEditorState>,
     context: &RenderContext,
+    live_bounds: Option<code_preview::BoundsMap>,
     cx: &App,
 ) {
-    let ids: Vec<BlockId> = editor
+    let ids: Vec<(BlockId, bool)> = editor
         .read(cx)
         .model
         .doc
         .blocks
         .iter()
-        .filter_map(|(&id, entry)| {
-            matches!(&entry.kind, super::kind::BlockKindData::CodeBlock { .. }).then_some(id)
+        .filter_map(|(&id, entry)| match &entry.kind {
+            super::kind::BlockKindData::CodeBlock { .. } => Some((id, false)),
+            super::kind::BlockKindData::FrontMatter { .. } => Some((id, true)),
+            _ => None,
         })
         .collect();
-    for id in ids {
+    let frontmatter_renderer = editor.read(cx).frontmatter_preview_registration();
+    let preview_bounds = live_bounds.clone();
+    for (id, is_frontmatter) in ids {
         let editor = editor.clone();
         let context = context.clone();
-        *extensions = std::mem::take(extensions).block_surface(
-            format!("editor-code-source-{}", id.as_u64()),
-            move |window, cx| {
-                super::code_ui::container(&context)
-                    .child(super::code_ui::header(&editor, id, window, cx))
-            },
-        );
+        if is_frontmatter {
+            if let Some(renderer) = frontmatter_renderer.clone() {
+                let preview_editor = editor.clone();
+                let bounds = preview_bounds.clone();
+                let (revision, yaml) = {
+                    let st = editor.read(cx);
+                    (
+                        st.model.doc.block_revision(id),
+                        st.model.doc.plain(id).unwrap_or_default().to_owned(),
+                    )
+                };
+                *extensions = std::mem::take(extensions).block_surface(
+                    format!("editor-frontmatter-preview-{}", id.as_u64()),
+                    move |window, cx| {
+                        let code = gpui_kit::base::text::editor_host::CodeBlock::new(
+                            yaml.clone().into(),
+                            Some("yaml".into()),
+                            None::<gpui_kit::base::text::editor_host::Span>,
+                        )
+                        .with_leaf_key(id.as_u64());
+                        code_preview::render_frontmatter_surface(
+                            preview_editor.clone(),
+                            id,
+                            revision,
+                            code,
+                            renderer.clone(),
+                            bounds.clone(),
+                            window,
+                            cx,
+                        )
+                    },
+                );
+            }
+            *extensions = std::mem::take(extensions).block_surface(
+                format!("editor-frontmatter-source-{}", id.as_u64()),
+                move |_, cx| {
+                    super::code_ui::container(&context)
+                        .child(super::code_ui::frontmatter_header(&editor, id, cx))
+                },
+            );
+        } else {
+            *extensions = std::mem::take(extensions).block_surface(
+                format!("editor-code-source-{}", id.as_u64()),
+                move |window, cx| {
+                    super::code_ui::container(&context)
+                        .child(super::code_ui::header(&editor, id, window, cx))
+                },
+            );
+        }
     }
 }
 
@@ -604,6 +674,12 @@ impl BlockEditor {
         let nodes: Vec<BlockNode> = snapshot
             .blocks
             .iter()
+            .filter(|block| {
+                !matches!(
+                    editor_state.model.doc.kind(block.id),
+                    Some(super::kind::BlockKindData::FrontMatter { .. })
+                )
+            })
             .flat_map(|block| {
                 block
                     .nodes
@@ -839,7 +915,13 @@ impl RenderOnce for BlockEditor {
             super::html_table::render_live(node, Some(&measured_html), reveal, window, cx)
         });
         code_preview::register_renderer(&mut extensions);
-        register_code_surfaces(&mut extensions, &self.state, &render_cx, cx);
+        register_code_surfaces(
+            &mut extensions,
+            &self.state,
+            &render_cx,
+            Some(code_preview_bounds.clone()),
+            cx,
+        );
         register_table_surfaces(&mut extensions, &self.state, cx);
         for leaf in snapshot.leaves.iter().filter(|leaf| leaf.atomic) {
             let id = leaf.block;
@@ -1165,6 +1247,7 @@ impl RenderOnce for BlockEditor {
                 }
                 Some(BlockKindData::Table { .. } | BlockKindData::HtmlTable(_)) => "▦".into(),
                 Some(BlockKindData::CodeBlock { .. }) => "‹/›".into(),
+                Some(BlockKindData::FrontMatter { .. }) => "---".into(),
                 Some(BlockKindData::Blockquote | BlockKindData::Alert { .. } | BlockKindData::Fold { .. }) => "❝".into(),
                 _ => String::new(),
             };

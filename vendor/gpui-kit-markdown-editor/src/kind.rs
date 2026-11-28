@@ -26,6 +26,7 @@ pub enum BlockKind {
         level: u8,
     },
     CodeBlock,
+    FrontMatter,
     // atomic leaves
     /// Reserved: on main, images are inline nodes inside a paragraph, so the
     /// spike stores them as inline atoms and never creates this kind.
@@ -74,6 +75,10 @@ pub(crate) enum BlockKindData {
         lang: Option<SharedString>,
         meta: Option<SharedString>,
     },
+    FrontMatter {
+        opening: SharedString,
+        closing: SharedString,
+    },
     HorizontalRule,
     Break {
         html: bool,
@@ -100,6 +105,7 @@ impl BlockKindData {
             Self::Paragraph => BlockKind::Paragraph,
             Self::Heading { level } => BlockKind::Heading { level: *level },
             Self::CodeBlock { .. } => BlockKind::CodeBlock,
+            Self::FrontMatter { .. } => BlockKind::FrontMatter,
             Self::HorizontalRule => BlockKind::HorizontalRule,
             Self::Break { .. } => BlockKind::Break,
             Self::Custom => BlockKind::Custom,

@@ -228,6 +228,24 @@ impl Workspace {
     }
 
     pub(super) fn change_tags(&mut self, change: Change<'_>, cx: &mut Context<Self>) -> bool {
+        let affected_md: Vec<String> = match change {
+            Change::Create { paths, .. } | Change::Assign { paths, .. } => paths
+                .iter()
+                .filter(|path| Self::is_markdown_path(path))
+                .cloned()
+                .collect(),
+            Change::Rename { tag, .. } | Change::Delete(tag) => self
+                .tags
+                .snapshot
+                .assigned
+                .iter()
+                .filter(|(path, ids)| {
+                    Self::is_markdown_path(path) && ids.iter().any(|id| id == tag)
+                })
+                .map(|(path, _)| path.clone())
+                .collect(),
+            Change::Color { .. } | Change::Rebind { .. } => Vec::new(),
+        };
         match self
             .tag_store()
             .map_err(Into::into)
@@ -235,12 +253,106 @@ impl Workspace {
         {
             Ok(snapshot) => {
                 self.use_tag_snapshot(snapshot, cx);
+                if !affected_md.is_empty() {
+                    self.sync_markdown_frontmatter_tags(&affected_md, cx);
+                }
                 true
             }
             Err(error) => {
                 self.report(crate::i18n::tags::err_save_tags(&error), cx);
                 false
             }
+        }
+    }
+
+    /// Sync YAML Front Matter `tags` from a Markdown file into Folio's SQLite tag store.
+    pub(super) fn sync_tags_from_markdown_text(
+        &mut self,
+        path: &str,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if !Self::is_markdown_path(path) {
+            return;
+        }
+        let Some(tag_names) = crate::markdown::frontmatter::extract_tags(text) else {
+            return;
+        };
+        let Ok(store) = self.tag_store() else {
+            return;
+        };
+        match store.sync_file_tags(path, &tag_names) {
+            Ok(Some(snapshot)) => self.use_tag_snapshot(snapshot, cx),
+            Ok(None) => {}
+            Err(error) => self.report(crate::i18n::tags::err_save_tags(&error), cx),
+        }
+    }
+
+    /// Sync Folio's SQLite tags back to YAML Front Matter for Markdown files (conservative mode:
+    /// only updates files that already have a Front Matter block).
+    pub(super) fn sync_markdown_frontmatter_tags(
+        &mut self,
+        paths: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        let tag_names_by_id: HashMap<&str, &str> = self
+            .tags
+            .snapshot
+            .tags
+            .iter()
+            .map(|tag| (tag.id.as_str(), tag.name.as_str()))
+            .collect();
+        let updates: Vec<(String, Vec<String>)> = paths
+            .iter()
+            .filter(|path| Self::is_markdown_path(path))
+            .map(|path| {
+                let names = self
+                    .tags
+                    .snapshot
+                    .assigned
+                    .get(path)
+                    .map(|ids| {
+                        ids.iter()
+                            .filter_map(|id| tag_names_by_id.get(id.as_str()).map(|s| (*s).to_owned()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (path.clone(), names)
+            })
+            .collect();
+
+        let root = self
+            .projects
+            .directory()
+            .map(|project| PathBuf::from(&project.folder));
+        for (path, desired_tags) in updates {
+            if let Some(current_text) = self.documents.open_buffer(&path).map(|b| b.text.clone()) {
+                if let Some(next_text) =
+                    crate::markdown::frontmatter::update_tags_in_markdown(&current_text, &desired_tags)
+                {
+                    self.edit_document(&path, next_text);
+                    cx.notify();
+                }
+                continue;
+            }
+            let disk = if let Some(root) = &root {
+                files::read_document(root, &path)
+            } else {
+                files::read_document_at(Path::new(&path))
+            };
+            let Ok(disk) = disk else {
+                continue;
+            };
+            let Some(next_text) =
+                crate::markdown::frontmatter::update_tags_in_markdown(&disk.text, &desired_tags)
+            else {
+                continue;
+            };
+            let _ = if let Some(root) = &root {
+                files::save_document(root, &path, &next_text, &disk.revision)
+            } else {
+                files::save_document_at(Path::new(&path), &next_text, &disk.revision)
+            };
         }
     }
 
