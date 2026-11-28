@@ -197,6 +197,10 @@ impl Workspace {
             RightPanelAction::OpenTerminal => {
                 self.open_right_panel(RightPanelView::Terminal, window, cx);
             }
+            RightPanelAction::OpenGraph => {
+                self.close_right_panel_immediate(window, cx);
+                self.open_graph(window, cx);
+            }
             RightPanelAction::NewSplitPage => {
                 let target_width = self.settings.terminal.panel_width.clamp(280., 1600.);
                 self.close_right_panel_immediate(window, cx);

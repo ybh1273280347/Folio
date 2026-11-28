@@ -291,6 +291,7 @@ impl TrashType {
 
 impl Workspace {
     pub(super) fn open_trash(&mut self, cx: &mut Context<Self>) {
+        self.graph_open = false;
         self.trash.open = true;
         self.trash.scope = if self.projects.directory().is_some() {
             TrashScope::CurrentProject

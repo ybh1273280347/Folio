@@ -25,6 +25,7 @@ impl Workspace {
         if let Err(error) = md_links::sync_markdown_links(&db_path, rel_path, text, &full) {
             self.report(error, cx);
         }
+        self.mark_graph_dirty(cx);
     }
 
     pub(in crate::workspace) fn sync_project_markdown_links(&mut self, cx: &mut Context<Self>) {
@@ -46,6 +47,7 @@ impl Workspace {
             self.report(error, cx);
         }
         self.refresh_active_markdown_backlinks(cx);
+        self.mark_graph_dirty(cx);
     }
 
     pub(in crate::workspace) fn remove_markdown_links_index(

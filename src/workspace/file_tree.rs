@@ -1515,6 +1515,17 @@ impl Workspace {
                 app.toggle_zen_mode(window, cx);
             }));
 
+        let graph_btn = rail_btn("rail-graph-view", IconName::ChartNetwork, self.graph_open, false)
+            .tooltip(|window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(
+                    crate::i18n::graph::TOOLTIP_OPEN_GRAPH.get(),
+                )
+                .build(window, cx)
+            })
+            .on_click(cx.listener(|app, _, window, cx| {
+                app.toggle_graph(window, cx);
+            }));
+
         let trash_bounds = self.tree.trash_bounds.clone();
         let trash_btn = div()
             .id("trash-entry")
@@ -1636,7 +1647,8 @@ impl Workspace {
                     .child(loose_files_btn)
                     .child(div().w(px(20.)).h(px(1.)).my_1p5().bg(rgb(BORDER)))
                     .child(open_file_btn)
-                    .child(zen_btn),
+                    .child(zen_btn)
+                    .child(graph_btn),
             )
             .child(
                 div()

@@ -32,6 +32,36 @@ impl Workspace {
             self.report(error, cx);
         }
         self.refresh_active_canvas_backlinks();
+        self.mark_graph_dirty(cx);
+    }
+
+    pub(in crate::workspace) fn sync_project_canvas_links(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.projects.directory() else {
+            return;
+        };
+        let Some(db_path) = self.canvas_metadata_db_path() else {
+            return;
+        };
+        let root = PathBuf::from(&project.folder);
+        let canvas_paths: Vec<String> = self
+            .tree
+            .files()
+            .iter()
+            .filter(|f| Self::is_canvas_path(&f.path))
+            .map(|f| f.path.clone())
+            .collect();
+        for rel_path in canvas_paths {
+            let full = root.join(&rel_path);
+            let Ok(text) = std::fs::read_to_string(&full) else {
+                continue;
+            };
+            if let Ok(doc) = CanvasDocument::from_json_str(&text)
+                && let Err(error) = canvas_index::sync_canvas_links(&db_path, &rel_path, &doc)
+            {
+                self.report(error, cx);
+            }
+        }
+        self.refresh_active_canvas_backlinks();
     }
 
     pub(in crate::workspace) fn remove_canvas_index(&mut self, rel_path: &str, cx: &mut Context<Self>) {

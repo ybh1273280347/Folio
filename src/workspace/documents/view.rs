@@ -12,6 +12,8 @@ impl Workspace {
         };
         let palette = crate::theme::palette();
         let trash_open = self.trash.is_open();
+        let graph_open = self.graph_open;
+        let special_open = trash_open || graph_open;
         let active_tab_bg = if palette.is_dark() {
             gpui_kit::rgb(palette.selection)
         } else {
@@ -28,7 +30,7 @@ impl Workspace {
             .border_b_1()
             .border_color(gpui_kit::rgb(palette.border));
 
-        if !trash_open
+        if !special_open
             && let Some(md_pane) = self.documents.markdown_panes.get(&PaneKey::tab(&self.documents.active))
         {
             let outline_open = md_pane.read(cx).is_outline_open();
@@ -113,7 +115,7 @@ impl Workspace {
                 .gap_1()
                 .overflow_hidden()
                 .children(self.documents.tabs.iter().map(|path| {
-                    let current = !trash_open && self.documents.active == *path;
+                    let current = !special_open && self.documents.active == *path;
                     let title = Path::new(path)
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
@@ -179,13 +181,43 @@ impl Workspace {
                                 })),
                         ),
                     )
+                })
+                .when(graph_open, |strip| {
+                    strip.child(
+                        tab_shell(
+                            SharedString::from("editor-tab-graph"),
+                            crate::i18n::graph::TAB_TITLE.get().to_owned(),
+                            true,
+                        )
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(
+                                crate::i18n::graph::TAB_TITLE.get(),
+                            )
+                            .build(window, cx)
+                        })
+                        .child(
+                            Button::new("close-editor-tab-graph")
+                                .ghost()
+                                .compact()
+                                .with_size(px(16.))
+                                .w(px(18.))
+                                .h(px(18.))
+                                .flex_shrink_0()
+                                .icon(crate::ui::icon(IconName::Close).size(px(12.)))
+                                .tooltip(crate::i18n::workspace::TOOLTIP_CLOSE_TAB.get())
+                                .on_click(cx.listener(|app, _, window, cx| {
+                                    cx.stop_propagation();
+                                    app.close_graph(window, cx);
+                                })),
+                        ),
+                    )
                 }),
         );
 
         let md_backlink_count = self.documents.active_markdown_backlinks.len();
         let canvas_backlink_count = self.documents.active_canvas_backlinks.len();
         let total_backlinks = md_backlink_count + canvas_backlink_count;
-        if !trash_open && total_backlinks > 0 {
+        if !special_open && total_backlinks > 0 {
             let canvas_backlinks = self.documents.active_canvas_backlinks.clone();
             let app = cx.entity();
             let pill_icon = if md_backlink_count > 0 {
@@ -279,7 +311,7 @@ impl Workspace {
             );
         }
 
-        if !trash_open
+        if !special_open
             && let Some(md_pane) = self.documents.markdown_panes.get(&PaneKey::tab(&self.documents.active))
         {
             let count = md_pane.read(cx).annotation_count();
@@ -336,7 +368,7 @@ impl Workspace {
                             source_pane.update(cx, |pane, cx| pane.toggle_source(window, cx));
                         }),
                 );
-        } else if !trash_open
+        } else if !special_open
             && Self::is_canvas_path(&self.documents.active)
             && let Some(canvas_pane) = self.documents.canvas_panes.get(&PaneKey::tab(&self.documents.active))
         {
@@ -345,7 +377,7 @@ impl Workspace {
                 SharedString::from(format!("canvas-copy-document:{}", self.documents.active)),
                 move |cx| copy_pane.read(cx).document().to_json_pretty().unwrap_or_default(),
             ));
-        } else if !trash_open
+        } else if !special_open
             && let Some(document) = self.documents.open.get(&self.documents.active)
         {
             let editor = document.editor.clone();
@@ -360,8 +392,10 @@ impl Workspace {
 
     pub(in crate::workspace) fn render_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let trash_open = self.trash.is_open();
+        let graph_open = self.graph_open;
         let document = self.documents.open.get(&self.documents.active);
         let show_background = !trash_open
+            && !graph_open
             && self.has_visible_background()
             && (self.documents.active.is_empty() || document.is_some());
         let mut area = div()
@@ -376,11 +410,13 @@ impl Workspace {
                 MouseButton::Left,
                 cx.listener(|app, _, _, _| app.documents.clear_reading_focus()),
             );
-        if !self.zen_mode && (!self.documents.tabs.is_empty() || trash_open) {
+        if !self.zen_mode && (!self.documents.tabs.is_empty() || trash_open || graph_open) {
             area = area.child(self.render_editor_tab_bar(show_background, cx));
         }
         if trash_open {
             area = area.child(div().flex_1().min_h_0().child(self.render_trash(window, cx)));
+        } else if graph_open {
+            area = area.child(div().flex_1().min_h_0().min_w_0().overflow_hidden().child(self.graph.clone()));
         } else if let Some(document) = document {
             if let Some(banner) = self.render_document_status_banner(&self.documents.active, document, cx) {
                 area = area.child(banner);

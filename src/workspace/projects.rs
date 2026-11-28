@@ -321,6 +321,9 @@ impl Workspace {
         self.remember_session()?;
         self.refresh_active_backlinks(cx);
         self.reset_rag_sync_on_project_switch(cx);
+        self.graph_open = false;
+        self.graph_dirty = true;
+        self.graph.update(cx, |pane, cx| pane.clear(cx));
         cx.notify();
         Ok(())
     }
@@ -409,6 +412,9 @@ impl Workspace {
         self.sync_project_markdown_links(cx);
         self.refresh_active_canvas_backlinks();
         self.reset_rag_sync_on_project_switch(cx);
+        self.graph_open = false;
+        self.graph_dirty = true;
+        self.graph.update(cx, |pane, cx| pane.clear(cx));
         cx.notify();
         Ok(())
     }
