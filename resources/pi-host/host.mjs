@@ -114,8 +114,10 @@ const metadata = fs.existsSync(metadataPath) ? JSON.parse(fs.readFileSync(metada
 const projectKey = cwd => fs.realpathSync.native(cwd).replaceAll('/', '\\').replace(/\\+$/, '').toLowerCase();
 const sessions = new SessionRegistry();
 const key = (project, id) => sessions.identity(project, id);
-const disposeSession = record => sessions.dispose(record, workspaceToolChannels.map(({ bridge }) => bridge));
+const workspaceToolBridges = workspaceToolChannels.map(({ bridge }) => bridge);
+const disposeSession = (record, targetSessionFile) => sessions.dispose(record, workspaceToolBridges, targetSessionFile);
 let settings = JSON.parse(process.env.FOLIO_AI_SETTINGS ?? '{}');
+let exiting = false;
 
 function saveMetadata() {
   const temporary = `${metadataPath}.tmp`;
@@ -148,7 +150,7 @@ function transcript(record) {
 
 function uiContext(record) {
   const request = (method, fields, options) => new Promise(resolve => {
-    if (record.cancelling || options?.signal?.aborted) { resolve(undefined); return; }
+    if (record.cancelling || record.disposal || options?.signal?.aborted) { resolve(undefined); return; }
     const id = randomUUID();
     let timer;
     const abort = () => finish(undefined);
@@ -209,6 +211,7 @@ async function configureModels(record) {
       reasoning: true, input: ['text', 'image'], contextWindow: 200000, maxTokens: 32768,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }));
   }
+  if (record.disposal) return;
   record.models.registerProvider('magpie', { ...configured, baseUrl, apiKey: 'magpie', api: 'openai-completions', models });
   if (record.session?.model?.provider === 'magpie' && !record.running) {
     await record.session.setModel(record.models.getModel('magpie', record.session.model.id));
@@ -263,21 +266,23 @@ async function createRecord(cwd, manager, replacement) {
       ...workspaceToolChannels.flatMap(({ bridge, factory }) => factory((operation, params, signal) =>
         bridge.request({ projectKey: project, sessionId: id }, operation, params, signal), record))] });
   record.session = session;
-  if (replacement) {
-    const { previous, temporary, file } = replacement;
-    // Construct the new SDK context before committing the replacement JSONL.
-    // The same ID and event sequence keep existing Folio routes attached.
-    try {
+  try {
+    if (exiting) throw new Error('Pi host is shutting down');
+    if (replacement) {
+      const { previous, temporary, file } = replacement;
+      // Keep the replacement unbound until the previous MCP transports have closed.
       fs.renameSync(temporary, file);
-    } catch (error) {
-      session.dispose();
-      throw error;
+      manager.setSessionFile(file);
+      await disposeSession(previous, file);
+      if (exiting) throw new Error('Pi host is shutting down');
+      // The same ID and event sequence keep existing Folio routes attached.
+      record.sequence = previous.sequence;
+      record.retained = previous.retained;
     }
-    manager.setSessionFile(file);
-    record.sequence = previous.sequence;
-    record.retained = previous.retained;
-    previous.titleController?.abort();
-    disposeSession(previous);
+  } catch (error) {
+    // This candidate has never received session_start.
+    session.dispose();
+    throw error;
   }
   record.unsubscribe = session.subscribe(event => {
     if (event.type === 'message_end' && event.message.role === 'user') {
@@ -314,15 +319,18 @@ async function createRecord(cwd, manager, replacement) {
     publish(record, event);
     if (event.type === 'agent_settled') {
       publish(record, { type: 'session_status', ...state(record) });
-      if (!record.retained && !record.titleController) disposeSession(record);
+      if (!record.retained && !record.task && !record.titleController && !record.rewind) {
+        void disposeSession(record).catch(error => console.error(error.stack));
+      }
     }
   });
   sessions.register(record);
-  await session.bindExtensions({ mode: 'rpc', uiContext: uiContext(record),
+  record.binding = session.bindExtensions({ mode: 'rpc', uiContext: uiContext(record),
     abortHandler: () => { void session.abort(); },
     shutdownHandler: () => { void session.abort(); },
     onError: error => publish(record, { type: 'extension_error', error: String(error.error ?? error) }),
   });
+  await record.binding;
   return record;
 }
 
@@ -377,7 +385,7 @@ async function generateTitle(record, text) {
     const title = [...(response.choices[0].message.content ?? '').trim().replace(/^["“”'「」]+|["“”'「」]+$/g, '').replace(/\s+/g, ' ')].slice(0, 24).join('');
     if (!title) throw new Error('标题模型返回空内容');
     // A manual rename or deletion can finish while the separate model request is pending.
-    if (sessions.get(record.project, record.id) !== record || metadata[identity]?.titleSource === 'manual') return;
+    if (record.disposal || sessions.get(record.project, record.id) !== record || metadata[identity]?.titleSource === 'manual') return;
     record.session.setSessionName(title);
     metadata[identity] = { ...metadata[identity], titleSource: 'generated' };
     saveMetadata();
@@ -385,8 +393,8 @@ async function generateTitle(record, text) {
     if (!controller.signal.aborted) publish(record, { type: 'title_error', error: error.message });
   } finally {
     record.titleController = undefined;
-    if (!record.retained && !record.running && !record.rewind && sessions.get(record.project, record.id) === record) {
-      disposeSession(record);
+    if (!record.retained && !record.running && !record.task && !record.rewind && sessions.get(record.project, record.id) === record) {
+      void disposeSession(record).catch(error => console.error(error.stack));
     }
   }
 }
@@ -421,13 +429,18 @@ async function dispatch(command) {
     saveMetadata();
     return response();
   }
+  if (command.type === 'release') {
+    await sessions.release(command.projectKey, command.sessionId, workspaceToolBridges);
+    return response();
+  }
   let record = await target(command);
+  if (record.disposal && !record.rewind) throw new Error('会话已关闭');
   if (record.rewind && command.type === 'snapshot') {
     // A tab reopened during the replacement must see the committed transcript.
     sessions.retain(record);
     record = await record.rewind.then(updated => updated, () => record);
   }
-  if (record.rewind && !['release', 'retain', 'get_state', 'get_messages', 'get_session_stats',
+  if (record.rewind && !['retain', 'get_state', 'get_messages', 'get_session_stats',
     'get_available_models', 'get_available_thinking_levels', 'get_commands'].includes(command.type)) {
     throw new Error('会话正在回退');
   }
@@ -489,7 +502,7 @@ async function dispatch(command) {
       } finally {
         fs.rmSync(temporary, { force: true });
         previous.rewind = undefined;
-        if (record === previous && !previous.retained && !previous.titleController) disposeSession(previous);
+        if (record === previous && !previous.retained && !previous.titleController) await disposeSession(previous);
       }
       // Start the normal prompt lifecycle on the replacement record in the same dispatch.
     }
@@ -515,7 +528,7 @@ async function dispatch(command) {
           if (!current) throw new Error('当前模型已从 Magpie 网关移除，请重新选择模型');
           if (current !== session.model) await session.setModel(current);
         }
-        await session.prompt(command.message, { images: command.images });
+        if (!record.disposal) await session.prompt(command.message, { images: command.images });
       })();
       record.task = task;
       if (first && command.titleText?.trim() && settings.titleModelId
@@ -532,8 +545,8 @@ async function dispatch(command) {
         // Extension commands can finish without starting an agent run, so the host settles those runs.
         if (needsSettled) publish(record, { type: 'agent_settled' });
         publish(record, { type: 'session_status', ...state(record) });
-        if (!record.retained && !record.titleController && sessions.get(record.project, record.id)) {
-          disposeSession(record);
+        if (!record.retained && !record.titleController && sessions.get(record.project, record.id) === record) {
+          await disposeSession(record);
         }
       }
       return response();
@@ -566,9 +579,6 @@ async function dispatch(command) {
       session.setSessionName(name);
       return response();
     }
-    case 'release':
-      if (sessions.release(record)) disposeSession(record);
-      return response();
     case 'retain': sessions.retain(record); return response();
     case 'delete_session': {
       if ((record.running || record.pending.size) && !command.confirmed) throw new Error('删除运行中的会话需要确认');
@@ -578,7 +588,7 @@ async function dispatch(command) {
       await session.abort();
       await record.task;
       const file = session.sessionFile;
-      disposeSession(record);
+      await disposeSession(record);
       if (file && fs.existsSync(file)) fs.unlinkSync(file);
       delete metadata[key(record.project, record.id)];
       saveMetadata();
@@ -600,11 +610,11 @@ input.on('line', line => {
       command: command.type, success: false, error: error.message });
   });
 });
-input.on('close', () => {
-  for (const record of sessions.records()) {
-    record.titleController?.abort();
-    for (const pending of record.pending.values()) pending.finish(undefined);
-    record.session.dispose();
+input.on('close', async () => {
+  exiting = true;
+  const results = await Promise.allSettled([...sessions.records()].map(record => disposeSession(record)));
+  for (const result of results) {
+    if (result.status === 'rejected') console.error(result.reason);
   }
-  process.exit(0);
+  process.exit(results.some(result => result.status === 'rejected') ? 1 : 0);
 });

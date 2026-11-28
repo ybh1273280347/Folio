@@ -11,6 +11,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
+    time::Duration,
 };
 
 #[derive(Debug, Clone)]
@@ -97,10 +98,11 @@ struct Route {
 }
 
 pub struct Host {
-    stdin: mpsc::Sender<String>,
+    stdin: mpsc::Sender<Option<String>>,
     routes: Arc<Mutex<HashMap<String, Route>>>,
     child: Arc<Mutex<Child>>,
     alive: Arc<AtomicBool>,
+    exited: Mutex<mpsc::Receiver<()>>,
     next: AtomicU64,
     #[cfg(windows)]
     _job: ProcessJob,
@@ -173,9 +175,10 @@ impl Host {
         let mut stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
-        let (tx, rx) = mpsc::channel::<String>();
+        let (tx, rx) = mpsc::channel::<Option<String>>();
         std::thread::spawn(move || {
             for line in rx {
+                let Some(line) = line else { break };
                 if writeln!(stdin, "{line}")
                     .and_then(|_| stdin.flush())
                     .is_err()
@@ -251,13 +254,15 @@ impl Host {
         let wait_child = Arc::clone(&child);
         let wait_alive = Arc::clone(&alive);
         let wait_routes = Arc::clone(&routes);
+        let (exited_tx, exited) = mpsc::channel();
         std::thread::spawn(move || {
             loop {
                 let status = wait_child.lock().expect("child lock").try_wait();
                 match status {
-                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                    Ok(None) => std::thread::sleep(Duration::from_millis(100)),
                     status => {
                         wait_alive.store(false, Ordering::Release);
+                        let _ = exited_tx.send(());
                         let code = status.ok().flatten().and_then(|status| status.code());
                         for route in wait_routes.lock().expect("routes lock").values() {
                             let _ = route.sender.send(RpcInbound::Exited(code));
@@ -272,6 +277,7 @@ impl Host {
             routes,
             child,
             alive,
+            exited: Mutex::new(exited),
             next: AtomicU64::new(1),
             #[cfg(windows)]
             _job: job,
@@ -341,6 +347,21 @@ mod tests {
 }
 impl Drop for Host {
     fn drop(&mut self) {
+        if !self.alive.load(Ordering::Acquire) {
+            return;
+        }
+        // Closing the pipe starts the host's async SDK shutdown. Keep the Windows job
+        // alive while Pi closes its MCP transports, with a bound for stuck extensions.
+        let _ = self.stdin.send(None);
+        if self
+            .exited
+            .get_mut()
+            .expect("exit receiver lock")
+            .recv_timeout(Duration::from_secs(5))
+            .is_ok()
+        {
+            return;
+        }
         let _ = self.child.lock().expect("child lock").kill();
     }
 }
@@ -386,7 +407,7 @@ impl RpcClient {
         }
         self.host
             .stdin
-            .send(serde_json::to_string(&payload).map_err(|e| e.to_string())?)
+            .send(Some(serde_json::to_string(&payload).map_err(|e| e.to_string())?))
             .map_err(|_| crate::i18n::ai::ERR_RPC_STDIN_CLOSED.get().to_owned())?;
         Ok(id)
     }

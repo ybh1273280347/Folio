@@ -24,22 +24,42 @@ export class SessionRegistry {
     this.#records.delete(this.identity(record.project, record.id));
   }
 
-  release(record) {
+  async release(project, sessionId, bridges) {
+    const identity = this.identity(project, sessionId);
+    // A close can arrive while a snapshot is opening the session.
+    const record = this.#records.get(identity) ?? await this.#opening.get(identity);
+    if (!record) return;
     record.retained = false;
-    return !record.running && !record.titleController && !record.rewind;
+    if (!record.running && !record.task && !record.titleController && !record.rewind) {
+      await this.dispose(record, bridges);
+    }
   }
 
   retain(record) {
     record.retained = true;
   }
 
-  dispose(record, bridges) {
-    for (const bridge of bridges) {
-      bridge.dispose({ projectKey: record.project, sessionId: record.id });
-    }
-    record.unsubscribe();
-    record.session.dispose();
-    this.remove(record);
+  dispose(record, bridges, targetSessionFile) {
+    // Closing, a settling turn and host EOF can all release the same SDK session.
+    return record.disposal ??= Promise.resolve().then(async () => {
+      record.titleController?.abort();
+      for (const pending of record.pending.values()) pending.finish(undefined);
+      for (const bridge of bridges) {
+        bridge.dispose({ projectKey: record.project, sessionId: record.id });
+      }
+      await record.binding;
+      const { session } = record;
+      await session.abort();
+      // Pi emits this event with the extension runtime still bound so MCP can await transport close.
+      await session.extensionRunner.emit(targetSessionFile
+        ? { type: 'session_shutdown', reason: 'resume', targetSessionFile }
+        : { type: 'session_shutdown', reason: 'quit' });
+      record.unsubscribe();
+      session.dispose();
+      await record.models.settleCredentialWrites();
+      // Keep the rewind record addressable until createRecord installs its replacement.
+      if (!targetSessionFile) this.remove(record);
+    });
   }
 
   prepare(project, manager, created) {
@@ -51,6 +71,10 @@ export class SessionRegistry {
   async open(project, sessionId, initialize) {
     const identity = this.identity(project, sessionId);
     const record = this.#records.get(identity);
+    if (record?.disposal && !record.rewind) {
+      await record.disposal;
+      return this.open(project, sessionId, initialize);
+    }
     if (record) return record;
 
     const opening = this.#opening.get(identity);
