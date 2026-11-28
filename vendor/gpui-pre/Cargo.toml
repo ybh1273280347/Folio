@@ -392,6 +392,10 @@ version = "0.3.19"
 [dependencies.itertools]
 version = "0.14.0"
 
+[dependencies.jpeg-decoder]
+version = "0.3.2"
+default-features = false
+
 [dependencies.log]
 version = "0.4"
 features = ["std"]

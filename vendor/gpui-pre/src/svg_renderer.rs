@@ -109,6 +109,8 @@ pub enum SvgSize {
     Size(Size<DevicePixels>),
     /// An exact width and height in device pixels.
     ExactSize(Size<DevicePixels>),
+    /// An exact size filled by a centered, aspect-preserving crop.
+    Cover(Size<DevicePixels>),
     /// A logical scaling factor to apply to the size provided by the SVG.
     ScaleFactor(f32),
 }
@@ -200,6 +202,7 @@ impl SvgRenderer {
         let (size, image_scale_factor) = match size.into() {
             SvgSize::Size(size) => (SvgSize::Size(size), 1.0),
             SvgSize::ExactSize(size) => (SvgSize::ExactSize(size), 1.0),
+            SvgSize::Cover(size) => (SvgSize::Cover(size), 1.0),
             SvgSize::ScaleFactor(scale_factor) => (
                 SvgSize::ScaleFactor(scale_factor * SMOOTH_SVG_SCALE_FACTOR),
                 SMOOTH_SVG_SCALE_FACTOR,
@@ -278,7 +281,9 @@ fn rasterize_tree(tree: &usvg::Tree, size: SvgSize) -> Result<Pixmap, usvg::Erro
             let scale = i32::from(size.width) as f32 / svg_size.width();
             (svg_size.width() * scale, svg_size.height() * scale)
         }
-        SvgSize::ExactSize(size) => (i32::from(size.width) as f32, i32::from(size.height) as f32),
+        SvgSize::ExactSize(size) | SvgSize::Cover(size) => {
+            (i32::from(size.width) as f32, i32::from(size.height) as f32)
+        }
         SvgSize::ScaleFactor(scale) => (svg_size.width() * scale, svg_size.height() * scale),
     };
 
@@ -296,10 +301,17 @@ fn rasterize_tree(tree: &usvg::Tree, size: SvgSize) -> Result<Pixmap, usvg::Erro
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width as u32, height as u32)
         .ok_or(usvg::Error::InvalidSize)?;
 
-    let transform = resvg::tiny_skia::Transform::from_scale(
-        width / svg_size.width(),
-        height / svg_size.height(),
-    );
+    let scale_x = width / svg_size.width();
+    let scale_y = height / svg_size.height();
+    let transform = if matches!(size, SvgSize::Cover(_)) {
+        let scale = scale_x.max(scale_y);
+        resvg::tiny_skia::Transform::from_scale(scale, scale).post_translate(
+            (width - scale * svg_size.width()) * 0.5,
+            (height - scale * svg_size.height()) * 0.5,
+        )
+    } else {
+        resvg::tiny_skia::Transform::from_scale(scale_x, scale_y)
+    };
 
     resvg::render(tree, transform, &mut pixmap.as_mut());
 

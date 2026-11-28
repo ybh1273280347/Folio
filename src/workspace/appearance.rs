@@ -2,42 +2,94 @@
 
 use super::*;
 
-/// Holds the decoded workspace backdrop and the task for the selected image.
+/// Holds the backdrop currently being drawn and the latest requested physical size.
 #[derive(Default)]
 pub(super) struct Backdrop {
     image: Option<Arc<RenderImage>>,
+    target: Option<(u32, u32)>,
     load: Option<Task<()>>,
 }
 
-impl Backdrop {
-    pub(super) fn image(&self) -> Option<&Arc<RenderImage>> {
-        self.image.as_ref()
-    }
-}
-
 impl Workspace {
-    pub(super) fn load_background_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Dropping the retained task prevents an older selection from publishing after replacement.
-        self.backdrop.load = None;
-        if self.backdrop.image.is_some() {
-            self.set_background_image(None, window, cx);
+    pub(super) fn render_backdrop(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
+        let opacity = self.settings.background_image_opacity;
+        if opacity == 0 || self.settings.background_image.is_none() {
+            return None;
         }
-        self.preferences.update(cx, |panel, cx| panel.set_background_image_error(None, cx));
+        let workspace = cx.weak_entity();
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .size_full()
+                .child(
+                    canvas(
+                        move |bounds, window, cx| {
+                            let scale = window.scale_factor();
+                            let width = (f32::from(bounds.size.width) * scale).ceil() as u32;
+                            let height = (f32::from(bounds.size.height) * scale).ceil() as u32;
+                            let target = workspace.read_with(cx, |app, _| app.backdrop.target);
+                            if width > 0
+                                && height > 0
+                                && target.is_ok_and(|target| target != Some((width, height)))
+                            {
+                                window.defer(cx, move |window, cx| {
+                                    let _ = workspace.update(cx, |app, cx| {
+                                        app.load_background_image((width, height), window, cx);
+                                    });
+                                });
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0()
+                    .size_full(),
+                )
+                .children(self.backdrop.image.iter().map(|image| {
+                    img(image.clone())
+                        .absolute()
+                        .inset_0()
+                        .size_full()
+                        .object_fit(ObjectFit::Cover)
+                        .opacity(f32::from(opacity) / 100.)
+                })),
+        )
+    }
+
+    fn load_background_image(
+        &mut self,
+        target: (u32, u32),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.background_image_opacity == 0 || self.backdrop.target == Some(target) {
+            return;
+        }
         let Some(path) = self.settings.background_image.clone() else {
             return;
         };
-        let load = ImageAssetLoader::load(path.into(), cx);
-        let load = cx.background_executor().spawn(load);
+        // Replacing the task cancels the old debounce and prevents stale decode results from painting.
+        // Keep the rendered texture while layout is changing, including during sidebar transitions.
+        let resizing = self.backdrop.target.replace(target).is_some();
+        let decode = ImageAssetLoader::load_cover(path, target, cx);
         self.backdrop.load = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = load.await;
-            let _ = this.update_in(cx, |app, window, cx| match result {
-                Ok(image) => app.set_background_image(Some(image), window, cx),
-                Err(error) => app.preferences.update(cx, |panel, cx| {
-                    panel.set_background_image_error(
-                        Some(crate::i18n::workspace::err_read_background_image(&error)),
-                        cx,
-                    );
-                }),
+            if resizing {
+                cx.background_executor()
+                    .timer(Duration::from_millis(250))
+                    .await;
+            }
+            let result = cx.background_executor().spawn(decode).await;
+            let _ = this.update_in(cx, |app, window, cx| {
+                let error = match result {
+                    Ok(image) => {
+                        app.set_background_image(Some(image), window, cx);
+                        None
+                    }
+                    Err(error) => Some(crate::i18n::workspace::err_read_background_image(&error)),
+                };
+                app.preferences
+                    .update(cx, |panel, cx| panel.set_background_image_error(error, cx));
             });
         }));
     }
@@ -145,10 +197,14 @@ impl Workspace {
         if locale_changed || fallback_changed || cjk_scale_changed {
             window.refresh();
         }
-        if previous.background_image != settings.background_image {
-            self.load_background_image(window, cx);
-        } else if previous.background_image_opacity != settings.background_image_opacity {
-            self.sync_backdrop_visible(cx);
+        if previous.background_image != settings.background_image
+            || (previous.background_image_opacity > 0 && settings.background_image_opacity == 0)
+        {
+            self.backdrop.load = None;
+            self.backdrop.target = None;
+            self.set_background_image(None, window, cx);
+            self.preferences
+                .update(cx, |panel, cx| panel.set_background_image_error(None, cx));
         }
         if previous.rag != self.settings.rag {
             self.refresh_kb_snapshot(cx);

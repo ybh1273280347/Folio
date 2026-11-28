@@ -2,8 +2,8 @@ use crate::{
     AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, DefiniteLength, Element, ElementId,
     Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId, InteractiveElement,
     Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels, RenderImage, Resource,
-    SharedString, SharedUri, StyleRefinement, Styled, Task, Window, decode_gif_image,
-    decode_static_image, decode_webp_image, px,
+    SharedString, SharedUri, StyleRefinement, Styled, SvgSize, Task, Window, decode_gif_image,
+    decode_raster_cover, decode_static_image, decode_webp_image, px, size,
 };
 use anyhow::Result;
 
@@ -617,6 +617,31 @@ impl Asset for ImageDecoder {
 #[derive(Clone)]
 pub enum ImageAssetLoader {}
 
+impl ImageAssetLoader {
+    /// Loads a local image for a centered Cover crop at the given physical size.
+    /// The caller owns the result and its texture lifetime outside the asset cache.
+    pub fn load_cover(
+        path: PathBuf,
+        (width, height): (u32, u32),
+        cx: &App,
+    ) -> impl Future<Output = Result<Arc<RenderImage>, ImageCacheError>> + Send + 'static {
+        let renderer = cx.svg_renderer();
+        async move {
+            let bytes = fs::read(path)?;
+            match image::guess_format(&bytes) {
+                Ok(format) => Ok(Arc::new(RenderImage::new(decode_raster_cover(
+                    &bytes, format, (width, height),
+                )?))),
+                Err(_) => {
+                    let svg = renderer.parse_svg(&bytes)?;
+                    let target = size((width as i32).into(), (height as i32).into());
+                    Ok(renderer.render_parsed(&svg, SvgSize::Cover(target))?)
+                }
+            }
+        }
+    }
+}
+
 impl Asset for ImageAssetLoader {
     type Source = Resource;
     type Output = Result<Arc<RenderImage>, ImageCacheError>;
@@ -670,7 +695,7 @@ impl Asset for ImageAssetLoader {
             if let Ok(format) = image::guess_format(&bytes) {
                 let data = match format {
                     ImageFormat::Gif => decode_gif_image(&bytes)?,
-                    ImageFormat::WebP => decode_webp_image(&bytes)?,
+                    ImageFormat::WebP => decode_webp_image(&bytes, None)?,
                     _ => decode_static_image(&bytes, format)?,
                 };
 

@@ -395,9 +395,6 @@ impl Workspace {
             _tick: tick,
             _history_escape: history_escape,
         };
-        if app.settings.background_image.is_some() {
-            app.load_background_image(window, cx);
-        }
         let result = match initial_location {
             WorkspaceLocation::Default => app.select_project("__folio_default", window, cx),
             WorkspaceLocation::Project(id) => app.select_project(&id, window, cx),
@@ -919,10 +916,6 @@ impl Render for Workspace {
         let shell_active = palette.island_shell_active();
         let shell_text = gpui_kit::rgb(palette.text);
         let zen_mode = self.zen_mode;
-        let show_backdrop = self.has_visible_background();
-        let backdrop_image = (show_backdrop && !trash_open)
-            .then(|| self.backdrop.image().cloned())
-            .flatten();
         let canvas_card = move |content: AnyElement| -> AnyElement {
             div()
                 .relative()
@@ -954,16 +947,7 @@ impl Render for Workspace {
                 .min_w_0()
                 .min_h_0()
                 // Paint once at work-area coordinates so text panes share the same crop as they scroll.
-                .when_some(backdrop_image, |card, image| {
-                    card.child(
-                        img(image)
-                            .absolute()
-                            .inset_0()
-                            .size_full()
-                            .object_fit(ObjectFit::Cover)
-                            .opacity(f32::from(self.settings.background_image_opacity) / 100.),
-                    )
-                })
+                .children(self.render_backdrop(cx))
                 .child(work_with_logs)
                 .into_any_element(),
         );

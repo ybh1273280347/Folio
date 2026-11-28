@@ -54,7 +54,7 @@ use futures::channel::oneshot;
 #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
 use image::RgbaImage;
 use image::codecs::{gif::GifDecoder, webp::WebPDecoder};
-use image::{DynamicImage, Frame, Rgba};
+use image::{Delay, DynamicImage, Frame, GenericImageView, ImageDecoder, Rgba};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use scheduler::Instant;
 pub use scheduler::RunnableMeta;
@@ -3383,11 +3383,12 @@ pub(crate) fn decode_static_image(
     let decoder = image::ImageReader::with_format(Cursor::new(bytes), format)
         .into_decoder()
         .context("creating image decoder")?;
-    decode_static_image_from_decoder(decoder)
+    decode_static_image_from_decoder(decoder, None)
 }
 
 pub(crate) fn decode_static_image_from_decoder(
     mut decoder: impl image::ImageDecoder,
+    cover: Option<(u32, u32)>,
 ) -> Result<SmallVec<[Frame; 1]>> {
     let orientation = decoder
         .orientation()
@@ -3395,22 +3396,60 @@ pub(crate) fn decode_static_image_from_decoder(
     let mut image = DynamicImage::from_decoder(decoder).context("decoding image")?;
     image.apply_orientation(orientation);
 
-    let mut data = image.into_rgba8();
+    Ok(SmallVec::from_elem(
+        render_frame(image, cover, Delay::from_numer_denom_ms(0, 1)),
+        1,
+    ))
+}
+
+fn render_frame(image: DynamicImage, cover: Option<(u32, u32)>, delay: Delay) -> Frame {
+    let mut data = if let Some((width, height)) = cover {
+        let (source_w, source_h) = image.dimensions();
+        // Crop in source coordinates before resampling so an offscreen strip of a panorama
+        // never needs a second buffer. Cap the output at the available source resolution.
+        let scale =
+            (f64::from(source_w) / f64::from(width)).min(f64::from(source_h) / f64::from(height));
+        let crop_w = ((f64::from(width) * scale).round() as u32).clamp(1, source_w);
+        let crop_h = ((f64::from(height) * scale).round() as u32).clamp(1, source_h);
+        let crop = image.view(
+            (source_w - crop_w) / 2,
+            (source_h - crop_h) / 2,
+            crop_w,
+            crop_h,
+        );
+        image::imageops::resize(
+            &*crop,
+            width.min(crop_w),
+            height.min(crop_h),
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        image.into_rgba8()
+    };
     for pixel in data.chunks_exact_mut(4) {
         pixel.swap(0, 2);
     }
 
-    Ok(SmallVec::from_elem(Frame::new(data), 1))
+    Frame::from_parts(data, 0, 0, delay)
 }
 
 fn decode_animated_frames<'a>(
     decoder: impl image::AnimationDecoder<'a>,
     format_name: &str,
+    cover: Option<(u32, u32)>,
 ) -> Result<SmallVec<[Frame; 1]>> {
     let mut frames = SmallVec::new();
 
     for frame in decoder.into_frames() {
         match frame {
+            Ok(frame) if cover.is_some() => {
+                let delay = frame.delay();
+                frames.push(render_frame(
+                    DynamicImage::ImageRgba8(frame.into_buffer()),
+                    cover,
+                    delay,
+                ));
+            }
             Ok(mut frame) => {
                 // Convert from RGBA to BGRA.
                 for pixel in frame.buffer_mut().chunks_exact_mut(4) {
@@ -3433,18 +3472,96 @@ fn decode_animated_frames<'a>(
 
 pub(crate) fn decode_gif_image(bytes: &[u8]) -> Result<SmallVec<[Frame; 1]>> {
     let decoder = GifDecoder::new(Cursor::new(bytes))?;
-    decode_animated_frames(decoder, "GIF")
+    decode_animated_frames(decoder, "GIF", None)
 }
 
-pub(crate) fn decode_webp_image(bytes: &[u8]) -> Result<SmallVec<[Frame; 1]>> {
+pub(crate) fn decode_webp_image(
+    bytes: &[u8],
+    cover: Option<(u32, u32)>,
+) -> Result<SmallVec<[Frame; 1]>> {
     let mut decoder = WebPDecoder::new(Cursor::new(bytes))?;
 
     if decoder.has_animation() {
         let _ = decoder.set_background_color(Rgba([0, 0, 0, 0]));
-        decode_animated_frames(decoder, "WebP")
+        decode_animated_frames(decoder, "WebP", cover)
     } else {
-        decode_static_image_from_decoder(decoder)
+        decode_static_image_from_decoder(decoder, cover)
     }
+}
+
+pub(crate) fn decode_raster_cover(
+    bytes: &[u8],
+    format: image::ImageFormat,
+    cover: (u32, u32),
+) -> Result<SmallVec<[Frame; 1]>> {
+    use image::ImageFormat;
+    match format {
+        ImageFormat::Gif => {
+            decode_animated_frames(GifDecoder::new(Cursor::new(bytes))?, "GIF", Some(cover))
+        }
+        ImageFormat::WebP => decode_webp_image(bytes, Some(cover)),
+        _ => {
+            let mut decoder =
+                image::ImageReader::with_format(Cursor::new(bytes), format).into_decoder()?;
+            if format == ImageFormat::Jpeg {
+                let orientation = decoder.orientation()?;
+                // IDCT scaling works in encoded coordinates, before the Exif rotation.
+                let (width, height) = if matches!(orientation.to_exif(), 5..=8) {
+                    (cover.1, cover.0)
+                } else {
+                    cover
+                };
+                let (source_w, source_h) = decoder.dimensions();
+                if source_w.div_ceil(2) >= width && source_h.div_ceil(2) >= height {
+                    match decode_scaled_jpeg(bytes, width as u16, height as u16) {
+                        Ok(Some(mut image)) => {
+                            image.apply_orientation(orientation);
+                            return Ok(SmallVec::from_elem(
+                                render_frame(image, Some(cover), Delay::from_numer_denom_ms(0, 1)),
+                                1,
+                            ));
+                        }
+                        // The original decoder supports additional modes and tolerates some
+                        // nonconforming JPEGs. Its decode still reports any unreadable file.
+                        Ok(None) | Err(jpeg_decoder::Error::Unsupported(_) | jpeg_decoder::Error::Format(_)) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
+            decode_static_image_from_decoder(decoder, Some(cover))
+        }
+    }
+}
+
+fn decode_scaled_jpeg(
+    bytes: &[u8],
+    width: u16,
+    height: u16,
+) -> std::result::Result<Option<DynamicImage>, jpeg_decoder::Error> {
+    use jpeg_decoder::PixelFormat;
+    let mut decoder = jpeg_decoder::Decoder::new(bytes);
+    // The decoder stops at the first satisfied axis, so choose the limiting Cover axis.
+    decoder.read_info()?;
+    let info = decoder.info().unwrap();
+    let (width, height) = if u32::from(width) * u32::from(info.height)
+        >= u32::from(height) * u32::from(info.width)
+    {
+        (width, u16::MAX)
+    } else {
+        (u16::MAX, height)
+    };
+    let (w, h) = decoder.scale(width, height)?;
+    let (w, h) = (u32::from(w), u32::from(h));
+    let image = match info.pixel_format {
+        PixelFormat::L8 => {
+            DynamicImage::ImageLuma8(image::GrayImage::from_raw(w, h, decoder.decode()?).unwrap())
+        }
+        PixelFormat::RGB24 => {
+            DynamicImage::ImageRgb8(image::RgbImage::from_raw(w, h, decoder.decode()?).unwrap())
+        }
+        PixelFormat::L16 | PixelFormat::CMYK32 => return Ok(None),
+    };
+    Ok(Some(image))
 }
 
 impl Hash for Image {
@@ -3513,7 +3630,7 @@ impl Image {
             ImageFormat::Gif => decode_gif_image(&self.bytes)?,
             ImageFormat::Png => decode_static_image(&self.bytes, image::ImageFormat::Png)?,
             ImageFormat::Jpeg => decode_static_image(&self.bytes, image::ImageFormat::Jpeg)?,
-            ImageFormat::Webp => decode_webp_image(&self.bytes)?,
+            ImageFormat::Webp => decode_webp_image(&self.bytes, None)?,
             ImageFormat::Bmp => decode_static_image(&self.bytes, image::ImageFormat::Bmp)?,
             ImageFormat::Tiff => decode_static_image(&self.bytes, image::ImageFormat::Tiff)?,
             ImageFormat::Ico => decode_static_image(&self.bytes, image::ImageFormat::Ico)?,
