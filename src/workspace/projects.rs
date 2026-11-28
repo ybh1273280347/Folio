@@ -404,14 +404,6 @@ impl Workspace {
             }
         }
         self.documents.restore_active_tab(&session.active);
-        self.queue_math_preload(
-            self.tree.files()
-                .iter()
-                .filter(|file| file.path.to_lowercase().ends_with(".md"))
-                .map(|file| Path::new(&project.folder).join(&file.path))
-                .collect(),
-            cx,
-        );
         self.projects.save()?;
         self.remember_session()?;
         self.sync_project_markdown_links(cx);

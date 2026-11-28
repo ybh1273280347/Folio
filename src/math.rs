@@ -14,7 +14,7 @@ use gpui_kit::{
 };
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -66,7 +66,6 @@ struct MathRequest {
     display: bool,
     font: MathFont,
     fallback_font: FontId,
-    background: bool,
 }
 
 pub struct MathRenderer {
@@ -90,26 +89,15 @@ impl MathRenderer {
         let (finished, events) = mpsc::channel();
         let text_system = cx.text_system().clone();
         thread::spawn(move || {
-            let mut queue = VecDeque::<MathRequest>::new();
             let mut typesetter = crate::math_layout::Typesetter::new(text_system);
-            loop {
-                // Visible edits bypass unopened documents waiting for background warmup.
-                if queue.is_empty() {
-                    let Ok(job) = jobs.recv() else {
-                        break;
-                    };
-                    queue.push_back(job);
-                }
-                queue.extend(jobs.try_iter());
-                let next = queue.iter().position(|job| !job.background).unwrap_or(0);
-                let MathRequest {
-                    key,
-                    latex,
-                    display,
-                    font,
-                    fallback_font,
-                    ..
-                } = queue.remove(next).expect("queued formula");
+            while let Ok(MathRequest {
+                key,
+                latex,
+                display,
+                font,
+                fallback_font,
+            }) = jobs.recv()
+            {
                 if results.lock().expect("math assets lock").contains_key(&key) {
                     continue;
                 }
@@ -188,7 +176,6 @@ impl MathRenderer {
                             display,
                             font: updated.font,
                             fallback_font: updated.fallback_font,
-                            background: false,
                         })
                         .expect("math worker is alive");
                 }
@@ -197,32 +184,6 @@ impl MathRenderer {
         if previous != updated {
             cx.emit(MathReady::Ready);
         }
-    }
-    pub fn prewarm_paths(
-        &self,
-        paths: Vec<std::path::PathBuf>,
-        renderer: Entity<Self>,
-        cx: &App,
-    ) -> Task<Result<(), String>> {
-        let mut inline = self.plugin(false, renderer.clone(), MathDisplaySize::Markdown);
-        let mut block = self.plugin(true, renderer, MathDisplaySize::Markdown);
-        inline.background = true;
-        block.background = true;
-        let extensions = Arc::new(
-            gpui_kit::base::text::MarkdownExtensions::default()
-                .plugin(inline)
-                .plugin(block),
-        );
-        cx.background_executor().spawn(async move {
-            for path in paths {
-                let text = std::fs::read_to_string(&path)
-                    .map_err(|error| format!("{}：{error}", path.display()))?;
-                let source = markdown_editor::normalize_math(&text);
-                gpui_kit::base::text::editor_host::parse_markdown(&source, extensions.clone())
-                    .map_err(|error| format!("{}：{error}", path.display()))?;
-            }
-            Ok(())
-        })
     }
     pub(crate) fn plugin(
         &self,
@@ -235,7 +196,6 @@ impl MathRenderer {
             pending: self.pending.clone(),
             requests: self.requests.clone(),
             appearance: self.appearance.clone(),
-            background: false,
             display,
             display_size,
             renderer: renderer.downgrade(),
@@ -260,7 +220,6 @@ pub struct MathPlugin {
     pending: Arc<Mutex<HashMap<String, (String, bool)>>>,
     requests: mpsc::Sender<MathRequest>,
     appearance: Arc<Mutex<MathAppearance>>,
-    background: bool,
     display: bool,
     display_size: MathDisplaySize,
     renderer: WeakEntity<MathRenderer>,
@@ -389,14 +348,7 @@ impl MarkdownPlugin for MathPlugin {
             .expect("math pending lock")
             .insert(key.clone(), (latex.clone(), self.display))
             .is_none();
-        if fresh
-            || (!self.background
-                && !self
-                    .assets
-                    .lock()
-                    .expect("math assets lock")
-                    .contains_key(&key))
-        {
+        if fresh {
             self.requests
                 .send(MathRequest {
                     key,
@@ -404,7 +356,6 @@ impl MarkdownPlugin for MathPlugin {
                     display: self.display,
                     font: appearance.font,
                     fallback_font: appearance.fallback_font,
-                    background: self.background,
                 })
                 .expect("math worker is alive");
         }

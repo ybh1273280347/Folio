@@ -1197,6 +1197,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Restored and newly opened tabs and reading panes all typeset the mounted document here.
         let text = self.documents.open[path].buffer.text.clone();
         let full = self.documents.open[path].path.clone();
         let project_root = self.projects.directory().map(|project| PathBuf::from(&project.folder));
@@ -1681,22 +1682,6 @@ impl Workspace {
             Err(error) => self.report(error, cx),
         }
     }
-    pub(super) fn queue_math_preload(&self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        if paths.is_empty() {
-            return;
-        }
-        let task = self
-            .math
-            .read(cx)
-            .prewarm_paths(paths, self.math.clone(), cx);
-        cx.spawn(async move |this, cx| {
-            if let Err(error) = task.await {
-                this.update(cx, |app, cx| app.report(error, cx))
-                    .expect("workspace is alive while preloading");
-            }
-        })
-        .detach();
-    }
     pub(super) fn refresh_files(&mut self, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
         let root = self.projects.directory().map(|project| PathBuf::from(&project.folder));
         let previous: BTreeSet<_> = self.tree.files().iter().map(|file| file.path.clone()).collect();
@@ -1779,20 +1764,6 @@ impl Workspace {
         if refresh_tree || !changed.is_empty() {
             self.schedule_rag_sync();
         }
-        self.queue_math_preload(
-            self.tree.files()
-                .iter()
-                .filter(|file| {
-                    file.path.to_lowercase().ends_with(".md")
-                        && (!previous.contains(&file.path)
-                            || root
-                                .as_ref()
-                                .is_some_and(|root| changed.contains(&root.join(&file.path))))
-                })
-                .filter_map(|file| root.as_ref().map(|root| root.join(&file.path)))
-                .collect(),
-            cx,
-        );
         self.documents.document_watch.tree = false;
         let mut updated_sources = Vec::new();
         for (path, document) in &mut self.documents.open {
