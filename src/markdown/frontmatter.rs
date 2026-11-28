@@ -1087,16 +1087,21 @@ pub(crate) fn render_preview(
                     list_row = list_row.child(
                         div()
                             .group(pill_group.clone())
-                            .h(px(pill_px * 1.65))
-                            .pl(px(pill_px * 0.65))
-                            .pr(px(pill_px * 0.45))
-                            .rounded(px(4.))
+                            .relative()
+                            .h(px(pill_px * 1.75))
+                            .px(px(pill_px * 0.85))
+                            .rounded_full()
                             .bg(item_bg)
                             .flex()
                             .items_center()
-                            .gap(px(3.))
+                            .gap(px(2.))
                             .text_size(px(pill_px))
                             .text_color(item_fg)
+                            .children(is_tags_field.then(|| {
+                                div()
+                                    .text_color(item_fg.opacity(0.5))
+                                    .child("#")
+                            }))
                             .child(item.clone())
                             .child(
                                 div()
@@ -1106,14 +1111,18 @@ pub(crate) fn render_preview(
                                             .wrapping_mul(131)
                                             .wrapping_add(ix * 37 + item_ix),
                                     ))
-                                    .size(px(pill_px * 1.05))
-                                    .rounded(px(3.))
+                                    .absolute()
+                                    .right(px(2.))
+                                    .top(px((pill_px * 1.75 - pill_px * 1.2) * 0.5))
+                                    .size(px(pill_px * 1.2))
+                                    .rounded_full()
+                                    .bg(item_bg)
                                     .flex()
                                     .items_center()
                                     .justify_center()
                                     .cursor_pointer()
                                     .opacity(0.)
-                                    .group_hover(pill_group, |s| s.opacity(0.7))
+                                    .group_hover(pill_group, |s| s.opacity(0.95))
                                     .hover(|s| s.opacity(1.0))
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation()
@@ -1126,7 +1135,7 @@ pub(crate) fn render_preview(
                                             ed.replace_plain_block_text(block, next_yaml, cx);
                                         });
                                     })
-                                    .child(crate::ui::icon(IconName::Close).size(px(pill_px * 0.8))),
+                                    .child(crate::ui::icon(IconName::Close).size(px(pill_px * 0.78))),
                             ),
                     );
                 }
