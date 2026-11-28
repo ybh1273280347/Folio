@@ -4,6 +4,7 @@ mod annotations;
 mod canvas;
 mod compile;
 mod drawio;
+mod graph;
 mod rag;
 mod tags;
 
@@ -43,6 +44,7 @@ impl Workspace {
             "canvas" => self.canvas_request(request, cx),
             "compile" => self.compile_request(request, window, cx),
             "drawio" => self.drawio_request(request, cx),
+            "graph" => self.graph_request(request, cx),
             "rag" => self.rag_request(request, cx),
             "tag" => self.tag_request(request, cx),
             _ if request.action == WorkspaceToolAction::Request => {
