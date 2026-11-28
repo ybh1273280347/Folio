@@ -8,7 +8,7 @@ use crate::{
 };
 use rusqlite::{Connection, OpenFlags};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::Path,
     time::Duration,
 };
@@ -66,6 +66,8 @@ pub struct GraphEdge {
     pub target: usize,
     pub kind: GraphEdgeKind,
     pub label: String,
+    pub first_line: Option<usize>,
+    pub first_node_id: Option<String>,
     pub weight: usize,
 }
 
@@ -77,6 +79,8 @@ pub struct GraphFilter {
     pub only_orphans: bool,
     pub color_mode: GraphColorMode,
     pub search_query: String,
+    pub focus_center: Option<String>,
+    pub focus_depth: u8,
 }
 
 impl Default for GraphFilter {
@@ -88,6 +92,8 @@ impl Default for GraphFilter {
             only_orphans: false,
             color_mode: GraphColorMode::Folder,
             search_query: String::new(),
+            focus_center: None,
+            focus_depth: 1,
         }
     }
 }
@@ -272,7 +278,9 @@ impl GraphSnapshot {
         let mut push_edge = |source: usize,
                               target: usize,
                               kind: GraphEdgeKind,
-                              label: String| {
+                              label: String,
+                              first_line: Option<usize>,
+                              first_node_id: Option<String>| {
             if source == target {
                 return;
             }
@@ -289,12 +297,20 @@ impl GraphSnapshot {
                     if e.label.is_empty() && !label.is_empty() {
                         e.label = label.clone();
                     }
+                    if e.first_line.is_none() && first_line.is_some() {
+                        e.first_line = first_line;
+                    }
+                    if e.first_node_id.is_none() && first_node_id.is_some() {
+                        e.first_node_id = first_node_id.clone();
+                    }
                 })
                 .or_insert(GraphEdge {
                     source,
                     target,
                     kind,
                     label,
+                    first_line,
+                    first_node_id,
                     weight: 1,
                 });
         };
@@ -329,7 +345,7 @@ impl GraphSnapshot {
                     .map_err(|e| e.to_string())?;
 
                 for row in rows {
-                    let (src_raw, dst_raw, _anchor_raw, label, _line, kind_raw) =
+                    let (src_raw, dst_raw, _anchor_raw, label, line, kind_raw) =
                         row.map_err(|e| e.to_string())?;
                     let src_norm = normalize_rel_path(&src_raw);
                     let dst_norm = normalize_rel_path(&dst_raw);
@@ -363,7 +379,14 @@ impl GraphSnapshot {
                         tag_snapshot,
                         &tag_map,
                     );
-                    push_edge(src_idx, dst_idx, edge_kind, label);
+                    push_edge(
+                        src_idx,
+                        dst_idx,
+                        edge_kind,
+                        label,
+                        Some(line.max(1) as usize),
+                        None,
+                    );
                 }
             }
 
@@ -388,7 +411,7 @@ impl GraphSnapshot {
                     .map_err(|e| e.to_string())?;
 
                 for row in rows {
-                    let (canvas_raw, _node_id, dst_raw, _anchor_kind, label) =
+                    let (canvas_raw, node_id, dst_raw, _anchor_kind, label) =
                         row.map_err(|e| e.to_string())?;
                     let src_norm = normalize_rel_path(&canvas_raw);
                     let dst_norm = normalize_rel_path(&dst_raw);
@@ -407,7 +430,14 @@ impl GraphSnapshot {
                         tag_snapshot,
                         &tag_map,
                     );
-                    push_edge(src_idx, dst_idx, GraphEdgeKind::CanvasAnchor, label);
+                    push_edge(
+                        src_idx,
+                        dst_idx,
+                        GraphEdgeKind::CanvasAnchor,
+                        label,
+                        None,
+                        (!node_id.is_empty()).then_some(node_id),
+                    );
                 }
             }
         }
@@ -459,7 +489,58 @@ impl GraphSnapshot {
             neighbors[edge.target].push(edge.source);
         }
 
-        if filter.only_orphans {
+        if let Some(center_key) = filter.focus_center.as_deref()
+            && let Some(&center_idx) = self.id_lookup.get(center_key)
+            && node_visible[center_idx]
+        {
+            let max_depth = filter.focus_depth.clamp(1, 2);
+            let mut keep = vec![false; n];
+            let mut dist = vec![u8::MAX; n];
+            let mut queue = VecDeque::new();
+            keep[center_idx] = true;
+            dist[center_idx] = 0;
+            queue.push_back(center_idx);
+            while let Some(u) = queue.pop_front() {
+                if dist[u] >= max_depth {
+                    continue;
+                }
+                for &v in &neighbors[u] {
+                    if !keep[v] {
+                        keep[v] = true;
+                        dist[v] = dist[u] + 1;
+                        queue.push_back(v);
+                    }
+                }
+            }
+            for i in 0..n {
+                if !keep[i] {
+                    node_visible[i] = false;
+                }
+            }
+            visible_edges.clear();
+            visible_in_degree.fill(0);
+            visible_out_degree.fill(0);
+            for list in &mut neighbors {
+                list.clear();
+            }
+            for (ei, edge) in self.edges.iter().enumerate() {
+                if !node_visible[edge.source] || !node_visible[edge.target] {
+                    continue;
+                }
+                if !filter.show_attachments && edge.kind == GraphEdgeKind::MarkdownImage {
+                    continue;
+                }
+                visible_edges.push(ei);
+                visible_out_degree[edge.source] += 1;
+                visible_in_degree[edge.target] += 1;
+                neighbors[edge.source].push(edge.target);
+                neighbors[edge.target].push(edge.source);
+            }
+            for list in &mut neighbors {
+                list.sort_unstable();
+                list.dedup();
+            }
+        } else if filter.only_orphans {
             for i in 0..n {
                 if !node_visible[i] {
                     continue;
@@ -598,5 +679,27 @@ mod tests {
         });
         assert_eq!(orphan_vis.visible_nodes.len(), 1);
         assert_eq!(snap.nodes[orphan_vis.visible_nodes[0]].rel_path, "notes/orphan.md");
+
+        // Local 1-hop focus around `maps/overview.canvas` includes only itself and `notes/b.md`.
+        let focus_1 = snap.compute_visible(&GraphFilter {
+            focus_center: Some(canonical_key("maps/overview.canvas")),
+            focus_depth: 1,
+            ..Default::default()
+        });
+        assert_eq!(focus_1.visible_nodes.len(), 2);
+        assert_eq!(focus_1.visible_edges.len(), 1);
+        let canvas_edge = &snap.edges[focus_1.visible_edges[0]];
+        assert_eq!(canvas_edge.first_node_id.as_deref(), Some("n1"));
+
+        // Local 2-hop focus from `maps/overview.canvas` reaches `notes/a.md` via `notes/b.md`,
+        // while keeping `notes/orphan.md` excluded.
+        let focus_2 = snap.compute_visible(&GraphFilter {
+            focus_center: Some(canonical_key("maps/overview.canvas")),
+            focus_depth: 2,
+            ..Default::default()
+        });
+        assert!(focus_2.visible_nodes.len() >= 3);
+        let orphan_idx = snap.node_index("notes/orphan.md").unwrap();
+        assert!(!focus_2.node_visible[orphan_idx]);
     }
 }

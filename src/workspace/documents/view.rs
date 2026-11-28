@@ -311,6 +311,25 @@ impl Workspace {
             );
         }
 
+        if !special_open && !self.documents.active.is_empty() {
+            let local_open = self.right_panel.open && self.right_panel.view == RightPanelView::Graph;
+            bar = bar.child(
+                Button::new("tab-local-graph-toggle")
+                    .ghost()
+                    .compact()
+                    .with_size(px(15.))
+                    .w(px(26.))
+                    .h(px(24.))
+                    .rounded(px(6.))
+                    .when(local_open, |b| b.bg(gpui_kit::rgb(palette.selection)))
+                    .icon(crate::ui::icon(IconName::ChartNetwork).size(px(14.)))
+                    .tooltip(crate::i18n::graph::TOOLTIP_OPEN_LOCAL_GRAPH.get())
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        app.toggle_local_graph_panel(window, cx);
+                    })),
+            );
+        }
+
         if !special_open
             && let Some(md_pane) = self.documents.markdown_panes.get(&PaneKey::tab(&self.documents.active))
         {

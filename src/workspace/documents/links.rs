@@ -138,6 +138,58 @@ impl Workspace {
         cx.notify();
     }
 
+    pub(in crate::workspace) fn open_graph_source_location(
+        &mut self,
+        source_rel: &str,
+        label: &str,
+        line: Option<usize>,
+        node_id: Option<&str>,
+        split: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let full = self.document_path(source_rel);
+        if !full.is_file() {
+            self.report(crate::i18n::workspace::err_file_not_found(&full), cx);
+            self.refresh_graph_data(false, cx);
+            return;
+        }
+        let file = ProjectFile {
+            kind: Self::file_kind(&full),
+            path: source_rel.to_owned(),
+        };
+        let pane_key = if split && Self::supports_split_pane(&file.path) {
+            let Some(key) = self.open_reading_pane(&file, window, cx) else {
+                return;
+            };
+            key
+        } else {
+            if let Err(error) = self.open_file(&file, window, cx) {
+                self.report(error, cx);
+                return;
+            }
+            PaneKey::tab(&file.path)
+        };
+        if let Some(md) = self.documents.markdown_panes.get(&pane_key).cloned() {
+            let trimmed = label.trim().to_owned();
+            md.update(cx, |pane, cx| {
+                if trimmed.is_empty() {
+                    pane.jump_to_search_hit(line, None, None, window, cx);
+                } else {
+                    pane.jump_to_canvas_quote(&trimmed, 0, None, line, window, cx);
+                }
+            });
+        } else if let Some(node_id) = node_id
+            && let Some(canvas_pane) = self.documents.canvas_panes.get(&pane_key).cloned()
+        {
+            let target_id = node_id.to_owned();
+            canvas_pane.update(cx, |pane, cx| {
+                pane.focus_node(&target_id, window, cx);
+            });
+        }
+        cx.notify();
+    }
+
     /// Automatically refactors project-internal Markdown links and image paths after an
     /// in-app file or folder rename/move. Updates both inbound references and outbound
     /// relative paths of moved Markdown documents.

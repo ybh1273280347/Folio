@@ -323,7 +323,9 @@ impl Workspace {
         self.reset_rag_sync_on_project_switch(cx);
         self.graph_open = false;
         self.graph_dirty = true;
+        self.local_graph_dirty = true;
         self.graph.update(cx, |pane, cx| pane.clear(cx));
+        self.local_graph.update(cx, |pane, cx| pane.clear(cx));
         cx.notify();
         Ok(())
     }
@@ -414,7 +416,9 @@ impl Workspace {
         self.reset_rag_sync_on_project_switch(cx);
         self.graph_open = false;
         self.graph_dirty = true;
+        self.local_graph_dirty = true;
         self.graph.update(cx, |pane, cx| pane.clear(cx));
+        self.local_graph.update(cx, |pane, cx| pane.clear(cx));
         cx.notify();
         Ok(())
     }

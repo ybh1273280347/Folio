@@ -12,6 +12,7 @@ use crate::ai::AttachedFile;
 pub(super) enum RightPanelView {
     Hub,
     KnowledgeBase,
+    Graph,
     Ai,
     Terminal,
 }
@@ -100,6 +101,17 @@ impl Workspace {
                     self.right_panel.kb.search.update(cx, |input, cx| {
                         input.focus(window, cx);
                     });
+                }
+            }
+            RightPanelView::Graph => {
+                self.terminal.update(cx, |pane, _| pane.hide());
+                let active = self.documents.active().to_owned();
+                self.local_graph.update(cx, |pane, cx| {
+                    pane.set_active_document(&active, cx);
+                    pane.focus(window, cx);
+                });
+                if self.local_graph_dirty {
+                    self.refresh_graph_data(true, cx);
                 }
             }
             RightPanelView::Terminal => {
@@ -200,6 +212,9 @@ impl Workspace {
             RightPanelAction::OpenGraph => {
                 self.close_right_panel_immediate(window, cx);
                 self.open_graph(window, cx);
+            }
+            RightPanelAction::OpenLocalGraph => {
+                self.open_right_panel(RightPanelView::Graph, window, cx);
             }
             RightPanelAction::NewSplitPage => {
                 let target_width = self.settings.terminal.panel_width.clamp(280., 1600.);
@@ -373,6 +388,7 @@ impl Workspace {
                 )
             }
             RightPanelView::KnowledgeBase => self.render_knowledge_base_panel(window, cx),
+            RightPanelView::Graph => self.render_local_graph_panel(window, cx),
             RightPanelView::Ai => self.ai.clone().into_any_element(),
             RightPanelView::Terminal => self.terminal.clone().into_any_element(),
         }

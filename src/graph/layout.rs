@@ -1,7 +1,7 @@
 //! Deterministic seeding and spatial-hash force-directed layout for the knowledge graph.
 
 use super::model::{GraphColorMode, GraphNodeKind, GraphSnapshot, VisibleGraph};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 const WARMUP_STEPS: usize = 48;
 const CELL_SIZE: f32 = 150.0;
@@ -110,6 +110,108 @@ impl GraphSimulation {
         self.temperature = 1.0;
         self.settled = visible.visible_nodes.is_empty();
         self.warmup(snapshot, visible, color_mode);
+    }
+
+    /// Places a centered concentric radial layout for narrow local-graph panels.
+    pub fn apply_radial_ego_layout(
+        &mut self,
+        snapshot: &GraphSnapshot,
+        visible: &VisibleGraph,
+        center_idx: usize,
+    ) {
+        let n = snapshot.nodes.len();
+        if self.positions.len() != n {
+            self.positions.resize(n, (0.0, 0.0));
+        }
+        if self.velocities.len() != n {
+            self.velocities.resize(n, (0.0, 0.0));
+        }
+        if self.pinned.len() != n {
+            self.pinned.resize(n, false);
+        }
+        self.velocities.fill((0.0, 0.0));
+        self.pinned.fill(false);
+
+        if center_idx >= n || !visible.node_visible.get(center_idx).copied().unwrap_or(false) {
+            self.settled = true;
+            return;
+        }
+
+        let mut dist = vec![u8::MAX; n];
+        let mut parent = vec![None::<usize>; n];
+        let mut q = VecDeque::new();
+        dist[center_idx] = 0;
+        q.push_back(center_idx);
+        while let Some(u) = q.pop_front() {
+            if dist[u] >= 2 {
+                continue;
+            }
+            for &v in &visible.neighbors[u] {
+                if dist[v] == u8::MAX {
+                    dist[v] = dist[u] + 1;
+                    parent[v] = Some(u);
+                    q.push_back(v);
+                }
+            }
+        }
+
+        self.positions[center_idx] = (0.0, 0.0);
+        self.pinned[center_idx] = true;
+
+        let mut ring1: Vec<usize> = visible
+            .visible_nodes
+            .iter()
+            .copied()
+            .filter(|&i| dist[i] == 1)
+            .collect();
+        ring1.sort_by(|&a, &b| snapshot.nodes[a].id.cmp(&snapshot.nodes[b].id));
+
+        let r1 = (96.0 + (ring1.len() as f32) * 7.0).clamp(96.0, 152.0);
+        let mut ring1_angle: HashMap<usize, f32> = HashMap::with_capacity(ring1.len());
+        let count1 = ring1.len().max(1);
+        for (k, &ni) in ring1.iter().enumerate() {
+            let angle = -std::f32::consts::FRAC_PI_2
+                + (k as f32 / count1 as f32) * std::f32::consts::TAU;
+            self.positions[ni] = (r1 * angle.cos(), r1 * angle.sin());
+            ring1_angle.insert(ni, angle);
+        }
+
+        let mut ring2: Vec<usize> = visible
+            .visible_nodes
+            .iter()
+            .copied()
+            .filter(|&i| dist[i] == 2)
+            .collect();
+        ring2.sort_by(|&a, &b| {
+            let pa = parent[a].and_then(|p| ring1_angle.get(&p)).copied().unwrap_or(0.0);
+            let pb = parent[b].and_then(|p| ring1_angle.get(&p)).copied().unwrap_or(0.0);
+            pa.total_cmp(&pb).then_with(|| snapshot.nodes[a].id.cmp(&snapshot.nodes[b].id))
+        });
+
+        let r2 = r1 + 92.0;
+        let mut by_parent: HashMap<usize, Vec<usize>> = HashMap::new();
+        for ni in ring2 {
+            let p = parent[ni].unwrap_or(center_idx);
+            by_parent.entry(p).or_default().push(ni);
+        }
+        let sector_span = (std::f32::consts::TAU / count1 as f32).min(1.05);
+        for (p, children) in by_parent {
+            let base = ring1_angle.get(&p).copied().unwrap_or(0.0);
+            let m = children.len();
+            for (idx, child) in children.into_iter().enumerate() {
+                let offset = if m == 1 {
+                    0.0
+                } else {
+                    let frac = (idx as f32 / (m - 1) as f32) - 0.5;
+                    frac * sector_span * 0.82
+                };
+                let angle = base + offset;
+                self.positions[child] = (r2 * angle.cos(), r2 * angle.sin());
+            }
+        }
+
+        self.temperature = 0.0;
+        self.settled = true;
     }
 
     fn warmup(&mut self, snapshot: &GraphSnapshot, visible: &VisibleGraph, color_mode: GraphColorMode) {
@@ -353,10 +455,10 @@ mod tests {
             })
             .collect();
         let edges = vec![
-            GraphEdge { source: 0, target: 1, kind: GraphEdgeKind::MarkdownLink, label: String::new(), weight: 1 },
-            GraphEdge { source: 1, target: 2, kind: GraphEdgeKind::MarkdownLink, label: String::new(), weight: 1 },
-            GraphEdge { source: 2, target: 3, kind: GraphEdgeKind::CanvasAnchor, label: String::new(), weight: 1 },
-            GraphEdge { source: 4, target: 5, kind: GraphEdgeKind::MarkdownLink, label: String::new(), weight: 1 },
+            GraphEdge { source: 0, target: 1, kind: GraphEdgeKind::MarkdownLink, label: String::new(), first_line: Some(1), first_node_id: None, weight: 1 },
+            GraphEdge { source: 1, target: 2, kind: GraphEdgeKind::MarkdownLink, label: String::new(), first_line: Some(1), first_node_id: None, weight: 1 },
+            GraphEdge { source: 2, target: 3, kind: GraphEdgeKind::CanvasAnchor, label: String::new(), first_line: None, first_node_id: Some("a".into()), weight: 1 },
+            GraphEdge { source: 4, target: 5, kind: GraphEdgeKind::MarkdownLink, label: String::new(), first_line: Some(1), first_node_id: None, weight: 1 },
         ];
         let mut snap = GraphSnapshot::default();
         snap.nodes = nodes;

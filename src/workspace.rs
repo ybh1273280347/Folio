@@ -242,8 +242,10 @@ pub struct Workspace {
     tree: FileTree,
     trash: TrashView,
     graph: Entity<crate::graph::GraphPane>,
+    local_graph: Entity<crate::graph::GraphPane>,
     graph_open: bool,
     graph_dirty: bool,
+    local_graph_dirty: bool,
     documents: Documents,
     build: Build,
     zen_mode: bool,
@@ -318,6 +320,11 @@ impl Workspace {
             app.handle_graph_event(event, window, cx);
         })
         .detach();
+        let local_graph = cx.new(|cx| crate::graph::GraphPane::new_local(window, cx));
+        cx.subscribe_in(&local_graph, window, |app, _, event: &crate::graph::GraphPaneEvent, window, cx| {
+            app.handle_graph_event(event, window, cx);
+        })
+        .detach();
         let project_menu = ProjectMenu::new(window, cx);
         let right_panel = RightPanel::new(window, cx);
         let tags = tags::TagPanel::new(window, cx);
@@ -386,8 +393,10 @@ impl Workspace {
             tree,
             trash,
             graph,
+            local_graph,
             graph_open: false,
             graph_dirty: true,
+            local_graph_dirty: true,
             documents: Documents::default(),
             build: Build::default(),
             zen_mode: false,

@@ -899,7 +899,7 @@ impl Workspace {
             self.documents.tabs.push(file.path.clone());
         }
         self.documents.active = file.path.clone();
-        self.graph.update(cx, |pane, cx| pane.set_active_document(&file.path, cx));
+        self.sync_graph_active_document(&file.path, cx);
         self.refresh_active_backlinks(cx);
         if focus_editor {
             if let Some(pane) = self.documents.markdown_panes.get(&tab) {
@@ -1539,7 +1539,7 @@ impl Workspace {
     pub(super) fn select_tab_from_tree(&mut self, path: &str, focus_editor: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.graph_open = false;
         self.documents.active = path.to_owned();
-        self.graph.update(cx, |pane, cx| pane.set_active_document(path, cx));
+        self.sync_graph_active_document(path, cx);
         self.refresh_active_backlinks(cx);
         if focus_editor {
             self.focus_document_tab(path, window, cx);
@@ -1560,7 +1560,7 @@ impl Workspace {
         self.graph_open = false;
         self.documents.clear_reading_focus();
         self.documents.active = path.to_owned();
-        self.graph.update(cx, |pane, cx| pane.set_active_document(path, cx));
+        self.sync_graph_active_document(path, cx);
         self.refresh_active_backlinks(cx);
         self.focus_document_tab(path, window, cx);
         if let Err(error) = self.remember_session() {
@@ -1674,7 +1674,7 @@ impl Workspace {
         if role == PaneRole::Tab && self.documents.active == path {
             self.documents.active = self.documents.tabs.last().cloned().unwrap_or_default();
             let active = self.documents.active.clone();
-            self.graph.update(cx, |pane, cx| pane.set_active_document(&active, cx));
+            self.sync_graph_active_document(&active, cx);
             if !self.trash.is_open() && !self.graph_open && !self.documents.active.is_empty() {
                 self.focus_document_tab(&active, window, cx);
             }
