@@ -2,6 +2,7 @@
 pub mod ai;
 pub mod canvas;
 pub mod common;
+pub mod graph;
 pub mod markdown;
 pub mod media;
 pub mod preferences;

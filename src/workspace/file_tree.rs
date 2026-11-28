@@ -693,6 +693,18 @@ impl Workspace {
         }
     }
 
+    pub(super) fn reveal_file_in_tree(&mut self, rel_path: &str, cx: &mut Context<Self>) {
+        if !self.settings.sidebar_open {
+            self.settings.sidebar_open = true;
+            self.persist_settings(cx);
+        }
+        self.expand_ancestors(rel_path);
+        self.tree.focused_file = Some(rel_path.to_owned());
+        self.tree.selected_files.clear();
+        self.tree.selected_files.insert(rel_path.to_owned());
+        cx.notify();
+    }
+
     pub(super) fn new_markdown(&mut self, window: &mut Window, cx: &mut Context<Self>) -> io::Result<()> {
         let folder = self.tree.focused_folder.clone();
         self.new_preset_in("md", folder.as_deref(), window, cx)
@@ -1515,6 +1527,17 @@ impl Workspace {
                 app.toggle_zen_mode(window, cx);
             }));
 
+        let graph_btn = rail_btn("rail-graph-view", IconName::ChartNetwork, self.graph_open, false)
+            .tooltip(|window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(
+                    crate::i18n::graph::TOOLTIP_OPEN_GRAPH.get(),
+                )
+                .build(window, cx)
+            })
+            .on_click(cx.listener(|app, _, window, cx| {
+                app.toggle_graph(window, cx);
+            }));
+
         let trash_bounds = self.tree.trash_bounds.clone();
         let trash_btn = div()
             .id("trash-entry")
@@ -1634,6 +1657,7 @@ impl Workspace {
                     .child(toggle_sidebar_btn)
                     .child(default_space_btn)
                     .child(loose_files_btn)
+                    .child(graph_btn)
                     .child(div().w(px(20.)).h(px(1.)).my_1p5().bg(rgb(BORDER)))
                     .child(open_file_btn)
                     .child(zen_btn),

@@ -8,6 +8,7 @@ mod canvas;
 mod drawio;
 mod export_provenance;
 mod files;
+mod graph;
 mod http;
 mod image;
 mod web_view;

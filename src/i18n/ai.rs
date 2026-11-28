@@ -311,6 +311,19 @@ pub fn tool_kb_search(query: &str) -> String {
 }
 pub const TOOL_KB_STATUS: BiText = BiText::new("查看知识库索引状态", "Check knowledge base status");
 pub const TOOL_KB_REINDEX: BiText = BiText::new("更新知识库索引", "Update knowledge base index");
+pub const TOOL_GRAPH_OVERVIEW: BiText = BiText::new("查看知识图谱概览", "Inspect knowledge graph overview");
+pub fn tool_graph_neighbors(path: &str) -> String {
+    match locale() {
+        Locale::ZhCn => format!("查询图谱关系 {path}"),
+        Locale::En => format!("Query graph links {path}"),
+    }
+}
+pub fn tool_graph_path(from: &str, to: &str) -> String {
+    match locale() {
+        Locale::ZhCn => format!("查找图谱路径 {from} → {to}"),
+        Locale::En => format!("Find graph path {from} → {to}"),
+    }
+}
 pub fn tool_pdf_read(path: &str) -> String {
     match locale() {
         Locale::ZhCn => {

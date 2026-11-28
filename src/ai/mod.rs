@@ -2958,6 +2958,12 @@ fn summarize_tool_call(name: &str, args: &Value, diffs: &[FileDiff]) -> String {
         }
         "folio_kb_status" => crate::i18n::ai::TOOL_KB_STATUS.get().into(),
         "folio_kb_reindex" => crate::i18n::ai::TOOL_KB_REINDEX.get().into(),
+        "folio_graph_neighbors" => crate::i18n::ai::tool_graph_neighbors(args["path"].as_str().unwrap_or_default()),
+        "folio_graph_overview" => crate::i18n::ai::TOOL_GRAPH_OVERVIEW.get().into(),
+        "folio_graph_path" => crate::i18n::ai::tool_graph_path(
+            args["from_path"].as_str().unwrap_or_default(),
+            args["to_path"].as_str().unwrap_or_default(),
+        ),
         "folio_pdf_read" => crate::i18n::ai::tool_pdf_read(args["path"].as_str().unwrap_or_default()),
         "folio_tex_compile" => {
             if let Some(folder) = args["under_directory"].as_str() {

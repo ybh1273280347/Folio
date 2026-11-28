@@ -347,6 +347,13 @@ pub fn format_relative_link_url(
     }
 }
 
+/// Formats a workspace root-relative Markdown link destination (`/dir/file.md`).
+pub fn format_root_link_url(target_rel: &str) -> String {
+    let norm = normalize_slash(target_rel);
+    let trimmed = norm.trim_start_matches('/');
+    format!("/{}", encode_destination(trimmed, false, false))
+}
+
 /// A completion starts from the literal heading title, including any percent signs.
 pub fn format_heading_fragment(title: &str) -> Option<String> {
     let title = title.trim();

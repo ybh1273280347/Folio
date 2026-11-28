@@ -193,6 +193,8 @@ impl Workspace {
             self.ai.update(cx, |pane, cx| pane.refresh_locale(window, cx));
             self.documents.refresh_locale(window, cx);
             self.build.refresh_locale(window, cx);
+            self.graph.update(cx, |pane, cx| pane.refresh_locale(window, cx));
+            self.local_graph.update(cx, |pane, cx| pane.refresh_locale(window, cx));
         }
         if locale_changed || fallback_changed || cjk_scale_changed {
             window.refresh();

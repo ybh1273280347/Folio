@@ -13,6 +13,7 @@ import { annotationTools } from './tools/workspace/annotation-tools.mjs';
 import { canvasTools } from './tools/workspace/canvas-tools.mjs';
 import { compileTools } from './tools/workspace/compile-tools.mjs';
 import { drawioTools } from './tools/workspace/drawio-tools.mjs';
+import { graphTools } from './tools/workspace/graph-tools.mjs';
 import { ragTools } from './tools/workspace/rag-tools.mjs';
 import { tagTools } from './tools/workspace/tag-tools.mjs';
 import { pythonTool } from './tools/local/python.mjs';
@@ -72,6 +73,18 @@ const workspaceToolChannels = [
     retryableForError: (operation, error) =>
       error.code === 'drawio_not_ready'
       || (error.code === 'workspace_tool_timeout' && ['read', 'get_selection'].includes(operation)),
+  },
+  {
+    channel: 'graph',
+    factory: graphTools,
+    timeoutMs: 30_000,
+    timeouts: {
+      neighbors: 30_000,
+      overview: 30_000,
+      path: 30_000,
+    },
+    timeoutMessage: 'Folio 图谱工具在 30 秒内没有响应。',
+    retryableForError: (_operation, error) => error.code === 'workspace_tool_timeout',
   },
   {
     channel: 'rag',

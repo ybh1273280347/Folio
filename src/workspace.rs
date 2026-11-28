@@ -4,6 +4,7 @@ mod build;
 mod dialogs;
 mod documents;
 mod file_tree;
+mod graph;
 mod knowledge_base;
 mod panels;
 mod projects;
@@ -240,6 +241,11 @@ pub struct Workspace {
     tags: tags::TagPanel,
     tree: FileTree,
     trash: TrashView,
+    graph: Entity<crate::graph::GraphPane>,
+    local_graph: Entity<crate::graph::GraphPane>,
+    graph_open: bool,
+    graph_dirty: bool,
+    local_graph_dirty: bool,
     documents: Documents,
     build: Build,
     zen_mode: bool,
@@ -309,6 +315,16 @@ impl Workspace {
         .detach();
         let tree = FileTree::new(window, cx);
         let trash = TrashView::new(window, cx);
+        let graph = cx.new(|cx| crate::graph::GraphPane::new(window, cx));
+        cx.subscribe_in(&graph, window, |app, _, event: &crate::graph::GraphPaneEvent, window, cx| {
+            app.handle_graph_event(event, window, cx);
+        })
+        .detach();
+        let local_graph = cx.new(|cx| crate::graph::GraphPane::new_local(window, cx));
+        cx.subscribe_in(&local_graph, window, |app, _, event: &crate::graph::GraphPaneEvent, window, cx| {
+            app.handle_graph_event(event, window, cx);
+        })
+        .detach();
         let project_menu = ProjectMenu::new(window, cx);
         let right_panel = RightPanel::new(window, cx);
         let tags = tags::TagPanel::new(window, cx);
@@ -376,6 +392,11 @@ impl Workspace {
             tags,
             tree,
             trash,
+            graph,
+            local_graph,
+            graph_open: false,
+            graph_dirty: true,
+            local_graph_dirty: true,
             documents: Documents::default(),
             build: Build::default(),
             zen_mode: false,
@@ -729,7 +750,8 @@ impl Render for Workspace {
             .filter_map(|pane| pane.read(cx).export_element())
             .collect();
         let trash_open = self.trash.is_open();
-        let modal_open = trash_open || self.show_preferences
+        let graph_open = self.graph_open;
+        let modal_open = trash_open || graph_open || self.show_preferences
             || self.is_project_menu_open()
             || self.tags.is_editing()
             || self.tree.name_dialog_open()
@@ -746,9 +768,9 @@ impl Render for Workspace {
         }
         // Native WebView2 child windows sit above GPUI and would intercept the drop.
         self.documents.sync_pane_visibility(
-            self.zen_mode, trash_open, modal_open || show_work_area_drop, window, cx,
+            self.zen_mode, trash_open || graph_open, modal_open || show_work_area_drop, window, cx,
         );
-        self.build.sync_preview_visibility(!self.zen_mode && !trash_open, window, cx);
+        self.build.sync_preview_visibility(!self.zen_mode && !trash_open && !graph_open, window, cx);
         let engine = self.projects.directory().map(|project| project.engine);
         let engine_app = cx.entity();
         let main_app = cx.entity();
@@ -1114,6 +1136,10 @@ impl Render for Workspace {
             .on_action(cx.listener(|app, _: &CloseTab, window, cx| {
                 if app.trash.is_open() {
                     app.close_trash(window, cx);
+                    return;
+                }
+                if app.graph_open {
+                    app.close_graph(window, cx);
                     return;
                 }
                 let path = app.documents.active().to_owned();
