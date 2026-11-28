@@ -81,6 +81,8 @@ flowchart LR
 
 ## 开发验证
 
+涉及启动、后台任务或大对象分配时，参考 [Folio 内存管理经验](MemoryExperience.md) 确定资源归属、回收时机和验证口径。
+
 ```powershell
 # 桌面编译检查
 cargo check --locked --bin folio-gpui-prototype
