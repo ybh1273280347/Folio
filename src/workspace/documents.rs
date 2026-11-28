@@ -1062,6 +1062,9 @@ impl Workspace {
             if self.projects.directory().is_none() {
                 self.sync_markdown_links_from_text(path, &disk.text, cx);
             }
+            if Self::is_markdown_path(path) {
+                self.sync_tags_from_markdown_text(path, &disk.text, cx);
+            }
             let language = Self::editor_language_for_path(Path::new(path));
             let editor = cx.new(|cx| {
                 EditorState::new(window, cx)
@@ -1204,11 +1207,28 @@ impl Workspace {
         let settings = self.settings.clone();
         let math = self.math.clone();
         let workspace = cx.weak_entity();
+        let tag_workspace = cx.weak_entity();
         let pane = cx.new(|cx| {
             MarkdownPane::new(text, full, settings, math, reading, window, cx)
                 .with_project_files(project_root, Box::new(move |cx| {
                     // Completion uses the same file listing as the sidebar.
                     workspace.upgrade().map_or(&[], |app| app.read(cx).tree.files())
+                }))
+                .with_tag_colors(std::sync::Arc::new(move |tag_name, cx| {
+                    let app = tag_workspace.upgrade()?;
+                    let key = tag_name.trim().to_lowercase();
+                    let tag = app
+                        .read(cx)
+                        .tags
+                        .snapshot
+                        .tags
+                        .iter()
+                        .find(|t| t.name.trim().to_lowercase() == key)?;
+                    let (_, bg, fg) = crate::ui::TAG_COLORS
+                        .get(tag.color as usize)
+                        .copied()
+                        .unwrap_or(crate::ui::TAG_COLORS[0]);
+                    Some((bg, fg))
                 }))
         });
         if self.has_visible_background() {
@@ -1344,6 +1364,7 @@ impl Workspace {
                 self.sync_canvas_index_from_text(path, &saved_text, cx);
                 if Self::is_markdown_path(path) {
                     self.sync_markdown_links_from_text(path, &saved_text, cx);
+                    self.sync_tags_from_markdown_text(path, &saved_text, cx);
                     self.refresh_active_markdown_backlinks(cx);
                 }
                 self.schedule_rag_sync();
@@ -1734,6 +1755,7 @@ impl Workspace {
                 Ok(disk) if self.documents.open_buffer(&key).is_none_or(|buffer| buffer.revision != disk.revision) => {
                     if is_markdown {
                         self.sync_markdown_links_from_text(&key, &disk.text, cx);
+                        self.sync_tags_from_markdown_text(&key, &disk.text, cx);
                         refresh_markdown_backlinks = true;
                     } else {
                         self.sync_canvas_index_from_text(&key, &disk.text, cx);

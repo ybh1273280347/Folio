@@ -198,6 +198,72 @@ impl Store {
         Ok(result)
     }
 
+    /// Synchronize a file's tag bindings to match an external source (e.g. YAML Front Matter).
+    /// Returns `Ok(None)` when the normalized tag set already matches.
+    pub fn sync_file_tags(&self, path: &str, tag_names: &[String]) -> Result<Option<Snapshot>> {
+        let mut desired: Vec<(String, String)> = Vec::new();
+        let mut desired_keys = BTreeSet::new();
+        for raw in tag_names {
+            let Ok(clean) = label(raw) else {
+                continue;
+            };
+            let key = name_key(clean);
+            if desired_keys.insert(key.clone()) {
+                desired.push((clean.to_owned(), key));
+            }
+        }
+        let Some(mut db) = self.open(!desired.is_empty())? else {
+            return Ok(None);
+        };
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current_keys: BTreeSet<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT t.name_key
+                 FROM tags t
+                 JOIN file_tags ft ON ft.tag_id = t.id
+                 JOIN files f ON f.id = ft.file_id
+                 WHERE f.path = ?1 AND f.missing = 0 AND f.trash IS NULL",
+            )?;
+            let rows = stmt.query_map([path], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        if current_keys == desired_keys {
+            return Ok(None);
+        }
+        let mut target_tag_ids = Vec::with_capacity(desired.len());
+        for (name, key) in &desired {
+            tx.execute(
+                "INSERT INTO tags (id, name, name_key) VALUES (?1, ?2, ?3) ON CONFLICT(name_key) DO NOTHING",
+                params![Uuid::new_v4().to_string(), name, key],
+            )?;
+            let id: String = tx.query_row(
+                "SELECT id FROM tags WHERE name_key = ?1",
+                [key],
+                |row| row.get(0),
+            )?;
+            target_tag_ids.push(id);
+        }
+        if target_tag_ids.is_empty() {
+            tx.execute(
+                "DELETE FROM file_tags WHERE file_id IN
+                 (SELECT id FROM files WHERE path = ?1 AND missing = 0 AND trash IS NULL)",
+                [path],
+            )?;
+        } else {
+            let file_id = self.bind(&tx, path, None)?;
+            tx.execute("DELETE FROM file_tags WHERE file_id = ?1", [&file_id])?;
+            for tag_id in &target_tag_ids {
+                tx.execute(
+                    "INSERT OR IGNORE INTO file_tags VALUES (?1, ?2)",
+                    params![file_id, tag_id],
+                )?;
+            }
+        }
+        let result = snapshot_after_changes(&tx)?;
+        tx.commit()?;
+        Ok(Some(result))
+    }
+
     /// Both the sidebar and an approved AI batch use these same write rules.
     fn apply_change(&self, db: &Connection, change: Change<'_>) -> Result<()> {
         match change {
